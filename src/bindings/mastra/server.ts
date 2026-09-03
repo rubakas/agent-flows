@@ -2,7 +2,6 @@
 // MUST be the very first line: disable Mastra telemetry before any @mastra import.
 process.env.MASTRA_TELEMETRY_DISABLED = "1";
 
-import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Mastra } from "@mastra/core/mastra";
@@ -13,8 +12,10 @@ import { z } from "zod";
 import { listPipelines, loadPipeline } from "../../canon/load.js";
 import { defaultRegistry } from "../../canon/registry.js";
 import { makeDb } from "../../db/index.js";
+import { RunService } from "../../runtime/runService.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, mastraDbPath, validateModelOverrides } from "./build.js";
+import type { MastraLike } from "../../runtime/runService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -56,19 +57,11 @@ for (const loaded of loadedPipelines) {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mastra = new Mastra({ storage: mastraStorage, workflows: workflows as Record<string, any> });
 
-// ── In-process run registry ───────────────────────────────────────────────────
-// v1: single-process only. Cross-process resume via LibSQL snapshots is a future step.
+// ── Run ownership ──────────────────────────────────────────────────────────────
+// RunService owns run state so that MCP, HTTP and the web editor all share
+// the same runs. The public run id is Mastra's own run id (FR-011).
 
-interface RunRecord {
-  pipelineId: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  run: any;
-  status: "running" | "suspended" | "success" | "failed";
-  result?: unknown;
-  suspendPayload?: unknown;
-}
-
-const runRegistry = new Map<string, RunRecord>();
+const runService = new RunService(mastra as unknown as MastraLike);
 
 // ── MCP custom tools ──────────────────────────────────────────────────────────
 
@@ -105,37 +98,20 @@ const runPipelineTool = createTool({
       const err = validateModelOverrides(models, registry);
       if (err) return { error: err };
     }
-    const wf = mastra.getWorkflow(pipeline);
-    const run = await wf.createRun();
-    const runId = randomUUID();
-
-    const record: RunRecord = { pipelineId: pipeline, run, status: "running" };
-    runRegistry.set(runId, record);
-
     const wfInput = { ...inputs, ...(models ? { models } : {}) };
-    const r1 = await run.start({ inputData: wfInput });
-
-    if (r1.status === "suspended") {
-      record.status = "suspended";
-      const gateStep = r1.steps?.approve as Record<string, unknown> | undefined;
-      const suspendPayload = gateStep?.suspendPayload as Record<string, unknown> | undefined;
-      record.suspendPayload = suspendPayload;
+    const result = await runService.start(pipeline, wfInput);
+    if (result.status === "awaiting_approval") {
       return {
-        runId,
+        runId: result.runId,
         status: "awaiting_approval",
-        gateMessage: (suspendPayload?.message as string) ?? "Approve this spec?",
-        spec: suspendPayload?.spec,
+        gateMessage: result.gateMessage,
+        spec: result.spec,
       };
     }
-
-    if (r1.status === "success") {
-      record.status = "success";
-      record.result = r1.result;
-      return { runId, status: "success", result: r1.result };
+    if (result.status === "success") {
+      return { runId: result.runId, status: "success", result: result.result };
     }
-
-    record.status = "failed";
-    return { runId, status: "failed" };
+    return { runId: result.runId, status: "failed" };
   },
 });
 
@@ -149,26 +125,12 @@ const approveTool = createTool({
   }),
   execute: async (inputData) => {
     const { runId, approved } = inputData;
-    const record = runRegistry.get(runId);
-    if (!record) return { error: `No run found for runId "${runId}"` };
-    if (record.status !== "suspended") {
-      return { error: `Run ${runId} is not suspended (status: ${record.status})` };
+    const result = await runService.approve(runId, approved);
+    if (result.error) return { error: result.error };
+    if (result.status === "success") {
+      return { runId: result.runId, status: "success", result: result.result };
     }
-
-    // Find the suspended step (gate step named "approve")
-    const r2 = await record.run.resume({
-      step: ["approve"],
-      resumeData: { approved },
-    });
-
-    if (r2.status === "success") {
-      record.status = "success";
-      record.result = r2.result;
-      return { runId, status: "success", result: r2.result };
-    }
-
-    record.status = "failed";
-    return { runId, status: "failed" };
+    return { runId: result.runId, status: "failed" };
   },
 });
 
@@ -179,13 +141,13 @@ const getRunTool = createTool({
     runId: z.string().describe("Run ID returned by run_pipeline"),
   }),
   execute: async (inputData) => {
-    const record = runRegistry.get(inputData.runId);
-    if (!record) return { error: `No run found for runId "${inputData.runId}"` };
+    const got = runService.get(inputData.runId);
+    if (!got) return { error: `No run found for runId "${inputData.runId}"` };
     return {
-      runId: inputData.runId,
-      pipelineId: record.pipelineId,
-      status: record.status,
-      result: record.result,
+      runId: got.runId,
+      pipelineId: got.pipelineId,
+      status: got.status,
+      result: got.result,
     };
   },
 });
