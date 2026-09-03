@@ -105,6 +105,12 @@ export function loadPipeline(
     if (step.role !== undefined && step.kind !== "llm") {
       throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
     }
+
+    if (step.workspace !== undefined && step.workspace !== "read") {
+      throw new Error(
+        `Step "${step.id}": invalid workspace value "${String(step.workspace)}" — only "read" is supported`
+      );
+    }
   }
 
   return { def, prompts };

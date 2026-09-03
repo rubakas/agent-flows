@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 import { DEFAULT_STEP_TIMEOUT_MS, StepTimeoutError, runLlmStep } from "./runStep.js";
-import { makeFakeSpawn } from "./testing/fakeSpawn.js";
+import { makeFakeChild, makeFakeSpawn } from "./testing/fakeSpawn.js";
 import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
 
@@ -326,5 +326,129 @@ describe("runLlmStep — deadline enforcement", () => {
     const { spawn } = makeFakeSpawn({ stdoutChunks: ["done"] });
     const result = await runLlmStep(entry, "hi", { spawn, timeoutMs: 0 });
     assert.equal(result, "done", "step with timeoutMs:0 must complete without being aborted");
+  });
+});
+
+// ── workspace: "read" ─────────────────────────────────────────────────────────
+
+// workspaceDir must be a real directory on disk; use the repo root (always exists).
+const repoRoot = new URL("../../..", import.meta.url).pathname.replace(/\/$/, "");
+
+describe('runLlmStep — workspace: "read"', () => {
+  it('claude: spawns with --allowedTools Read,Glob and cwd=workspaceDir when workspaceAccess is "read"', async () => {
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { child } = makeFakeChild({ stdoutChunks: ["analysis result"] });
+    let capturedArgs: string[] = [];
+    let capturedCwd: string | undefined;
+    const spawn = ((_cmd: string, args: string[], opts: { cwd?: string }) => {
+      capturedArgs = args;
+      capturedCwd = opts.cwd;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "analyze repo", {
+      spawn,
+      workspaceAccess: "read",
+      workspaceDir: repoRoot,
+    });
+
+    assert.ok(capturedArgs.includes("--allowedTools"), "must include --allowedTools flag");
+    assert.ok(capturedArgs.includes("Read,Glob"), "must restrict to Read,Glob only");
+    assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
+  });
+
+  it("claude: no --allowedTools and no cwd when workspaceAccess is not set", async () => {
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
+    let capturedArgs: string[] = [];
+    let capturedCwd: string | undefined;
+    const spawn = ((_cmd: string, args: string[], opts: { cwd?: string }) => {
+      capturedArgs = args;
+      capturedCwd = opts.cwd;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "hello", { spawn });
+
+    assert.ok(
+      !capturedArgs.includes("--allowedTools"),
+      "must not add --allowedTools when no workspace declared"
+    );
+    assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
+  });
+
+  it('codex: sets cwd=workspaceDir when workspaceAccess is "read" (already has -s read-only)', async () => {
+    const entry: ModelEntry = {
+      id: "codex-test",
+      transport: "cli",
+      cli: { bin: "codex", model: "o4-mini" },
+    };
+    const { child } = makeFakeChild({ stdoutChunks: [makeCodexJsonlOutput("ok")] });
+    let capturedCwd: string | undefined;
+    const spawn = ((_cmd: string, _args: string[], opts: { cwd?: string }) => {
+      capturedCwd = opts.cwd;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "analyze", { spawn, workspaceAccess: "read", workspaceDir: repoRoot });
+
+    assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
+  });
+
+  it("codex: no cwd when workspaceAccess is not set", async () => {
+    const entry: ModelEntry = {
+      id: "codex-test",
+      transport: "cli",
+      cli: { bin: "codex", model: "o4-mini" },
+    };
+    const { child } = makeFakeChild({ stdoutChunks: [makeCodexJsonlOutput("answer")] });
+    let capturedCwd: string | undefined;
+    const spawn = ((_cmd: string, _args: string[], opts: { cwd?: string }) => {
+      capturedCwd = opts.cwd;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "hello", { spawn });
+
+    assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
+  });
+
+  it('api transport: rejects when workspaceAccess is "read" (no CLI sandbox available)', async () => {
+    const entry: ModelEntry = {
+      id: "ollama-qwen",
+      transport: "api",
+      api: { endpoint: "http://localhost:11434/v1/chat/completions", model: "qwen2.5:1.5b" },
+    };
+
+    await assert.rejects(
+      runLlmStep(entry, "hi", { workspaceAccess: "read", workspaceDir: repoRoot }),
+      /api.*workspace|workspace.*api/i
+    );
+  });
+
+  it("rejects when workspaceDir is not a real directory", async () => {
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { spawn } = makeFakeSpawn({ stdoutChunks: ["irrelevant"] });
+
+    await assert.rejects(
+      runLlmStep(entry, "hi", {
+        spawn,
+        workspaceAccess: "read",
+        workspaceDir: "/definitely/does/not/exist/yoke-test-9482",
+      }),
+      /workspaceDir/
+    );
   });
 });

@@ -1,6 +1,7 @@
 // Provider-agnostic step executor for Binding B.
 
 import { spawn as defaultSpawn } from "node:child_process";
+import { statSync } from "node:fs";
 import { runClaudeCli } from "./runClaudeCli.js";
 import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
@@ -43,6 +44,19 @@ export interface StepRunnerDeps {
    * can be exercised without waiting 10 minutes.
    */
   _builtInTimeoutMs?: number;
+  /**
+   * Absolute path to the project workspace root. Supplied by the caller; required
+   * when workspaceAccess is set. Defaults to process.cwd() when absent and
+   * workspaceAccess is "read".
+   */
+  workspaceDir?: string;
+  /**
+   * When "read", the spawned CLI agent runs with cwd=workspaceDir and is restricted
+   * to read-only file access via the CLI sandbox flag (--allowedTools for claude,
+   * the existing -s read-only for codex). Not supported for api transport — will
+   * throw at runtime because sandbox enforcement requires a CLI subprocess.
+   */
+  workspaceAccess?: "read";
 }
 
 // ── Deadline helper ───────────────────────────────────────────────────────────
@@ -185,7 +199,8 @@ function runCodexCli(
   prompt: string,
   model: string | undefined,
   deps: StepRunnerDeps,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  cwd?: string
 ): Promise<string> {
   const spawnFn = deps.spawn ?? defaultSpawn;
   const env = deps.env ?? process.env;
@@ -200,7 +215,7 @@ function runCodexCli(
   ];
 
   return new Promise((resolve, reject) => {
-    const child = spawnFn("codex", args, { env });
+    const child = spawnFn("codex", args, { env, ...(cwd !== undefined ? { cwd } : {}) });
 
     let stdout = "";
     let stderr = "";
@@ -251,6 +266,32 @@ export async function runLlmStep(
   prompt: string,
   deps: StepRunnerDeps = {}
 ): Promise<string> {
+  // Validate and resolve workspace access before creating any deadline.
+  // Fail fast on configuration errors rather than timing out or running silently
+  // against the wrong directory.
+  let resolvedWorkspaceDir: string | undefined;
+  if (deps.workspaceAccess === "read") {
+    if (entry.transport === "api") {
+      throw new Error(
+        `runLlmStep: workspace "read" is not supported for api transport — ` +
+          `sandbox enforcement requires a CLI subprocess; api transport has no equivalent`
+      );
+    }
+    const dir = deps.workspaceDir ?? process.cwd();
+    let isDir = false;
+    try {
+      isDir = statSync(dir).isDirectory();
+    } catch {
+      // ENOENT or other fs error — isDir stays false
+    }
+    if (!isDir) {
+      throw new Error(
+        `runLlmStep: workspace "read" declared but workspaceDir "${dir}" is not a valid directory`
+      );
+    }
+    resolvedWorkspaceDir = dir;
+  }
+
   // Precedence: step-level > pipeline-level > built-in constant.
   // A value of 0 at any level is the explicit escape hatch: no deadline is created.
   const effectiveTimeoutMs =
@@ -269,16 +310,36 @@ export async function runLlmStep(
       const bin = entry.cli?.bin ?? "claude";
 
       if (bin === "claude") {
+        const extraArgs: string[] = [];
+        if (resolvedWorkspaceDir !== undefined) {
+          // Restrict to read-only tools: Read (read file contents) and Glob (find files).
+          // This is the real mechanism from `claude --help --allowedTools`.
+          // Edit, Write, and Bash are not in the allowlist and are therefore denied.
+          extraArgs.push("--allowedTools", "Read,Glob");
+        }
         const result = await runClaudeCli(
           prompt,
-          { model: entry.cli?.model, signal: effectiveSignal },
+          {
+            model: entry.cli?.model,
+            signal: effectiveSignal,
+            cwd: resolvedWorkspaceDir,
+            extraArgs,
+          },
           deps
         );
         return result.stdout.trim();
       }
 
       if (bin === "codex") {
-        return await runCodexCli(prompt, entry.cli?.model, deps, effectiveSignal);
+        // codex already spawns with -s read-only unconditionally; workspace: "read"
+        // adds the cwd so the sandbox is rooted at the project directory.
+        return await runCodexCli(
+          prompt,
+          entry.cli?.model,
+          deps,
+          effectiveSignal,
+          resolvedWorkspaceDir
+        );
       }
 
       throw new Error(`runLlmStep: unknown cli bin "${String(bin)}"`);

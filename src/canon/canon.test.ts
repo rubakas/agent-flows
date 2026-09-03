@@ -424,6 +424,56 @@ steps:
     assert.equal(def.steps[0].dependsOn, undefined);
   });
 
+  it("rejects an invalid workspace value on a step", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    workspace: write
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), "error must name the step id");
+        assert.ok(
+          err.message.toLowerCase().includes("workspace") || err.message.includes("write"),
+          "error must reference the invalid workspace value"
+        );
+        return true;
+      }
+    );
+  });
+
+  it('accepts workspace: "read" on a step and preserves it in the definition', () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    workspace: read
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.equal(def.steps[0].workspace, "read");
+  });
+
   it("loads a dependsOn pipeline that contains an isolated step (no edges in or out)", () => {
     // An isolated step is valid: pipelineLevels places it at level 0 and execution
     // is well-defined. Rejecting it would make in-progress editor state unsaveable

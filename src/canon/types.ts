@@ -32,6 +32,14 @@ export interface StepDef {
    * long-running steps that must not be killed mid-thought. `null` is not accepted; use `0`.
    */
   timeoutMs?: number;
+  /**
+   * Declares read-only access to the project workspace. When set to `"read"`,
+   * the step's agent runs with its working directory set to the project root
+   * and is constrained to read-only file access via the CLI sandbox mechanism.
+   * Absent = no repo access (today's default behaviour, fully backward compatible).
+   * Only `"read"` is valid in this version — write access is not yet supported.
+   */
+  workspace?: "read";
 }
 
 export interface PipelineDef {
