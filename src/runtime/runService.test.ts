@@ -74,38 +74,101 @@ function successResult(): Record<string, unknown> {
   return { status: "success", result: { ticketId: 42 } };
 }
 
+// ── Tests: non-blocking start ─────────────────────────────────────────────────
+
+describe("RunService.start — non-blocking: returns immediately, background settles", () => {
+  it("start returns status 'running' before the background run settles", async () => {
+    let resolveBackground!: (r: Record<string, unknown>) => void;
+
+    // A run whose start() does not resolve until we call resolveBackground.
+    const pendingRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "pending-run-001",
+      watchers: [],
+      start: () =>
+        new Promise<Record<string, unknown>>((resolve) => {
+          resolveBackground = resolve;
+        }),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(pendingRun as unknown as MockRun));
+
+    // start() must return immediately — not wait for the background run.start().
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    assert.equal(startResult.status, "running", "start must return 'running' immediately");
+    assert.equal(startResult.runId, "pending-run-001", "runId must be Mastra's own id");
+
+    // The background has not settled yet — registry shows 'running'.
+    const mid = service.get(startResult.runId);
+    assert.ok(mid !== undefined, "run must be in registry immediately");
+    assert.equal(mid.status, "running", "registry must show 'running' before background settles");
+
+    // Resolve the background run.start() to a suspended result.
+    resolveBackground(suspendedResult("pending-run-001"));
+
+    // waitForSettled resolves once the background processes the result.
+    const settled = await service.waitForSettled(startResult.runId);
+    assert.ok(settled !== undefined, "waitForSettled must resolve");
+    assert.equal(settled.status, "awaiting_approval", "settled state must be awaiting_approval");
+    assert.ok(settled.gateMessage, "gateMessage must be set");
+    assert.ok(settled.spec, "spec must be set");
+
+    // Registry now reflects suspended.
+    const after = service.get(startResult.runId);
+    assert.ok(after !== undefined);
+    assert.equal(after.status, "suspended", "get must show 'suspended' after background settles");
+  });
+
+  it("waitForSettled returns undefined for an unknown runId", async () => {
+    const run = makeMockRun("run-noop", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const result = await service.waitForSettled("nonexistent-id");
+    assert.equal(result, undefined);
+  });
+});
+
 // ── Tests: start / get ────────────────────────────────────────────────────────
 
 describe("RunService.start — run reaches gate, get reports suspended", () => {
-  it("start returns awaiting_approval with runId, get returns suspended", async () => {
+  it("start returns running with runId; waitForSettled returns awaiting_approval; get returns suspended", async () => {
     const mockRunId = "mastra-run-abc123";
     const run = makeMockRun(mockRunId, suspendedResult(mockRunId), successResult());
     const service = new RunService(makeMastra(run));
 
-    const result = await service.start("test-pipeline", { request: "test" });
+    const startResult = await service.start("test-pipeline", { request: "test" });
 
-    assert.equal(result.status, "awaiting_approval");
+    assert.equal(startResult.status, "running", "start must return running immediately");
     // Run id is Mastra's own id — not a locally-minted UUID.
-    assert.equal(result.runId, mockRunId, "runId must be Mastra's own run id");
-    assert.ok(result.gateMessage, "gateMessage should be set");
-    assert.ok(result.spec, "spec should be set");
+    assert.equal(startResult.runId, mockRunId, "runId must be Mastra's own run id");
 
-    const got = service.get(result.runId);
+    // Wait for the background to settle.
+    const settled = await service.waitForSettled(startResult.runId);
+    assert.ok(settled !== undefined, "waitForSettled must resolve");
+    assert.equal(settled.status, "awaiting_approval", "settled state must be awaiting_approval");
+    assert.ok(settled.gateMessage, "gateMessage should be set");
+    assert.ok(settled.spec, "spec should be set");
+
+    const got = service.get(startResult.runId);
     assert.ok(got !== undefined, "get should find the run");
     assert.equal(got.status, "suspended");
     assert.equal(got.pipelineId, "test-pipeline");
   });
 
-  it("start returns success when workflow completes without a gate", async () => {
+  it("start returns running; waitForSettled returns success when workflow completes without a gate", async () => {
     const run = makeMockRun("run-direct", successResult(), successResult());
     const service = new RunService(makeMastra(run));
 
-    const result = await service.start("test-pipeline", { request: "test" });
+    const startResult = await service.start("test-pipeline", { request: "test" });
 
-    assert.equal(result.status, "success");
-    assert.equal(result.runId, "run-direct");
+    assert.equal(startResult.status, "running");
+    assert.equal(startResult.runId, "run-direct");
 
-    const got = service.get(result.runId);
+    const settled = await service.waitForSettled(startResult.runId);
+    assert.ok(settled !== undefined);
+    assert.equal(settled.status, "success");
+
+    const got = service.get(startResult.runId);
     assert.ok(got !== undefined);
     assert.equal(got.status, "success");
   });
@@ -125,14 +188,15 @@ describe("RunService.approve — resumes suspended run", () => {
     const run = makeMockRun("run-ok", suspendedResult("run-ok"), successResult());
     const service = new RunService(makeMastra(run));
 
-    const start = await service.start("test-pipeline", { request: "test" });
-    assert.equal(start.status, "awaiting_approval");
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    // Wait for background to reach suspended before approving.
+    await service.waitForSettled(startResult.runId);
 
-    const approval = await service.approve(start.runId, true);
+    const approval = await service.approve(startResult.runId, true);
     assert.equal(approval.error, undefined, "approve should not return an error");
     assert.equal(approval.status, "success");
 
-    const got = service.get(start.runId);
+    const got = service.get(startResult.runId);
     assert.ok(got !== undefined);
     assert.equal(got.status, "success");
   });
@@ -145,16 +209,17 @@ describe("RunService.approve — second approve returns defined error", () => {
     const run = makeMockRun("run-resolved", suspendedResult("run-resolved"), successResult());
     const service = new RunService(makeMastra(run));
 
-    const start = await service.start("test-pipeline", { request: "test" });
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    await service.waitForSettled(startResult.runId);
 
-    const first = await service.approve(start.runId, true);
+    const first = await service.approve(startResult.runId, true);
     assert.equal(first.error, undefined, "first approve must succeed");
     assert.equal(first.status, "success");
 
     // Second approve on an already-resolved run must return a defined error.
-    const second = await service.approve(start.runId, true);
+    const second = await service.approve(startResult.runId, true);
     assert.ok(typeof second.error === "string", "second approve must return an error string");
-    assert.ok(second.error.includes(start.runId), "error should name the run id");
+    assert.ok(second.error.includes(startResult.runId), "error should name the run id");
     // Must not return status "success" — it must be an error, not a silent no-op.
     assert.equal(second.status, undefined, "second approve must not report status success");
   });
@@ -189,13 +254,14 @@ describe("RunService.approve — single-flight: two concurrent approvals resolve
     };
 
     const service = new RunService(makeMastra(slowRun as unknown as MockRun));
-    const start = await service.start("test-pipeline", { request: "test" });
-    assert.equal(start.status, "awaiting_approval");
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    // Wait for the background to reach suspended before racing two approvals.
+    await service.waitForSettled(startResult.runId);
 
     // Both approve calls are started without awaiting the first.
     const [r1, r2] = await Promise.all([
-      service.approve(start.runId, true),
-      service.approve(start.runId, true),
+      service.approve(startResult.runId, true),
+      service.approve(startResult.runId, true),
     ]);
 
     const successes = [r1, r2].filter((r) => r.status === "success" && r.error === undefined);
@@ -222,11 +288,11 @@ describe("RunService.subscribe — step events and gate suspension", () => {
     const run = makeMockRun("run-sub-gate", suspendedResult("run-sub-gate"), successResult());
     const service = new RunService(makeMastra(run));
 
-    const start = await service.start("test-pipeline", { request: "test" });
-    assert.equal(start.status, "awaiting_approval");
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    // The run is in the registry immediately; subscribe works without waiting for settlement.
 
     const events: StepEvent[] = [];
-    const unsubscribe = service.subscribe(start.runId, (e) => events.push(e));
+    const unsubscribe = service.subscribe(startResult.runId, (e) => events.push(e));
 
     // Emit a 'workflow-step-suspended' event — the Mastra event type for a gate suspension.
     run.emit({
@@ -263,9 +329,9 @@ describe("RunService.subscribe — step events and gate suspension", () => {
     const run = makeMockRun("run-sub-fail", suspendedResult("run-sub-fail"), successResult());
     const service = new RunService(makeMastra(run));
 
-    const start = await service.start("test-pipeline", { request: "test" });
+    const startResult = await service.start("test-pipeline", { request: "test" });
     const events: StepEvent[] = [];
-    const unsubscribe = service.subscribe(start.runId, (e) => events.push(e));
+    const unsubscribe = service.subscribe(startResult.runId, (e) => events.push(e));
 
     run.emit({
       type: "workflow-step-result",
@@ -283,9 +349,9 @@ describe("RunService.subscribe — step events and gate suspension", () => {
     const run = makeMockRun("run-sub-start", suspendedResult("run-sub-start"), successResult());
     const service = new RunService(makeMastra(run));
 
-    const start = await service.start("test-pipeline", { request: "test" });
+    const startResult = await service.start("test-pipeline", { request: "test" });
     const events: StepEvent[] = [];
-    const unsubscribe = service.subscribe(start.runId, (e) => events.push(e));
+    const unsubscribe = service.subscribe(startResult.runId, (e) => events.push(e));
 
     run.emit({ type: "workflow-step-start", payload: { id: "intake" } });
     run.emit({

@@ -99,19 +99,24 @@ const runPipelineTool = createTool({
       if (err) return { error: err };
     }
     const wfInput = { ...inputs, ...(models ? { models } : {}) };
-    const result = await runService.start(pipeline, wfInput);
-    if (result.status === "awaiting_approval") {
+    // start() is non-blocking — fires the run in the background and returns a runId.
+    // waitForSettled() blocks here so the MCP tool remains blocking from the chat
+    // client's perspective, preserving the existing contract.
+    const { runId } = await runService.start(pipeline, wfInput);
+    const settled = await runService.waitForSettled(runId);
+    if (!settled) return { error: `Run ${runId} lost before settling` };
+    if (settled.status === "awaiting_approval") {
       return {
-        runId: result.runId,
+        runId,
         status: "awaiting_approval",
-        gateMessage: result.gateMessage,
-        spec: result.spec,
+        gateMessage: settled.gateMessage,
+        spec: settled.spec,
       };
     }
-    if (result.status === "success") {
-      return { runId: result.runId, status: "success", result: result.result };
+    if (settled.status === "success") {
+      return { runId, status: "success", result: settled.result };
     }
-    return { runId: result.runId, status: "failed" };
+    return { runId, status: "failed" };
   },
 });
 

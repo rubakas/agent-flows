@@ -45,7 +45,16 @@ export type StepListener = (event: StepEvent) => void;
 
 export interface StartResult {
   runId: string;
-  /** "awaiting_approval" when the run suspended at a gate. */
+  /** Always "running" — the run advances in the background. */
+  status: "running";
+}
+
+/**
+ * The state after a run first suspends or completes.
+ * Returned by waitForSettled(). MCP callers use this to stay blocking
+ * while HTTP callers use the non-blocking StartResult.
+ */
+export interface SettledResult {
   status: "awaiting_approval" | "success" | "failed";
   gateMessage?: string;
   spec?: unknown;
@@ -77,6 +86,10 @@ interface RunRecord {
   suspendPayload?: unknown;
   /** The suspended step path returned by Mastra, needed for resume(). */
   suspendedStep?: string[];
+  /** Resolves once the background run first suspends or completes. */
+  readonly settledPromise: Promise<SettledResult>;
+  /** Call exactly once from the background to resolve settledPromise. */
+  readonly settle: (result: SettledResult) => void;
 }
 
 // ── RunService ─────────────────────────────────────────────────────────────────
@@ -87,8 +100,13 @@ export class RunService {
   constructor(private readonly mastra: MastraLike) {}
 
   /**
-   * Start a pipeline run. Returns immediately.
-   * If the pipeline suspends at a gate, returns status "awaiting_approval".
+   * Start a pipeline run and return immediately with status "running".
+   *
+   * The run advances in the background — run.start() is fired without being
+   * awaited. When the run first suspends or completes, the registry record is
+   * updated and settledPromise resolves. Use waitForSettled() to block until
+   * that point (MCP callers need this; HTTP callers do not).
+   *
    * The public run id is Mastra's own run id so it keys LibSQL snapshots and
    * resume() calls without a separate mapping.
    */
@@ -97,33 +115,62 @@ export class RunService {
     const run = await wf.createRun();
     const { runId } = run;
 
-    const record: RunRecord = { pipelineId, run, status: "running" };
+    let settle!: (result: SettledResult) => void;
+    const settledPromise = new Promise<SettledResult>((resolve) => {
+      settle = resolve;
+    });
+
+    const record: RunRecord = { pipelineId, run, status: "running", settledPromise, settle };
     this.registry.set(runId, record);
 
-    const r1 = await run.start({ inputData: wfInput });
+    // Fire the run in the background — do NOT await.
+    // The result/rejection updates the registry record and resolves settledPromise.
+    // The void operator makes the dangling promise intentional; the catch branch
+    // ensures no unhandled rejection can surface.
+    void run
+      .start({ inputData: wfInput })
+      .then((r1) => {
+        if (r1.status === "suspended") {
+          record.status = "suspended";
+          record.suspendedStep = r1.suspended?.[0] ?? ["approve"];
+          const gateStep = r1.steps?.approve;
+          const suspendPayload = gateStep?.suspendPayload;
+          record.suspendPayload = suspendPayload;
+          record.settle({
+            status: "awaiting_approval",
+            gateMessage: (suspendPayload?.message as string | undefined) ?? "Approve this spec?",
+            spec: suspendPayload?.spec,
+          });
+        } else if (r1.status === "success") {
+          record.status = "success";
+          record.result = r1.result;
+          record.settle({ status: "success", result: r1.result });
+        } else {
+          record.status = "failed";
+          record.settle({ status: "failed" });
+        }
+      })
+      .catch(() => {
+        record.status = "failed";
+        record.settle({ status: "failed" });
+      });
 
-    if (r1.status === "suspended") {
-      record.status = "suspended";
-      record.suspendedStep = r1.suspended?.[0] ?? ["approve"];
-      const gateStep = r1.steps?.approve;
-      const suspendPayload = gateStep?.suspendPayload;
-      record.suspendPayload = suspendPayload;
-      return {
-        runId,
-        status: "awaiting_approval",
-        gateMessage: (suspendPayload?.message as string | undefined) ?? "Approve this spec?",
-        spec: suspendPayload?.spec,
-      };
-    }
+    return { runId, status: "running" };
+  }
 
-    if (r1.status === "success") {
-      record.status = "success";
-      record.result = r1.result;
-      return { runId, status: "success", result: r1.result };
-    }
-
-    record.status = "failed";
-    return { runId, status: "failed" };
+  /**
+   * Wait until the background run first suspends or completes.
+   *
+   * MCP callers use this to preserve the blocking contract that existed before
+   * start() was made non-blocking. HTTP callers skip it — they return immediately
+   * and let the client poll via GET /api/runs/:id or SSE /api/runs/:id/events.
+   *
+   * Returns undefined if the runId is unknown.
+   */
+  async waitForSettled(runId: string): Promise<SettledResult | undefined> {
+    const record = this.registry.get(runId);
+    if (!record) return undefined;
+    return record.settledPromise;
   }
 
   /** Return the current state of a run, or undefined if the id is unknown. */
