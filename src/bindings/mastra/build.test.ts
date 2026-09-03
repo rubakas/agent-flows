@@ -20,7 +20,7 @@ import { ModelRegistry } from "../../canon/registry.js";
 import { makeInMemoryDb } from "../../db/index.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, mastraDbPath, validateModelOverrides } from "./build.js";
-import type { runLlmStep } from "../../canon/runStep.js";
+import type { StepRunnerDeps, runLlmStep } from "../../canon/runStep.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 
 // ── Test pipeline fixture ─────────────────────────────────────────────────────
@@ -571,6 +571,89 @@ describe("buildPipelineWorkflow — FR-005 context scoping", () => {
       assert.ok(
         !capturedPrompts.chain_d?.includes("CHAIN_A_OUTPUT"),
         "chain_d prompt must not contain chain_a's output (non-ancestor, FR-005)"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ── Per-step timeout wiring ───────────────────────────────────────────────────
+
+describe("buildPipelineWorkflow — per-step timeout wiring", () => {
+  it("passes step.timeoutMs and pipeline.defaultTimeoutMs to the runner for precedence resolution", async () => {
+    const capturedDeps: Record<string, StepRunnerDeps> = {};
+    const trackingRunner: typeof runLlmStep = async (entry, _prompt, deps) => {
+      capturedDeps[entry.id] = { ...(deps ?? {}) };
+      return "output";
+    };
+
+    const pipelineWithTimeout: LoadedPipeline = {
+      def: {
+        id: "timeout-wiring",
+        version: 1,
+        description: "Timeout wiring test pipeline",
+        inputs: ["request"],
+        defaultTimeoutMs: 5000,
+        steps: [
+          {
+            id: "with-step-timeout",
+            kind: "llm",
+            model: "with-step-timeout",
+            prompt: "prompts/a.md",
+            timeoutMs: 1000,
+          },
+          {
+            id: "without-step-timeout",
+            kind: "llm",
+            model: "without-step-timeout",
+            prompt: "prompts/b.md",
+            dependsOn: ["with-step-timeout"],
+          },
+        ],
+      },
+      prompts: {
+        "with-step-timeout": "{{request}}",
+        "without-step-timeout": "{{with-step-timeout}}",
+      },
+    };
+
+    const { storage, store, cleanup } = makeTestFixture("timeout-wire");
+    try {
+      const wf = buildPipelineWorkflow(pipelineWithTimeout, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: trackingRunner,
+      });
+
+      const mastra = new Mastra({ storage, workflows: { "timeout-wiring": wf } });
+      const mastraWf = mastra.getWorkflow("timeout-wiring");
+      const run = await mastraWf.createRun();
+      await run.start({ inputData: { request: "test" } });
+
+      // Step with step-level timeout: both timeoutMs and defaultTimeoutMs should be present.
+      // runLlmStep resolves the effective timeout as timeoutMs ?? defaultTimeoutMs = 1000.
+      assert.equal(
+        capturedDeps["with-step-timeout"]?.timeoutMs,
+        1000,
+        "step-level timeoutMs should be passed to the runner"
+      );
+      assert.equal(
+        capturedDeps["with-step-timeout"]?.defaultTimeoutMs,
+        5000,
+        "pipeline defaultTimeoutMs should also be present for transparency"
+      );
+
+      // Step without step-level timeout: only the pipeline default is passed.
+      assert.equal(
+        capturedDeps["without-step-timeout"]?.timeoutMs,
+        undefined,
+        "step without timeoutMs should not have a step-level timeoutMs in runner deps"
+      );
+      assert.equal(
+        capturedDeps["without-step-timeout"]?.defaultTimeoutMs,
+        5000,
+        "pipeline defaultTimeoutMs should be passed for steps without their own timeout"
       );
     } finally {
       cleanup();

@@ -117,10 +117,12 @@ function computeAncestors(steps: readonly StepDef[]): Map<string, Set<string>> {
 // visibleKeys, when provided, limits which context keys are visible to the
 // prompt renderer (FR-005). The full accumulated context is always returned
 // so later steps can apply their own filter.
+// defaultTimeoutMs is the pipeline-level fallback; step.timeoutMs takes precedence.
 function buildLlmStep(
   step: StepDef,
   prompts: Record<string, string>,
   deps: BuildDeps,
+  defaultTimeoutMs: number | undefined,
   visibleKeys?: Set<string>
 ) {
   const runner = deps.runner ?? runLlmStep;
@@ -151,7 +153,15 @@ function buildLlmStep(
         }
       }
 
-      const raw = await runner(entry, prompt, deps.runnerDeps ?? {});
+      // Thread per-step and pipeline-level timeouts into the runner deps.
+      // runLlmStep resolves the effective timeout as: timeoutMs ?? defaultTimeoutMs.
+      const runnerDeps: StepRunnerDeps = {
+        ...(deps.runnerDeps ?? {}),
+        ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
+        ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+      };
+
+      const raw = await runner(entry, prompt, runnerDeps);
 
       let value: unknown = raw;
       if (step.schema) {
@@ -319,7 +329,7 @@ export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): 
         }
         const stepAncestors = ancestorMap.get(step.id) ?? new Set<string>();
         const visibleKeys = new Set([...alwaysVisible, ...stepAncestors]);
-        return buildLlmStep(step, prompts, deps, visibleKeys);
+        return buildLlmStep(step, prompts, deps, def.defaultTimeoutMs, visibleKeys);
       });
       builder = builder.parallel(mastraSteps);
       builder = builder.then(buildParallelMergeStep(`level_${i}`, levelSteps));
@@ -328,7 +338,9 @@ export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): 
       if (step.kind === "llm") {
         const stepAncestors = ancestorMap.get(step.id) ?? new Set<string>();
         const visibleKeys = new Set([...alwaysVisible, ...stepAncestors]);
-        builder = builder.then(buildLlmStep(step, prompts, deps, visibleKeys));
+        builder = builder.then(
+          buildLlmStep(step, prompts, deps, def.defaultTimeoutMs, visibleKeys)
+        );
       } else if (step.kind === "assemble-spec") {
         builder = builder.then(buildAssembleStep(step.id));
       } else if (step.kind === "gate") {

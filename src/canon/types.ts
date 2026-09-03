@@ -26,6 +26,12 @@ export interface StepDef {
   schema?: "weaknesses" | "securityFindings";
   dependsOn?: readonly string[];
   message?: string;
+  /**
+   * Per-step deadline in milliseconds. Overrides the pipeline's `defaultTimeoutMs` and
+   * the built-in default. Set to `0` to disable the deadline for this step — useful for
+   * long-running steps that must not be killed mid-thought. `null` is not accepted; use `0`.
+   */
+  timeoutMs?: number;
 }
 
 export interface PipelineDef {
@@ -34,6 +40,7 @@ export interface PipelineDef {
   description: string;
   inputs: string[];
   steps: StepDef[];
+  defaultTimeoutMs?: number;
 }
 
 export interface LoadedPipeline {

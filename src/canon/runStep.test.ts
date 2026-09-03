@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { runLlmStep } from "./runStep.js";
+import { DEFAULT_STEP_TIMEOUT_MS, StepTimeoutError, runLlmStep } from "./runStep.js";
 import { makeFakeSpawn } from "./testing/fakeSpawn.js";
 import type { ModelEntry } from "./registry.js";
+import type { SpawnFn } from "./runClaudeCli.js";
 
 // ── claude CLI ────────────────────────────────────────────────────────────────
 
@@ -205,5 +208,123 @@ describe("runLlmStep — API transport", () => {
   it("rejects when choices[0].message.content is missing", async () => {
     const fetchFn = makeFakeFetch({ body: { choices: [] } });
     await assert.rejects(runLlmStep(entry, "hi", { fetchFn }), /choices\[0\]\.message\.content/);
+  });
+});
+
+// ── Deadline enforcement ──────────────────────────────────────────────────────
+
+// A spawn that hangs until kill() is called, then closes.
+// The real fake spawn always closes via setImmediate; this one simulates a stuck provider.
+function makeHangingSpawn(): { spawn: SpawnFn; killCalls: string[] } {
+  const killCalls: string[] = [];
+  const spawn = ((_cmd: string, _args: string[]) => {
+    const emitter = new EventEmitter();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdin = new PassThrough();
+    const child = Object.assign(emitter, {
+      stdout,
+      stderr,
+      stdin,
+      kill(sig?: string) {
+        killCalls.push(sig ?? "SIGTERM");
+        // Emit close to unblock the Promise, as a real killed process would.
+        setImmediate(() => {
+          stdout.push(null);
+          stderr.push(null);
+          emitter.emit("close", null);
+        });
+      },
+    });
+    // Never emit close naturally — the child hangs until killed.
+    return child;
+  }) as unknown as SpawnFn;
+  return { spawn, killCalls };
+}
+
+describe("runLlmStep — deadline enforcement", () => {
+  const entry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+
+  it("aborts a hung step and surfaces StepTimeoutError", async () => {
+    const { spawn, killCalls } = makeHangingSpawn();
+    await assert.rejects(runLlmStep(entry, "hang", { spawn, timeoutMs: 50 }), (err: unknown) => {
+      assert.ok(err instanceof StepTimeoutError, `expected StepTimeoutError, got ${String(err)}`);
+      assert.ok(err.message.includes("50"), "error message should include the timeout value");
+      return true;
+    });
+    assert.ok(killCalls.length > 0, "child should have been killed when deadline fired");
+  });
+
+  it("resolves normally when step finishes before the deadline", async () => {
+    const { spawn } = makeFakeSpawn({ stdoutChunks: ["done"] });
+    const result = await runLlmStep(entry, "ping", { spawn, timeoutMs: 5000 });
+    assert.equal(result, "done");
+  });
+
+  it("step-level timeoutMs overrides defaultTimeoutMs", async () => {
+    // step timeoutMs: 50ms fires before defaultTimeoutMs: 10000ms
+    const { spawn } = makeHangingSpawn();
+    await assert.rejects(
+      runLlmStep(entry, "hang", { spawn, timeoutMs: 50, defaultTimeoutMs: 10_000 }),
+      (err: unknown) => {
+        assert.ok(err instanceof StepTimeoutError);
+        assert.equal(err.timeoutMs, 50, "should use step-level timeout, not the pipeline default");
+        return true;
+      }
+    );
+  });
+
+  it("uses defaultTimeoutMs when timeoutMs is not set", async () => {
+    const { spawn } = makeHangingSpawn();
+    await assert.rejects(
+      runLlmStep(entry, "hang", { spawn, defaultTimeoutMs: 50 }),
+      (err: unknown) => {
+        assert.ok(err instanceof StepTimeoutError);
+        assert.equal(err.timeoutMs, 50);
+        return true;
+      }
+    );
+  });
+
+  it("does not keep the process alive when step completes before its deadline", async () => {
+    // A very long timeout that would block process exit if not cleared.
+    // The step completes immediately (fast spawn). The test suite exits promptly,
+    // proving the timer was removed by clearTimeout in the finally block.
+    const { spawn } = makeFakeSpawn({ stdoutChunks: ["quick"] });
+    const result = await runLlmStep(entry, "hi", { spawn, timeoutMs: 300_000 });
+    assert.equal(result, "quick");
+    // If clearTimeout were not called, the 300-second timer would hold the process
+    // alive. The test suite completing promptly proves it was cleared.
+  });
+
+  it("applies the built-in DEFAULT_STEP_TIMEOUT_MS when no timeout is declared anywhere", async () => {
+    // When deps has no timeoutMs or defaultTimeoutMs, the built-in constant fires.
+    // DEFAULT_STEP_TIMEOUT_MS is 10 minutes — far too long to await in a test.
+    // _builtInTimeoutMs overrides the constant so the built-in path is observable.
+    assert.equal(DEFAULT_STEP_TIMEOUT_MS, 600_000, "built-in should be 10 minutes");
+    const { spawn } = makeHangingSpawn();
+    await assert.rejects(
+      runLlmStep(entry, "hang", { spawn, _builtInTimeoutMs: 50 }),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof StepTimeoutError,
+          "built-in path must surface StepTimeoutError, not a generic hang"
+        );
+        assert.equal(err.timeoutMs, 50);
+        return true;
+      }
+    );
+  });
+
+  it("timeoutMs: 0 is an explicit escape hatch that disables the deadline", async () => {
+    // Without the escape hatch, a 0ms timeout would fire immediately, aborting
+    // even a fast step before it completes. timeoutMs: 0 must mean "no deadline".
+    const { spawn } = makeFakeSpawn({ stdoutChunks: ["done"] });
+    const result = await runLlmStep(entry, "hi", { spawn, timeoutMs: 0 });
+    assert.equal(result, "done", "step with timeoutMs:0 must complete without being aborted");
   });
 });

@@ -7,10 +7,88 @@ import type { SpawnFn } from "./runClaudeCli.js";
 
 export type { SpawnFn } from "./runClaudeCli.js";
 
+/**
+ * Built-in deadline applied to every step when neither the step nor its pipeline
+ * declares a timeout. 10 minutes: generous enough for a reasoner-role step on a
+ * large prompt, short enough that a wedged CLI does not hold a daemon slot for a
+ * working day. Override at the step level (timeoutMs) or pipeline level
+ * (defaultTimeoutMs). Set either to 0 to remove the deadline entirely.
+ */
+export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
+
+/** Thrown when a step's deadline fires before the transport completes. */
+export class StepTimeoutError extends Error {
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`Step timed out after ${timeoutMs}ms`);
+    this.name = "StepTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export interface StepRunnerDeps {
   spawn?: SpawnFn;
   fetchFn?: typeof fetch;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  /**
+   * Per-step deadline in milliseconds. Takes precedence over defaultTimeoutMs.
+   * Set to 0 to disable the deadline for this step (explicit escape hatch).
+   */
+  timeoutMs?: number;
+  /** Pipeline-level fallback deadline, used when timeoutMs is absent. */
+  defaultTimeoutMs?: number;
+  /**
+   * @internal Override DEFAULT_STEP_TIMEOUT_MS in tests so the built-in path
+   * can be exercised without waiting 10 minutes.
+   */
+  _builtInTimeoutMs?: number;
+}
+
+// ── Deadline helper ───────────────────────────────────────────────────────────
+
+interface DeadlineHandle {
+  signal: AbortSignal;
+  cancel: () => void;
+  timeoutMs: number;
+}
+
+/**
+ * Returns an AbortSignal that fires after timeoutMs milliseconds.
+ * Any parent signal abort is propagated into the returned signal.
+ * Call cancel() — invoked from runLlmStep's finally block — to clear the timer
+ * the moment the step resolves or rejects, preventing the timer from keeping
+ * the process alive after the step is done.
+ */
+function createDeadline(timeoutMs: number, parentSignal?: AbortSignal): DeadlineHandle {
+  const controller = new AbortController();
+
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException(`Step timed out after ${timeoutMs}ms`, "TimeoutError"));
+  }, timeoutMs);
+
+  // cancel() is called in runLlmStep's finally block to remove the timer the moment
+  // the step resolves or rejects. This prevents the timer from keeping the process
+  // alive after the step is done — the classic leak in this pattern.
+  const cancel = () => clearTimeout(timer);
+
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      clearTimeout(timer);
+      controller.abort(parentSignal.reason);
+    } else {
+      parentSignal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          controller.abort(parentSignal.reason);
+        },
+        { once: true }
+      );
+    }
+  }
+
+  return { signal: controller.signal, cancel, timeoutMs };
 }
 
 // ── codex exec JSON event shape ───────────────────────────────────────────────
@@ -55,7 +133,8 @@ interface ChatCompletion {
 async function runApiStep(
   entry: ModelEntry,
   prompt: string,
-  deps: StepRunnerDeps
+  deps: StepRunnerDeps,
+  signal: AbortSignal | undefined
 ): Promise<string> {
   const endpoint = entry.api!.endpoint;
   const model = entry.api!.model;
@@ -76,7 +155,7 @@ async function runApiStep(
 
   let res: Response;
   try {
-    res = await fetchFn(endpoint, { method: "POST", headers, body });
+    res = await fetchFn(endpoint, { method: "POST", headers, body, signal });
   } catch (err) {
     throw new Error(`api step: fetch failed for ${endpoint}: ${String(err)}`, { cause: err });
   }
@@ -105,7 +184,8 @@ async function runApiStep(
 function runCodexCli(
   prompt: string,
   model: string | undefined,
-  deps: StepRunnerDeps
+  deps: StepRunnerDeps,
+  signal: AbortSignal | undefined
 ): Promise<string> {
   const spawnFn = deps.spawn ?? defaultSpawn;
   const env = deps.env ?? process.env;
@@ -152,6 +232,15 @@ function runCodexCli(
         );
       }
     });
+
+    if (signal) {
+      if (signal.aborted) {
+        child.kill("SIGTERM");
+        reject(new DOMException("codex exec aborted before start", "AbortError"));
+        return;
+      }
+      signal.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
+    }
   });
 }
 
@@ -162,24 +251,53 @@ export async function runLlmStep(
   prompt: string,
   deps: StepRunnerDeps = {}
 ): Promise<string> {
-  if (entry.transport === "cli") {
-    const bin = entry.cli?.bin ?? "claude";
+  // Precedence: step-level > pipeline-level > built-in constant.
+  // A value of 0 at any level is the explicit escape hatch: no deadline is created.
+  const effectiveTimeoutMs =
+    deps.timeoutMs ?? deps.defaultTimeoutMs ?? deps._builtInTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
 
-    if (bin === "claude") {
-      const result = await runClaudeCli(prompt, { model: entry.cli?.model }, deps);
-      return result.stdout.trim();
-    }
+  let deadline: DeadlineHandle | undefined;
+  let effectiveSignal: AbortSignal | undefined = deps.signal;
 
-    if (bin === "codex") {
-      return runCodexCli(prompt, entry.cli?.model, deps);
-    }
-
-    throw new Error(`runLlmStep: unknown cli bin "${String(bin)}"`);
+  if (effectiveTimeoutMs > 0) {
+    deadline = createDeadline(effectiveTimeoutMs, deps.signal);
+    effectiveSignal = deadline.signal;
   }
 
-  if (entry.transport === "api") {
-    return runApiStep(entry, prompt, deps);
-  }
+  try {
+    if (entry.transport === "cli") {
+      const bin = entry.cli?.bin ?? "claude";
 
-  throw new Error(`runLlmStep: unknown transport "${String(entry.transport)}"`);
+      if (bin === "claude") {
+        const result = await runClaudeCli(
+          prompt,
+          { model: entry.cli?.model, signal: effectiveSignal },
+          deps
+        );
+        return result.stdout.trim();
+      }
+
+      if (bin === "codex") {
+        return await runCodexCli(prompt, entry.cli?.model, deps, effectiveSignal);
+      }
+
+      throw new Error(`runLlmStep: unknown cli bin "${String(bin)}"`);
+    }
+
+    if (entry.transport === "api") {
+      return await runApiStep(entry, prompt, deps, effectiveSignal);
+    }
+
+    throw new Error(`runLlmStep: unknown transport "${String(entry.transport)}"`);
+  } catch (err) {
+    if (deadline?.signal.aborted) {
+      const reason = deadline.signal.reason as { name?: string } | undefined;
+      if (reason?.name === "TimeoutError") {
+        throw new StepTimeoutError(deadline.timeoutMs);
+      }
+    }
+    throw err;
+  } finally {
+    deadline?.cancel();
+  }
 }
