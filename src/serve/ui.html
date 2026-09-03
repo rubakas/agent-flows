@@ -1,0 +1,1266 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yoke Editor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+    />
+    <style>
+      /* ── design tokens (prototype-verbatim) ── */
+      :root {
+        --bg: #eceef1;
+        --panel: #f8f9fb;
+        --sunk: #e2e6ea;
+        --line: #ccd2d9;
+        --line-soft: #dde2e7;
+        --ink: #161a20;
+        --ink-2: #414954;
+        --muted: #6d7783;
+        --accent: #2d6a92;
+        --accent-bg: #d9e6ef;
+        --llm: #3f7a5f;
+        --gate: #9a7318;
+        --assemble: #6a5a9c;
+        --persist: #9c5f3c;
+        --ok: #2a7a3b;
+        --err: #b52d2d;
+        --ui: "IBM Plex Sans", system-ui, sans-serif;
+        --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", sans-serif;
+        --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg: #101318;
+          --panel: #171c23;
+          --sunk: #0c0f13;
+          --line: #2a323c;
+          --line-soft: #212831;
+          --ink: #e6e9ec;
+          --ink-2: #bcc3cb;
+          --muted: #838d99;
+          --accent: #6aa9d6;
+          --accent-bg: #17303f;
+          --llm: #7fb99a;
+          --gate: #d9a441;
+          --assemble: #9d8ec7;
+          --persist: #c98b6b;
+          --ok: #4db86a;
+          --err: #e05555;
+        }
+      }
+      :root[data-theme="dark"] {
+        --bg: #101318;
+        --panel: #171c23;
+        --sunk: #0c0f13;
+        --line: #2a323c;
+        --line-soft: #212831;
+        --ink: #e6e9ec;
+        --ink-2: #bcc3cb;
+        --muted: #838d99;
+        --accent: #6aa9d6;
+        --accent-bg: #17303f;
+        --llm: #7fb99a;
+        --gate: #d9a441;
+        --assemble: #9d8ec7;
+        --persist: #c98b6b;
+        --ok: #4db86a;
+        --err: #e05555;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--ui);
+        font-size: 14px;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          animation: none !important;
+          transition: none !important;
+        }
+      }
+
+      /* ── header bar ── */
+      header.bar {
+        display: flex;
+        align-items: baseline;
+        gap: 0.8rem;
+        flex-wrap: wrap;
+        padding: 0.7rem 1rem;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        flex-shrink: 0;
+      }
+      .bar h1 {
+        font-family: var(--cond);
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin: 0;
+        letter-spacing: 0.01em;
+      }
+      .bar .id {
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        color: var(--muted);
+      }
+      .bar .desc {
+        font-size: 0.8rem;
+        color: var(--ink-2);
+      }
+      .bar .actions {
+        margin-left: auto;
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
+
+      /* ── buttons ── */
+      .btn {
+        font-family: var(--mono);
+        font-size: 0.78rem;
+        font-weight: 500;
+        padding: 0.3rem 0.7rem;
+        border-radius: 2px;
+        cursor: pointer;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--ink);
+      }
+      .btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .btn:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .btn.primary {
+        background: var(--accent);
+        color: var(--bg);
+        border-color: var(--accent);
+      }
+      .btn.primary:hover {
+        opacity: 0.85;
+        color: var(--bg);
+        border-color: var(--accent);
+      }
+      .btn.danger {
+        background: var(--err);
+        color: #fff;
+        border-color: var(--err);
+      }
+      .btn.danger:hover {
+        opacity: 0.85;
+        color: #fff;
+        border-color: var(--err);
+      }
+      .btn-link {
+        background: none;
+        border: none;
+        color: var(--accent);
+        font-family: var(--ui);
+        font-size: 0.85rem;
+        cursor: pointer;
+        padding: 0.2rem 0.4rem;
+      }
+      .btn-link:hover {
+        text-decoration: underline;
+      }
+      .btn-link:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+        border-radius: 2px;
+      }
+
+      /* ── pipeline list view ── */
+      #view-list {
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+      }
+      .list-body {
+        padding: 1.5rem;
+        max-width: 36rem;
+      }
+      .list-body h2 {
+        font-family: var(--mono);
+        font-size: 0.64rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin: 0 0 1rem;
+      }
+      .pipeline-card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 0.6rem;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+      }
+      .pipeline-card:hover {
+        border-color: var(--accent);
+      }
+      .pipeline-card:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .pipeline-card .pid {
+        font-family: var(--mono);
+        font-size: 0.88rem;
+        font-weight: 500;
+      }
+      .pipeline-card .pdesc {
+        font-size: 0.8rem;
+        color: var(--ink-2);
+      }
+      .pipeline-card .ppath {
+        font-family: var(--mono);
+        font-size: 0.65rem;
+        color: var(--muted);
+      }
+
+      /* ── editor view ── */
+      #view-editor {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      .work {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 19rem;
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+      }
+      @media (max-width: 800px) {
+        .work {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .stage {
+        overflow: auto;
+        padding: 1.2rem;
+        background: var(--sunk);
+      }
+
+      /* ── level bands (variant A — the chosen design) ── */
+      .bands {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+      }
+      .band {
+        display: grid;
+        grid-template-columns: 4.4rem 1fr;
+        gap: 0.8rem;
+        align-items: center;
+        padding: 0.55rem 0;
+      }
+      .band + .band {
+        border-top: 1px dashed var(--line-soft);
+      }
+      .band .lvl {
+        font-family: var(--mono);
+        font-size: 0.64rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--muted);
+        text-align: right;
+      }
+      .band .lvl b {
+        display: block;
+        font-size: 1.05rem;
+        color: var(--ink-2);
+        font-weight: 600;
+      }
+      .band.par .lvl::after {
+        content: "parallel";
+        display: block;
+        color: var(--accent);
+        font-size: 0.58rem;
+        margin-top: 0.15rem;
+      }
+      .band .row {
+        display: flex;
+        gap: 0.7rem;
+        flex-wrap: wrap;
+      }
+
+      /* ── nodes ── */
+      .node {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--kind);
+        border-radius: 3px;
+        padding: 0.5rem 0.6rem;
+        min-width: 9.5rem;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        gap: 0.18rem;
+        position: relative;
+      }
+      .node:hover {
+        border-color: var(--accent);
+      }
+      .node[aria-selected="true"] {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px var(--accent-bg);
+      }
+      .node:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .node .nid {
+        font-family: var(--mono);
+        font-size: 0.82rem;
+        font-weight: 500;
+      }
+      .node .meta {
+        font-family: var(--mono);
+        font-size: 0.64rem;
+        color: var(--muted);
+        letter-spacing: 0.04em;
+      }
+      .node .kindtag {
+        color: var(--kind);
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .k-llm {
+        --kind: var(--llm);
+      }
+      .k-gate {
+        --kind: var(--gate);
+      }
+      .k-assemble-spec {
+        --kind: var(--assemble);
+      }
+      .k-persist-ticket {
+        --kind: var(--persist);
+      }
+
+      /* run status indicators on nodes */
+      .node .sdot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--muted);
+        position: absolute;
+        top: 0.4rem;
+        right: 0.4rem;
+        opacity: 0.25;
+      }
+      .ns-started .sdot {
+        background: var(--accent);
+        opacity: 1;
+        animation: blink 1.2s ease infinite;
+      }
+      .ns-succeeded .sdot {
+        background: var(--ok);
+        opacity: 1;
+      }
+      .ns-failed .sdot {
+        background: var(--err);
+        opacity: 1;
+      }
+      .ns-suspended .sdot {
+        background: var(--gate);
+        opacity: 1;
+        animation: blink 1.5s ease infinite;
+      }
+      @keyframes blink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.3;
+        }
+      }
+
+      /* ── inspector sidebar ── */
+      aside {
+        border-left: 1px solid var(--line);
+        background: var(--panel);
+        padding: 0.9rem;
+        overflow: auto;
+      }
+      @media (max-width: 800px) {
+        aside {
+          border-left: 0;
+          border-top: 1px solid var(--line);
+        }
+      }
+      aside > h2 {
+        font-family: var(--mono);
+        font-size: 0.64rem;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin: 0 0 0.7rem;
+      }
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.22rem;
+        margin-bottom: 0.75rem;
+      }
+      .field label {
+        font-family: var(--mono);
+        font-size: 0.62rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .field input,
+      .field select {
+        font-family: var(--mono);
+        font-size: 0.8rem;
+        background: var(--sunk);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        padding: 0.3rem 0.4rem;
+        width: 100%;
+      }
+      .field input:focus,
+      .field select:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .field .ro {
+        font-family: var(--mono);
+        font-size: 0.8rem;
+        color: var(--ink-2);
+        padding: 0.3rem 0;
+      }
+      .empty {
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .constraint {
+        margin-top: 1rem;
+        padding: 0.6rem;
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--gate);
+        border-radius: 2px;
+        font-size: 0.76rem;
+        line-height: 1.5;
+        color: var(--ink-2);
+        background: var(--sunk);
+      }
+      .constraint b {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      /* run panel inside inspector */
+      .run-section {
+        margin-top: 1rem;
+        padding-top: 0.7rem;
+        border-top: 1px solid var(--line);
+      }
+      .run-section h2 {
+        font-family: var(--mono);
+        font-size: 0.64rem;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin: 0 0 0.6rem;
+      }
+      .run-badge {
+        display: inline-block;
+        font-family: var(--mono);
+        font-size: 0.7rem;
+        font-weight: 600;
+        padding: 0.15rem 0.45rem;
+        border-radius: 2px;
+        border: 1px solid currentColor;
+        margin-bottom: 0.6rem;
+      }
+      .run-badge.running {
+        color: var(--accent);
+      }
+      .run-badge.suspended {
+        color: var(--gate);
+      }
+      .run-badge.success {
+        color: var(--ok);
+      }
+      .run-badge.failed {
+        color: var(--err);
+      }
+      .gate-msg {
+        font-size: 0.82rem;
+        color: var(--ink-2);
+        margin-bottom: 0.7rem;
+        line-height: 1.45;
+      }
+      .gate-actions {
+        display: flex;
+        gap: 0.5rem;
+      }
+
+      /* ── status bar (save feedback) ── */
+      .status-bar {
+        padding: 0.45rem 1rem;
+        font-family: var(--mono);
+        font-size: 0.78rem;
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+        flex-shrink: 0;
+      }
+      .status-bar.ok {
+        color: var(--ok);
+      }
+      .status-bar.err {
+        color: var(--err);
+      }
+      .status-bar.conflict {
+        color: var(--gate);
+      }
+
+      /* ── run inputs modal ── */
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.42);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+      }
+      .modal {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 1.2rem 1.4rem;
+        min-width: 22rem;
+        max-width: min(90vw, 32rem);
+      }
+      .modal h3 {
+        font-family: var(--cond);
+        font-size: 0.95rem;
+        font-weight: 700;
+        margin: 0 0 0.9rem;
+      }
+      .modal-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        justify-content: flex-end;
+      }
+      .modal .field textarea {
+        font-family: var(--mono);
+        font-size: 0.8rem;
+        background: var(--sunk);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        padding: 0.3rem 0.4rem;
+        width: 100%;
+        resize: vertical;
+        min-height: 3.5rem;
+      }
+      .modal .field textarea:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+
+      /* ── error box ── */
+      .error-box {
+        padding: 0.8rem 1rem;
+        background: var(--panel);
+        border: 1px solid var(--err);
+        border-left: 3px solid var(--err);
+        border-radius: 3px;
+        font-size: 0.82rem;
+        color: var(--err);
+        margin: 0.8rem 0;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ═══════════════════════════════════ View: pipeline list ═══════════════════ -->
+    <section id="view-list">
+      <header class="bar">
+        <h1>Yoke</h1>
+        <span class="desc">DAG editor</span>
+      </header>
+      <div class="list-body">
+        <h2>Pipelines</h2>
+        <div id="list-items">Loading…</div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════ View: editor ════════════════════════════ -->
+    <section id="view-editor" hidden>
+      <header class="bar">
+        <button class="btn-link" id="back-btn">← Pipelines</button>
+        <h1 id="editor-title"></h1>
+        <span class="id" id="editor-meta"></span>
+        <span class="desc" id="editor-desc"></span>
+        <div class="actions">
+          <button class="btn primary" id="run-btn">Run ▶</button>
+          <button class="btn" id="save-btn">Save</button>
+        </div>
+      </header>
+
+      <div class="work">
+        <!-- canvas: level-band layout populated from pipeline.levels -->
+        <div class="stage" id="canvas"></div>
+
+        <aside id="inspector-panel">
+          <h2>Step inspector</h2>
+          <div id="inspector-body"><p class="empty">Select a node on the canvas.</p></div>
+          <div class="constraint">
+            <b>An edge means dependency only.</b> It orders execution and scopes a step's context to
+            its ancestors. The canon stores no data routing along edges, no conditionals, no loops —
+            this is a DAG, not a flow language.
+          </div>
+          <div id="run-panel" hidden></div>
+        </aside>
+      </div>
+
+      <div id="status-bar" class="status-bar" hidden></div>
+    </section>
+
+    <!-- ═══════════════════════════════════ Run inputs modal ════════════════════════ -->
+    <div id="run-modal" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h3 id="modal-title">Run pipeline</h3>
+        <div id="modal-fields"></div>
+        <div class="modal-actions">
+          <button class="btn" id="modal-cancel">Cancel</button>
+          <button class="btn primary" id="modal-submit">Start run</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      "use strict";
+
+      // ── Application state ─────────────────────────────────────────────────────────
+      const S = {
+        pipelines: [],
+        pipeline: null, // { def, prompts, levels, graph }
+        editedSteps: [], // deep-copied, mutable
+        selectedId: null,
+        draftId: null,
+        // run
+        runId: null,
+        runStatus: null, // 'running' | 'suspended' | 'success' | 'failed'
+        stepStatuses: {}, // stepId → status string
+        suspendedStepId: null,
+        sseSource: null,
+      };
+
+      // ── DOM helpers ───────────────────────────────────────────────────────────────
+      const el = (id) => document.getElementById(id);
+
+      function escH(s) {
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      // ── View routing ──────────────────────────────────────────────────────────────
+      function showView(name) {
+        el("view-list").hidden = name !== "list";
+        el("view-editor").hidden = name !== "editor";
+      }
+
+      // ── Status bar ────────────────────────────────────────────────────────────────
+      function setStatus(msg, cls) {
+        const bar = el("status-bar");
+        bar.textContent = msg;
+        bar.className = "status-bar" + (cls ? " " + cls : "");
+        bar.hidden = !msg;
+      }
+
+      // ══════════════════════════════════════════════════════════════════════════════
+      // Screen 1: Pipeline list
+      // ══════════════════════════════════════════════════════════════════════════════
+
+      async function loadList() {
+        const items = el("list-items");
+        try {
+          const res = await fetch("/api/pipelines");
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          S.pipelines = data.pipelines;
+
+          if (!S.pipelines.length) {
+            items.innerHTML = '<p class="empty">No pipelines found.</p>';
+            return;
+          }
+          items.innerHTML = S.pipelines
+            .map(
+              (p) => `
+      <div class="pipeline-card" role="button" tabindex="0" data-pid="${escH(p.id)}">
+        <span class="pid">${escH(p.id)}</span>
+        <span class="pdesc">${escH(p.description || "")}</span>
+        <span class="ppath">${escH(p.path)}</span>
+      </div>`
+            )
+            .join("");
+
+          items.querySelectorAll(".pipeline-card").forEach((card) => {
+            const pid = card.dataset.pid;
+            card.addEventListener("click", () => openPipeline(pid));
+            card.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openPipeline(pid);
+              }
+            });
+          });
+        } catch (err) {
+          items.innerHTML = `<div class="error-box">Could not load pipelines: ${escH(err.message)}</div>`;
+        }
+      }
+
+      // ══════════════════════════════════════════════════════════════════════════════
+      // Screen 2: Editor
+      // ══════════════════════════════════════════════════════════════════════════════
+
+      async function openPipeline(id) {
+        try {
+          const res = await fetch(`/api/pipelines/${encodeURIComponent(id)}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+
+          // Stop any live run
+          closeSse();
+          resetRun();
+
+          S.pipeline = data;
+          // Deep-copy steps for in-memory editing
+          S.editedSteps = data.def.steps.map((s) => ({
+            ...s,
+            dependsOn: s.dependsOn ? [...s.dependsOn] : [],
+          }));
+          S.selectedId = null;
+          S.draftId = null;
+
+          showView("editor");
+          renderEditorHeader();
+          renderBands();
+          renderInspector();
+          el("run-panel").hidden = true;
+          setStatus("");
+        } catch (err) {
+          el("list-items").innerHTML =
+            `<div class="error-box">Could not load pipeline "${escH(id)}": ${escH(err.message)}</div>`;
+        }
+      }
+
+      function renderEditorHeader() {
+        const { def } = S.pipeline;
+        el("editor-title").textContent = def.id;
+        el("editor-meta").textContent = `v${def.version} · inputs: ${def.inputs.join(", ")}`;
+        el("editor-desc").textContent = def.description || "";
+      }
+
+      // ── Level-band canvas ─────────────────────────────────────────────────────────
+      // S.pipeline.levels is string[][] from the server — execution bands in order.
+      // A band with >1 id runs in parallel.
+
+      function renderBands() {
+        const { levels } = S.pipeline;
+        const byId = {};
+        for (const s of S.editedSteps) byId[s.id] = s;
+
+        el("canvas").innerHTML = `<div class="bands">${levels
+          .map(
+            (band, i) => `
+      <div class="band${band.length > 1 ? " par" : ""}">
+        <div class="lvl">level<b>${i}</b></div>
+        <div class="row">${band.map((id) => nodeHtml(byId[id] || { id, kind: "llm" })).join("")}</div>
+      </div>`
+          )
+          .join("")}</div>`;
+
+        el("canvas")
+          .querySelectorAll(".node")
+          .forEach((node) => {
+            const nid = node.dataset.nid;
+            node.addEventListener("click", () => selectNode(nid));
+            node.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                selectNode(nid);
+              }
+            });
+          });
+      }
+
+      function nodeHtml(s) {
+        const status = S.stepStatuses[s.id] || "";
+        const meta = [s.role, s.schema ? "schema:" + s.schema : null].filter(Boolean).join(" · ");
+        return `<div class="node k-${escH(s.kind)}${status ? " ns-" + status : ""}"
+    data-nid="${escH(s.id)}" role="button" tabindex="0"
+    aria-selected="${s.id === S.selectedId}">
+    <span class="nid">${escH(s.id)}</span>
+    <span class="meta"><span class="kindtag">${escH(s.kind)}</span>${meta ? " " + escH(meta) : ""}</span>
+    <span class="sdot" aria-hidden="true"></span>
+  </div>`;
+      }
+
+      function selectNode(id) {
+        S.selectedId = id;
+        el("canvas")
+          .querySelectorAll(".node")
+          .forEach((n) => {
+            n.setAttribute("aria-selected", n.dataset.nid === id ? "true" : "false");
+          });
+        renderInspector();
+      }
+
+      // ── Inspector ─────────────────────────────────────────────────────────────────
+
+      function levelOf(id) {
+        return S.pipeline.levels.findIndex((band) => band.includes(id));
+      }
+
+      function renderInspector() {
+        const body = el("inspector-body");
+        const s = S.editedSteps.find((x) => x.id === S.selectedId);
+        if (!s) {
+          body.innerHTML = '<p class="empty">Select a node on the canvas.</p>';
+          return;
+        }
+
+        const depStr = s.dependsOn?.length ? "[" + s.dependsOn.join(", ") + "]" : "— (level 0)";
+
+        const kindOpts = ["llm", "gate", "assemble-spec", "persist-ticket"];
+        const roleOpts = ["reasoner", "worker", "scout"];
+
+        body.innerHTML = `
+    <div class="field"><label>id</label><div class="ro">${escH(s.id)}</div></div>
+    <div class="field">
+      <label>kind</label>
+      <select data-f="kind">
+        ${kindOpts.map((k) => `<option${k === s.kind ? " selected" : ""}>${k}</option>`).join("")}
+      </select>
+    </div>
+    ${
+      s.kind === "llm"
+        ? `
+    <div class="field">
+      <label>role</label>
+      <select data-f="role">
+        ${roleOpts.map((r) => `<option${r === (s.role || "worker") ? " selected" : ""}>${r}</option>`).join("")}
+      </select>
+    </div>
+    <div class="field">
+      <label>prompt</label>
+      <input type="text" data-f="prompt" value="${escH(s.prompt || "")}">
+    </div>`
+        : ""
+    }
+    ${
+      s.kind === "gate"
+        ? `
+    <div class="field">
+      <label>message</label>
+      <input type="text" data-f="message" value="${escH(s.message || "")}">
+    </div>`
+        : ""
+    }
+    <div class="field"><label>dependsOn</label><div class="ro">${escH(depStr)}</div></div>
+    <div class="field"><label>execution level</label><div class="ro">${levelOf(s.id)}</div></div>`;
+
+        // Wire field changes → in-memory step mutation
+        body.querySelectorAll("[data-f]").forEach((input) => {
+          input.addEventListener("change", () => {
+            const f = input.dataset.f;
+            const step = S.editedSteps.find((x) => x.id === S.selectedId);
+            if (!step) return;
+            step[f] = input.value;
+            // kind change affects node CSS class and inspector fields
+            if (f === "kind") {
+              renderBands();
+              renderInspector();
+            }
+          });
+        });
+      }
+
+      // ══════════════════════════════════════════════════════════════════════════════
+      // Save flow
+      // POST /api/pipelines/:id/drafts → PUT /api/drafts/:id → POST /api/drafts/:id/save
+      // ══════════════════════════════════════════════════════════════════════════════
+
+      async function saveFlow() {
+        setStatus("Saving…");
+        const { def } = S.pipeline;
+        try {
+          // 1 — open draft (server snapshots current file body + baseHash)
+          const draftRes = await fetch(`/api/pipelines/${encodeURIComponent(def.id)}/drafts`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          });
+          if (!draftRes.ok) throw new Error(`open draft: HTTP ${draftRes.status}`);
+          const { draftId } = await draftRes.json();
+
+          // 2 — serialize edited steps back to YAML and PUT the draft body
+          const yamlBody = serializeYaml(def, S.editedSteps);
+          const putRes = await fetch(`/api/drafts/${draftId}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ body: yamlBody }),
+          });
+          if (!putRes.ok) throw new Error(`update draft: HTTP ${putRes.status}`);
+
+          // 3 — commit the draft
+          const saveRes = await fetch(`/api/drafts/${draftId}/save`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          });
+          const saved = await saveRes.json();
+
+          if (saved.ok) {
+            const regen = saved.regenerated?.length
+              ? ` · regenerated: ${saved.regenerated.join(", ")}`
+              : "";
+            setStatus(`Saved${regen}`, "ok");
+          } else if (saved.reason === "conflict") {
+            // File changed on disk between open and save
+            setStatus(`Conflict: ${saved.message}`, "conflict");
+          } else {
+            // invalid — validator rejected the YAML
+            setStatus(`Invalid: ${saved.message}`, "err");
+          }
+        } catch (err) {
+          setStatus(`Save error: ${err.message}`, "err");
+        }
+      }
+
+      // ── YAML emitter ──────────────────────────────────────────────────────────────
+      // Emits only the subset of YAML the canon loader accepts.
+      // The daemon re-validates; comment preservation is the writer's job, not ours.
+
+      function serializeYaml(def, steps) {
+        const lines = [];
+        lines.push(`id: ${ys(def.id)}`);
+        lines.push(`version: ${def.version}`);
+        lines.push(`description: ${ys(def.description)}`);
+        if (def.defaultTimeoutMs !== undefined) {
+          lines.push(`defaultTimeoutMs: ${def.defaultTimeoutMs}`);
+        }
+        if (def.inputs && def.inputs.length) {
+          lines.push("inputs:");
+          def.inputs.forEach((inp) => lines.push(`  - ${ys(inp)}`));
+        }
+        lines.push("steps:");
+        for (const s of steps) {
+          lines.push(`  - id: ${ys(s.id)}`);
+          lines.push(`    kind: ${s.kind}`);
+          if (s.role) lines.push(`    role: ${s.role}`);
+          if (s.model) lines.push(`    model: ${ys(s.model)}`);
+          if (s.prompt) lines.push(`    prompt: ${ys(s.prompt)}`);
+          if (s.schema) lines.push(`    schema: ${s.schema}`);
+          if (s.message) lines.push(`    message: ${ys(s.message)}`);
+          if (s.timeoutMs !== undefined) lines.push(`    timeoutMs: ${s.timeoutMs}`);
+          if (s.dependsOn && s.dependsOn.length) {
+            lines.push(`    dependsOn: [${s.dependsOn.join(", ")}]`);
+          }
+        }
+        return lines.join("\n") + "\n";
+      }
+
+      // YAML scalar: quote with JSON double-quoting when the value contains
+      // characters that would be ambiguous in bare YAML context.
+      function ys(s) {
+        if (typeof s !== "string") return String(s);
+        if (!s || /[:#\[\]{},&*?|<>=!%@`"'\n\r\t]/.test(s) || s !== s.trim()) {
+          return JSON.stringify(s);
+        }
+        return s;
+      }
+
+      // ══════════════════════════════════════════════════════════════════════════════
+      // Screen 3: Run
+      // POST /api/runs → SSE /api/runs/:id/events → POST /api/runs/:id/approve
+      // ══════════════════════════════════════════════════════════════════════════════
+
+      function openRunModal() {
+        const { def } = S.pipeline;
+        el("modal-title").textContent = `Run: ${def.id}`;
+        const fields = el("modal-fields");
+
+        if (!def.inputs || !def.inputs.length) {
+          fields.innerHTML = '<p class="empty">No inputs required.</p>';
+        } else {
+          fields.innerHTML = def.inputs
+            .map(
+              (inp) => `
+      <div class="field">
+        <label>${escH(inp)}</label>
+        <textarea data-inp="${escH(inp)}" rows="3"></textarea>
+      </div>`
+            )
+            .join("");
+        }
+
+        el("run-modal").hidden = false;
+        const first = fields.querySelector("textarea");
+        if (first) first.focus();
+      }
+
+      async function startRun() {
+        el("run-modal").hidden = true;
+        const { def } = S.pipeline;
+
+        // Collect inputs
+        const inputs = {};
+        el("modal-fields")
+          .querySelectorAll("[data-inp]")
+          .forEach((t) => {
+            inputs[t.dataset.inp] = t.value;
+          });
+
+        // Reset per-step statuses and re-draw canvas
+        resetRun();
+        renderBands();
+        renderRunPanel();
+
+        try {
+          const res = await fetch("/api/runs", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ pipeline: def.id, inputs }),
+          });
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            throw new Error(e.error || `HTTP ${res.status}`);
+          }
+          const runData = await res.json();
+          S.runId = runData.runId;
+
+          // Map StartResult.status to internal status
+          // StartResult: "awaiting_approval" | "success" | "failed"
+          if (runData.status === "success") S.runStatus = "success";
+          else if (runData.status === "failed") S.runStatus = "failed";
+          else if (runData.status === "awaiting_approval") S.runStatus = "suspended";
+          else S.runStatus = "running";
+
+          renderRunPanel();
+          openSse(runData.runId);
+        } catch (err) {
+          S.runStatus = "failed";
+          renderRunPanel();
+          setStatus(`Run error: ${err.message}`, "err");
+        }
+      }
+
+      function openSse(runId) {
+        closeSse();
+        const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
+        S.sseSource = es;
+
+        es.addEventListener("snapshot", (e) => {
+          const snap = JSON.parse(e.data);
+          // GetResult: status 'running' | 'suspended' | 'success' | 'failed'
+          if (snap.status) {
+            S.runStatus = snap.status;
+            renderRunPanel();
+          }
+        });
+
+        es.addEventListener("step", (e) => {
+          const { stepId, status } = JSON.parse(e.data);
+          S.stepStatuses[stepId] = status;
+
+          if (status === "suspended") {
+            S.suspendedStepId = stepId;
+            S.runStatus = "suspended";
+          } else if (status === "succeeded" || status === "failed") {
+            if (S.suspendedStepId === stepId) S.suspendedStepId = null;
+          }
+
+          // Update just the one node's status class in-place (avoids full re-render)
+          const node = el("canvas").querySelector(`[data-nid="${CSS.escape(stepId)}"]`);
+          if (node) {
+            node.classList.remove("ns-started", "ns-succeeded", "ns-failed", "ns-suspended");
+            if (status) node.classList.add("ns-" + status);
+          }
+
+          // Infer terminal state from all step statuses
+          const allIds = S.pipeline.levels.flat();
+          const terminal = new Set(["succeeded", "failed"]);
+          if (allIds.every((id) => terminal.has(S.stepStatuses[id] || ""))) {
+            const anyFailed = allIds.some((id) => S.stepStatuses[id] === "failed");
+            S.runStatus = anyFailed ? "failed" : "success";
+            closeSse();
+          } else if (!S.suspendedStepId) {
+            const anySuspended = Object.values(S.stepStatuses).some((st) => st === "suspended");
+            if (!anySuspended) S.runStatus = "running";
+          }
+
+          renderRunPanel();
+        });
+
+        es.addEventListener("error", () => {
+          // EventSource auto-reconnects on transient errors; do nothing unless terminal
+          if (S.runStatus === "success" || S.runStatus === "failed") closeSse();
+        });
+      }
+
+      function closeSse() {
+        if (S.sseSource) {
+          S.sseSource.close();
+          S.sseSource = null;
+        }
+      }
+
+      function resetRun() {
+        closeSse();
+        S.runId = null;
+        S.runStatus = null;
+        S.stepStatuses = {};
+        S.suspendedStepId = null;
+      }
+
+      async function approve(approved) {
+        if (!S.runId) return;
+        try {
+          const res = await fetch(`/api/runs/${encodeURIComponent(S.runId)}/approve`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ approved }),
+          });
+          if (!res.ok) {
+            const e = await res.json().catch(() => ({}));
+            throw new Error(e.error || `HTTP ${res.status}`);
+          }
+          const data = await res.json();
+          S.suspendedStepId = null;
+          // The approve endpoint blocks until the run fully settles — use the returned
+          // status directly rather than waiting for further SSE events.
+          if (data.status === "success") {
+            S.runStatus = "success";
+          } else {
+            S.runStatus = "failed";
+          }
+          closeSse();
+          renderRunPanel();
+        } catch (err) {
+          setStatus(`Approve error: ${err.message}`, "err");
+        }
+      }
+
+      function renderRunPanel() {
+        const panel = el("run-panel");
+        if (!S.runId && !S.runStatus) {
+          panel.hidden = true;
+          return;
+        }
+        panel.hidden = false;
+
+        const labels = {
+          running: "running",
+          suspended: "suspended — gate awaiting approval",
+          success: "success",
+          failed: "failed",
+        };
+        const label = labels[S.runStatus] || S.runStatus || "";
+
+        let gateHtml = "";
+        if (S.runStatus === "suspended" && S.suspendedStepId) {
+          const gs = S.editedSteps.find((s) => s.id === S.suspendedStepId);
+          const msg = gs?.message || "Gate awaiting approval.";
+          gateHtml = `
+      <div class="gate-msg">${escH(msg)}</div>
+      <div class="gate-actions">
+        <button class="btn primary" id="approve-yes">Approve</button>
+        <button class="btn danger"  id="approve-no">Reject</button>
+      </div>`;
+        }
+
+        panel.innerHTML = `
+    <div class="run-section">
+      <h2>Run</h2>
+      <span class="run-badge ${escH(S.runStatus || "")}">${escH(label)}</span>
+      ${gateHtml}
+    </div>`;
+
+        if (S.runStatus === "suspended") {
+          const yesBtn = panel.querySelector("#approve-yes");
+          const noBtn = panel.querySelector("#approve-no");
+          // Disable both buttons on first click — prevents double-approval from the UI.
+          // (The service is already single-flight, but the UI should not fire twice.)
+          function lockGate() {
+            if (yesBtn) yesBtn.disabled = true;
+            if (noBtn) noBtn.disabled = true;
+          }
+          yesBtn?.addEventListener("click", () => {
+            lockGate();
+            approve(true);
+          });
+          noBtn?.addEventListener("click", () => {
+            lockGate();
+            approve(false);
+          });
+        }
+      }
+
+      // ── Event wiring ──────────────────────────────────────────────────────────────
+
+      el("back-btn").addEventListener("click", () => {
+        closeSse();
+        showView("list");
+      });
+
+      el("save-btn").addEventListener("click", saveFlow);
+
+      el("run-btn").addEventListener("click", openRunModal);
+
+      el("modal-cancel").addEventListener("click", () => {
+        el("run-modal").hidden = true;
+      });
+
+      el("modal-submit").addEventListener("click", startRun);
+
+      el("run-modal").addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          el("run-modal").hidden = true;
+          return;
+        }
+        // Enter submits only when not in a textarea (textarea needs multi-line)
+        if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") startRun();
+      });
+
+      // ── Boot ──────────────────────────────────────────────────────────────────────
+      showView("list");
+      loadList();
+    </script>
+  </body>
+</html>
