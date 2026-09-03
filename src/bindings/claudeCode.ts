@@ -1,4 +1,5 @@
 import { ASSEMBLE_JS } from "../canon/assembleSource.js";
+import { pipelineLevels } from "../canon/graph.js";
 import {
   defaultRegistry,
   getActiveProfile,
@@ -42,27 +43,24 @@ function convertPromptTemplate(template: string, inputVars: Set<string>): string
 }
 
 /**
- * Derive workflow phases from step definitions.
- * - llm steps with no phase, before the first named phase → phase "Draft".
- * - Each named phase (in first-appearance order) → phase capitalize(phase).
+ * Derive meta phases from levelled DAG steps.
+ *
+ * Each level that contains at least one llm step becomes one phase entry.
+ * The phase title is derived from the first step id in the level (capitalized),
+ * which preserves declaration order and produces a meaningful label rather than
+ * a generic "Level0" index.
  */
-function computePhases(steps: StepDef[]): { title: string }[] {
+function computePhasesForDependsOn(
+  steps: StepDef[],
+  levels: readonly (readonly string[])[]
+): { title: string }[] {
+  const stepById = new Map(steps.map((s) => [s.id, s]));
   const phases: { title: string }[] = [];
-  const seenPhases = new Set<string>();
-  let hasPrePhaseLlm = false;
-  let firstPhaseSeen = false;
-
-  for (const step of steps) {
-    if (step.kind !== "llm") continue;
-    if (!step.phase && !firstPhaseSeen) hasPrePhaseLlm = true;
-    if (step.phase) {
-      firstPhaseSeen = true;
-      seenPhases.add(step.phase);
+  for (const level of levels) {
+    if (level.some((id) => stepById.get(id)?.kind === "llm")) {
+      phases.push({ title: capitalize(level[0]) });
     }
   }
-
-  if (hasPrePhaseLlm) phases.push({ title: "Draft" });
-  for (const phase of seenPhases) phases.push({ title: capitalize(phase) });
   return phases;
 }
 
@@ -77,8 +75,10 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
   const registry = defaultRegistry();
   const { def, prompts } = loaded;
   const inputVars = new Set<string>(def.inputs);
-  const phases = computePhases(def.steps);
   const llmSteps = def.steps.filter((s) => s.kind === "llm");
+
+  const dependsOnLevels = pipelineLevels(def.steps);
+  const phases = computePhasesForDependsOn(def.steps, dependsOnLevels);
 
   const out: string[] = [];
 
@@ -150,97 +150,106 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
   }
 
   // ── steps ─────────────────────────────────────────────────────────────────
-  const processedPhases = new Set<string>();
-  let currentPhase: string | null = null;
-  let sequentialLlmCount = 0; // to identify the first sequential step
+  {
+    // dependsOn path: derive step groups from pipelineLevels, emit one phase() per level.
+    const stepById = new Map(def.steps.map((s) => [s.id, s]));
+    const stepVarNames = new Map<string, string>(); // step id → JS result variable name
+    let isFirstSingleLlm = true; // null-guard only on the first single-step llm level
 
-  for (const step of def.steps) {
-    if (step.kind === "llm") {
-      const stepPhase = step.phase ? capitalize(step.phase) : "Draft";
+    for (const level of dependsOnLevels) {
+      const stepsInLevel = level.map((id) => stepById.get(id)!);
+      const llmInLevel = stepsInLevel.filter((s) => s.kind === "llm");
+      const nonLlmInLevel = stepsInLevel.filter((s) => s.kind !== "llm");
 
-      if (stepPhase !== currentPhase) {
-        currentPhase = stepPhase;
-        out.push(`phase(${sq(stepPhase)})`);
-        out.push(`log('Running ${stepPhase.toLowerCase()} steps…')`);
-        out.push("");
-      }
-
-      if (step.phase) {
-        if (processedPhases.has(step.phase)) continue;
-        processedPhases.add(step.phase);
-
-        const phaseSteps = def.steps.filter(
-          (s): s is StepDef => s.kind === "llm" && s.phase === step.phase
-        );
-        const resultVars = phaseSteps.map((gs) => `${gs.id}Res`);
-
-        out.push(`const [${resultVars.join(", ")}] = await parallel([`);
-        for (const gs of phaseSteps) {
-          const converted = convertPromptTemplate(prompts[gs.id], inputVars);
-          const schemaArg = gs.schema
-            ? `, schema: ${gs.schema === "weaknesses" ? "WEAK_SCHEMA" : "SEC_SCHEMA"}`
-            : "";
-          out.push("  () =>");
-          out.push("    agent(");
-          out.push("      `" + converted + "`,");
-          out.push(
-            `      { label: '${gs.id}', phase: '${stepPhase}', model: ${modelVar(gs.id)}${schemaArg} },`
-          );
-          out.push("    ),");
-        }
-        out.push("])");
+      if (llmInLevel.length > 0) {
+        // Phase title = capitalize of the level's first step id (declaration order preserved
+        // by pipelineLevels). Using step id rather than level index gives a meaningful label.
+        const phaseTitle = capitalize(level[0]);
+        out.push(`phase(${sq(phaseTitle)})`);
+        out.push(`log('Running ${phaseTitle.toLowerCase()} steps…')`);
         out.push("");
 
-        // Null-guard extractions for schema fields
-        for (const gs of phaseSteps) {
-          if (gs.schema) {
-            out.push(`const ${gs.schema} = (${gs.id}Res && ${gs.id}Res.${gs.schema}) || []`);
+        if (llmInLevel.length > 1) {
+          // Parallel block — mirrors the existing phase-path parallel block exactly.
+          const resultVars = llmInLevel.map((gs) => `${gs.id}Res`);
+          for (const gs of llmInLevel) stepVarNames.set(gs.id, `${gs.id}Res`);
+
+          out.push(`const [${resultVars.join(", ")}] = await parallel([`);
+          for (const gs of llmInLevel) {
+            const converted = convertPromptTemplate(prompts[gs.id], inputVars);
+            const schemaArg = gs.schema
+              ? `, schema: ${gs.schema === "weaknesses" ? "WEAK_SCHEMA" : "SEC_SCHEMA"}`
+              : "";
+            out.push("  () =>");
+            out.push("    agent(");
+            out.push("      `" + converted + "`,");
+            out.push(
+              `      { label: '${gs.id}', phase: '${phaseTitle}', model: ${modelVar(gs.id)}${schemaArg} },`
+            );
+            out.push("    ),");
           }
-        }
-        out.push("");
-      } else {
-        // Sequential llm step
-        const isFirstSequential = sequentialLlmCount === 0;
-        sequentialLlmCount++;
+          out.push("])");
+          out.push("");
 
-        const converted = convertPromptTemplate(prompts[step.id], inputVars);
-        out.push(`const r_${step.id} = await agent(`);
-        out.push("  `" + converted + "`,");
-        out.push(`  { label: '${step.id}', phase: '${stepPhase}', model: ${modelVar(step.id)} },`);
-        out.push(")");
+          // Null-guard extractions for schema fields
+          for (const gs of llmInLevel) {
+            if (gs.schema) {
+              out.push(`const ${gs.schema} = (${gs.id}Res && ${gs.id}Res.${gs.schema}) || []`);
+            }
+          }
+          out.push("");
 
-        // Null-guard on the very first llm step (mirrors handwritten pattern)
-        if (isFirstSequential) {
-          out.push(`if (!r_${step.id}) throw new Error('${step.id} agent failed')`);
+          // A parallel level has run first: no subsequent single-step level should
+          // carry the null-guard, because none of them is genuinely "first".
+          isFirstSingleLlm = false;
+        } else {
+          // Sequential — single llm step in this level.
+          const step = llmInLevel[0];
+          stepVarNames.set(step.id, `r_${step.id}`);
+          const converted = convertPromptTemplate(prompts[step.id], inputVars);
+          out.push(`const r_${step.id} = await agent(`);
+          out.push("  `" + converted + "`,");
+          out.push(
+            `  { label: '${step.id}', phase: '${phaseTitle}', model: ${modelVar(step.id)} },`
+          );
+          out.push(")");
+          if (isFirstSingleLlm) {
+            out.push(`if (!r_${step.id}) throw new Error('${step.id} agent failed')`);
+            isFirstSingleLlm = false;
+          }
+          out.push("");
         }
-        out.push("");
       }
-    } else if (step.kind === "assemble-spec") {
-      // Inline ASSEMBLE_JS via IIFE, mapping all prior llm results by step id.
-      const allLlm = def.steps.filter((s) => s.kind === "llm");
-      out.push("const _assembleInput = {");
-      for (const s of allLlm) {
-        const varName = s.phase ? `${s.id}Res` : `r_${s.id}`;
-        out.push(`  ${s.id}: ${varName},`);
+
+      // Emit non-llm steps that land in this level.
+      for (const step of nonLlmInLevel) {
+        if (step.kind === "assemble-spec") {
+          const allLlm = def.steps.filter((s) => s.kind === "llm");
+          out.push("const _assembleInput = {");
+          for (const s of allLlm) {
+            const varName = stepVarNames.get(s.id) ?? `r_${s.id}`;
+            out.push(`  ${s.id}: ${varName},`);
+          }
+          out.push("}");
+          out.push("const spec = (function(input) {");
+          for (const line of ASSEMBLE_JS.split("\n")) {
+            out.push("  " + line);
+          }
+          out.push("})(_assembleInput)");
+          out.push("");
+          out.push(
+            "const blocking = [...spec.weaknesses, ...spec.securityFindings].filter(f => f.blocking).length"
+          );
+          out.push(
+            "log(`Assembled: ${spec.requirements.length} requirements, ${spec.acceptanceCriteria.length} AC, ${spec.weaknesses.length} weaknesses, ${spec.securityFindings.length} security findings (${blocking} blocking)`)"
+          );
+          out.push("");
+        } else if (step.kind === "gate") {
+          out.push(`// gate '${step.id}': handled in chat by the orchestrating session`);
+        } else if (step.kind === "persist-ticket") {
+          out.push("// persist: pipe result.spec into 'pnpm persist'");
+        }
       }
-      out.push("}");
-      out.push("const spec = (function(input) {");
-      for (const line of ASSEMBLE_JS.split("\n")) {
-        out.push("  " + line);
-      }
-      out.push("})(_assembleInput)");
-      out.push("");
-      out.push(
-        "const blocking = [...spec.weaknesses, ...spec.securityFindings].filter(f => f.blocking).length"
-      );
-      out.push(
-        "log(`Assembled: ${spec.requirements.length} requirements, ${spec.acceptanceCriteria.length} AC, ${spec.weaknesses.length} weaknesses, ${spec.securityFindings.length} security findings (${blocking} blocking)`)"
-      );
-      out.push("");
-    } else if (step.kind === "gate") {
-      out.push(`// gate '${step.id}': handled in chat by the orchestrating session`);
-    } else if (step.kind === "persist-ticket") {
-      out.push("// persist: pipe result.spec into 'pnpm persist'");
     }
   }
 

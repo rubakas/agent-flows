@@ -2,8 +2,9 @@ export const meta = {
   name: 'spec-creation',
   description: 'Harden a feature request into an adversarially reviewed spec',
   phases: [
-    { title: 'Draft' },
-    { title: 'Critique' },
+    { title: 'Intake' },
+    { title: 'Enrich' },
+    { title: 'Critic' },
   ],
 }
 
@@ -56,17 +57,20 @@ const SEC_SCHEMA = {
   additionalProperties: false,
 }
 
-phase('Draft')
-log('Running draft steps…')
+phase('Intake')
+log('Running intake steps…')
 
 const r_intake = await agent(
   `You are a product analyst. Produce a concise software spec draft in markdown for the feature request below. Structure it EXACTLY as: one '# <Title>' heading line (a short feature title, not a sentence), one short description paragraph, a '## Requirements' section with 3-7 '- ' bullets, a '## Acceptance Criteria' section with 3-7 '- ' bullets. Return ONLY the markdown document — no commentary, no code fences.
 
 Feature request: ${request}
 `,
-  { label: 'intake', phase: 'Draft', model: mIntake },
+  { label: 'intake', phase: 'Intake', model: mIntake },
 )
 if (!r_intake) throw new Error('intake agent failed')
+
+phase('Enrich')
+log('Running enrich steps…')
 
 const r_enrich = await agent(
   `Review the spec draft below. Return ONLY a markdown section that starts with the exact heading '## Enrichment additions', followed by '- ' bullets with ADDITIONAL edge cases, non-functional requirements, and clarifications that the draft is missing. Do NOT rewrite, repeat, or restructure the draft itself. No commentary, no code fences.
@@ -74,11 +78,11 @@ const r_enrich = await agent(
 Draft:
 ${r_intake}
 `,
-  { label: 'enrich', phase: 'Draft', model: mEnrich },
+  { label: 'enrich', phase: 'Enrich', model: mEnrich },
 )
 
-phase('Critique')
-log('Running critique steps…')
+phase('Critic')
+log('Running critic steps…')
 
 const [criticRes, securityRes] = await parallel([
   () =>
@@ -90,7 +94,7 @@ ${r_intake}
 
 ${r_enrich}
 `,
-      { label: 'critic', phase: 'Critique', model: mCritic, schema: WEAK_SCHEMA },
+      { label: 'critic', phase: 'Critic', model: mCritic, schema: WEAK_SCHEMA },
     ),
   () =>
     agent(
@@ -101,7 +105,7 @@ ${r_intake}
 
 ${r_enrich}
 `,
-      { label: 'security', phase: 'Critique', model: mSecurity, schema: SEC_SCHEMA },
+      { label: 'security', phase: 'Critic', model: mSecurity, schema: SEC_SCHEMA },
     ),
 ])
 

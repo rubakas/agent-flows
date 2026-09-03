@@ -16,12 +16,12 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
-import { makeInMemoryDb } from "../../db/index.js";
 import { ModelRegistry } from "../../canon/registry.js";
+import { makeInMemoryDb } from "../../db/index.js";
+import { DrizzleTicketStore } from "../../store/sqlite.js";
+import { buildPipelineWorkflow, mastraDbPath, validateModelOverrides } from "./build.js";
 import type { runLlmStep } from "../../canon/runStep.js";
 import type { LoadedPipeline } from "../../canon/types.js";
-import { DrizzleTicketStore } from "../../store/sqlite.js";
-import { buildPipelineWorkflow, mastraDbPath } from "./build.js";
 
 // ── Test pipeline fixture ─────────────────────────────────────────────────────
 
@@ -35,14 +35,20 @@ const CANNED_PIPELINE: LoadedPipeline = {
     inputs: ["request"],
     steps: [
       { id: "intake", kind: "llm", model: "intake", prompt: "prompts/intake.md" },
-      { id: "enrich", kind: "llm", model: "enrich", prompt: "prompts/enrich.md" },
+      {
+        id: "enrich",
+        kind: "llm",
+        model: "enrich",
+        prompt: "prompts/enrich.md",
+        dependsOn: ["intake"],
+      },
       {
         id: "critic",
         kind: "llm",
         model: "critic",
         prompt: "prompts/critic.md",
         schema: "weaknesses",
-        phase: "critique",
+        dependsOn: ["enrich"],
       },
       {
         id: "security",
@@ -50,11 +56,11 @@ const CANNED_PIPELINE: LoadedPipeline = {
         model: "security",
         prompt: "prompts/security.md",
         schema: "securityFindings",
-        phase: "critique",
+        dependsOn: ["enrich"],
       },
-      { id: "assemble", kind: "assemble-spec" },
-      { id: "approve", kind: "gate", message: "Approve this spec?" },
-      { id: "persist", kind: "persist-ticket" },
+      { id: "assemble", kind: "assemble-spec", dependsOn: ["critic", "security"] },
+      { id: "approve", kind: "gate", message: "Approve this spec?", dependsOn: ["assemble"] },
+      { id: "persist", kind: "persist-ticket", dependsOn: ["approve"] },
     ],
   },
   prompts: {
@@ -345,6 +351,227 @@ describe("buildPipelineWorkflow — JSON retry", () => {
 
       assert.equal(r1.status, "failed", "should fail when both attempts return non-JSON");
       assert.equal(callCounts.critic, 2, "runner should have been called twice for critic");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("validateModelOverrides", () => {
+  const reg = new ModelRegistry([
+    { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "sonnet" } },
+    { id: "haiku", transport: "cli", cli: { bin: "claude", model: "haiku" } },
+  ]);
+
+  it("returns null when all step model ids are known", () => {
+    const result = validateModelOverrides({ intake: "sonnet", enrich: "haiku" }, reg);
+    assert.equal(result, null);
+  });
+
+  it("returns an error string naming the step and the bad model id when unknown", () => {
+    const result = validateModelOverrides({ intake: "../../../../evil" }, reg);
+    assert.ok(result !== null, "should return an error");
+    assert.ok(result.includes("intake"), "error should name the step id");
+    assert.ok(result.includes("../../../../evil"), "error should name the bad id");
+    assert.ok(result.includes("sonnet") && result.includes("haiku"), "error should list valid ids");
+  });
+
+  it("returns an error for an unknown id even if another step uses a valid id", () => {
+    const result = validateModelOverrides({ intake: "sonnet", "bad-step": "unknown-model" }, reg);
+    assert.ok(result !== null);
+    assert.ok(result.includes("unknown-model"));
+  });
+});
+
+// ── dependsOn pipeline fixtures ───────────────────────────────────────────────
+
+// Sequential: a → b (two levels, one step each)
+const SEQUENTIAL_DEPENDS_ON: LoadedPipeline = {
+  def: {
+    id: "sequential-depends-on",
+    version: 1,
+    description: "Sequential dependsOn pipeline",
+    inputs: ["request"],
+    steps: [
+      { id: "a", kind: "llm", model: "a", prompt: "prompts/a.md", dependsOn: [] },
+      { id: "b", kind: "llm", model: "b", prompt: "prompts/b.md", dependsOn: ["a"] },
+    ],
+  },
+  prompts: {
+    a: "Step A: {{request}}",
+    b: "Step B after A: {{a}}",
+  },
+};
+
+// Diamond: a → b, a → c, b+c → d
+// Level 0: [a], Level 1: [b, c] (parallel), Level 2: [d]
+const DIAMOND_DEPENDS_ON: LoadedPipeline = {
+  def: {
+    id: "diamond-depends-on",
+    version: 1,
+    description: "Diamond dependsOn pipeline",
+    inputs: ["request"],
+    steps: [
+      { id: "a", kind: "llm", model: "a", prompt: "prompts/a.md", dependsOn: [] },
+      { id: "b", kind: "llm", model: "b", prompt: "prompts/b.md", dependsOn: ["a"] },
+      { id: "c", kind: "llm", model: "c", prompt: "prompts/c.md", dependsOn: ["a"] },
+      { id: "d", kind: "llm", model: "d", prompt: "prompts/d.md", dependsOn: ["b", "c"] },
+    ],
+  },
+  prompts: {
+    a: "Step A: {{request}}",
+    b: "Step B: {{a}}",
+    c: "Step C: {{a}}",
+    d: "Step D: {{b}} {{c}}",
+  },
+};
+
+// Two independent chains — used to test FR-005 context scoping.
+// Level 0: [a, chain_c] (parallel), Level 1: [b, chain_d] (parallel)
+// b depends only on a; chain_d depends only on chain_c.
+// With FR-005: b's rendered prompt must not contain chain_c's output value.
+const PARALLEL_CHAINS: LoadedPipeline = {
+  def: {
+    id: "parallel-chains",
+    version: 1,
+    description: "Two independent chains",
+    inputs: ["request"],
+    steps: [
+      { id: "chain_a", kind: "llm", model: "chain_a", prompt: "prompts/a.md", dependsOn: [] },
+      { id: "chain_c", kind: "llm", model: "chain_c", prompt: "prompts/c.md", dependsOn: [] },
+      {
+        id: "chain_b",
+        kind: "llm",
+        model: "chain_b",
+        prompt: "prompts/b.md",
+        dependsOn: ["chain_a"],
+      },
+      {
+        id: "chain_d",
+        kind: "llm",
+        model: "chain_d",
+        prompt: "prompts/d.md",
+        dependsOn: ["chain_c"],
+      },
+    ],
+  },
+  prompts: {
+    chain_a: "Step A: {{request}}",
+    chain_c: "Step C: {{request}}",
+    chain_b: "Step B sees: {{chain_a}}",
+    chain_d: "Step D sees: {{chain_c}}",
+  },
+};
+
+const DEPENDS_ON_RESPONSES: Record<string, string> = {
+  a: "OUTPUT_A",
+  b: "OUTPUT_B",
+  c: "OUTPUT_C",
+  d: "OUTPUT_D",
+  chain_a: "CHAIN_A_OUTPUT",
+  chain_b: "CHAIN_B_OUTPUT",
+  chain_c: "CHAIN_C_OUTPUT",
+  chain_d: "CHAIN_D_OUTPUT",
+};
+
+describe("buildPipelineWorkflow — dependsOn sequential pipeline", () => {
+  it("compiles and runs a sequential dependsOn pipeline to completion", async () => {
+    const { storage, store, cleanup } = makeTestFixture("dep-seq");
+    try {
+      const wf = buildPipelineWorkflow(SEQUENTIAL_DEPENDS_ON, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: makeFakeRunner(DEPENDS_ON_RESPONSES),
+      });
+
+      const mastra = new Mastra({ storage, workflows: { [SEQUENTIAL_DEPENDS_ON.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(SEQUENTIAL_DEPENDS_ON.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: { request: "test request" } });
+
+      assert.equal(r1.status, "success", "sequential dependsOn pipeline should succeed");
+      const result = r1.result as Record<string, unknown>;
+      assert.ok("a" in result, "result should contain step a output");
+      assert.ok("b" in result, "result should contain step b output");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("buildPipelineWorkflow — diamond dependsOn pipeline", () => {
+  it("produces a parallel level for b and c with a merge, then runs d", async () => {
+    const { storage, store, cleanup } = makeTestFixture("dep-diamond");
+    try {
+      const wf = buildPipelineWorkflow(DIAMOND_DEPENDS_ON, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: makeFakeRunner(DEPENDS_ON_RESPONSES),
+      });
+
+      const mastra = new Mastra({ storage, workflows: { [DIAMOND_DEPENDS_ON.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(DIAMOND_DEPENDS_ON.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: { request: "diamond input" } });
+
+      assert.equal(r1.status, "success", "diamond pipeline should succeed");
+      const result = r1.result as Record<string, unknown>;
+      assert.ok("a" in result, "result should contain step a output");
+      assert.ok("b" in result, "result should contain step b output (parallel level)");
+      assert.ok("c" in result, "result should contain step c output (parallel level)");
+      assert.ok("d" in result, "result should contain step d output (post-merge)");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("buildPipelineWorkflow — FR-005 context scoping", () => {
+  it("step sees ancestor output but not non-ancestor output in rendered prompt", async () => {
+    const capturedPrompts: Record<string, string> = {};
+    const capturingRunner: typeof runLlmStep = async (entry, prompt) => {
+      capturedPrompts[entry.id] = prompt;
+      const resp = DEPENDS_ON_RESPONSES[entry.id];
+      if (resp === undefined) throw new Error(`no canned response for "${entry.id}"`);
+      return resp;
+    };
+
+    const { storage, store, cleanup } = makeTestFixture("dep-fr005");
+    try {
+      const wf = buildPipelineWorkflow(PARALLEL_CHAINS, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: capturingRunner,
+      });
+
+      const mastra = new Mastra({ storage, workflows: { [PARALLEL_CHAINS.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(PARALLEL_CHAINS.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: { request: "fr005 test" } });
+
+      assert.equal(r1.status, "success", "parallel chains pipeline should succeed");
+
+      // chain_b depends on chain_a → chain_a's output must appear in chain_b's prompt.
+      assert.ok(
+        capturedPrompts.chain_b?.includes("CHAIN_A_OUTPUT"),
+        "chain_b prompt should contain chain_a's output (ancestor)"
+      );
+
+      // chain_c is NOT an ancestor of chain_b — its output must not appear.
+      assert.ok(
+        !capturedPrompts.chain_b?.includes("CHAIN_C_OUTPUT"),
+        "chain_b prompt must not contain chain_c's output (non-ancestor, FR-005)"
+      );
+
+      // Symmetric check for chain_d / chain_a.
+      assert.ok(
+        capturedPrompts.chain_d?.includes("CHAIN_C_OUTPUT"),
+        "chain_d prompt should contain chain_c's output (ancestor)"
+      );
+      assert.ok(
+        !capturedPrompts.chain_d?.includes("CHAIN_A_OUTPUT"),
+        "chain_d prompt must not contain chain_a's output (non-ancestor, FR-005)"
+      );
     } finally {
       cleanup();
     }

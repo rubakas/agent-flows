@@ -10,15 +10,16 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { assembleSpec } from "../../canon/assemble.js";
-import type { ModelRegistry, ProviderProfile } from "../../canon/registry.js";
+import { pipelineLevels } from "../../canon/graph.js";
+import { persistTicket } from "../../canon/persistTicket.js";
 import { getActiveProfile, resolveStepModel } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
 import { runLlmStep } from "../../canon/runStep.js";
-import type { StepRunnerDeps } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
+import type { ModelRegistry, ProviderProfile } from "../../canon/registry.js";
+import type { StepRunnerDeps } from "../../canon/runStep.js";
 import type { HardenedSpec, LoadedPipeline, StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
-import { persistTicket } from "../../canon/persistTicket.js";
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -91,7 +92,37 @@ function tryParseSchemaOutput(
   return { ok: true, value: parsed };
 }
 
-function buildLlmStep(step: StepDef, prompts: Record<string, string>, deps: BuildDeps) {
+// Returns the transitive ancestor set for every step in the pipeline.
+// Must only be called after pipelineLevels has validated the graph (no cycles).
+function computeAncestors(steps: readonly StepDef[]): Map<string, Set<string>> {
+  const depMap = new Map<string, readonly string[]>(steps.map((s) => [s.id, s.dependsOn ?? []]));
+  const cache = new Map<string, Set<string>>();
+
+  function getAncestors(id: string): Set<string> {
+    const cached = cache.get(id);
+    if (cached !== undefined) return cached;
+    const set = new Set<string>();
+    for (const dep of depMap.get(id) ?? []) {
+      set.add(dep);
+      for (const anc of getAncestors(dep)) set.add(anc);
+    }
+    cache.set(id, set);
+    return set;
+  }
+
+  for (const s of steps) getAncestors(s.id);
+  return cache;
+}
+
+// visibleKeys, when provided, limits which context keys are visible to the
+// prompt renderer (FR-005). The full accumulated context is always returned
+// so later steps can apply their own filter.
+function buildLlmStep(
+  step: StepDef,
+  prompts: Record<string, string>,
+  deps: BuildDeps,
+  visibleKeys?: Set<string>
+) {
   const runner = deps.runner ?? runLlmStep;
   const profile = deps.profile ?? getActiveProfile();
   return createStep({
@@ -99,7 +130,10 @@ function buildLlmStep(step: StepDef, prompts: Record<string, string>, deps: Buil
     inputSchema: ctx,
     outputSchema: ctx,
     execute: async ({ inputData }) => {
-      const ctxData = inputData as Ctx;
+      const rawCtx = inputData as Ctx;
+      const ctxData: Ctx = visibleKeys
+        ? (Object.fromEntries(Object.entries(rawCtx).filter(([k]) => visibleKeys.has(k))) as Ctx)
+        : rawCtx;
       const override = ctxModelOverride(step.id, ctxData);
       const entry = override
         ? deps.registry.resolve(override)
@@ -138,7 +172,7 @@ function buildLlmStep(step: StepDef, prompts: Record<string, string>, deps: Buil
         }
       }
 
-      return { ...ctxData, [step.id]: value };
+      return { ...rawCtx, [step.id]: value };
     },
   });
 }
@@ -227,6 +261,25 @@ function buildPersistStep(stepId: string, store: TicketStore) {
   });
 }
 
+/**
+ * Validates a caller-supplied models override map against known registry ids.
+ * Returns an error string if any value is unknown, or null if all are valid.
+ * Only registered ids are accepted — the registry passthrough is intentionally
+ * not reachable from untrusted callers (e.g. MCP input).
+ */
+export function validateModelOverrides(
+  models: Record<string, string>,
+  registry: ModelRegistry
+): string | null {
+  const validIds = registry.list().map((e) => e.id);
+  for (const [stepId, modelId] of Object.entries(models)) {
+    if (!validIds.includes(modelId)) {
+      return `Step "${stepId}": unknown model id "${modelId}". Valid ids: ${validIds.join(", ")}`;
+    }
+  }
+  return null;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): any {
   const { def, prompts } = loaded;
@@ -246,29 +299,43 @@ export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): 
     outputSchema: ctx,
   });
 
-  const processedPhases = new Set<string>();
+  // dependsOn path: topologically level the DAG and compile each level.
+  const levels = pipelineLevels(def.steps);
+  const stepById = new Map(def.steps.map((s) => [s.id, s]));
+  const ancestorMap = computeAncestors(def.steps);
+  const alwaysVisible = new Set([...def.inputs, "models"]);
 
-  for (const step of def.steps) {
-    if (step.kind === "llm") {
-      if (step.phase) {
-        if (processedPhases.has(step.phase)) continue;
-        processedPhases.add(step.phase);
+  for (let i = 0; i < levels.length; i++) {
+    const level = levels[i];
+    const levelSteps = level.map((id) => stepById.get(id)!);
 
-        const phaseSteps = def.steps.filter(
-          (s): s is StepDef => s.kind === "llm" && s.phase === step.phase
-        );
-        const mastraSteps = phaseSteps.map((s) => buildLlmStep(s, prompts, deps));
-        builder = builder.parallel(mastraSteps);
-        builder = builder.then(buildParallelMergeStep(step.phase, phaseSteps));
-      } else {
-        builder = builder.then(buildLlmStep(step, prompts, deps));
+    if (levelSteps.length > 1) {
+      // All steps in a multi-step level must be llm steps.
+      const mastraSteps = levelSteps.map((step) => {
+        if (step.kind !== "llm") {
+          throw new Error(
+            `Step "${step.id}" (kind "${step.kind}") is in a parallel level — only llm steps may be parallelised`
+          );
+        }
+        const stepAncestors = ancestorMap.get(step.id) ?? new Set<string>();
+        const visibleKeys = new Set([...alwaysVisible, ...stepAncestors]);
+        return buildLlmStep(step, prompts, deps, visibleKeys);
+      });
+      builder = builder.parallel(mastraSteps);
+      builder = builder.then(buildParallelMergeStep(`level_${i}`, levelSteps));
+    } else {
+      const step = levelSteps[0];
+      if (step.kind === "llm") {
+        const stepAncestors = ancestorMap.get(step.id) ?? new Set<string>();
+        const visibleKeys = new Set([...alwaysVisible, ...stepAncestors]);
+        builder = builder.then(buildLlmStep(step, prompts, deps, visibleKeys));
+      } else if (step.kind === "assemble-spec") {
+        builder = builder.then(buildAssembleStep(step.id));
+      } else if (step.kind === "gate") {
+        builder = builder.then(buildGateStep(step));
+      } else if (step.kind === "persist-ticket") {
+        builder = builder.then(buildPersistStep(step.id, deps.store));
       }
-    } else if (step.kind === "assemble-spec") {
-      builder = builder.then(buildAssembleStep(step.id));
-    } else if (step.kind === "gate") {
-      builder = builder.then(buildGateStep(step));
-    } else if (step.kind === "persist-ticket") {
-      builder = builder.then(buildPersistStep(step.id, deps.store));
     }
   }
 

@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadPipeline } from "../canon/load.js";
 import { generateWorkflowScript } from "./claudeCode.js";
+import type { LoadedPipeline } from "../canon/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -24,10 +25,11 @@ describe("generateWorkflowScript — structural checks", () => {
     assert.ok(s.includes("export const meta"), "meta export missing");
   });
 
-  it("contains both phase titles", () => {
+  it("contains all three phase titles derived from step ids", () => {
     const s = getGenerated();
-    assert.ok(s.includes("title: 'Draft'"), "'Draft' phase missing");
-    assert.ok(s.includes("title: 'Critique'"), "'Critique' phase missing");
+    assert.ok(s.includes("title: 'Intake'"), "'Intake' phase missing");
+    assert.ok(s.includes("title: 'Enrich'"), "'Enrich' phase missing");
+    assert.ok(s.includes("title: 'Critic'"), "'Critic' phase missing");
   });
 
   it("emits the early-abort throw for 'request' input", () => {
@@ -131,6 +133,163 @@ describe("generateWorkflowScript — drift guard", () => {
       generated,
       onDisk,
       "Generated script has drifted from .claude/workflows/spec-creation.js — run pnpm bindings:claude to regenerate"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dependsOn path tests
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal LoadedPipeline for testing the dependsOn code path.
+ * All steps are llm kind with role:worker. Prompts are simple strings.
+ */
+function makeLoaded(
+  steps: { id: string; dependsOn?: string[] }[],
+  prompt = "Do the work"
+): LoadedPipeline {
+  const prompts: Record<string, string> = {};
+  for (const s of steps) {
+    prompts[s.id] = prompt;
+  }
+  return {
+    def: {
+      id: "test",
+      version: 1,
+      description: "test pipeline",
+      inputs: [],
+      steps: steps.map((s) => ({
+        id: s.id,
+        kind: "llm" as const,
+        role: "worker" as const,
+        prompt: `prompts/${s.id}.md`,
+        ...(s.dependsOn !== undefined ? { dependsOn: s.dependsOn } : {}),
+      })),
+    },
+    prompts,
+  };
+}
+
+describe("generateWorkflowScript — dependsOn path", () => {
+  it("a dependsOn pipeline generates phase() per level and wraps multi-step levels in parallel()", () => {
+    // Diamond: intake → {critic, security} → assemble_out
+    const loaded = makeLoaded([
+      { id: "intake" },
+      { id: "critic", dependsOn: ["intake"] },
+      { id: "security", dependsOn: ["intake"] },
+      { id: "assemble_out", dependsOn: ["critic", "security"] },
+    ]);
+    const s = generateWorkflowScript(loaded);
+
+    // Three levels → three phase() calls
+    const phaseMatches = [...s.matchAll(/^phase\(/gm)];
+    assert.equal(phaseMatches.length, 3, `expected 3 phase() calls, got ${phaseMatches.length}`);
+
+    // Middle level (critic + security) emits one parallel block
+    const parallelMatches = [...s.matchAll(/await parallel\(\[/g)];
+    assert.equal(
+      parallelMatches.length,
+      1,
+      `expected 1 parallel([ call, got ${parallelMatches.length}`
+    );
+
+    const parallelIdx = s.indexOf("await parallel([");
+    assert.ok(s.slice(parallelIdx).includes("label: 'critic'"), "critic not inside parallel block");
+    assert.ok(
+      s.slice(parallelIdx).includes("label: 'security'"),
+      "security not inside parallel block"
+    );
+
+    // Level-0 and level-2 steps emit sequential (r_ prefix, no parallel)
+    assert.ok(s.includes("const r_intake"), "intake should be sequential (r_ prefix)");
+    assert.ok(s.includes("const r_assemble_out"), "assemble_out should be sequential (r_ prefix)");
+  });
+
+  it("a diamond produces three phases with the middle one parallel", () => {
+    const loaded = makeLoaded([
+      { id: "intake" },
+      { id: "critic", dependsOn: ["intake"] },
+      { id: "security", dependsOn: ["intake"] },
+      { id: "assemble_out", dependsOn: ["critic", "security"] },
+    ]);
+    const s = generateWorkflowScript(loaded);
+
+    // Exactly three phase titles in the meta block
+    assert.ok(s.includes("title: 'Intake'"), "meta should have 'Intake' phase");
+    assert.ok(s.includes("title: 'Critic'"), "meta should have 'Critic' phase (first in level 1)");
+    assert.ok(s.includes("title: 'Assemble_out'"), "meta should have 'Assemble_out' phase");
+
+    // Middle level uses parallel([
+    assert.ok(s.includes("await parallel(["), "middle level must emit parallel([");
+
+    // Outer levels use sequential form
+    assert.ok(s.includes("const r_intake ="), "level 0 must be sequential");
+    assert.ok(s.includes("const r_assemble_out ="), "level 2 must be sequential");
+
+    // Null-guard appears exactly once (on the first sequential step, intake)
+    assert.ok(
+      s.includes("if (!r_intake) throw new Error('intake agent failed')"),
+      "null-guard must be on the first sequential step"
+    );
+    assert.ok(
+      !s.includes("if (!r_assemble_out)"),
+      "null-guard must NOT appear on subsequent sequential steps"
+    );
+  });
+
+  it("a linear chain produces no parallel() at all", () => {
+    const loaded = makeLoaded([
+      { id: "a" },
+      { id: "b", dependsOn: ["a"] },
+      { id: "c", dependsOn: ["b"] },
+    ]);
+    const s = generateWorkflowScript(loaded);
+
+    // Three levels → three phase() calls
+    const phaseMatches = [...s.matchAll(/^phase\(/gm)];
+    assert.equal(phaseMatches.length, 3, `expected 3 phase() calls, got ${phaseMatches.length}`);
+
+    // No parallel blocks
+    assert.ok(!s.includes("await parallel(["), "linear chain must not emit parallel([)");
+
+    // All steps are sequential
+    assert.ok(s.includes("const r_a ="), "a must be sequential");
+    assert.ok(s.includes("const r_b ="), "b must be sequential");
+    assert.ok(s.includes("const r_c ="), "c must be sequential");
+  });
+
+  it("parallel first level does not leave null-guard on a subsequent single-step level", () => {
+    // Level 0: {p, q} in parallel (neither has dependsOn → both are roots)
+    // Level 1: r (depends on both p and q) → single-step, sequential
+    const loaded = makeLoaded([{ id: "p" }, { id: "q" }, { id: "r", dependsOn: ["p", "q"] }]);
+    const s = generateWorkflowScript(loaded);
+
+    // Level 0 is parallel
+    assert.ok(s.includes("await parallel(["), "level 0 must be parallel");
+    assert.ok(s.includes("label: 'p'"), "p must be inside the parallel block");
+    assert.ok(s.includes("label: 'q'"), "q must be inside the parallel block");
+
+    // Level 1 is sequential but must NOT carry the null-guard
+    assert.ok(s.includes("const r_r ="), "r must be emitted as a sequential step");
+    assert.ok(
+      !s.includes("if (!r_r)"),
+      "r must NOT carry the null-guard — it is not the first agent that ran"
+    );
+  });
+
+  it("single-step first level carries the null-guard", () => {
+    // Level 0: just one step → it is genuinely the first agent and should be guarded
+    const loaded = makeLoaded([{ id: "first" }, { id: "second", dependsOn: ["first"] }]);
+    const s = generateWorkflowScript(loaded);
+
+    assert.ok(
+      s.includes("if (!r_first) throw new Error('first agent failed')"),
+      "null-guard must be present on the single-step first level"
+    );
+    assert.ok(
+      !s.includes("if (!r_second)"),
+      "null-guard must NOT appear on the second sequential step"
     );
   });
 });
