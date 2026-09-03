@@ -15,9 +15,11 @@ currently active.
 runs unchanged when the underlying provider changes — swapping providers is a registry edit,
 not a rewrite.
 
-**Operating surface.** Chat. Templates are files; creating and editing them is a chat and
-file operation (ADR-0011). A visual workflow editor is desirable but no evaluated option has
-met the bar, so it is deliberately out of scope until one does.
+**Operating surface.** Chat and a local editor. Templates are files; creating and editing them is
+a chat and file operation (ADR-0011). Since ADR-0013 a visual editor is part of the product rather
+than deferred: it is a web page served by a loopback-only local process, it writes the same files
+chat writes, and it opens in whichever window the operator already has — Claude Code's browser
+pane, T3 Code's desktop Browser panel, or an ordinary browser.
 
 **Rules** (invariants, not preferences):
 
@@ -71,42 +73,11 @@ pnpm mastra:smoke             # execute pipeline with test input
 pnpm mastra:smoke --db ./custom.sqlite --intake-model opus  # with flags
 ```
 
-**Persist a hardened spec:**
-
-```sh
-echo '{"title":"T","description":"D"}' | pnpm persist --db ./yoke.sqlite
-pnpm persist --file spec.json --db ./yoke.sqlite
-```
-
 **Preflight check:**
 
 ```sh
 pnpm run doctor               # verify all prerequisites; fix hints for each missing item
 ```
-
----
-
-## Optional: Rivet host and editor
-
-Rivet was evaluated as a workflow engine and visual editor (ADR-0011); the engine passed but the operator experience did not, and the question of a visual editor is still open. This section is kept but is not the primary way to run Yoke.
-
-**Additional prerequisites:**
-
-- Rivet desktop app: `brew install --cask rivet`
-
-**Launch Rivet host (starts on default port 21888):**
-
-```sh
-./bootstrap.sh                # installs deps, builds, runs doctor, starts Rivet host
-# or manually:
-pnpm rivet:host
-```
-
-**Attach the Rivet editor:**
-
-1. Open Rivet.app
-2. Action bar → Remote Debugger → connect to `ws://localhost:21888` (unauthenticated localhost WebSocket — **do not port-forward or expose remotely**)
-3. File → Open → `rivet/spec-creation.rivet-project`
 
 ---
 
@@ -118,16 +89,16 @@ pnpm rivet:host
 - **Binding A** — Claude Code dynamic workflow generator (`.claude/workflows/*.js`, generated via `pnpm bindings:claude`); approval gates happen in chat between runs; subscription-billed; exit path is Binding B.
 - **Binding B** — Mastra interpreter + MCP server (Apache-2.0); durable suspend/resume HITL; steps execute via the open model registry (`pnpm mcp` starts the server; `pnpm mastra:smoke` runs standalone).
 - **Model registry** — open; CLI aliases + passthrough of any model id; local `claude`/`codex` CLIs on subscription auth, Ollama local models, keyed APIs via LiteLLM.
-- **SQLite ticket store** — pipeline source of truth (better-sqlite3 + Drizzle); accepts persisted HardenedSpec JSON (via `pnpm persist --db ./yoke.sqlite`).
+- **SQLite ticket store** — pipeline source of truth (better-sqlite3 + Drizzle); persisted by the `persist-ticket` step in each pipeline run.
 - **Layer-0 key isolation** — Yoke process environment holds no real provider keys; child processes receive scrubbed environment (Charter invariant).
 
 ## Current direction
 
 **One canonical pipeline definition, many execution backends.** Chat-first operation via any MCP-capable client (Claude Code, Codex, or other). The same canon (provider-neutral YAML + prompts) runs unchanged against any configured model provider — swapping providers is a registry edit, not a code change (ADR-0011, ADR-0012). Provider portability is an acceptance criterion, enforced by smoke-testing the same pipeline under at least two independent bindings.
 
-The visual workflow editor question remains open — no currently evaluated option meets the bar, so visual authoring is deliberately out of scope until one does. Rivet engine passed evaluation but UX needs work; kept in-repo as an optional path.
+The visual workflow editor question is settled (ADR-0013): the editor is a web page Yoke serves itself, loopback-only, writing the same canon files chat writes. Rivet's engine passed the spike's evaluation rubric but its authoring UX did not, and a separate desktop application on its own release cadence cannot move at the speed of the canon it edits; the spike record remains in specs/011-spike-rivet and the code has been removed. ADR-0014 gives the canon the explicit `dependsOn` edges such an editor needs to save what it draws.
 
-Current milestone: [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) — validate full portability, close the registry, and harden the operator-facing APIs (canon validation, binding generation, ticket persistence).
+Current milestone: [`specs/015-meta-mvp`](specs/015-meta-mvp/spec.md) — give the canon explicit edges, then a local DAG editor that opens inside Claude Code and T3 Code. [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps, three of which 015 closes.
 
 ### Architecture & Design Record
 
@@ -144,14 +115,16 @@ Current milestone: [`specs/013-provider-portable-templates`](specs/013-provider-
 - [0009. MVP Telemetry: JSONL Sink](docs/decisions/0009-telemetry-jsonl-sink-mvp.md) (superseded by ADR-0011)
 - [0010. Orchestrator Transport: HTTP + SSE](docs/decisions/0010-orchestrator-transport-http-sse.md) (superseded by ADR-0011)
 - [0011. Chat-first canon and bindings](docs/decisions/0011-chat-first-canon-and-bindings.md)
-- [0012. Canon ontology: single-nesting pipeline](docs/decisions/0012-canon-ontology-single-nesting-pipeline.md)
+- [0012. Canon ontology: single-nesting pipeline](docs/decisions/0012-canon-ontology-single-nesting-pipeline.md) (topology rule amended by ADR-0014)
+- [0013. A visual editor meets the Charter's bar](docs/decisions/0013-visual-editor-meets-the-bar.md)
+- [0014. Canon topology: explicit edges](docs/decisions/0014-canon-topology-explicit-edges.md)
 
 **Hardened Specs (per-feature):**
 See [`specs/`](specs/) for the full set: stage1-hardening, module-system, tracker-provider, executor, stage2-development, stage3-testing, stage4-audit, orchestrator-server, observability.
 
 ## Development
 
-**Prerequisites:** Node ≥ 22, pnpm, Docker (Compose v2), Pi CLI, `claude` CLI, `gh` (authenticated).
+**Prerequisites:** Node ≥ 22, pnpm, Docker (Compose v2), `claude` CLI, `gh` (authenticated).
 
 > Exact dependency versions pin on first `pnpm install` via `.npmrc save-exact`. The resulting `pnpm-lock.yaml` is committed and must be kept in sync.
 
@@ -167,10 +140,6 @@ pnpm install
 
 # 4. Generate and apply DB migrations
 pnpm db:generate && pnpm db:migrate
-
-# 5. Run the CLI
-pnpm dev harden -             # interactive free-text mode
-pnpm dev harden 42            # seed from GitHub issue #42
 ```
 
 **Quality gates** (run before commit):
@@ -179,5 +148,5 @@ pnpm dev harden 42            # seed from GitHub issue #42
 pnpm lint          # ESLint + typescript-eslint (type-checked)
 pnpm format:check  # Prettier
 pnpm typecheck     # TypeScript
-pnpm test          # node:test suite (124+ tests)
+pnpm test          # node:test suite
 ```
