@@ -10,11 +10,11 @@ import { createTool } from "@mastra/core/tools";
 import { LibSQLStore } from "@mastra/libsql";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
-import { makeDb } from "../../db/index.js";
 import { listPipelines, loadPipeline } from "../../canon/load.js";
 import { defaultRegistry } from "../../canon/registry.js";
+import { makeDb } from "../../db/index.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
-import { buildPipelineWorkflow, mastraDbPath } from "./build.js";
+import { buildPipelineWorkflow, mastraDbPath, validateModelOverrides } from "./build.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -101,6 +101,10 @@ const runPipelineTool = createTool({
   }),
   execute: async (inputData) => {
     const { pipeline, inputs, models } = inputData;
+    if (models) {
+      const err = validateModelOverrides(models, registry);
+      if (err) return { error: err };
+    }
     const wf = mastra.getWorkflow(pipeline);
     const run = await wf.createRun();
     const runId = randomUUID();
