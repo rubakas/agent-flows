@@ -1,0 +1,582 @@
+// FR-010 / FR-019 — loopback-only HTTP + SSE editor server (ADR-0013).
+// Serves the DAG editor UI, relays run events over SSE, and enforces
+// DNS-rebinding and simple-form CSRF mitigations. Zero new runtime
+// dependencies — node:http only.
+
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import {
+  createServer as nodeCreateServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
+import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
+import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
+import { listPipelines, loadPipeline } from "../canon/load.js";
+import { makeDb, type DbInstance } from "../db/index.js";
+import type { RunService, StepEvent } from "../runtime/runService.js";
+import type { AddressInfo } from "node:net";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// ── SSE status normalisation ───────────────────────────────────────────────────
+// Maps RunService StepEvent kinds to the stable status strings the UI receives.
+
+const STEP_STATUS: Record<StepEvent["kind"], string> = {
+  "step-start": "started",
+  "step-finish": "succeeded",
+  "step-failed": "failed",
+  "step-suspended": "suspended",
+};
+
+// Reusable compiled regexes for the host port check and route matching.
+const RE_PORT = /:\d+$/u;
+const RE_PORT_CAPTURE = /:(\d+)$/u;
+const RE_PIPELINE_DETAIL = /^\/api\/pipelines\/([^/]+)$/u;
+const RE_PIPELINE_DRAFTS = /^\/api\/pipelines\/([^/]+)\/drafts$/u;
+const RE_DRAFT_BY_ID = /^\/api\/drafts\/(\d+)$/u;
+const RE_DRAFT_SAVE = /^\/api\/drafts\/(\d+)\/save$/u;
+const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
+const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
+const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
+
+// ── Security helpers (FR-019) ──────────────────────────────────────────────────
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * DNS-rebinding defence: the Host header must identify a loopback address,
+ * optionally followed by the exact bound port.
+ */
+function isAllowedHost(host: string | undefined, port: number): boolean {
+  if (!host) return false;
+  // Strip port suffix to get the bare hostname.
+  const bare = host.replace(RE_PORT, "");
+  if (!LOOPBACK_HOSTS.has(bare)) return false;
+  const portMatch = RE_PORT_CAPTURE.exec(host);
+  if (portMatch) return Number(portMatch[1]) === port;
+  return true;
+}
+
+/**
+ * Simple-form CSRF defence: if an Origin header is present on a mutating
+ * request, it must be a loopback origin with the exact bound port.
+ * Absence is allowed — non-browser clients (curl, fetch from localhost) omit it.
+ */
+function isAllowedOrigin(origin: string | undefined, port: number): boolean {
+  if (!origin) return true;
+  for (const h of LOOPBACK_HOSTS) {
+    if (origin === `http://${h}:${port}`) return true;
+  }
+  return false;
+}
+
+/**
+ * Replace any occurrence of the launch root in an error message with the
+ * literal string `<root>` so absolute filesystem paths never enter HTTP
+ * or SSE payloads.
+ */
+function safePath(message: string, root: string): string {
+  return message.split(root).join("<root>");
+}
+
+// ── HTTP helpers ───────────────────────────────────────────────────────────────
+
+function json(res: ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(payload);
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function parseJsonBody(raw: string): { ok: true; value: Record<string, unknown> } | { ok: false } {
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+      return { ok: true, value: v as Record<string, unknown> };
+    }
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+// ── Pipeline helpers ───────────────────────────────────────────────────────────
+
+interface PipelineEntry {
+  filePath: string;
+  loaded: ReturnType<typeof loadPipeline>;
+}
+
+/** Scan pipelinesDir and return the first pipeline whose id matches. */
+function findPipelineById(pipelinesDir: string, id: string): PipelineEntry | undefined {
+  let files: string[];
+  try {
+    files = listPipelines(pipelinesDir);
+  } catch {
+    return undefined;
+  }
+  for (const filePath of files) {
+    try {
+      const loaded = loadPipeline(filePath);
+      if (loaded.def.id === id) return { filePath, loaded };
+    } catch {
+      // Skip files that fail to load; the listing endpoint reports them as absent.
+    }
+  }
+  return undefined;
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────────
+
+export interface ServeOptions {
+  /** TCP port; defaults to 7411. Pass 0 for an ephemeral port (tests). */
+  port?: number;
+  /** Absolute path to the SQLite database; defaults to `<cwd>/yoke.sqlite`. */
+  dbPath?: string;
+  /** Directory containing pipeline YAML files; defaults to `<cwd>/pipelines`. */
+  pipelinesDir?: string;
+  /** Injected RunService for tests; constructed from Mastra in CLI mode. */
+  runService?: RunService;
+}
+
+export interface ServeHandle {
+  port: number;
+  close(): Promise<void>;
+}
+
+// ── Handler context ────────────────────────────────────────────────────────────
+
+interface HandlerCtx {
+  pipelinesDir: string;
+  root: string;
+  db: DbInstance;
+  runService: RunService | null;
+  uiPath: string;
+  boundPort: number;
+}
+
+// ── startServer ────────────────────────────────────────────────────────────────
+
+/**
+ * Bind a loopback-only HTTP server. Returns a handle with the actual port
+ * (useful when port 0 was requested) and a close function.
+ */
+export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle> {
+  const pipelinesDir = opts.pipelinesDir ?? join(process.cwd(), "pipelines");
+  const dbPath = opts.dbPath ?? join(process.cwd(), "yoke.sqlite");
+  const root = dirname(pipelinesDir); // launch root — one level above pipelines/
+  const db = makeDb(dbPath);
+  const runService = opts.runService ?? null;
+  const uiPath = join(__dirname, "ui.html");
+
+  // boundPort is updated once the OS assigns a port (important when port: 0).
+  let boundPort = opts.port ?? 7411;
+
+  const server = nodeCreateServer((req, res) => {
+    void handleRequest(req, res, {
+      pipelinesDir,
+      root,
+      db,
+      runService,
+      uiPath,
+      boundPort,
+    }).catch((err: unknown) => {
+      if (!res.headersSent) {
+        const msg = err instanceof Error ? err.message : String(err);
+        json(res, 500, { error: safePath(msg, root) });
+      }
+    });
+  });
+
+  return new Promise<ServeHandle>((resolve, reject) => {
+    server.listen(opts.port ?? 7411, "127.0.0.1", () => {
+      const info = server.address() as AddressInfo;
+      boundPort = info.port;
+      resolve({
+        port: info.port,
+        close: () =>
+          new Promise<void>((r, e) => {
+            // Destroy keep-alive connections immediately so server.close() resolves
+            // without waiting for idle timeouts (important for SSE in tests).
+            server.closeAllConnections();
+            server.close((err) => {
+              if (err) e(err);
+              else r();
+            });
+          }),
+      });
+    });
+    server.on("error", reject);
+  });
+}
+
+// ── Request handler ────────────────────────────────────────────────────────────
+
+async function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: HandlerCtx
+): Promise<void> {
+  const { root, boundPort } = ctx;
+  const method = req.method ?? "GET";
+  const rawUrl = req.url ?? "/";
+  const url = new URL(rawUrl, `http://${req.headers.host ?? "localhost"}`);
+  const pathname = url.pathname;
+
+  // ── FR-019: Host validation (DNS-rebinding defence) ────────────────────────
+  if (!isAllowedHost(req.headers.host, boundPort)) {
+    json(res, 403, { error: "Forbidden: invalid Host header" });
+    return;
+  }
+
+  const isMutating = method === "POST" || method === "PUT";
+
+  if (isMutating) {
+    // Content-type guard — kills simple-form CSRF
+    const ct = (req.headers["content-type"] ?? "").toLowerCase();
+    if (!ct.startsWith("application/json")) {
+      json(res, 403, { error: "Forbidden: content-type must be application/json" });
+      return;
+    }
+    // Origin guard — forces preflight failure for cross-origin pages
+    const origin = req.headers.origin;
+    if (!isAllowedOrigin(origin, boundPort)) {
+      json(res, 403, { error: "Forbidden: cross-origin request rejected" });
+      return;
+    }
+  }
+
+  // ── Route dispatch ─────────────────────────────────────────────────────────
+
+  // GET / — serve the editor UI from disk
+  if (method === "GET" && pathname === "/") {
+    if (!existsSync(ctx.uiPath)) {
+      res.writeHead(503, { "Content-Type": "text/plain" });
+      res.end("UI file absent: src/serve/ui.html has not been built");
+      return;
+    }
+    const html = readFileSync(ctx.uiPath, "utf8");
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(html);
+    return;
+  }
+
+  // GET /api/pipelines
+  if (method === "GET" && pathname === "/api/pipelines") {
+    let files: string[];
+    try {
+      files = listPipelines(ctx.pipelinesDir);
+    } catch {
+      files = [];
+    }
+    const pipelines: { id: string; description: string; path: string }[] = [];
+    for (const filePath of files) {
+      try {
+        const loaded = loadPipeline(filePath);
+        pipelines.push({
+          id: loaded.def.id,
+          description: loaded.def.description,
+          path: relative(root, filePath),
+        });
+      } catch {
+        // Silently omit files that fail to parse; they are visible as errors
+        // on disk and will be flagged by `yoke canon:check`.
+      }
+    }
+    json(res, 200, { pipelines });
+    return;
+  }
+
+  // GET /api/pipelines/:id
+  const pipelineDetailMatch = RE_PIPELINE_DETAIL.exec(pathname);
+  if (method === "GET" && pipelineDetailMatch) {
+    const id = decodeURIComponent(pipelineDetailMatch[1]);
+    const entry = findPipelineById(ctx.pipelinesDir, id);
+    if (!entry) {
+      json(res, 404, { error: `Pipeline "${id}" not found` });
+      return;
+    }
+    const { def, prompts } = entry.loaded;
+    json(res, 200, {
+      def,
+      prompts,
+      levels: pipelineLevels(def.steps),
+      graph: pipelineToGraph(def.steps),
+    });
+    return;
+  }
+
+  // POST /api/pipelines/:id/drafts
+  const openDraftMatch = RE_PIPELINE_DRAFTS.exec(pathname);
+  if (method === "POST" && openDraftMatch) {
+    const id = decodeURIComponent(openDraftMatch[1]);
+    const entry = findPipelineById(ctx.pipelinesDir, id);
+    if (!entry) {
+      json(res, 404, { error: `Pipeline "${id}" not found` });
+      return;
+    }
+    // Consume the (empty) body to satisfy HTTP spec — no useful payload expected.
+    await readBody(req);
+    const body = readFileSync(entry.filePath, "utf8");
+    const baseHash = createHash("sha256").update(body).digest("hex");
+    const relPath = relative(root, entry.filePath);
+    const sourceId = indexSource(ctx.db, root, relPath, "pipeline", baseHash);
+    const draftId = openDraft(ctx.db, sourceId, body, baseHash);
+    json(res, 200, { draftId, body, baseHash });
+    return;
+  }
+
+  // PUT /api/drafts/:draftId
+  const updateDraftMatch = RE_DRAFT_BY_ID.exec(pathname);
+  if (method === "PUT" && updateDraftMatch) {
+    const draftId = parseInt(updateDraftMatch[1], 10);
+    const draft = getDraft(ctx.db, draftId);
+    if (!draft) {
+      json(res, 404, { error: `Draft ${draftId} not found` });
+      return;
+    }
+    const raw = await readBody(req);
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { body: newBody } = parsed.value;
+    if (typeof newBody !== "string") {
+      json(res, 400, { error: 'Field "body" must be a string' });
+      return;
+    }
+    updateDraftBody(ctx.db, draftId, newBody);
+    json(res, 200, { ok: true });
+    return;
+  }
+
+  // POST /api/drafts/:draftId/save
+  const saveDraftMatch = RE_DRAFT_SAVE.exec(pathname);
+  if (method === "POST" && saveDraftMatch) {
+    const draftId = parseInt(saveDraftMatch[1], 10);
+    const draft = getDraft(ctx.db, draftId);
+    if (!draft) {
+      json(res, 404, { error: `Draft ${draftId} not found` });
+      return;
+    }
+    await readBody(req); // consume body
+    // TODO(serve): switch to saveDraftAndRegenerate once another agent adds that export
+    const result: SaveResult & { regenerated?: string[] } = saveDraft(ctx.db, draftId);
+    if (result.ok) {
+      json(res, 200, { ok: true, regenerated: result.regenerated ?? [] });
+      return;
+    }
+    if (result.reason === "conflict") {
+      json(res, 409, { ok: false, reason: "conflict", message: result.message });
+      return;
+    }
+    // reason === "invalid"
+    json(res, 422, {
+      ok: false,
+      reason: "invalid",
+      message: safePath(result.message, root),
+    });
+    return;
+  }
+
+  // POST /api/runs
+  if (method === "POST" && pathname === "/api/runs") {
+    if (!ctx.runService) {
+      json(res, 503, { error: "RunService not available in this instance" });
+      return;
+    }
+    const raw = await readBody(req);
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { pipeline, inputs, models } = parsed.value as {
+      pipeline?: unknown;
+      inputs?: unknown;
+      models?: unknown;
+    };
+    if (typeof pipeline !== "string") {
+      json(res, 400, { error: 'Field "pipeline" must be a string' });
+      return;
+    }
+    if (typeof inputs !== "object" || inputs === null || Array.isArray(inputs)) {
+      json(res, 400, { error: 'Field "inputs" must be an object' });
+      return;
+    }
+    const wfInput: Record<string, unknown> = {
+      ...(inputs as Record<string, unknown>),
+      ...(models !== undefined ? { models } : {}),
+    };
+    const result = await ctx.runService.start(pipeline, wfInput);
+    json(res, 200, result);
+    return;
+  }
+
+  // GET /api/runs/:id/events  — SSE (must precede the bare GET /api/runs/:id check)
+  const sseMatch = RE_RUN_EVENTS.exec(pathname);
+  if (method === "GET" && sseMatch) {
+    if (!ctx.runService) {
+      json(res, 503, { error: "RunService not available in this instance" });
+      return;
+    }
+    const id = decodeURIComponent(sseMatch[1]);
+    const snapshot = ctx.runService.get(id);
+    if (!snapshot) {
+      json(res, 404, { error: `Run "${id}" not found` });
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+
+    // Snapshot first — allows a client connecting mid-run to catch up.
+    res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
+
+    const safeWrite = (data: string): void => {
+      if (!res.destroyed) res.write(data);
+    };
+
+    // Relay step lifecycle events with normalised status strings.
+    const unsub = ctx.runService.subscribe(id, (event: StepEvent) => {
+      const status = STEP_STATUS[event.kind];
+      safeWrite(`event: step\ndata: ${JSON.stringify({ stepId: event.stepId, status })}\n\n`);
+    });
+
+    // Heartbeat comment every 15 s to keep proxies alive.
+    const heartbeat = setInterval(() => {
+      safeWrite(": heartbeat\n\n");
+    }, 15_000);
+
+    // Clean up on client disconnect — no listener leaks.
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      unsub();
+    });
+
+    return; // Connection is kept open; do not call res.end().
+  }
+
+  // GET /api/runs/:id
+  const runGetMatch = RE_RUN_BY_ID.exec(pathname);
+  if (method === "GET" && runGetMatch) {
+    if (!ctx.runService) {
+      json(res, 503, { error: "RunService not available in this instance" });
+      return;
+    }
+    const id = decodeURIComponent(runGetMatch[1]);
+    const state = ctx.runService.get(id);
+    if (!state) {
+      json(res, 404, { error: `Run "${id}" not found` });
+      return;
+    }
+    json(res, 200, state);
+    return;
+  }
+
+  // POST /api/runs/:id/approve
+  const approveMatch = RE_RUN_APPROVE.exec(pathname);
+  if (method === "POST" && approveMatch) {
+    if (!ctx.runService) {
+      json(res, 503, { error: "RunService not available in this instance" });
+      return;
+    }
+    const id = decodeURIComponent(approveMatch[1]);
+    const raw = await readBody(req);
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { approved } = parsed.value;
+    if (typeof approved !== "boolean") {
+      json(res, 400, { error: 'Field "approved" must be a boolean' });
+      return;
+    }
+    const result = await ctx.runService.approve(id, approved);
+    if (result.error) {
+      // A non-suspended run (already resolved, still running, or unknown) is a 409.
+      json(res, 409, { error: result.error });
+      return;
+    }
+    json(res, 200, result);
+    return;
+  }
+
+  // 404 fallback
+  json(res, 404, { error: `Not found: ${method} ${pathname}` });
+}
+
+// ── CLI entrypoint ─────────────────────────────────────────────────────────────
+
+function getArgValue(flag: string, fallback: string): string {
+  const idx = process.argv.indexOf(flag);
+  return idx !== -1 && idx + 1 < process.argv.length
+    ? (process.argv[idx + 1] ?? fallback)
+    : fallback;
+}
+
+if (process.argv[1] === __filename) {
+  process.env.MASTRA_TELEMETRY_DISABLED = "1";
+
+  const port = parseInt(getArgValue("--port", "7411"), 10);
+  const dbPath = getArgValue("--db", join(process.cwd(), "yoke.sqlite"));
+  const pipelinesDir = join(process.cwd(), "pipelines");
+
+  // Non-literal specifiers prevent import-x/no-cycle from traversing into
+  // @mastra/core's deep subpath exports, which crash the resolver —
+  // see the eslint override on src/bindings/mastra/** for context.
+  // The values resolve correctly at runtime; only static analysis is bypassed.
+  const mastraCoreSpec = "@mastra/core/mastra";
+  const mastraLibsqlSpec = "@mastra/libsql";
+  const bindingsBuildSpec = "../bindings/mastra/build.js" as string;
+  const registrySpec = "../canon/registry.js" as string;
+  const sqliteSpec = "../store/sqlite.js" as string;
+  const runServiceSpec = "../runtime/runService.js" as string;
+
+  /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
+  const { Mastra } = await import(mastraCoreSpec);
+  const { LibSQLStore } = await import(mastraLibsqlSpec);
+  const { buildPipelineWorkflow, mastraDbPath } = await import(bindingsBuildSpec);
+  const { defaultRegistry } = await import(registrySpec);
+  const { DrizzleTicketStore } = await import(sqliteSpec);
+  const { RunService: RunServiceClass } = await import(runServiceSpec);
+
+  const mastraDb = mastraDbPath(dbPath);
+  const mastraStorage = new LibSQLStore({ id: "yoke-mastra", url: `file:${mastraDb}` });
+  const yokeDb = makeDb(dbPath);
+  const store = new DrizzleTicketStore(yokeDb);
+  const registry = defaultRegistry();
+
+  const pipelineFiles = listPipelines(pipelinesDir);
+  const loadedPipelines = pipelineFiles.map((f) => loadPipeline(f));
+  const workflows: Record<string, unknown> = {};
+  for (const loaded of loadedPipelines) {
+    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store });
+  }
+
+  const mastra = new Mastra({ storage: mastraStorage, workflows });
+  const runService = new RunServiceClass(mastra);
+
+  const handle = await startServer({ port, dbPath, pipelinesDir, runService });
+  /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
+  console.log(`yoke serve listening on http://127.0.0.1:${handle.port}`);
+}
