@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
-# FR-008: Self-assembling bootstrap — installs deps, builds, migrates DB, and launches the host.
-# Usage: ./bootstrap.sh [--dry-run] [--no-launch] [-- <extra rivet:host args>]
+# FR-008: Self-assembling bootstrap — installs deps, builds, and runs preflight checks.
+# Usage: ./bootstrap.sh [--dry-run]
 set -euo pipefail
 cd "$(dirname "$0")"
 
 DRY_RUN=0
-NO_LAUNCH=0
-EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dry-run)   DRY_RUN=1; shift ;;
-    --no-launch) NO_LAUNCH=1; shift ;;
-    --)          shift; EXTRA_ARGS=("$@"); break ;;
-    *)           EXTRA_ARGS+=("$1"); shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    *)         echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
@@ -93,21 +89,6 @@ run pnpm run doctor
 step "pnpm build"
 run pnpm build
 
-# ── 8. Rivet project build (if script present) ────────────────────────────────
-step "pnpm rivet:build-project (if present)"
-run pnpm run --if-present rivet:build-project
-
 # DB schema is applied by makeDb() on first open (src/db/index.ts); no migration step needed
-# ── 9. Launch host ────────────────────────────────────────────────────────────
-if [[ $NO_LAUNCH == 0 ]]; then
-  step "Launch pnpm rivet:host"
-  if [[ $DRY_RUN == 1 ]]; then
-    if (( ${#EXTRA_ARGS[@]} > 0 )); then
-      echo "  + exec pnpm rivet:host -- ${EXTRA_ARGS[*]}"
-    else
-      echo "  + exec pnpm rivet:host"
-    fi
-  else
-    exec pnpm rivet:host -- "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
-  fi
-fi
+# ── 7. Done ───────────────────────────────────────────────────────────────────
+step "Bootstrap complete — entry points: pnpm mcp  |  pnpm canon:check  |  pnpm bindings:claude  |  pnpm doctor"

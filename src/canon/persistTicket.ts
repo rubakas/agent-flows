@@ -11,10 +11,10 @@ export async function persistTicket(
   spec: HardenedSpec
 ): Promise<{ ticketId: number }> {
   const ticket = await store.createTicket({
-    slug: `rivet-${randomUUID()}`,
+    slug: `yoke-${randomUUID()}`,
     title: spec.title,
     body: spec.description,
-    intent: "rivet:spec-creation",
+    intent: "yoke:spec-creation",
   });
 
   const ticketId = ticket.id;
@@ -57,8 +57,8 @@ export async function persistTicket(
   await store.addProvenance({
     ticketId,
     section: "spec-creation",
-    agent: "rivet",
-    model: "rivet:spec-creation",
+    agent: "yoke",
+    model: "yoke:spec-creation",
     runId: randomUUID(),
   });
 

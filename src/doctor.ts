@@ -2,7 +2,7 @@
 // FR-006: covers prerequisites for both Binding A (claude CLI) and Binding B (codex/ollama).
 
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +30,6 @@ export interface DoctorProbes {
   /** Returns all resolved locations of bin in PATH order. */
   whichAll: (bin: string) => string[];
   exec: (cmd: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
-  exists: (path: string) => boolean;
   fetchJson: (url: string) => Promise<unknown>;
   /** Tries to load better-sqlite3 for the active Node ABI; returns true if ok. */
   requireNative: () => boolean;
@@ -315,40 +314,7 @@ export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
     }
   }
 
-  // 9. Rivet desktop app (OPTIONAL — Rivet's role as workflow engine is undecided)
-  {
-    const systemPath = "/Applications/Rivet.app";
-    const home = probes.env.HOME ?? "";
-    const userPath = `${home}/Applications/Rivet.app`;
-    const rivetPath = probes.exists(systemPath)
-      ? systemPath
-      : probes.exists(userPath)
-        ? userPath
-        : null;
-
-    if (rivetPath) {
-      const ver = await probes.exec("defaults", [
-        "read",
-        `${rivetPath}/Contents/Info.plist`,
-        "CFBundleShortVersionString",
-      ]);
-      const version = ver.code === 0 ? ver.stdout.trim() : "version unknown";
-      results.push({
-        name: "Rivet.app (optional)",
-        status: "ok",
-        detail: `${rivetPath} (v${version})`,
-      });
-    } else {
-      results.push({
-        name: "Rivet.app (optional)",
-        status: "warn",
-        detail: "not found in /Applications or ~/Applications",
-        hint: "brew install --cask rivet",
-      });
-    }
-  }
-
-  // 10. Canon: all pipelines load without error (required)
+  // 9. Canon: all pipelines load without error (required)
   {
     const canon = probes.loadCanon();
     if (canon.failed.length === 0 && canon.loaded.length > 0) {
@@ -447,8 +413,6 @@ export function defaultProbes(): DoctorProbes {
         };
       }
     },
-
-    exists: existsSync,
 
     fetchJson: async (url) => {
       const resp = await fetch(url);

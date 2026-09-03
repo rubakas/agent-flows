@@ -27,12 +27,8 @@ function makeOkProbes(overrides: Partial<DoctorProbes> = {}): DoctorProbes {
       if (cmd === "codex" && args.includes("doctor")) {
         return { code: 0, stdout: "all ok", stderr: "" };
       }
-      if (cmd === "defaults") {
-        return { code: 0, stdout: "1.11.3", stderr: "" };
-      }
       return { code: 0, stdout: "", stderr: "" };
     },
-    exists: (path) => path.includes("Rivet.app"),
     fetchJson: async (url) => {
       if (url.includes("/api/tags")) return { models: OLLAMA_MODELS };
       if (url.includes("/health/liveliness")) return { status: "ok" };
@@ -155,20 +151,6 @@ describe("runDoctor", () => {
     const results = await runDoctor(makeOkProbes());
     const warn = results.find((r) => r.name === "claude CLI shadowed");
     assert.equal(warn, undefined, "unexpected shadow warn");
-  });
-
-  it("Rivet missing → warn only (optional), not fail", async () => {
-    const results = await runDoctor(makeOkProbes({ exists: () => false }));
-    const check = results.find((r) => r.name === "Rivet.app (optional)");
-    assert.ok(check, "Rivet.app (optional) check missing");
-    assert.equal(check.status, "warn");
-    assert.ok(check.hint?.includes("brew"), `hint: ${check.hint}`);
-  });
-
-  it("Rivet missing → no fail in results (it is OPTIONAL)", async () => {
-    const results = await runDoctor(makeOkProbes({ exists: () => false }));
-    const fails = results.filter((r) => r.status === "fail");
-    assert.deepEqual(fails, [], `unexpected failures when Rivet absent: ${JSON.stringify(fails)}`);
   });
 
   it("ollama down → warn only, no fail", async () => {
