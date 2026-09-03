@@ -1,8 +1,8 @@
 // Provider-agnostic step executor for Binding B.
 
 import { spawn as defaultSpawn } from "node:child_process";
-import type { ModelEntry } from "./registry.js";
 import { runClaudeCli } from "./runClaudeCli.js";
+import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
 
 export type { SpawnFn } from "./runClaudeCli.js";

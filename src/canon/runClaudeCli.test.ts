@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { makeFakeChild, makeFakeSpawn } from "./testing/fakeSpawn.js";
 import { runClaudeCli } from "./runClaudeCli.js";
+import { makeFakeChild, makeFakeSpawn } from "./testing/fakeSpawn.js";
 import type { SpawnFn } from "./runClaudeCli.js";
 
 describe("runClaudeCli", () => {
