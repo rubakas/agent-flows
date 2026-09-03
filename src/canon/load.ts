@@ -1,10 +1,19 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync, readdirSync, realpathSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "yaml";
+import { GraphError, pipelineLevels } from "./graph.js";
 import { canonSchemas } from "./schemas.js";
 import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 
 const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
+
+/** Thrown when a prompt path fails the containment check. Distinct from fs errors. */
+class PromptPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PromptPathError";
+  }
+}
 
 export function loadPipeline(
   yamlPath: string,
@@ -17,6 +26,8 @@ export function loadPipeline(
 
   // Repo root = parent of the yaml file's directory
   const repoRoot = dirname(dirname(resolve(yamlPath)));
+  const resolvedRoot = resolve(repoRoot);
+  const rootWithSep = resolvedRoot.endsWith(sep) ? resolvedRoot : resolvedRoot + sep;
 
   const ids = new Set<string>();
   for (const step of def.steps) {
@@ -24,6 +35,19 @@ export function loadPipeline(
       throw new Error(`Duplicate step id "${step.id}"`);
     }
     ids.add(step.id);
+  }
+
+  // When any step uses dependsOn, validate the full graph via the shared module.
+  const hasDependsOn = def.steps.some((s) => s.dependsOn !== undefined);
+  if (hasDependsOn) {
+    try {
+      pipelineLevels(def.steps);
+    } catch (err) {
+      if (err instanceof GraphError) {
+        throw new Error(err.message, { cause: err });
+      }
+      throw err;
+    }
   }
 
   let gateCount = 0;
@@ -50,9 +74,25 @@ export function loadPipeline(
       if (!step.prompt) {
         throw new Error(`Step "${step.id}": llm step requires prompt`);
       }
-      const promptPath = join(repoRoot, step.prompt);
+      const resolvedPromptPath = resolve(repoRoot, step.prompt);
+      if (!resolvedPromptPath.startsWith(rootWithSep)) {
+        throw new PromptPathError(
+          `Step "${step.id}": prompt path "${step.prompt}" escapes the pipeline root`
+        );
+      }
       try {
-        prompts[step.id] = readFile(promptPath);
+        const realPromptPath = realpathSync(resolvedPromptPath);
+        if (!realPromptPath.startsWith(rootWithSep)) {
+          throw new PromptPathError(
+            `Step "${step.id}": prompt path "${step.prompt}" resolves outside the pipeline root via symlink`
+          );
+        }
+      } catch (err) {
+        if (err instanceof PromptPathError) throw err;
+        // ENOENT or other fs error: file does not exist, let readFile handle below
+      }
+      try {
+        prompts[step.id] = readFile(resolvedPromptPath);
       } catch {
         throw new Error(`Step "${step.id}": prompt file "${step.prompt}" not found`);
       }
@@ -60,10 +100,6 @@ export function loadPipeline(
 
     if (step.schema !== undefined && !(step.schema in canonSchemas)) {
       throw new Error(`Step "${step.id}": unknown schema "${String(step.schema)}"`);
-    }
-
-    if (step.phase !== undefined && step.kind !== "llm") {
-      throw new Error(`Step "${step.id}": phase is only allowed on llm steps`);
     }
 
     if (step.role !== undefined && step.kind !== "llm") {

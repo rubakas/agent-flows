@@ -12,22 +12,26 @@ steps:
     kind: llm
     role: worker
     prompt: prompts/enrich.md
+    dependsOn: [intake]
   - id: critic
     kind: llm
     role: reasoner
     prompt: prompts/critic.md
     schema: weaknesses
-    phase: critique
+    dependsOn: [enrich]
   - id: security
     kind: llm
     role: reasoner
     prompt: prompts/security.md
     schema: securityFindings
-    phase: critique
+    dependsOn: [enrich]
   - id: assemble
     kind: assemble-spec
+    dependsOn: [critic, security]
   - id: approve
     kind: gate
     message: Approve this hardened spec?
+    dependsOn: [assemble]
   - id: persist
     kind: persist-ticket
+    dependsOn: [approve]

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { assembleSpec } from "./assemble.js";
+import { pipelineLevels } from "./graph.js";
 import { loadPipeline } from "./load.js";
 import { renderPrompt } from "./render.js";
 
@@ -22,8 +25,18 @@ describe("loadPipeline", () => {
       assert.ok(prompts[id].length > 0, `prompts["${id}"] should be non-empty`);
     }
 
-    const critiqueIds = def.steps.filter((s) => s.phase === "critique").map((s) => s.id);
+    const critiqueIds = def.steps.filter((s) => s.dependsOn?.includes("enrich")).map((s) => s.id);
     assert.deepEqual(critiqueIds, ["critic", "security"]);
+  });
+
+  it("spec-creation pipeline levels match expected execution order (equivalence)", () => {
+    const { def } = loadPipeline(pipelinesYaml);
+    const levels = pipelineLevels(def.steps);
+    assert.deepEqual(
+      levels,
+      [["intake"], ["enrich"], ["critic", "security"], ["assemble"], ["approve"], ["persist"]],
+      "pipelineLevels must return the canonical six-level execution order"
+    );
   });
 
   it("throws on duplicate step ids", () => {
@@ -183,6 +196,101 @@ steps:
     );
   });
 
+  it("rejects a prompt path that escapes the pipeline root via ../", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: ../../../../.ssh/id_ed25519
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), "error should name the step id");
+        assert.ok(
+          err.message.includes("escapes") || err.message.includes("outside"),
+          "error should say it escapes the root"
+        );
+        return true;
+      }
+    );
+  });
+
+  it("accepts a legitimate nested prompt path inside the root", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/nested/deep.md
+`;
+    const { prompts } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.equal(prompts.s1, "prompt content");
+  });
+
+  it("rejects a symlink that points outside the pipeline root", (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), "yoke-symlink-test-"));
+    const outsideDir = join(tmp, "outside");
+    const rootDir = join(tmp, "root");
+    const promptsDir = join(rootDir, "prompts");
+    const pipelinesDir = join(rootDir, "pipelines");
+    try {
+      mkdirSync(outsideDir);
+      mkdirSync(promptsDir, { recursive: true });
+      mkdirSync(pipelinesDir, { recursive: true });
+      const secretPath = join(outsideDir, "secret.txt");
+      writeFileSync(secretPath, "secret contents");
+      try {
+        symlinkSync(secretPath, join(promptsDir, "evil.md"));
+      } catch {
+        t.skip("symlink creation not permitted on this platform");
+        return;
+      }
+      const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/evil.md
+`;
+      writeFileSync(join(pipelinesDir, "test.yaml"), yaml);
+      assert.throws(
+        () => loadPipeline(join(pipelinesDir, "test.yaml")),
+        (err: Error) => {
+          assert.ok(err.message.includes("s1"), "error should name the step id");
+          assert.ok(
+            err.message.includes("symlink") || err.message.includes("outside"),
+            "error should indicate symlink escape"
+          );
+          return true;
+        }
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("throws on unknown schema", () => {
     const yaml = `
 id: test
@@ -204,6 +312,150 @@ steps:
         }),
       /s1.*unknown|unknown.*schema/
     );
+  });
+
+  it("loads a valid dependsOn pipeline", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: a
+    kind: llm
+    role: worker
+    prompt: prompts/a.md
+  - id: b
+    kind: llm
+    role: worker
+    prompt: prompts/b.md
+    dependsOn: [a]
+  - id: c
+    kind: llm
+    role: worker
+    prompt: prompts/c.md
+    dependsOn: [b]
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.equal(def.steps.length, 3);
+    assert.deepEqual(def.steps[1].dependsOn, ["a"]);
+    assert.deepEqual(def.steps[2].dependsOn, ["b"]);
+  });
+
+  it("throws on a cycle in dependsOn, naming the members", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: a
+    kind: llm
+    role: worker
+    prompt: prompts/a.md
+    dependsOn: [b]
+  - id: b
+    kind: llm
+    role: worker
+    prompt: prompts/b.md
+    dependsOn: [a]
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("cycle"), "error must mention 'cycle'");
+        assert.ok(err.message.includes("a"), "error must name step 'a'");
+        assert.ok(err.message.includes("b"), "error must name step 'b'");
+        return true;
+      }
+    );
+  });
+
+  it("throws when dependsOn references an unknown step id", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: a
+    kind: llm
+    role: worker
+    prompt: prompts/a.md
+  - id: b
+    kind: llm
+    role: worker
+    prompt: prompts/b.md
+    dependsOn: [nonexistent]
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      /nonexistent|unknown/
+    );
+  });
+
+  it("loads a pipeline using neither phase nor dependsOn (plain sequential)", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: g1
+    kind: gate
+    message: approve?
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+    });
+    assert.equal(def.steps.length, 1);
+    assert.equal(def.steps[0].dependsOn, undefined);
+  });
+
+  it("loads a dependsOn pipeline that contains an isolated step (no edges in or out)", () => {
+    // An isolated step is valid: pipelineLevels places it at level 0 and execution
+    // is well-defined. Rejecting it would make in-progress editor state unsaveable
+    // (FR-007/FR-008). This test pins that decision so the rule is not reintroduced.
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: a
+    kind: llm
+    role: worker
+    prompt: prompts/a.md
+  - id: b
+    kind: llm
+    role: worker
+    prompt: prompts/b.md
+    dependsOn: [a]
+  - id: isolated
+    kind: llm
+    role: worker
+    prompt: prompts/isolated.md
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.equal(def.steps.length, 3);
+    const iso = def.steps.find((s) => s.id === "isolated");
+    assert.ok(iso, "isolated step should be present");
+    assert.equal(iso?.dependsOn, undefined);
   });
 });
 
