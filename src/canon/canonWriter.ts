@@ -8,10 +8,11 @@
 //   5. Update stored hashes so the next save is not a false conflict.
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { parseDocument } from "yaml";
+import { generateWorkflowScript } from "../bindings/claudeCode.js";
 import { canonSource } from "../db/schema.js";
 import {
   getDraft,
@@ -20,6 +21,7 @@ import {
   updateSourceHash,
 } from "./draftStore.js";
 import { loadPipeline } from "./load.js";
+import { getActiveProfile } from "./registry.js";
 import type { DbInstance } from "../db/index.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -28,6 +30,12 @@ export type SaveResult =
   | { ok: true }
   | { ok: false; reason: "conflict"; message: string }
   | { ok: false; reason: "invalid"; message: string };
+
+export type SaveAndRegenerateResult =
+  | { ok: true; regenerated: string[] }
+  | { ok: true; regenerated: []; regenerationError: string }
+  | { ok: false; reason: "conflict"; message: string; regenerated: [] }
+  | { ok: false; reason: "invalid"; message: string; regenerated: [] };
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -96,6 +104,46 @@ export function saveDraft(db: DbInstance, draftId: number): SaveResult {
   setDraftValidation(db, draftId, "valid");
 
   return { ok: true };
+}
+
+/**
+ * Perform saveDraft, and on success additionally regenerate the Claude Code
+ * workflow script at <root>/.claude/workflows/<pipelineId>.js.
+ *
+ * Failure isolation: a generation error never rolls back the YAML write.
+ * The YAML file is the truth; the workflow script is disposable output.
+ * When generation fails, the result is ok:true with regenerated:[] and a
+ * regenerationError message so the UI can report that the output is stale.
+ */
+export function saveDraftAndRegenerate(db: DbInstance, draftId: number): SaveAndRegenerateResult {
+  const saveResult = saveDraft(db, draftId);
+
+  if (!saveResult.ok) {
+    return { ...saveResult, regenerated: [] };
+  }
+
+  // Save succeeded — regenerate Binding A output.
+  try {
+    const draft = getDraft(db, draftId);
+    if (!draft) throw new Error(`Draft ${draftId} not found after save`);
+
+    const source = db.select().from(canonSource).where(eq(canonSource.id, draft.sourceId)).get();
+    if (!source) throw new Error(`Source ${draft.sourceId} not found after save`);
+
+    const filePath = join(source.root, source.relPath);
+    const loaded = loadPipeline(filePath);
+    const profile = getActiveProfile();
+    const script = generateWorkflowScript(loaded, profile);
+
+    const outDir = join(source.root, ".claude", "workflows");
+    mkdirSync(outDir, { recursive: true });
+    const outFile = join(outDir, `${loaded.def.id}.js`);
+    writeFileSync(outFile, script, "utf8");
+
+    return { ok: true, regenerated: [outFile] };
+  } catch (err) {
+    return { ok: true, regenerated: [], regenerationError: (err as Error).message };
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

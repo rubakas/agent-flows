@@ -2,15 +2,22 @@
 // Run via: npx tsx --test src/canon/canonWriter.test.ts
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseDocument } from "yaml";
 import { makeInMemoryDb } from "../db/index.js";
-import { docToString, hashContent, saveDraft } from "./canonWriter.js";
-import { addDraftOp, getDraft, indexSource, listDraftOps, openDraft } from "./draftStore.js";
+import { docToString, hashContent, saveDraft, saveDraftAndRegenerate } from "./canonWriter.js";
+import {
+  addDraftOp,
+  getDraft,
+  indexSource,
+  listDraftOps,
+  openDraft,
+  updateDraftBody,
+} from "./draftStore.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -276,6 +283,141 @@ describe("saveDraft — clean save", () => {
 
     const draft = getDraft(db, draftId);
     assert.equal(draft?.validationState, "valid");
+  });
+});
+
+// ── saveDraftAndRegenerate ────────────────────────────────────────────────────
+
+/**
+ * A pipeline whose step id we can change in the draft. Gate steps produce a
+ * predictable comment line in the generated script, making the assertion easy.
+ */
+const REGEN_PIPELINE_BEFORE = `\
+id: test
+version: 1
+description: Regen test
+inputs:
+  - request
+steps:
+  - id: original-gate
+    kind: gate
+    message: approve?
+`;
+
+const REGEN_PIPELINE_AFTER = `\
+id: test
+version: 1
+description: Regen test
+inputs:
+  - request
+steps:
+  - id: renamed-gate
+    kind: gate
+    message: approve?
+`;
+
+describe("saveDraftAndRegenerate — successful save", () => {
+  it("writes both the YAML file and .claude/workflows/<id>.js", () => {
+    const { db, root, pipelinePath, draftId } = setup(REGEN_PIPELINE_BEFORE);
+    updateDraftBody(db, draftId, REGEN_PIPELINE_AFTER);
+
+    const result = saveDraftAndRegenerate(db, draftId);
+
+    assert.ok(result.ok, `Expected ok, got: ${JSON.stringify(result)}`);
+    if (result.ok) {
+      assert.equal(result.regenerated.length, 1, "one file should have been written");
+    }
+
+    // YAML on disk must reflect the draft body
+    const yaml = readFileSync(pipelinePath, "utf8");
+    assert.ok(yaml.includes("renamed-gate"), "YAML must contain the edited step id");
+
+    // Workflow script must exist and reflect the edited definition
+    const jsPath = join(root, ".claude", "workflows", "test.js");
+    assert.ok(existsSync(jsPath), ".claude/workflows/test.js must exist");
+    const script = readFileSync(jsPath, "utf8");
+    assert.ok(script.includes("renamed-gate"), "script must contain the new step id");
+    assert.ok(!script.includes("original-gate"), "script must NOT contain the old step id");
+  });
+
+  it("regenerated path in result matches the file that was written", () => {
+    const { db, root, draftId } = setup(REGEN_PIPELINE_BEFORE);
+
+    const result = saveDraftAndRegenerate(db, draftId);
+
+    assert.ok(result.ok);
+    if (result.ok) {
+      const expectedPath = join(root, ".claude", "workflows", "test.js");
+      assert.equal(result.regenerated[0], expectedPath);
+    }
+  });
+
+  it("a second saveDraftAndRegenerate does not produce a false conflict", () => {
+    const { db, draftId } = setup(REGEN_PIPELINE_BEFORE);
+
+    const first = saveDraftAndRegenerate(db, draftId);
+    assert.ok(first.ok, "first save must succeed");
+
+    const second = saveDraftAndRegenerate(db, draftId);
+    assert.ok(second.ok, "second save must not be a false conflict");
+  });
+});
+
+describe("saveDraftAndRegenerate — failed save does not regenerate", () => {
+  it("returns ok:false and regenerated:[] on conflict — no .js file written", () => {
+    const { db, root, pipelinePath, draftId } = setup(REGEN_PIPELINE_BEFORE);
+
+    // Simulate an external edit that creates a conflict
+    writeFileSync(pipelinePath, REGEN_PIPELINE_BEFORE + "# edited externally\n", "utf8");
+
+    const result = saveDraftAndRegenerate(db, draftId);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.reason, "conflict");
+      assert.deepEqual(result.regenerated, []);
+    }
+    assert.ok(!existsSync(join(root, ".claude", "workflows", "test.js")), "no .js must be written");
+  });
+
+  it("returns ok:false and regenerated:[] on invalid draft — no .js file written", () => {
+    const { db, root, draftId } = setup(REGEN_PIPELINE_BEFORE);
+    updateDraftBody(db, draftId, INVALID_PIPELINE);
+
+    const result = saveDraftAndRegenerate(db, draftId);
+
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.reason, "invalid");
+      assert.deepEqual(result.regenerated, []);
+    }
+    assert.ok(!existsSync(join(root, ".claude", "workflows", "test.js")), "no .js must be written");
+  });
+});
+
+describe("saveDraftAndRegenerate — generation failure is isolated", () => {
+  it("reports ok:true with regenerationError when generation fails, YAML already written", () => {
+    const { db, root, pipelinePath, draftId } = setup(REGEN_PIPELINE_BEFORE);
+
+    // Block mkdirSync by placing a regular file where .claude directory would go.
+    // writeFileSync creates the file; mkdirSync(recursive) will fail when it hits
+    // an existing non-directory component in the path.
+    writeFileSync(join(root, ".claude"), "not-a-directory");
+
+    const result = saveDraftAndRegenerate(db, draftId);
+
+    assert.ok(result.ok, "save must be reported as ok despite generation failure");
+    if (result.ok) {
+      assert.deepEqual(result.regenerated, [], "regenerated must be empty on failure");
+      assert.ok(
+        "regenerationError" in result && typeof result.regenerationError === "string",
+        "regenerationError must be a string"
+      );
+    }
+
+    // The YAML save must have succeeded — the file on disk should reflect the draft
+    const yaml = readFileSync(pipelinePath, "utf8");
+    assert.ok(yaml.includes("original-gate"), "YAML write must have completed before generation");
   });
 });
 
