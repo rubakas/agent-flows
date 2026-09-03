@@ -67,6 +67,35 @@ CREATE TABLE IF NOT EXISTS provenance (
   at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS canon_source (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  root TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  parse_state TEXT NOT NULL DEFAULT 'ok',
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canon_draft (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id INTEGER NOT NULL REFERENCES canon_source(id),
+  body TEXT NOT NULL,
+  base_hash TEXT NOT NULL,
+  validation_state TEXT NOT NULL DEFAULT 'pending',
+  validation_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS canon_draft_op (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  draft_id INTEGER NOT NULL REFERENCES canon_draft(id),
+  seq INTEGER NOT NULL,
+  op TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 `;
 
 /** Open (or create) a file-backed SQLite database at the given path. Applies schema DDL idempotently. */
