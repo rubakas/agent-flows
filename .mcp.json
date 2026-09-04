@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "yoke": {
-      "command": "node_modules/.bin/tsx",
-      "args": ["src/bindings/mastra/server.ts"],
+      "command": "bash",
+      "args": ["scripts/mcp-serve.sh"],
       "env": {
         "YOKE_PROVIDER": "anthropic"
       }
