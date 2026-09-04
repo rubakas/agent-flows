@@ -15,3 +15,4 @@ mastra.db*
 
 # One-time research doc — kept locally, not published (decisions distilled into docs/decisions/)
 docs/yoke-harness-research-and-design.md
+.n8n-workflows/

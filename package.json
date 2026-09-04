@@ -19,6 +19,7 @@
     "bootstrap": "./bootstrap.sh",
     "canon:check": "tsx src/canon/validate-cli.ts",
     "bindings:claude": "tsx src/bindings/write-cli.ts",
+    "bindings:n8n": "tsx src/bindings/n8n/write-cli.ts",
     "mcp": "tsx src/bindings/mastra/server.ts",
     "mastra:smoke": "tsx src/bindings/mastra/smoke.ts",
     "serve": "tsx src/serve/server.ts"
