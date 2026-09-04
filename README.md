@@ -66,6 +66,21 @@ Manual workflow from the client:
 pnpm mcp                      # also launchable standalone (stdio, for testing)
 ```
 
+**Generate an n8n workflow (Binding C) and run it in n8n:**
+
+```sh
+pnpm bindings:n8n             # generate .n8n-workflows/*.json from the canon
+```
+
+Install the typed node so both the n8n editor and CLI load it — copy the built
+`integrations/n8n-nodes-yoke` into `<N8N_USER_FOLDER>/.n8n/nodes/node_modules/`, then import the
+generated workflow. See `integrations/n8n-nodes-yoke/README.md`.
+
+**Node version:** everything requires Node ≥ 22 (`better-sqlite3` is built for it). If your shell
+defaults to an older node, `scripts/dev-serve.sh` and `scripts/mcp-serve.sh` force Node 22 via nvm —
+`.claude/launch.json` and `.mcp.json` invoke them, so the daemon and MCP server start correctly
+regardless of the ambient node.
+
 **Run the pipeline end-to-end (standalone):**
 
 ```sh
@@ -85,9 +100,10 @@ pnpm run doctor               # verify all prerequisites; fix hints for each mis
 
 **Built (ready to use):**
 
-- **Provider-neutral canon** — `pipelines/*.yaml` + `prompts/*.md` + loader (`src/canon/`); schema includes llm, gate, assemble-spec, persist-ticket; steps execute in parallel via `phase` grouping (ADR-0012).
+- **Provider-neutral canon** — `pipelines/*.yaml` + `prompts/*.md` + loader (`src/canon/`); schema includes llm, gate, assemble-spec, persist-ticket; step ordering is explicit via `dependsOn` edges (ADR-0014), compiled to parallel levels. A step may declare `workspace: read` to run its agent read-only in the project directory.
 - **Binding A** — Claude Code dynamic workflow generator (`.claude/workflows/*.js`, generated via `pnpm bindings:claude`); approval gates happen in chat between runs; subscription-billed; exit path is Binding B.
 - **Binding B** — Mastra interpreter + MCP server (Apache-2.0); durable suspend/resume HITL; steps execute via the open model registry (`pnpm mcp` starts the server; `pnpm mastra:smoke` runs standalone).
+- **Binding C** — n8n workflow generator (`.n8n-workflows/*.json`, generated via `pnpm bindings:n8n`); the canon compiles to an n8n workflow whose llm steps reference the installable `n8n-nodes-yoke.yokeAgent` community node (`integrations/n8n-nodes-yoke/`). n8n provides the visual editor and execution surface; the canon stays the git-backed source.
 - **Model registry** — open; CLI aliases + passthrough of any model id; local `claude`/`codex` CLIs on subscription auth, Ollama local models, keyed APIs via LiteLLM.
 - **SQLite ticket store** — pipeline source of truth (better-sqlite3 + Drizzle); persisted by the `persist-ticket` step in each pipeline run.
 - **Layer-0 key isolation** — Yoke process environment holds no real provider keys; child processes receive scrubbed environment (Charter invariant).
@@ -96,9 +112,9 @@ pnpm run doctor               # verify all prerequisites; fix hints for each mis
 
 **One canonical pipeline definition, many execution backends.** Chat-first operation via any MCP-capable client (Claude Code, Codex, or other). The same canon (provider-neutral YAML + prompts) runs unchanged against any configured model provider — swapping providers is a registry edit, not a code change (ADR-0011, ADR-0012). Provider portability is an acceptance criterion, enforced by smoke-testing the same pipeline under at least two independent bindings.
 
-The visual workflow editor question is settled (ADR-0013): the editor is a web page Yoke serves itself, loopback-only, writing the same canon files chat writes. Rivet's engine passed the spike's evaluation rubric but its authoring UX did not, and a separate desktop application on its own release cadence cannot move at the speed of the canon it edits; the spike record remains in specs/011-spike-rivet and the code has been removed. ADR-0014 gives the canon the explicit `dependsOn` edges such an editor needs to save what it draws.
+**The visual editor is n8n, not a Yoke-built one** (evaluated live 2026-09-04; see `docs/research/2026-09-04-n8n-spike.md` and `docs/research/2026-09-04-n8n-and-alternatives.md`). Rebuilding a node editor — the canvas is only a library (n8n uses Vue Flow); the forms, modals, inspector and execution UI are years of work — is not worth it for a private tool. Instead the canon compiles to n8n via Binding C, and the typed coding-agent step ships as an installable n8n node. n8n gives the editor and runtime for free; Yoke keeps the git-backed canon, the provider-neutral role→model registry, and the typed read-only workspace grounding that n8n has no concept of. The earlier direction — a Yoke-served DAG editor (ADR-0013, spec 015) — is superseded by this hybrid; the level-band web editor built under it (`src/serve/`) remains but is no longer the plan.
 
-Current milestone: [`specs/015-meta-mvp`](specs/015-meta-mvp/spec.md) — give the canon explicit edges, then a local DAG editor that opens inside Claude Code and T3 Code. [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps, three of which 015 closes.
+Current milestone: land the hybrid — Binding C (built), the `n8n-nodes-yoke` node package (built), and wiring the investigation pipeline to read the repo (`workspace: read`). [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps.
 
 ### Architecture & Design Record
 
