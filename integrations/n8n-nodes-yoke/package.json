@@ -1,0 +1,34 @@
+{
+  "name": "n8n-nodes-yoke",
+  "version": "0.1.0",
+  "description": "Yoke coding-agent node for n8n — a typed, sandboxed interface to the claude CLI",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "node --test '__tests__/**/*.test.js' 2>/dev/null || node --test '__tests__/**/*.test.ts'",
+    "test:ts": "node --experimental-strip-types --test '__tests__/**/*.test.ts'"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "nodes": [
+      "dist/nodes/YokeAgent/YokeAgent.node.js"
+    ]
+  },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md"
+  ],
+  "keywords": [
+    "n8n-community-node-package"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "n8n-workflow": "^1.120.0",
+    "typescript": "^5.4.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": ">=1.0.0"
+  }
+}
