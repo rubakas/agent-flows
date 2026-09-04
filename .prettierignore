@@ -4,3 +4,5 @@ drizzle/
 pnpm-lock.yaml
 bootstrap.sh
 .claude/
+integrations/
+.n8n-workflows/

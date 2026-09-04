@@ -12,7 +12,15 @@ export default tseslint.config(
   // ── Ignores ──────────────────────────────────────────────────────────────────
   {
     // drizzle.config.ts is a root-level config file not included in tsconfig.json.
-    ignores: ["dist/", "node_modules/", "drizzle/", "*.config.js", "drizzle.config.ts", ".claude/"],
+    ignores: [
+      "dist/",
+      "node_modules/",
+      "drizzle/",
+      "*.config.js",
+      "drizzle.config.ts",
+      ".claude/",
+      "integrations/",
+    ],
   },
 
   // ── Base JS ──────────────────────────────────────────────────────────────────
