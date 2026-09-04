@@ -7,7 +7,7 @@ import type { LoadedPipeline, StepDef } from "../../canon/types.js";
 // ---------------------------------------------------------------------------
 
 /** n8n node type for Yoke LLM steps. Change here when the node package finalises the type string. */
-export const YOKE_NODE_TYPE = "yokeAgent";
+export const YOKE_NODE_TYPE = "n8n-nodes-yoke.yokeAgent";
 
 /**
  * Single-source expression for the project directory.
