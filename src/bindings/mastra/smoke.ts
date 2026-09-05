@@ -11,7 +11,8 @@ import { listPipelines, loadPipeline } from "../../canon/load.js";
 import { defaultRegistry, getProfile, resolveStepModel } from "../../canon/registry.js";
 import { makeDb } from "../../db/index.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
-import { buildPipelineWorkflow, mastraDbPath } from "./build.js";
+import { buildPipelineWorkflow } from "./build.js";
+import { mastraDbPath } from "./paths.js";
 import type { ModelEntry } from "../../canon/registry.js";
 import type { StepDef } from "../../canon/types.js";
 

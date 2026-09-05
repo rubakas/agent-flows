@@ -14,7 +14,8 @@ import { defaultRegistry } from "../../canon/registry.js";
 import { makeDb } from "../../db/index.js";
 import { RunService } from "../../runtime/runService.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
-import { buildPipelineWorkflow, mastraDbPath, validateModelOverrides } from "./build.js";
+import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
+import { mastraDbPath } from "./paths.js";
 import type { MastraLike } from "../../runtime/runService.js";
 
 const __filename = fileURLToPath(import.meta.url);

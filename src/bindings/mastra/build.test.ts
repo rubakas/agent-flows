@@ -19,7 +19,8 @@ import { LibSQLStore } from "@mastra/libsql";
 import { ModelRegistry } from "../../canon/registry.js";
 import { makeInMemoryDb } from "../../db/index.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
-import { buildPipelineWorkflow, mastraDbPath, validateModelOverrides } from "./build.js";
+import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
+import { mastraDbPath } from "./paths.js";
 import type { StepRunnerDeps, runLlmStep } from "../../canon/runStep.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 

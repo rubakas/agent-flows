@@ -548,6 +548,7 @@ if (process.argv[1] === __filename) {
   const mastraCoreSpec = "@mastra/core/mastra";
   const mastraLibsqlSpec = "@mastra/libsql";
   const bindingsBuildSpec = "../bindings/mastra/build.js" as string;
+  const bindingsPathsSpec = "../bindings/mastra/paths.js" as string;
   const registrySpec = "../canon/registry.js" as string;
   const sqliteSpec = "../store/sqlite.js" as string;
   const runServiceSpec = "../runtime/runService.js" as string;
@@ -555,7 +556,8 @@ if (process.argv[1] === __filename) {
   /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
   const { Mastra } = await import(mastraCoreSpec);
   const { LibSQLStore } = await import(mastraLibsqlSpec);
-  const { buildPipelineWorkflow, mastraDbPath } = await import(bindingsBuildSpec);
+  const { buildPipelineWorkflow } = await import(bindingsBuildSpec);
+  const { mastraDbPath } = await import(bindingsPathsSpec);
   const { defaultRegistry } = await import(registrySpec);
   const { DrizzleTicketStore } = await import(sqliteSpec);
   const { RunService: RunServiceClass } = await import(runServiceSpec);
