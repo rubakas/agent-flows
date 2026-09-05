@@ -18,9 +18,10 @@ export type { SpawnFn } from "./runClaudeCli.js";
 export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
 
 /**
- * Files a workspace step may never read or write, even when
- * `permissions.contents` is granted. Applied via `--disallowedTools` on every
- * claude CLI invocation that declares a `contentsAccess`.
+ * Files a workspace step may never read OR write, even when
+ * `permissions.contents` is granted. Applied via `--disallowedTools` as both
+ * `Read(pattern)` and `Edit(pattern)` entries on every claude CLI invocation
+ * that declares a `contentsAccess`.
  *
  * Named files and file types only — deliberately no keyword wildcards. A
  * pattern like `*token*` reads as thorough but denies ordinary source such as
@@ -29,6 +30,10 @@ export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
  * wildcard's damage is invisible.
  *
  * Add a line when a project keeps secrets somewhere this does not name.
+ *
+ * Separate from BUILD_CONFIG_DENY_PATTERNS: credential files must be unreadable
+ * as well as unwritable. Build config files must stay readable (steps
+ * legitimately need to understand them) but must not be editable.
  */
 export const CREDENTIAL_DENY_PATTERNS: readonly string[] = [
   // Environment files. Each real variant is named; `.env.example`,
@@ -67,6 +72,29 @@ export const CREDENTIAL_DENY_PATTERNS: readonly string[] = [
   "**/id_ed25519*",
   "**/id_ecdsa*",
   "**/id_dsa*",
+];
+
+/**
+ * Files a workspace step may never EDIT (but may read). Applied via
+ * `--disallowedTools` as `Edit(pattern)` entries — Read is intentionally absent
+ * so steps can still inspect these files.
+ *
+ * These are build/execution artifacts: editing them lets an injected step
+ * rewrite the test script or CI pipeline and have those rewrites executed
+ * inside the same run. A step reading `package.json` to understand dependencies
+ * is legitimate; a step rewriting `test` to `echo PWNED` is the attack.
+ *
+ * Separate from CREDENTIAL_DENY_PATTERNS, which denies both read and edit.
+ * The distinction is intentional and the whole point: Read stays allowed here
+ * so investigation steps retain full visibility into the build configuration.
+ */
+export const BUILD_CONFIG_DENY_PATTERNS: readonly string[] = [
+  "**/package.json",
+  "**/Makefile",
+  "**/.github/workflows/**",
+  "**/.git/**",
+  "**/.husky/**",
+  "**/*.config.*",
 ];
 
 /** Thrown when a step's deadline fires before the transport completes. */
@@ -488,50 +516,73 @@ export async function runLlmStep(
       if (bin === "claude") {
         const extraArgs: string[] = [];
         const hasSkills = (deps.skills?.length ?? 0) > 0;
-        if (resolvedWorkspaceDir !== undefined || hasSkills) {
-          // --restricted makes the CLI ignore user/project/local settings files and
-          // confines file tools to the working directory, so a target repo's own
-          // .claude/settings.json cannot widen the granted tool set.
-          // --strict-mcp-config extends that guarantee to MCP servers declared in the
-          // target repo — the claude --help text names it as the companion flag for
-          // exactly this use case.
-          // --tools / --allowedTools narrow the tool set to the declared access level.
-          // Skill is appended when the step declares skills; Bash is never granted.
-          let baseTools: string;
-          if (deps.contentsAccess === "read") {
-            baseTools = "Read,Glob";
-          } else if (deps.contentsAccess === "write") {
-            // "write": add Edit and Write; Bash is deliberately excluded.
-            baseTools = "Read,Glob,Edit,Write";
-          } else {
-            // skills-only: no file access declared.
-            baseTools = "";
-          }
-          const toolSet = hasSkills ? (baseTools ? `${baseTools},Skill` : "Skill") : baseTools;
-          extraArgs.push(
-            "--restricted",
-            "--strict-mcp-config",
-            "--tools",
-            toolSet,
-            "--allowedTools",
-            toolSet
+
+        // Determine the tool set for this step. The three axes are mutually exclusive:
+        // pure text (no contentsAccess, no skills), read, or write — plus an optional
+        // Skill suffix when skills are declared.
+        let baseTools: string;
+        if (deps.contentsAccess === "read") {
+          baseTools = "Read,Glob";
+        } else if (deps.contentsAccess === "write") {
+          // "write": add Edit and Write; Bash is deliberately excluded.
+          baseTools = "Read,Glob,Edit,Write";
+        } else {
+          // No file access declared (pure text step or skills-only).
+          baseTools = "";
+        }
+        const toolSet = hasSkills ? (baseTools ? `${baseTools},Skill` : "Skill") : baseTools;
+
+        // Hardening is unconditional. Every claude invocation gets --restricted and
+        // --strict-mcp-config regardless of whether the step declares permissions or
+        // skills. Without this, a step with no permissions gets the full default tool
+        // set (Bash, WebFetch, etc.) and loads the operator's personal settings —
+        // inverting the security model so the least-declared step is the most privileged.
+        //
+        // --restricted makes the CLI ignore user/project/local settings files and
+        // confines file tools to the working directory, so a target repo's own
+        // .claude/settings.json cannot widen the granted tool set.
+        // --strict-mcp-config extends that guarantee to MCP servers declared in the
+        // target repo.
+        //
+        // Tool-set selection for no-permissions steps:
+        // The CLI help documents `--tools ""` as disabling all tools. Empirically it
+        // does not: with `--tools ""`, the CLI ignores the flag and still grants the
+        // full file-tool set (Read, Edit, Write, Glob, Grep) and critically re-enables
+        // Bash even under `--restricted`. The nearest safe alternative is "Read,Glob" —
+        // confirmed to limit the session to read-only file operations with no Bash,
+        // no WebFetch, and no Edit/Write. A pure text step getting read access is a
+        // minor deviation from ideal "no tools at all" but is vastly safer than Bash.
+        const effectiveToolSet = toolSet || "Read,Glob";
+        extraArgs.push("--restricted", "--strict-mcp-config", "--tools", effectiveToolSet);
+        extraArgs.push("--allowedTools", effectiveToolSet);
+
+        if (resolvedWorkspaceDir !== undefined) {
+          // "Edit(pattern)" rules cover all file-editing tools (including Write);
+          // "Write(pattern)" is not a valid file permission deny rule and produces
+          // CLI warnings. "Read(pattern)" also suppresses Glob listing for the same
+          // path — granular "deny Read but allow Glob" is not achievable with this
+          // mechanism; the deny list is intentionally stricter on the side of security.
+          //
+          // CREDENTIAL_DENY_PATTERNS: deny both Read and Edit — these files must never
+          // be visible to a step.
+          // BUILD_CONFIG_DENY_PATTERNS: deny Edit only — Read stays allowed so steps
+          // can inspect the build configuration (e.g. to understand dependencies);
+          // editing these files would let an injected prompt rewrite the test script
+          // or CI pipeline and have it executed inside the same run.
+          const credentialDenyEntries = ["Read", "Edit"].flatMap((tool) =>
+            CREDENTIAL_DENY_PATTERNS.map((pat) => `${tool}(${pat})`)
           );
-          if (resolvedWorkspaceDir !== undefined) {
-            // "Edit(pattern)" rules cover all file-editing tools (including Write);
-            // "Write(pattern)" is not a valid file permission deny rule and produces
-            // CLI warnings. "Read(pattern)" also suppresses Glob listing for the same
-            // path — granular "deny Read but allow Glob" is not achievable with this
-            // mechanism; the deny list is intentionally stricter on the side of security.
-            const disallowedToolsValue = ["Read", "Edit"]
-              .flatMap((tool) => CREDENTIAL_DENY_PATTERNS.map((pat) => `${tool}(${pat})`))
-              .join(",");
-            extraArgs.push("--disallowedTools", disallowedToolsValue);
-          }
-          if (hasSkills) {
-            const rawEnv = deps.env ?? process.env;
-            const skillsDir = rawEnv.YOKE_SKILLS_DIR ?? `${rawEnv.HOME ?? ""}/.claude`;
-            extraArgs.push("--plugin-dir", skillsDir);
-          }
+          const buildConfigDenyEntries = BUILD_CONFIG_DENY_PATTERNS.map((pat) => `Edit(${pat})`);
+          const disallowedToolsValue = [...credentialDenyEntries, ...buildConfigDenyEntries].join(
+            ","
+          );
+          extraArgs.push("--disallowedTools", disallowedToolsValue);
+        }
+
+        if (hasSkills) {
+          const rawEnv = deps.env ?? process.env;
+          const skillsDir = rawEnv.YOKE_SKILLS_DIR ?? `${rawEnv.HOME ?? ""}/.claude`;
+          extraArgs.push("--plugin-dir", skillsDir);
         }
         const result = await runClaudeCli(
           prompt,

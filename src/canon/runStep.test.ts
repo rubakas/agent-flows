@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 import {
+  BUILD_CONFIG_DENY_PATTERNS,
   CREDENTIAL_DENY_PATTERNS,
   DEFAULT_STEP_TIMEOUT_MS,
   StepTimeoutError,
@@ -480,7 +481,16 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.ok(strictMcpIdx < toolsIdx, "--strict-mcp-config must appear before --tools");
   });
 
-  it("claude: no --allowedTools and no cwd when contentsAccess is not set", async () => {
+  it("claude: no-permissions step gets --restricted --strict-mcp-config --tools Read,Glob and no cwd", async () => {
+    // This test previously asserted the VULNERABLE behaviour: that no extra args
+    // were emitted when no permissions were declared. That assertion encoded the
+    // bug — a step with no permissions inherited the full default tool set
+    // (Bash, WebFetch, operator settings). It is now inverted: hardening is
+    // unconditional, so even a pure text step is confined.
+    //
+    // Note: the CLI help documents `--tools ""` as disabling all tools; empirically
+    // it re-enables Bash even under --restricted. The safe fallback is "Read,Glob"
+    // which reliably limits the session to read-only file operations.
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -498,9 +508,23 @@ describe('runLlmStep — workspace: "read"', () => {
     await runLlmStep(entry, "hello", { spawn });
 
     assert.ok(
-      !capturedArgs.includes("--allowedTools"),
-      "must not add --allowedTools when no workspace declared"
+      capturedArgs.includes("--restricted"),
+      "no-permissions step must get --restricted (hardening is unconditional)"
     );
+    assert.ok(
+      capturedArgs.includes("--strict-mcp-config"),
+      "no-permissions step must get --strict-mcp-config"
+    );
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    assert.ok(toolsIdx !== -1, "no-permissions step must get --tools");
+    assert.equal(
+      capturedArgs[toolsIdx + 1],
+      "Read,Glob",
+      "--tools must be Read,Glob for a no-permissions step (safe fallback: --tools '' re-enables Bash)"
+    );
+    const allowedIdx = capturedArgs.indexOf("--allowedTools");
+    assert.ok(allowedIdx !== -1, "no-permissions step must get --allowedTools");
+    assert.equal(capturedArgs[allowedIdx + 1], "Read,Glob", "--allowedTools must be Read,Glob");
     assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
   });
 
@@ -663,9 +687,11 @@ describe("runLlmStep — skills", () => {
       !capturedArgs.some((a) => a.includes("Skill")),
       "Skill must not appear in args without skills"
     );
+    // Hardening is unconditional: --restricted and --strict-mcp-config must be
+    // present even when no skills or permissions are declared.
     assert.ok(
-      !capturedArgs.includes("--restricted"),
-      "must not add --restricted without skills or permissions"
+      capturedArgs.includes("--restricted"),
+      "must add --restricted even without skills or permissions"
     );
   });
 
@@ -892,6 +918,70 @@ describe("runLlmStep — credential deny list", () => {
     assert.ok(disallowedIdx !== -1, "must emit --disallowedTools");
     const disallowedValue = capturedArgs[disallowedIdx + 1];
     assert.ok(!disallowedValue.includes("Glob("), "--disallowedTools must not contain Glob()");
+  });
+
+  it("write mode: --disallowedTools denies Edit for every build-config pattern", async () => {
+    // A write step must not be able to edit package.json, Makefile, CI workflows,
+    // etc. — editing these would let an injected prompt rewrite the test script
+    // or pipeline and have it executed inside the same run (the build-round loop
+    // is the concrete threat model). Read must stay allowed.
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "edit file", {
+      spawn,
+      contentsAccess: "write",
+      workspaceDir: repoRoot,
+    });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "write mode must emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+
+    for (const pattern of BUILD_CONFIG_DENY_PATTERNS) {
+      assert.ok(
+        disallowedValue.includes(`Edit(${pattern})`),
+        `--disallowedTools must deny Edit for build-config pattern ${pattern}`
+      );
+      assert.ok(
+        !disallowedValue.includes(`Read(${pattern})`),
+        `--disallowedTools must NOT deny Read for build-config pattern ${pattern} — steps must still be able to read these files`
+      );
+    }
+  });
+
+  it("read mode: --disallowedTools denies Edit for every build-config pattern (defence in depth)", async () => {
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "analyze", {
+      spawn,
+      contentsAccess: "read",
+      workspaceDir: repoRoot,
+    });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "read mode must emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+
+    for (const pattern of BUILD_CONFIG_DENY_PATTERNS) {
+      assert.ok(
+        disallowedValue.includes(`Edit(${pattern})`),
+        `--disallowedTools must deny Edit for build-config pattern ${pattern}`
+      );
+      assert.ok(
+        !disallowedValue.includes(`Read(${pattern})`),
+        `--disallowedTools must NOT deny Read for build-config pattern ${pattern}`
+      );
+    }
   });
 
   it("step with no permissions does not emit --disallowedTools (regression guard)", async () => {
