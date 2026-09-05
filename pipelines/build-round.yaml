@@ -1,0 +1,17 @@
+id: build-round
+version: 1
+description: Single test-and-fix iteration; composed into build.yaml as a bounded loop
+inputs: []
+steps:
+  - id: test
+    kind: check
+    command: pnpm test
+  # Known inefficiency: fix also runs when test has already passed on the loop's
+  # final passing iteration. Without conditionals in the canon this is unavoidable;
+  # build-fix.md instructs the model to change nothing in that case.
+  - id: fix
+    kind: llm
+    role: worker
+    workspace: write
+    dependsOn: [test]
+    prompt: prompts/build-fix.md

@@ -1,0 +1,19 @@
+id: build
+version: 1
+description: Execute the approved plan then loop test-and-fix until the suite passes
+inputs:
+  - plan
+steps:
+  - id: develop
+    kind: pipeline
+    pipeline: develop
+  - id: converge
+    kind: loop
+    pipeline: build-round
+    maxIterations: 3
+    # until: test.passed — test is the check step in build-round; resolveDotPath
+    # reads inputData["test"]["passed"] from the body workflow's accumulated context.
+    # buildCheckStep stores the CheckResult under [step.id], so ctx["test"].passed
+    # is the authoritative pass signal (exit code 0 = passed: true).
+    until: test.passed
+    dependsOn: [develop]

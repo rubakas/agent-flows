@@ -1,0 +1,21 @@
+id: ship
+version: 1
+description: Gate, commit, and open a pull request after human approval
+inputs:
+  - plan
+steps:
+  # Gate exists because commit and PR creation are irreversible from the pipeline's
+  # point of view — a mistake here cannot be undone without manual git history editing.
+  - id: approve
+    kind: gate
+    message: Commit all staged changes and open a pull request?
+  # Runs real git commands. The gate above must pass before these steps execute.
+  - id: commit
+    kind: check
+    command: 'git add -A && git commit -m "feat: apply approved plan"'
+    dependsOn: [approve]
+  # Runs real gh commands; creates a publicly visible pull request.
+  - id: pr
+    kind: check
+    command: gh pr create --fill
+    dependsOn: [commit]

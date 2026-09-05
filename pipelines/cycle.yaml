@@ -1,0 +1,23 @@
+id: cycle
+version: 1
+description: Full development lifecycle — investigate, plan, build, and ship
+inputs:
+  - request
+steps:
+  - id: investigate
+    kind: pipeline
+    pipeline: investigate
+  - id: plan
+    kind: pipeline
+    pipeline: spec-creation
+    dependsOn: [investigate]
+  - id: build
+    kind: pipeline
+    pipeline: build
+    with:
+      plan: plan.assemble
+    dependsOn: [plan]
+  - id: ship
+    kind: pipeline
+    pipeline: ship
+    dependsOn: [build]
