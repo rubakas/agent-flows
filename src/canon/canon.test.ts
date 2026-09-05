@@ -995,6 +995,92 @@ steps:
     );
   });
 
+  it("validates a dotted placeholder referencing a nested pipeline step output", () => {
+    // A step in the parent pipeline may reference {{foo.bar}} where foo is a nested
+    // pipeline step id and bar is a step inside it. After expansion, foo.bar is a
+    // real step id in the flat step list and the regex fix allows dots in placeholders.
+    const innerYaml = `
+id: inner
+version: 1
+description: inner
+inputs: []
+steps:
+  - id: bar
+    kind: llm
+    role: worker
+    prompt: prompts/bar.md
+`;
+    const outerYaml = `
+id: outer
+version: 1
+description: outer
+inputs: []
+steps:
+  - id: foo
+    kind: pipeline
+    pipeline: inner
+  - id: consumer
+    kind: llm
+    role: worker
+    prompt: prompts/consumer.md
+    dependsOn: [foo]
+`;
+    const { prompts } = loadPipeline("/fake/pipelines/outer.yaml", {
+      readFile: (p) => {
+        if (p.endsWith("outer.yaml")) return outerYaml;
+        if (p.endsWith("inner.yaml")) return innerYaml;
+        if (p.includes("consumer")) return "Result: {{foo.bar}}";
+        return "prompt content";
+      },
+    });
+    assert.ok(prompts.consumer.includes("{{foo.bar}}"), "dotted placeholder should be present");
+  });
+
+  it("throws when a prompt references an unknown dotted placeholder", () => {
+    const innerYaml = `
+id: inner
+version: 1
+description: inner
+inputs: []
+steps:
+  - id: bar
+    kind: llm
+    role: worker
+    prompt: prompts/bar.md
+`;
+    const outerYaml = `
+id: outer
+version: 1
+description: outer
+inputs: []
+steps:
+  - id: foo
+    kind: pipeline
+    pipeline: inner
+  - id: consumer
+    kind: llm
+    role: worker
+    prompt: prompts/consumer.md
+    dependsOn: [foo]
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/outer.yaml", {
+          readFile: (p) => {
+            if (p.endsWith("outer.yaml")) return outerYaml;
+            if (p.endsWith("inner.yaml")) return innerYaml;
+            if (p.includes("consumer")) return "Result: {{foo.nonexistent}}";
+            return "prompt content";
+          },
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("consumer"), "error names the step");
+        assert.ok(err.message.includes("nonexistent"), "error names the bad placeholder");
+        return true;
+      }
+    );
+  });
+
   it("error message names the step, the placeholder, and what is available", () => {
     const yaml = `
 id: test
@@ -1028,6 +1114,138 @@ steps:
         // available should include the input and the ancestor
         assert.ok(err.message.includes("request"), "lists pipeline input");
         assert.ok(err.message.includes("survey"), "lists ancestor step id");
+        return true;
+      }
+    );
+  });
+});
+
+describe("loadPipeline — with mapping and unmapped inputs", () => {
+  it("loads a nested pipeline with a valid with mapping and rewrites the prompt placeholder", () => {
+    const innerYaml = `
+id: inner
+version: 1
+description: inner
+inputs:
+  - parentKey
+steps:
+  - id: s
+    kind: llm
+    role: worker
+    prompt: prompts/s.md
+`;
+    const parentYaml = `
+id: parent
+version: 1
+description: parent
+inputs:
+  - parentKey
+steps:
+  - id: n
+    kind: pipeline
+    pipeline: inner
+    with:
+      parentKey: parentKey
+`;
+    const { prompts } = loadPipeline("/fake/pipelines/parent.yaml", {
+      readFile: (p) => {
+        if (p.endsWith("parent.yaml")) return parentYaml;
+        if (p.endsWith("inner.yaml")) return innerYaml;
+        if (p.endsWith("s.md")) return "Using: {{parentKey}}";
+        throw new Error(`unexpected: ${p}`);
+      },
+    });
+    // The with mapping rewrites {{parentKey}} → {{parentKey}} (identity mapping here,
+    // confirming the machinery works without error and the prompt is preserved).
+    assert.equal(prompts["n.s"], "Using: {{parentKey}}");
+  });
+
+  it("throws when with key is not a declared input of the nested pipeline", () => {
+    const innerYaml = `
+id: inner
+version: 1
+description: inner
+inputs:
+  - realInput
+steps:
+  - id: s
+    kind: llm
+    role: worker
+    prompt: prompts/s.md
+`;
+    const parentYaml = `
+id: parent
+version: 1
+description: parent
+inputs:
+  - request
+steps:
+  - id: n
+    kind: pipeline
+    pipeline: inner
+    with:
+      typo: request
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/parent.yaml", {
+          readFile: (p) => {
+            if (p.endsWith("parent.yaml")) return parentYaml;
+            if (p.endsWith("inner.yaml")) return innerYaml;
+            if (p.endsWith("s.md")) return "{{realInput}}";
+            throw new Error(`unexpected: ${p}`);
+          },
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("typo"), "names the bad with key");
+        assert.ok(
+          err.message.toLowerCase().includes("not a declared input"),
+          "says it is not a declared input"
+        );
+        return true;
+      }
+    );
+  });
+
+  it("throws when a nested pipeline input appears in a prompt but is not mapped and not a parent input", () => {
+    const innerYaml = `
+id: inner
+version: 1
+description: inner
+inputs:
+  - myInput
+steps:
+  - id: s
+    kind: llm
+    role: worker
+    prompt: prompts/s.md
+`;
+    const parentYaml = `
+id: parent
+version: 1
+description: parent
+inputs:
+  - request
+steps:
+  - id: n
+    kind: pipeline
+    pipeline: inner
+`;
+    // inner's myInput is not mapped via with, and the parent has no myInput input.
+    // The placeholder {{myInput}} in the prompt will remain after expansion and fail
+    // the load.ts validator.
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/parent.yaml", {
+          readFile: (p) => {
+            if (p.endsWith("parent.yaml")) return parentYaml;
+            if (p.endsWith("inner.yaml")) return innerYaml;
+            if (p.endsWith("s.md")) return "Using: {{myInput}}";
+            throw new Error(`unexpected: ${p}`);
+          },
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("myInput"), "names the unresolvable placeholder");
         return true;
       }
     );

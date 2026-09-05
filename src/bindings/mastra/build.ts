@@ -21,6 +21,21 @@ import type { StepRunnerDeps } from "../../canon/runStep.js";
 import type { HardenedSpec, LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
 
+// ── Namespace helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Derives a namespaced context key from a step id and a bare key name.
+ * The namespace is the prefix before the last dot in `stepId`.
+ *
+ * Examples:
+ *   nsKey("plan.assemble", "spec")  → "plan.spec"
+ *   nsKey("assemble",      "spec")  → "spec"      (no prefix — standalone pipeline)
+ */
+function nsKey(stepId: string, bare: string): string {
+  const dot = stepId.lastIndexOf(".");
+  return dot === -1 ? bare : `${stepId.slice(0, dot)}.${bare}`;
+}
+
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 /** Derive the Mastra LibSQL db path from the ticket db path.
@@ -64,11 +79,15 @@ function ctxVars(ctxData: Ctx): Record<string, string> {
   const vars: Record<string, string> = {};
   for (const [k, v] of Object.entries(ctxData)) {
     if (k === "models") continue;
+    let serialized: string;
     if (typeof v === "string") {
-      vars[k] = v;
+      serialized = v;
     } else if (v !== null && v !== undefined) {
-      vars[k] = JSON.stringify(v);
+      serialized = JSON.stringify(v);
+    } else {
+      continue;
     }
+    vars[k] = serialized;
   }
   return vars;
 }
@@ -203,14 +222,17 @@ function buildAssembleStep(stepId: string) {
     outputSchema: ctx,
     execute: ({ inputData }) => {
       const ctxData = inputData as Ctx;
+      const pfx = (bare: string) => nsKey(stepId, bare);
       const spec = assembleSpec({
         request: ctxData.request as string | undefined,
-        intake: ctxData.intake as string,
-        enrich: ctxData.enrich as string,
-        critic: ctxData.critic as { weaknesses: [] },
-        security: ctxData.security as { securityFindings: [] },
+        intake: ctxData[pfx("intake")] as string,
+        enrich: ctxData[pfx("enrich")] as string,
+        critic: ctxData[pfx("critic")] as { weaknesses: [] },
+        security: ctxData[pfx("security")] as { securityFindings: [] },
       });
-      return Promise.resolve({ ...ctxData, spec });
+      // Write at the step id key (ancestor-trackable, valid `with` mapping target)
+      // and at the conventional <ns>.spec key (read by gate and persist-ticket via nsKey).
+      return Promise.resolve({ ...ctxData, [stepId]: spec, [pfx("spec")]: spec });
     },
   });
 }
@@ -224,10 +246,14 @@ function buildGateStep(step: StepDef) {
     suspendSchema: z.object({ message: z.string(), spec: z.unknown() }),
     execute: async ({ inputData, resumeData, suspend }) => {
       const ctxData = inputData as Ctx;
+      const approvedKey = nsKey(step.id, "approved");
       if (resumeData) {
-        return { ...ctxData, approved: resumeData.approved };
+        return { ...ctxData, [approvedKey]: resumeData.approved };
       }
-      await suspend({ message: step.message ?? "Approve this spec?", spec: ctxData.spec });
+      await suspend({
+        message: step.message ?? "Approve this spec?",
+        spec: ctxData[nsKey(step.id, "spec")],
+      });
       // unreachable — suspend() throws internally; satisfies TypeScript return type
       return ctxData;
     },
@@ -241,12 +267,14 @@ function buildPersistStep(stepId: string, store: TicketStore) {
     outputSchema: ctx,
     execute: async ({ inputData }) => {
       const ctxData = inputData as Ctx;
-      if (ctxData.approved === false) {
-        return { approved: false };
+      const approvedKey = nsKey(stepId, "approved");
+      const specKey = nsKey(stepId, "spec");
+      if (ctxData[approvedKey] === false) {
+        return { ...ctxData };
       }
-      const spec = ctxData.spec as HardenedSpec;
+      const spec = ctxData[specKey] as HardenedSpec;
       const { ticketId } = await persistTicket(store, spec);
-      return { ...ctxData, ticketId, approved: true };
+      return { ...ctxData, [nsKey(stepId, "ticketId")]: ticketId, [approvedKey]: true };
     },
   });
 }

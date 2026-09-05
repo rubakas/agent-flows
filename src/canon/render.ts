@@ -5,7 +5,7 @@
 export function extractPlaceholders(template: string): string[] {
   const names: string[] = [];
   let m: RegExpExecArray | null;
-  const re = /\{\{(\w+)\}\}/g;
+  const re = /\{\{([\w.]+)\}\}/g;
   while ((m = re.exec(template)) !== null) {
     names.push(m[1]);
   }
@@ -13,7 +13,7 @@ export function extractPlaceholders(template: string): string[] {
 }
 
 export function renderPrompt(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{\{(\w+)\}\}/g, (_match, name: string) => {
+  return template.replace(/\{\{([\w.]+)\}\}/g, (_match, name: string) => {
     if (!(name in vars)) {
       throw new Error(`renderPrompt: no value provided for placeholder "{{${name}}}"`);
     }

@@ -1032,3 +1032,96 @@ describe("buildPipelineWorkflow — loop terminates on check.passed (the converg
     }
   });
 });
+
+// ── Regression: nested-namespace assemble ─────────────────────────────────────
+//
+// When spec-creation is embedded as a `plan` step in a parent pipeline,
+// expandNested namespaces every step id: intake → plan.intake, etc.
+// buildAssembleStep must read plan.intake / plan.enrich / plan.critic /
+// plan.security — not the bare keys — otherwise assembleSpec receives
+// undefined arguments and throws "Cannot read properties of undefined".
+//
+// This test fails against the unfixed code (status === "failed") and
+// passes after the namespace-aware nsKey fix (status === "suspended").
+
+const NESTED_ASSEMBLE_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "nested-assemble",
+    version: 1,
+    description: "Regression: assemble must read namespaced context keys",
+    inputs: ["request"],
+    steps: [
+      { id: "plan.intake", kind: "llm", model: "plan.intake", dependsOn: [] },
+      { id: "plan.enrich", kind: "llm", model: "plan.enrich", dependsOn: ["plan.intake"] },
+      {
+        id: "plan.critic",
+        kind: "llm",
+        model: "plan.critic",
+        schema: "weaknesses",
+        dependsOn: ["plan.enrich"],
+      },
+      {
+        id: "plan.security",
+        kind: "llm",
+        model: "plan.security",
+        schema: "securityFindings",
+        dependsOn: ["plan.enrich"],
+      },
+      { id: "plan.assemble", kind: "assemble-spec", dependsOn: ["plan.critic", "plan.security"] },
+      { id: "plan.approve", kind: "gate", message: "Approve?", dependsOn: ["plan.assemble"] },
+      { id: "plan.persist", kind: "persist-ticket", dependsOn: ["plan.approve"] },
+    ],
+  },
+  prompts: {
+    "plan.intake": "Draft a spec for: {{request}}",
+    "plan.enrich": "Enrich: {{plan.intake}}",
+    "plan.critic": "Critique: {{plan.intake}} {{plan.enrich}}",
+    "plan.security": "Security: {{plan.intake}} {{plan.enrich}}",
+  },
+};
+
+const NESTED_ASSEMBLE_RESPONSES: Record<string, string> = {
+  "plan.intake": INTAKE_MD,
+  "plan.enrich": ENRICH_MD,
+  "plan.critic": CRITIC_JSON,
+  "plan.security": SECURITY_JSON,
+};
+
+describe("buildPipelineWorkflow — nested namespace assemble (regression)", () => {
+  it("assemble step reads plan.intake / plan.enrich / … — not bare undefined keys", async () => {
+    const { storage, store, cleanup } = makeTestFixture("nested-assemble");
+    try {
+      const wf = buildPipelineWorkflow(NESTED_ASSEMBLE_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: makeFakeRunner(NESTED_ASSEMBLE_RESPONSES),
+      });
+
+      const mastra = new Mastra({
+        storage,
+        workflows: { [NESTED_ASSEMBLE_PIPELINE.def.id]: wf },
+      });
+      const mastraWf = mastra.getWorkflow(NESTED_ASSEMBLE_PIPELINE.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+
+      assert.equal(
+        r1.status,
+        "suspended",
+        "workflow must suspend at plan.approve gate — not fail on undefined intake"
+      );
+      const gateStep = r1.steps?.["plan.approve"] as Record<string, unknown> | undefined;
+      const suspendPayload = gateStep?.suspendPayload as Record<string, unknown> | undefined;
+      assert.ok(suspendPayload?.spec, "gate suspend payload must include spec");
+      const spec = suspendPayload?.spec as Record<string, unknown>;
+      assert.ok(
+        typeof spec.title === "string" && spec.title.length > 0,
+        `spec.title must be a non-empty string — got: ${JSON.stringify(spec.title)}`
+      );
+
+      await run.resume({ step: r1.suspended[0], resumeData: { approved: false } });
+    } finally {
+      cleanup();
+    }
+  });
+});

@@ -2,6 +2,33 @@ import { GraphError } from "./graph.js";
 import type { LoadedPipeline, StepDef } from "./types.js";
 
 /**
+ * Rewrites `{{name}}` placeholders in a prompt string at expansion time:
+ *
+ * - Pipeline inputs present in `withMapping` → replaced by the mapped parent key.
+ * - Pipeline inputs NOT in `withMapping` → left unchanged (validated later by load.ts).
+ * - Sibling step ids (that are not pipeline inputs) → namespaced to
+ *   `{{nestingStepId.name}}`.
+ * - Anything else → left unchanged.
+ */
+function rewritePromptPlaceholders(
+  promptText: string,
+  siblingIds: Set<string>,
+  pipelineInputs: Set<string>,
+  nestingStepId: string,
+  withMapping: Record<string, string>
+): string {
+  return promptText.replace(/\{\{([\w.]+)\}\}/g, (_match, name: string) => {
+    if (pipelineInputs.has(name)) {
+      return name in withMapping ? `{{${withMapping[name]}}}` : _match;
+    }
+    if (siblingIds.has(name)) {
+      return `{{${nestingStepId}.${name}}}`;
+    }
+    return _match;
+  });
+}
+
+/**
  * Expands all `kind: "pipeline"` steps in `loaded` into flat step lists,
  * depth-first, so callers (including bindings) see a plain pipeline with no
  * nesting steps.
@@ -84,6 +111,19 @@ function expand(
     }
 
     const nestedLoaded = resolve(nestedPipelineId);
+
+    // Validate with keys against the nested pipeline's declared inputs before expanding.
+    if (step.with) {
+      const nestedInputSet = new Set(nestedLoaded.def.inputs);
+      for (const key of Object.keys(step.with)) {
+        if (!nestedInputSet.has(key)) {
+          throw new Error(
+            `Step "${step.id}": with key "${key}" is not a declared input of pipeline "${nestedPipelineId}". Declared inputs: ${[...nestedInputSet].join(", ") || "(none)"}`
+          );
+        }
+      }
+    }
+
     const nestedExpanded = expand(
       nestedLoaded,
       resolve,
@@ -92,6 +132,11 @@ function expand(
       depth + 1
     );
     const nestedSteps = nestedExpanded.def.steps;
+
+    // Precompute sets for placeholder rewriting.
+    const siblingIds = new Set(nestedSteps.map((s) => s.id));
+    const pipelineInputs = new Set(nestedExpanded.def.inputs);
+    const withMapping = step.with ?? {};
 
     // Entry steps: those with no declared dependencies inside the nested pipeline.
     // Terminal steps: those no other nested step depends on.
@@ -120,7 +165,7 @@ function expand(
         dependsOn = ns.dependsOn!.map((d) => `${step.id}.${d}`);
       }
 
-      const { id: _id, dependsOn: _dep, pipeline: _pip, ...rest } = ns;
+      const { id: _id, dependsOn: _dep, pipeline: _pip, with: _with, ...rest } = ns;
       rawSteps.push({
         id: namespacedId,
         ...(dependsOn !== undefined ? { dependsOn } : {}),
@@ -128,7 +173,23 @@ function expand(
       });
 
       if (nestedExpanded.prompts[ns.id] !== undefined) {
-        expandedPrompts[namespacedId] = nestedExpanded.prompts[ns.id];
+        expandedPrompts[namespacedId] = rewritePromptPlaceholders(
+          nestedExpanded.prompts[ns.id],
+          siblingIds,
+          pipelineInputs,
+          step.id,
+          withMapping
+        );
+      }
+    }
+
+    // Forward loop bodies from the nested pipeline, namespacing their keys to
+    // match the step ids produced above. A loop step with id `foo` inside
+    // nested pipeline `bar` becomes `bar.foo` in the parent; its body must
+    // follow under the same key so buildLevelsOntoBuilder can find it.
+    if (nestedExpanded.bodies) {
+      for (const [bodyKey, body] of Object.entries(nestedExpanded.bodies)) {
+        bodies[`${step.id}.${bodyKey}`] = body;
       }
     }
   }

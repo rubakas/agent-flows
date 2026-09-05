@@ -57,6 +57,15 @@ export interface StepDef {
    */
   pipeline?: string;
   /**
+   * For `kind: "pipeline"` steps only. Maps each of the nested pipeline's
+   * declared `inputs` to a context key available in the parent pipeline
+   * (a parent input name or an ancestor step id). At load time the nested
+   * prompts' input placeholders are rewritten to the mapped parent key so
+   * the runtime never sees the bare input name. Every key must be a declared
+   * input of the target pipeline; validation fails at load time otherwise.
+   */
+  with?: Record<string, string>;
+  /**
    * For `kind: "loop"` steps only. Maximum number of times the body pipeline
    * may run. Must be a positive integer. Exhausting the budget is not an error.
    */

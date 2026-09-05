@@ -270,3 +270,139 @@ describe("expandNested", () => {
     assert.equal("pipeline" in step ? step.pipeline : undefined, undefined);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Placeholder rewriting and `with` mapping
+// ---------------------------------------------------------------------------
+
+describe("expandNested — prompt placeholder rewriting", () => {
+  it("rewrites sibling step id placeholders to <nestingStepId>.<siblingId> form", () => {
+    const inner = makePipeline(
+      "inner",
+      [
+        { id: "x", kind: "llm", role: "worker" },
+        { id: "y", kind: "llm", role: "worker", dependsOn: ["x"] },
+      ],
+      { x: "prompt x", y: "Depends on x: {{x}}" }
+    );
+    const parent = makePipeline("parent", [{ id: "n", kind: "pipeline", pipeline: "inner" }]);
+
+    const result = expandNested(parent, () => inner);
+    assert.equal(
+      result.prompts["n.y"],
+      "Depends on x: {{n.x}}",
+      "sibling ref {{x}} must be rewritten to {{n.x}}"
+    );
+    assert.equal(result.prompts["n.x"], "prompt x", "prompt with no sibling refs is unchanged");
+  });
+
+  it("does not rewrite input placeholders when no with mapping is provided", () => {
+    const inner: LoadedPipeline = {
+      def: {
+        id: "inner",
+        version: 1,
+        description: "test",
+        inputs: ["req"],
+        steps: [{ id: "s", kind: "llm", role: "worker" }],
+      },
+      prompts: { s: "Request: {{req}}" },
+    };
+    const parent = makePipeline("parent", [{ id: "n", kind: "pipeline", pipeline: "inner" }]);
+
+    const result = expandNested(parent, () => inner);
+    assert.equal(
+      result.prompts["n.s"],
+      "Request: {{req}}",
+      "unmapped input placeholder left unchanged"
+    );
+  });
+
+  it("applies with mapping: rewrites declared input placeholder to the mapped parent key", () => {
+    const inner: LoadedPipeline = {
+      def: {
+        id: "inner",
+        version: 1,
+        description: "test",
+        inputs: ["myInput"],
+        steps: [{ id: "s", kind: "llm", role: "worker" }],
+      },
+      prompts: { s: "Using: {{myInput}}" },
+    };
+    const parent = makePipeline("parent", [
+      { id: "n", kind: "pipeline", pipeline: "inner", with: { myInput: "parentKey" } },
+    ]);
+
+    const result = expandNested(parent, () => inner);
+    assert.equal(
+      result.prompts["n.s"],
+      "Using: {{parentKey}}",
+      "input placeholder {{myInput}} rewritten to {{parentKey}} via with mapping"
+    );
+  });
+
+  it("throws when a with key is not a declared input of the nested pipeline", () => {
+    const inner: LoadedPipeline = {
+      def: {
+        id: "inner",
+        version: 1,
+        description: "test",
+        inputs: ["realInput"],
+        steps: [{ id: "s", kind: "llm", role: "worker" }],
+      },
+      prompts: { s: "prompt" },
+    };
+    const parent = makePipeline("parent", [
+      { id: "n", kind: "pipeline", pipeline: "inner", with: { notAnInput: "val" } },
+    ]);
+
+    assert.throws(
+      () => expandNested(parent, () => inner),
+      (err: unknown) => {
+        assert.ok(err instanceof Error, "should throw an Error");
+        assert.ok(
+          err.message.includes("notAnInput"),
+          `message should name the bad key; got: ${String(err)}`
+        );
+        assert.ok(
+          err.message.toLowerCase().includes("not a declared input"),
+          `message should say it is not a declared input; got: ${String(err)}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("rewrites a namespaced sibling ref produced by a deeper nesting level", () => {
+    // inner nests inner2 as step "sub"; inner2 has step "leaf"
+    // After expanding inner2 inside inner: step "sub.leaf" with prompt that got sibling-rewritten.
+    // When inner is then expanded in parent as "n", sub.leaf becomes n.sub.leaf
+    // and any {{sub.leaf}} placeholder in inner must be rewritten to {{n.sub.leaf}}.
+    const inner2 = makePipeline("inner2", [{ id: "leaf", kind: "llm", role: "worker" }], {
+      leaf: "leaf prompt",
+    });
+    const inner = makePipeline(
+      "inner",
+      [
+        { id: "sub", kind: "pipeline", pipeline: "inner2" },
+        { id: "after", kind: "llm", role: "worker", dependsOn: ["sub"] },
+      ],
+      { after: "After leaf: {{sub.leaf}}" }
+    );
+    const parent = makePipeline("parent", [{ id: "n", kind: "pipeline", pipeline: "inner" }]);
+
+    const resolve = (id: string): LoadedPipeline => {
+      if (id === "inner") return inner;
+      if (id === "inner2") return inner2;
+      throw new Error(`unexpected: ${id}`);
+    };
+
+    const result = expandNested(parent, resolve);
+    // "after" step in inner becomes "n.after" in parent
+    // "sub.leaf" sibling ref should be rewritten first at inner level → "{{sub.leaf}}" → "{{n.sub.leaf}}"
+    assert.equal(
+      result.prompts["n.after"],
+      "After leaf: {{n.sub.leaf}}",
+      "two-level sibling ref rewritten through both nesting levels"
+    );
+  });
+});
