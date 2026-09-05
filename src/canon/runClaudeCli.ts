@@ -18,7 +18,7 @@ export interface RunCliResult {
   durationMs: number;
 }
 
-const SCRUBBED_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LITELLM_VIRTUAL_KEY"];
+export const SCRUBBED_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LITELLM_VIRTUAL_KEY"];
 
 export function runClaudeCli(
   prompt: string,
