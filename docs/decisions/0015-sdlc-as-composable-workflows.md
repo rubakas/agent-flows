@@ -63,29 +63,36 @@ These four principles fall directly from the surveyed primary sources (see
 
 ## Consequences
 
-**Until four canon primitives are implemented, the library is design, not product. Only `plan` is
-runnable today.** The obstacles and their rationale:
+**The library is runnable.** Two canon primitives are implemented, one obstacle is resolved, and two
+labeled "primitives" are not:
 
-1. **Self-nesting execution is the linchpin.** ADR-0012 decision 2 declares the ontology — a future
-   step `kind` that references another pipeline id — but no binding executes it. Without it, there
-   is no composition, only separate files. Blocker: `src/canon/runStep.ts` and each binding need
-   execution support.
+1. **Self-nesting execution — implemented.** Load-time expansion (commit `1ea9c5b`, `src/canon/nest.ts`)
+   splices `kind: "pipeline"` steps into the parent step list with namespaced ids and rewired `dependsOn`
+   edges. No binding changes required.
 
-2. **Bounded-loop construct does not exist.** The canon is deliberately acyclic (ADR-0014). `build`'s
-   test→audit→correct loop cannot be expressed today without a graph cycle. Requires an explicit
-   bounded-retry step kind with a max-iteration cap and a pass/fail termination signal — not general
-   graph cycles.
+2. **Bounded-loop construct — implemented.** `kind: "loop"` with `maxIterations` and `until` (commit
+   `d872114`) executes via Mastra's `.dountil()` as a child workflow. Body expansion is deferred to
+   runtime (not load-time) to preserve the loop boundary.
 
-3. **`workspace: write` is not implemented.** Only `workspace: read` exists in
-   `src/canon/runStep.ts`. Bindings need to support agent execution with repo write permissions.
+3. **Single-gate limit — resolved.** `RunService` (commit `256aed3`) was hardcoding the approve step
+   name; self-nesting exposed the bug. Multiple gates per run are now supported.
 
-4. **A `check` / `command` step kind does not exist.** `test` is not an `llm` step; it is a
-   structured step that runs a shell command and yields pass/fail. The canon has no such kind.
+4. **`workspace: write` — not a new primitive.** It is one line: widen `extraArgs` in
+   `src/canon/runStep.ts` from `"Read,Glob"` to `"Read,Glob,Edit,Write"`, and change the
+   `workspace?:` type in `src/canon/types.ts` to `"read" | "write"`. Directory plumbing and
+   permission handling already support both modes (see `docs/research/2026-09-05-existing-capabilities-vs-new-primitives.md` Question 1).
 
-**Existing `spec-creation` pipeline is the proof.** The migration from `phase:` to `dependsOn:` edges
-(ADR-0014) is already done; its executed shape (intake fan-out, `critic` and `security` in parallel
-converging on `assemble`) matches the `plan` stage contract above. This verifies the decomposition
-against real behavior, not guesswork.
+**The `check` step kind: justified, not required.** The loop can close today with an `llm` step,
+structured output schema `{passed, output}`, and an `until:` condition — no new kind needed. But the
+research audit shows a trust issue: when Bash denies a command, the model fabricates an exit code to
+satisfy the schema, not report the denial. A loop can converge on a well-formed lie (see
+`docs/research/2026-09-05-existing-capabilities-vs-new-primitives.md` Question 2, TEST C). A `check`
+kind (~15 lines) grounds termination in the actual process exit code, not the model's report.
+Justified on _determinism and trust_, not capability gap.
+
+**Existing workflows validate the decomposition.** The `spec-creation` pipeline instantiates the
+`plan` stage: intake fan-out, critic + security in parallel, assemble, persist. Its execution
+matches the plan stage contract above.
 
 ## Alternatives Rejected
 
