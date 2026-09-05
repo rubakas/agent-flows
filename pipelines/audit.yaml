@@ -1,0 +1,21 @@
+id: audit
+version: 1
+description: Adversarial read-only review of a plan; fans out to correctness and security then converges
+inputs:
+  - plan
+steps:
+  - id: correctness
+    kind: llm
+    role: reasoner
+    workspace: read
+    prompt: prompts/audit-correctness.md
+  - id: security
+    kind: llm
+    role: reasoner
+    workspace: read
+    prompt: prompts/audit-security.md
+  - id: synthesis
+    kind: llm
+    role: reasoner
+    dependsOn: [correctness, security]
+    prompt: prompts/audit-synthesis.md

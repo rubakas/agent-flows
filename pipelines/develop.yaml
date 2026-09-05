@@ -1,0 +1,11 @@
+id: develop
+version: 1
+description: Execute an approved implementation plan by writing code and tests
+inputs:
+  - plan
+steps:
+  - id: implement
+    kind: llm
+    role: worker
+    workspace: write
+    prompt: prompts/develop-implement.md

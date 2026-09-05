@@ -1,0 +1,16 @@
+id: investigate
+version: 1
+description: Read the real repo and surface what matters before any code is written
+inputs:
+  - request
+steps:
+  - id: survey
+    kind: llm
+    role: scout
+    workspace: read
+    prompt: prompts/investigate-survey.md
+  - id: findings
+    kind: llm
+    role: reasoner
+    dependsOn: [survey]
+    prompt: prompts/investigate-findings.md

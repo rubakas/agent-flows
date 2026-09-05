@@ -1,0 +1,10 @@
+id: test
+version: 1
+description: Run the project test suite and emit a pass/fail result
+inputs: []
+steps:
+  - id: run
+    kind: check
+    # Command is fixed to this repo's test runner.
+    # Parameterising it per-project is future work.
+    command: pnpm test
