@@ -9,6 +9,21 @@ import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 
 const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
 
+/** Fields that are illegal on every non-llm step kind. */
+const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "workspace"] as const;
+
+/** Runs pipelineLevels and re-throws GraphError as a plain Error (preserving the message). */
+function assertLevels(steps: PipelineDef["steps"]): void {
+  try {
+    pipelineLevels(steps);
+  } catch (err) {
+    if (err instanceof GraphError) {
+      throw new Error(err.message, { cause: err });
+    }
+    throw err;
+  }
+}
+
 /** Thrown when a prompt path fails the containment check. Distinct from fs errors. */
 class PromptPathError extends Error {
   constructor(message: string) {
@@ -41,92 +56,49 @@ export function loadPipeline(
 
   // When any step uses dependsOn, validate the full graph via the shared module.
   const hasDependsOn = def.steps.some((s) => s.dependsOn !== undefined);
-  if (hasDependsOn) {
-    try {
-      pipelineLevels(def.steps);
-    } catch (err) {
-      if (err instanceof GraphError) {
-        throw new Error(err.message, { cause: err });
-      }
-      throw err;
-    }
-  }
+  if (hasDependsOn) assertLevels(def.steps);
 
   const prompts: Record<string, string> = {};
 
   for (const step of def.steps) {
-    if (step.kind === "pipeline") {
-      if (!step.pipeline) {
-        throw new Error(`Step "${step.id}": pipeline step requires pipeline`);
-      }
-      if (step.prompt !== undefined) {
-        throw new Error(`Step "${step.id}": pipeline step cannot set prompt`);
+    if (step.kind === "pipeline" || step.kind === "loop" || step.kind === "check") {
+      for (const field of NON_LLM_FORBIDDEN) {
+        if ((step as Record<string, unknown>)[field] !== undefined) {
+          throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
+        }
       }
       if (step.role !== undefined) {
         throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
       }
-      if (step.model !== undefined) {
-        throw new Error(`Step "${step.id}": pipeline step cannot set model`);
-      }
-      if (step.schema !== undefined) {
-        throw new Error(`Step "${step.id}": pipeline step cannot set schema`);
-      }
-      if (step.workspace !== undefined) {
-        throw new Error(`Step "${step.id}": pipeline step cannot set workspace`);
-      }
-      continue;
-    }
 
-    if (step.kind === "loop") {
-      if (!step.pipeline) {
-        throw new Error(`Step "${step.id}": loop step requires pipeline`);
+      if (step.kind === "pipeline") {
+        if (!step.pipeline) {
+          throw new Error(`Step "${step.id}": pipeline step requires pipeline`);
+        }
+        continue;
       }
-      if (!step.maxIterations || !Number.isInteger(step.maxIterations) || step.maxIterations <= 0) {
-        throw new Error(
-          `Step "${step.id}": loop step requires maxIterations to be a positive integer`
-        );
-      }
-      if (!step.until) {
-        throw new Error(`Step "${step.id}": loop step requires until`);
-      }
-      if (step.prompt !== undefined) {
-        throw new Error(`Step "${step.id}": loop step cannot set prompt`);
-      }
-      if (step.role !== undefined) {
-        throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
-      }
-      if (step.model !== undefined) {
-        throw new Error(`Step "${step.id}": loop step cannot set model`);
-      }
-      if (step.schema !== undefined) {
-        throw new Error(`Step "${step.id}": loop step cannot set schema`);
-      }
-      if (step.workspace !== undefined) {
-        throw new Error(`Step "${step.id}": loop step cannot set workspace`);
-      }
-      continue;
-    }
 
-    if (step.kind === "check") {
-      if (!step.command) {
-        throw new Error(`Step "${step.id}": check step requires command`);
+      if (step.kind === "loop") {
+        if (!step.pipeline) {
+          throw new Error(`Step "${step.id}": loop step requires pipeline`);
+        }
+        if (!step.maxIterations || !Number.isInteger(step.maxIterations) || step.maxIterations <= 0) {
+          throw new Error(
+            `Step "${step.id}": loop step requires maxIterations to be a positive integer`
+          );
+        }
+        if (!step.until) {
+          throw new Error(`Step "${step.id}": loop step requires until`);
+        }
+        continue;
       }
-      if (step.prompt !== undefined) {
-        throw new Error(`Step "${step.id}": check step cannot set prompt`);
+
+      if (step.kind === "check") {
+        if (!step.command) {
+          throw new Error(`Step "${step.id}": check step requires command`);
+        }
+        continue;
       }
-      if (step.role !== undefined) {
-        throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
-      }
-      if (step.model !== undefined) {
-        throw new Error(`Step "${step.id}": check step cannot set model`);
-      }
-      if (step.schema !== undefined) {
-        throw new Error(`Step "${step.id}": check step cannot set schema`);
-      }
-      if (step.workspace !== undefined) {
-        throw new Error(`Step "${step.id}": check step cannot set workspace`);
-      }
-      continue;
     }
 
     if (step.kind === "llm") {
@@ -191,16 +163,7 @@ export function loadPipeline(
 
   // Graph validity is enforced on the expanded result.
   const expandedHasDependsOn = expanded.def.steps.some((s) => s.dependsOn !== undefined);
-  if (expandedHasDependsOn) {
-    try {
-      pipelineLevels(expanded.def.steps);
-    } catch (err) {
-      if (err instanceof GraphError) {
-        throw new Error(err.message, { cause: err });
-      }
-      throw err;
-    }
-  }
+  if (expandedHasDependsOn) assertLevels(expanded.def.steps);
 
   // Validate prompt placeholders against the keys each step can actually see
   // at runtime: pipeline inputs plus transitive ancestor step ids.
