@@ -18,24 +18,41 @@ export type { SpawnFn } from "./runClaudeCli.js";
 export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
 
 /**
- * Glob patterns for files whose contents must never be read or written by a
- * workspace step, even when `permissions.contents` is granted. Applied via
- * `--disallowedTools` on every claude CLI invocation that declares a
- * `contentsAccess`. Glob (listing filenames) is intentionally excluded — a step
- * may discover that a credential file exists; it may not read or overwrite it.
+ * Files a workspace step may never read or write, even when
+ * `permissions.contents` is granted. Applied via `--disallowedTools` on every
+ * claude CLI invocation that declares a `contentsAccess`.
  *
- * NOTE — .env.* variants: glob syntax cannot express "deny .env.production but
- * allow .env.example". Only the exact `.env` filename is denied here. Files like
- * `.env.production` are NOT covered; `.env.example`, `.env.sample`,
- * `.env.template`, and `.env.dist` remain fully readable.
+ * Named files and file types only — deliberately no keyword wildcards. A
+ * pattern like `*token*` reads as thorough but denies ordinary source such as
+ * `tokenizer.ts`, so an investigation silently loses part of the codebase it
+ * was asked to study. A miss here is visible and fixable by adding a line; a
+ * wildcard's damage is invisible.
  *
- * NOTE — keyword patterns (*secret*, *token*, etc.): these match on the full
- * path segment, which may incidentally deny source files whose names contain
- * those words (e.g. `tokenizer.ts`). This is a deliberate conservative tradeoff
- * following the owner's documented list.
+ * Add a line when a project keeps secrets somewhere this does not name.
  */
 export const CREDENTIAL_DENY_PATTERNS: readonly string[] = [
+  // Environment files. Each real variant is named; `.env.example`,
+  // `.env.sample` and `.env.template` are deliberately absent — a template
+  // holds placeholders, and a step needs it to understand configuration.
   "**/.env",
+  "**/.env.production",
+  "**/.env.staging",
+  "**/.env.local",
+  "**/.env.development",
+  "**/.env.test",
+
+  "**/credentials",
+  "**/credentials.production",
+  "**/credentials.staging",
+  "**/credentials.json",
+  "**/credentials.toml",
+  "**/credentials.yaml",
+  "**/secrets.json",
+  "**/secrets.yaml",
+  "**/secrets.yml",
+  "**/service-account*.json",
+
+  // Key material by extension.
   "**/*.key",
   "**/*.pem",
   "**/*.p12",
@@ -43,15 +60,13 @@ export const CREDENTIAL_DENY_PATTERNS: readonly string[] = [
   "**/*.jks",
   "**/*.keystore",
   "**/*.truststore",
-  "**/credentials.*",
-  "**/secrets.*",
-  "**/*-secrets.*",
-  "**/service-account*.json",
-  "**/*secret*",
-  "**/*credential*",
-  "**/*token*",
-  "**/*apikey*",
-  "**/*private-key*",
+
+  // SSH private keys carry no extension, so the rules above miss them —
+  // `id_rsa` is the most common private-key filename on disk.
+  "**/id_rsa*",
+  "**/id_ed25519*",
+  "**/id_ecdsa*",
+  "**/id_dsa*",
 ];
 
 /** Thrown when a step's deadline fires before the transport completes. */
