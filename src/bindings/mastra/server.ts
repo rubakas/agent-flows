@@ -9,13 +9,14 @@ import { createTool } from "@mastra/core/tools";
 import { LibSQLStore } from "@mastra/libsql";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
-import { listPipelines, loadPipeline } from "../../canon/load.js";
 import { defaultRegistry } from "../../canon/registry.js";
 import { makeDb } from "../../db/index.js";
 import { RunService } from "../../runtime/runService.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
 import { mastraDbPath } from "./paths.js";
+import { loadCatalog } from "./pipelineLoader.js";
+import type { PipelineCatalog } from "./pipelineLoader.js";
 import type { MastraLike } from "../../runtime/runService.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -46,23 +47,32 @@ const registry = defaultRegistry();
 // ── Load pipelines ────────────────────────────────────────────────────────────
 
 const pipelinesDir = join(repoRoot, "pipelines");
-const pipelineFiles = listPipelines(pipelinesDir);
 
-const loadedPipelines = pipelineFiles.map((f) => loadPipeline(f));
-const workflows: Record<string, unknown> = {};
-
-for (const loaded of loadedPipelines) {
-  workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store });
+function buildFreshMastra(catalog: PipelineCatalog): Mastra {
+  const workflows: Record<string, unknown> = {};
+  for (const loaded of catalog.loaded) {
+    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store });
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new Mastra({ storage: mastraStorage, workflows: workflows as Record<string, any> });
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mastra = new Mastra({ storage: mastraStorage, workflows: workflows as Record<string, any> });
+// Mutable reference to the current Mastra instance; rebuilt on each tool call
+// so newly added or edited pipelines are visible without restarting the server.
+let activeMastra = buildFreshMastra(loadCatalog(pipelinesDir));
+
+// Proxy so RunService always delegates to the latest activeMastra.
+// Suspended runs keep their original run objects tied to the Mastra that
+// created them; only new starts use the refreshed instance.
+const mastraProxy = {
+  getWorkflow: (id: string) => activeMastra.getWorkflow(id),
+} as unknown as MastraLike;
 
 // ── Run ownership ──────────────────────────────────────────────────────────────
 // RunService owns run state so that MCP, HTTP and the web editor all share
 // the same runs. The public run id is Mastra's own run id (FR-011).
 
-const runService = new RunService(mastra as unknown as MastraLike);
+const runService = new RunService(mastraProxy);
 
 // ── MCP custom tools ──────────────────────────────────────────────────────────
 
@@ -71,12 +81,15 @@ const listPipelinesTool = createTool({
   description: "List all loaded pipelines with their IDs and descriptions.",
   inputSchema: z.object({}),
   execute: async () => {
+    const catalog = loadCatalog(pipelinesDir);
+    activeMastra = buildFreshMastra(catalog);
     return {
-      pipelines: loadedPipelines.map((p) => ({
+      pipelines: catalog.loaded.map((p) => ({
         id: p.def.id,
         description: p.def.description,
         inputs: p.def.inputs,
       })),
+      errors: catalog.errors.map((e) => ({ file: e.file, error: e.error })),
     };
   },
 });
@@ -94,6 +107,10 @@ const runPipelineTool = createTool({
       .describe("Optional per-step model overrides (step id → registry model id)"),
   }),
   execute: async (inputData) => {
+    // Reload pipelines from disk before starting the run so newly added
+    // or edited pipelines are visible without restarting the server.
+    activeMastra = buildFreshMastra(loadCatalog(pipelinesDir));
+
     const { pipeline, inputs, models } = inputData;
     if (models) {
       const err = validateModelOverrides(models, registry);
