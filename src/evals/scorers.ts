@@ -150,6 +150,66 @@ export function plantedGapsFound(output: string, expectedGaps: KeyedItem[]): Gap
   return { score, surfaced, missed };
 }
 
+// ── auditDefectsFound ─────────────────────────────────────────────────────────
+
+export interface AuditCheckResult {
+  /** Fraction of planted defects the audit found (0–1). 1.0 when nothing is planted. */
+  recall: number;
+  /** Phrases of planted defects the audit named. */
+  found: string[];
+  /** Phrases of planted defects the audit missed. */
+  missed: string[];
+  /**
+   * Phrases of decoys the audit incorrectly flagged as real defects.
+   * A decoy is code that looks suspicious but is actually fine; any finding
+   * whose keywords all appear in the output counts as a false positive.
+   */
+  falsePositives: string[];
+}
+
+/**
+ * Score an adversarial audit against a known set of planted defects and decoys.
+ *
+ * Recall: fraction of planted defects whose keywords all appear in `output`.
+ * False positives: decoys whose keywords all appear in `output` — the auditor
+ * flagged something that is actually fine.
+ *
+ * Both sides reuse the same KeyedItem keyword-matching convention as the other
+ * scorers: all keywords must appear as case-insensitive substrings anywhere in
+ * the output.  This symmetric treatment keeps the vocabulary consistent.
+ */
+export function auditDefectsFound(
+  output: string,
+  plantedDefects: KeyedItem[],
+  decoys: KeyedItem[]
+): AuditCheckResult {
+  const lower = output.toLowerCase();
+  const found: string[] = [];
+  const missed: string[] = [];
+
+  for (const defect of plantedDefects) {
+    const hit = defect.keywords.every((kw) => lower.includes(kw.toLowerCase()));
+    if (hit) {
+      found.push(defect.phrase);
+    } else {
+      missed.push(defect.phrase);
+    }
+  }
+
+  const total = plantedDefects.length;
+  const recall = total === 0 ? 1 : found.length / total;
+
+  const falsePositives: string[] = [];
+  for (const decoy of decoys) {
+    const hit = decoy.keywords.every((kw) => lower.includes(kw.toLowerCase()));
+    if (hit) {
+      falsePositives.push(decoy.phrase);
+    }
+  }
+
+  return { recall, found, missed, falsePositives };
+}
+
 // ── existingFunctionalityNamed ────────────────────────────────────────────────
 
 export interface ExistingCheckResult {

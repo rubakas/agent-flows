@@ -3,10 +3,16 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import auditPlantedDefects from "./fixtures/audit-planted-defects.js";
 import bugMissingDetail from "./fixtures/bug-missing-detail.js";
 import featureCollision from "./fixtures/feature-collision.js";
 import { assertReadOnly } from "./safetyGuard.js";
-import { citedPathsExist, existingFunctionalityNamed, plantedGapsFound } from "./scorers.js";
+import {
+  auditDefectsFound,
+  citedPathsExist,
+  existingFunctionalityNamed,
+  plantedGapsFound,
+} from "./scorers.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -418,4 +424,127 @@ describe("feature-collision fixture: gap freshness guard", () => {
         `update the feature-collision fixture expectedGaps to reflect the new open gap`
     );
   });
+});
+
+// ── auditDefectsFound ─────────────────────────────────────────────────────────
+
+describe("auditDefectsFound", () => {
+  const { plantedDefects, decoys } = auditPlantedDefects;
+
+  it("scores recall 1.0 when audit names all planted defects and raises no decoy", () => {
+    // Mentions both planted defect keywords and explicitly says the parseInt path is safe.
+    const goodOutput =
+      "Two issues found in runCheckStep. " +
+      'First: the command fallback order is inverted — context["command"] takes priority and overrides step.command, ' +
+      "so any caller that sets a context key named 'command' silently hijacks the step definition. " +
+      "Second: step.id is interpolated directly into a shell string via execSync; " +
+      "this is a shell injection vector if the YAML source is not fully trusted. " +
+      "The parseInt call with a default is safe and is not a finding.";
+    const r = auditDefectsFound(goodOutput, plantedDefects, decoys);
+    assert.equal(r.recall, 1, `missed defects: ${r.missed.join(", ")}`);
+    assert.deepEqual(r.falsePositives, [], "good audit must produce no false positives");
+    assert.equal(r.found.length, plantedDefects.length);
+    assert.deepEqual(r.missed, []);
+  });
+
+  it("reports all planted defects as missed when audit output is unrelated", () => {
+    const blindOutput =
+      "The step validation logic looks straightforward. No issues found in the execution helper.";
+    const r = auditDefectsFound(blindOutput, plantedDefects, decoys);
+    assert.ok(r.recall < 1, "blind audit must not score full recall");
+    assert.equal(r.missed.length, plantedDefects.length, "all defects must be in missed");
+    assert.equal(r.found.length, 0);
+  });
+
+  it("counts a finding about the decoy as a false positive", () => {
+    // Mentions all planted defect keywords AND raises parseInt/NaN as a concern.
+    const paranoidOutput =
+      "Issues found: " +
+      "1. command fallback is wrong — context overrides step.command. " +
+      "2. step.id is used in a shell command — injection risk. " +
+      "3. parseInt could yield NaN if maxIterations is not a valid integer — this is a risk.";
+    const r = auditDefectsFound(paranoidOutput, plantedDefects, decoys);
+    assert.equal(r.recall, 1, `missed defects: ${r.missed.join(", ")}`);
+    assert.equal(r.falsePositives.length, 1, "decoy must be counted as exactly one false positive");
+    assert.ok(
+      r.falsePositives[0].toLowerCase().includes("parseint"),
+      "false positive phrase must identify the parseInt decoy"
+    );
+  });
+
+  it("scores recall 1.0 when no defects are planted (vacuously correct)", () => {
+    const r = auditDefectsFound("any audit output", [], []);
+    assert.equal(r.recall, 1);
+    assert.deepEqual(r.falsePositives, []);
+    assert.deepEqual(r.found, []);
+    assert.deepEqual(r.missed, []);
+  });
+
+  it("partial recall when only the correctness defect is found", () => {
+    // Contains command+context+override keywords but not step.id+injection.
+    const partialOutput =
+      "The command fallback order is wrong: context overrides step.command, " +
+      "violating the principle that the step definition should be authoritative.";
+    const r = auditDefectsFound(partialOutput, plantedDefects, decoys);
+    assert.ok(r.recall > 0 && r.recall < 1, "partial recall must be strictly between 0 and 1");
+    assert.equal(r.found.length, 1, "exactly one defect must be found");
+    assert.equal(r.missed.length, plantedDefects.length - 1, "remaining defects must be missed");
+    assert.deepEqual(r.falsePositives, [], "no false positives in partial output");
+  });
+
+  it("no false positive when decoy keywords are absent from the output", () => {
+    const safeOutput =
+      "The command fallback is inverted — context overrides step.command. " +
+      "step.id is shell injection risk.";
+    const r = auditDefectsFound(safeOutput, plantedDefects, decoys);
+    assert.deepEqual(r.falsePositives, [], "output without NaN must not trigger the decoy");
+  });
+
+  it("matching is case-insensitive for both defects and decoys", () => {
+    const upperOutput =
+      "COMMAND from CONTEXT can OVERRIDE STEP.COMMAND. STEP.ID causes shell INJECTION. " +
+      "PARSEINT yields NAN for bad input.";
+    const r = auditDefectsFound(upperOutput, plantedDefects, decoys);
+    assert.equal(r.recall, 1, "uppercase output must still match defect keywords");
+    assert.equal(r.falsePositives.length, 1, "uppercase output must still match decoy keywords");
+  });
+});
+
+// ── audit-planted-defects fixture: anti-rot guard ─────────────────────────────
+
+describe("audit-planted-defects fixture: planted defect keywords present in the diff", () => {
+  const diffLower = auditPlantedDefects.diff.toLowerCase();
+
+  for (const defect of auditPlantedDefects.plantedDefects) {
+    for (const kw of defect.keywords) {
+      it(`defect "${defect.phrase}" keyword "${kw}" is in the diff`, () => {
+        assert.ok(
+          diffLower.includes(kw.toLowerCase()),
+          `keyword "${kw}" must appear in the fixture diff — update the diff or the keyword`
+        );
+      });
+    }
+  }
+
+  for (const decoy of auditPlantedDefects.decoys) {
+    for (const kw of decoy.keywords) {
+      it(`decoy "${decoy.phrase}" keyword "${kw}" is in the diff`, () => {
+        assert.ok(
+          diffLower.includes(kw.toLowerCase()),
+          `decoy keyword "${kw}" must appear in the fixture diff — update the diff or the keyword`
+        );
+      });
+    }
+  }
+});
+
+describe("audit-planted-defects fixture: answer-key paths all exist on disk", () => {
+  for (const p of auditPlantedDefects.expectedPaths) {
+    it(p, () => {
+      assert.ok(
+        existsSync(join(REPO_ROOT, p)),
+        `answer-key path does not exist: ${p} — update the fixture`
+      );
+    });
+  }
 });
