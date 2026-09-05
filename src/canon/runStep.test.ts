@@ -525,6 +525,44 @@ describe('runLlmStep — workspace: "read"', () => {
   });
 });
 
+// ── codex key scrubbing (Fix 3) ───────────────────────────────────────────────
+
+describe("runLlmStep — codex key isolation", () => {
+  it("codex: SCRUBBED_KEYS are absent from the env passed to spawn", async () => {
+    const codexEntry: ModelEntry = {
+      id: "codex-scrub-test",
+      transport: "cli",
+      cli: { bin: "codex", model: "o4-mini" },
+    };
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const spawn = ((_cmd: string, _args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
+      capturedEnv = opts.env;
+      const { child } = makeFakeChild({ stdoutChunks: [makeCodexJsonlOutput("ok")] });
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(codexEntry, "hello", {
+      spawn,
+      env: {
+        PATH: "/usr/bin",
+        ANTHROPIC_API_KEY: "sk-ant-secret",
+        OPENAI_API_KEY: "sk-openai-secret",
+        LITELLM_VIRTUAL_KEY: "vk-secret",
+      },
+    });
+
+    assert.ok(capturedEnv !== undefined, "spawn must have been called");
+    assert.equal(capturedEnv.ANTHROPIC_API_KEY, undefined, "ANTHROPIC_API_KEY must be scrubbed");
+    assert.equal(capturedEnv.OPENAI_API_KEY, undefined, "OPENAI_API_KEY must be scrubbed");
+    assert.equal(
+      capturedEnv.LITELLM_VIRTUAL_KEY,
+      undefined,
+      "LITELLM_VIRTUAL_KEY must be scrubbed"
+    );
+    assert.equal(capturedEnv.PATH, "/usr/bin", "non-scrubbed keys must be preserved");
+  });
+});
+
 // ── runCheckStep — real execution ─────────────────────────────────────────────
 
 describe("runCheckStep — real execution", () => {

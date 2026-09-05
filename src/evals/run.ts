@@ -25,9 +25,9 @@ import { loadPipeline } from "../canon/load.js";
 import { defaultRegistry, getProfile } from "../canon/registry.js";
 import { makeDb } from "../db/index.js";
 import { DrizzleTicketStore } from "../store/sqlite.js";
+import { assertReadOnly } from "./safetyGuard.js";
 import { citedPathsExist, existingFunctionalityNamed, plantedGapsFound } from "./scorers.js";
 import type { KeyedItem } from "./scorers.js";
-import type { PipelineDef } from "../canon/types.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -65,25 +65,6 @@ if (!fixtureName || !(KNOWN_FIXTURES as readonly string[]).includes(fixtureName)
   console.error(`Usage: tsx src/evals/run.ts <fixture>`);
   console.error(`Available fixtures: ${KNOWN_FIXTURES.join(", ")}`);
   process.exit(1);
-}
-
-// ── Safety guard ──────────────────────────────────────────────────────────────
-
-function assertReadOnly(def: PipelineDef): void {
-  for (const step of def.steps) {
-    if (step.workspace === "write") {
-      throw new Error(
-        `SAFETY: step "${step.id}" declares workspace:write — ` +
-          `refusing to run (this pipeline may modify repo files)`
-      );
-    }
-    if (step.kind === "check") {
-      throw new Error(
-        `SAFETY: step "${step.id}" has kind:check — ` +
-          `refusing to run (check steps execute arbitrary shell commands)`
-      );
-    }
-  }
 }
 
 // ── Error extraction (mirrors smoke.ts) ──────────────────────────────────────
@@ -134,8 +115,8 @@ for (const p of fixture.expectedPaths) {
 const investigatePath = join(pipelinesDir, "investigate.yaml");
 const loaded = loadPipeline(investigatePath);
 
-// Safety guard: refuse pipelines with any writing or shell-exec steps.
-assertReadOnly(loaded.def);
+// Safety guard: refuse pipelines with any writing or shell-exec steps (including loop bodies).
+assertReadOnly(loaded);
 
 const llmStepCount = loaded.def.steps.filter((s) => s.kind === "llm").length;
 console.log(

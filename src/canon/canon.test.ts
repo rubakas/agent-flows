@@ -494,6 +494,35 @@ steps:
     assert.equal(def.steps[0].workspace, "write");
   });
 
+  it("rejects workspace: read on a gate step (workspace is only allowed on llm steps)", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: g1
+    kind: gate
+    message: Approve?
+    workspace: read
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("g1"), `error must name step id "g1"; got: ${err.message}`);
+        assert.ok(
+          err.message.toLowerCase().includes("workspace"),
+          `error must mention workspace; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
   it("loads a pipeline with two gates without throwing", () => {
     const yaml = `
 id: test

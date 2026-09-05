@@ -357,6 +357,78 @@ describe("buildPipelineWorkflow — JSON retry", () => {
   });
 });
 
+// ── schema retry preserves assembled runnerDeps (Fix 1) ──────────────────────
+
+describe("buildPipelineWorkflow — schema retry preserves runnerDeps", () => {
+  it("retry call receives assembled runnerDeps including workspaceAccess and workspaceDir", async () => {
+    const capturedDeps: StepRunnerDeps[] = [];
+    let criticCalls = 0;
+
+    const retryRunner: typeof runLlmStep = async (entry, _prompt, deps) => {
+      if (entry.id === "critic") {
+        capturedDeps.push({ ...deps });
+        criticCalls++;
+        if (criticCalls === 1) {
+          // First attempt: not JSON — triggers retry.
+          return "not json at all";
+        }
+        // Second attempt (retry): valid JSON.
+        return CRITIC_JSON;
+      }
+      return CANNED_RESPONSES[entry.id] ?? INTAKE_MD;
+    };
+
+    // Use the critic step with workspace: "read" so the assembled runnerDeps includes
+    // workspaceAccess and workspaceDir. The bug was that deps.runnerDeps ?? {} dropped them.
+    const pipeline: LoadedPipeline = {
+      ...CANNED_PIPELINE,
+      def: {
+        ...CANNED_PIPELINE.def,
+        steps: CANNED_PIPELINE.def.steps.map((s) =>
+          s.id === "critic" ? { ...s, workspace: "read" as const } : s
+        ),
+      },
+    };
+
+    const { storage, store, cleanup } = makeTestFixture("retry-deps");
+    try {
+      const wf = buildPipelineWorkflow(pipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: retryRunner,
+        cwd: "/tmp",
+      });
+
+      const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(pipeline.def.id);
+      const run = await mastraWf.createRun();
+      await run.start({ inputData: { request: "Test workspace retry" } });
+
+      assert.equal(criticCalls, 2, "runner should be called twice for critic (first + retry)");
+      assert.equal(capturedDeps.length, 2, "should have captured deps for both calls");
+
+      // Both calls must carry workspaceAccess from the assembled runnerDeps.
+      assert.equal(
+        capturedDeps[0]?.workspaceAccess,
+        "read",
+        "first call must have workspaceAccess: read"
+      );
+      assert.equal(
+        capturedDeps[1]?.workspaceAccess,
+        "read",
+        "retry call must have workspaceAccess: read (was dropped before fix)"
+      );
+      assert.equal(
+        capturedDeps[1]?.workspaceDir,
+        "/tmp",
+        "retry call must have workspaceDir (was dropped before fix)"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("validateModelOverrides", () => {
   const reg = new ModelRegistry([
     { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "sonnet" } },

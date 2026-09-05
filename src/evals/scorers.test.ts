@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import bugMissingDetail from "./fixtures/bug-missing-detail.js";
 import featureCollision from "./fixtures/feature-collision.js";
+import { assertReadOnly } from "./safetyGuard.js";
 import { citedPathsExist, existingFunctionalityNamed, plantedGapsFound } from "./scorers.js";
+import type { LoadedPipeline } from "../canon/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -229,7 +231,7 @@ describe("feature-collision fixture: correct investigation passes all scorers", 
     The codebase already implements nested pipeline support.
     \`src/canon/nest.ts\` exports \`expandNested\` which splices pipeline steps at load time.
     \`src/canon/types.ts\` defines StepKind which includes "pipeline".
-    Gap: workspace and write access are not yet implemented in runStep.
+    Gap: Binding A (claudeCode.ts) does not execute loop steps — generateWorkflowScript emits a stub comment.
   `;
 
   it("citedPathsExist: no invented paths", () => {
@@ -305,5 +307,115 @@ describe("bug-missing-detail fixture: shallow investigation fails scorers", () =
   it("plantedGapsFound: specific gaps not surfaced", () => {
     const r = plantedGapsFound(shallowOutput, bugMissingDetail.expectedGaps);
     assert.ok(r.score < 1, "vague output must not surface all planted gaps");
+  });
+});
+
+// ── assertReadOnly: loop body safety guard (Fix 4) ────────────────────────────
+
+describe("assertReadOnly: loop body safety check", () => {
+  function makeLoopPipeline(bodyStepKind: string): LoadedPipeline {
+    const body: LoadedPipeline = {
+      def: {
+        id: "body-pipeline",
+        version: 1,
+        description: "loop body",
+        inputs: [],
+        steps: [
+          {
+            id: "dangerous-step",
+            kind: bodyStepKind as "check",
+            command: "rm -rf /",
+          },
+        ],
+      },
+      prompts: {},
+    };
+    return {
+      def: {
+        id: "outer-pipeline",
+        version: 1,
+        description: "outer",
+        inputs: ["request"],
+        steps: [
+          {
+            id: "myloop",
+            kind: "loop",
+            pipeline: "body-pipeline",
+            maxIterations: 3,
+            until: "done",
+          },
+        ],
+      },
+      prompts: {},
+      bodies: { myloop: body },
+    };
+  }
+
+  it("refuses a loop body containing a check step", () => {
+    const loaded = makeLoopPipeline("check");
+    assert.throws(
+      () => assertReadOnly(loaded),
+      (err: Error) => {
+        assert.ok(
+          err.message.includes("dangerous-step") || err.message.includes("check"),
+          `error must identify the dangerous step; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("accepts a loop body with only llm steps", () => {
+    const body: LoadedPipeline = {
+      def: {
+        id: "body-pipeline",
+        version: 1,
+        description: "loop body",
+        inputs: [],
+        steps: [
+          {
+            id: "safe-step",
+            kind: "llm",
+            role: "worker",
+            prompt: "prompts/safe.md",
+          },
+        ],
+      },
+      prompts: { "safe-step": "do safe work" },
+    };
+    const loaded: LoadedPipeline = {
+      def: {
+        id: "outer-pipeline",
+        version: 1,
+        description: "outer",
+        inputs: ["request"],
+        steps: [
+          {
+            id: "myloop",
+            kind: "loop",
+            pipeline: "body-pipeline",
+            maxIterations: 3,
+            until: "done",
+          },
+        ],
+      },
+      prompts: {},
+      bodies: { myloop: body },
+    };
+    assert.doesNotThrow(() => assertReadOnly(loaded));
+  });
+});
+
+// ── feature-collision fixture: gap freshness anti-rot guard (Fix 5) ──────────
+
+describe("feature-collision fixture: gap freshness guard", () => {
+  it("Binding A loop stub still present in claudeCode.ts — if this fails, the gap is implemented and the fixture must be updated", () => {
+    const claudeCodePath = join(REPO_ROOT, "src/bindings/claudeCode.ts");
+    const source = readFileSync(claudeCodePath, "utf8");
+    assert.ok(
+      source.includes("Binding A does not implement the loop"),
+      `The loop stub was removed from src/bindings/claudeCode.ts — ` +
+        `update the feature-collision fixture expectedGaps to reflect the new open gap`
+    );
   });
 });

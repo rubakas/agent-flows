@@ -39,9 +39,10 @@ const fixture: EvalFixture = {
   expectedGaps: [
     {
       phrase:
-        "workspace:write is not yet wired into runStep — nested write-access steps are blocked",
-      // The investigation must call out the workspace:write gap explicitly.
-      keywords: ["workspace", "write"],
+        "Binding A (claudeCode.ts) does not execute loop steps — generateWorkflowScript emits a stub comment instead of running the body",
+      // The investigation must cite Binding A (claudeCode.ts) AND the loop step gap.
+      // These keywords require the specific claim, not just two common words.
+      keywords: ["Binding A", "loop"],
     },
   ],
 

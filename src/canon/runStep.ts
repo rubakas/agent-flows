@@ -105,6 +105,15 @@ function createDeadline(timeoutMs: number, parentSignal?: AbortSignal): Deadline
   return { signal: controller.signal, cancel, timeoutMs };
 }
 
+// ── Shared env-scrubbing helper ───────────────────────────────────────────────
+
+/** Returns a shallow copy of `rawEnv` with all SCRUBBED_KEYS removed. */
+function scrubEnv(rawEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...rawEnv };
+  for (const key of SCRUBBED_KEYS) delete env[key];
+  return env;
+}
+
 // ── codex exec JSON event shape ───────────────────────────────────────────────
 
 interface CodexItemCompleted {
@@ -203,7 +212,7 @@ function runCodexCli(
   cwd?: string
 ): Promise<string> {
   const spawnFn = deps.spawn ?? defaultSpawn;
-  const env = deps.env ?? process.env;
+  const env = scrubEnv(deps.env ?? process.env);
 
   const args = [
     "exec",
@@ -294,9 +303,7 @@ export async function runCheckStep(
   }
 
   const spawnFn = deps.spawn ?? defaultSpawn;
-  const rawEnv = deps.env ?? process.env;
-  const env: NodeJS.ProcessEnv = { ...rawEnv };
-  for (const key of SCRUBBED_KEYS) delete env[key];
+  const env = scrubEnv(deps.env ?? process.env);
 
   const cwd = deps.cwd ?? process.cwd();
 

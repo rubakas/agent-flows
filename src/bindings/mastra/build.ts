@@ -190,7 +190,7 @@ function buildLlmStep(
           const retryPrompt =
             `${prompt}\n\nYour previous output was not valid JSON (${r1.error}).` +
             ` Return ONLY the JSON object.`;
-          const retryRaw = await runner(entry, retryPrompt, deps.runnerDeps ?? {});
+          const retryRaw = await runner(entry, retryPrompt, runnerDeps);
           const r2 = tryParseSchemaOutput(retryRaw, step.schema);
           if (!r2.ok) {
             throw new Error(`Step "${step.id}": ${r2.error}`);

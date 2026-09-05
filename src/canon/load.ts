@@ -61,7 +61,14 @@ export function loadPipeline(
   const prompts: Record<string, string> = {};
 
   for (const step of def.steps) {
-    if (step.kind === "pipeline" || step.kind === "loop" || step.kind === "check") {
+    if (
+      step.kind === "pipeline" ||
+      step.kind === "loop" ||
+      step.kind === "check" ||
+      step.kind === "gate" ||
+      step.kind === "assemble-spec" ||
+      step.kind === "persist-ticket"
+    ) {
       for (const field of NON_LLM_FORBIDDEN) {
         if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
           throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
@@ -103,6 +110,9 @@ export function loadPipeline(
         }
         continue;
       }
+
+      // gate / assemble-spec / persist-ticket: validated above; skip llm checks.
+      continue;
     }
 
     if (step.kind === "llm") {
