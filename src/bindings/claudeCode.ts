@@ -171,11 +171,12 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
             const schemaArg = gs.schema
               ? `, schema: ${gs.schema === "weaknesses" ? "WEAK_SCHEMA" : "SEC_SCHEMA"}`
               : "";
+            const skillsArg = gs.skills?.length ? `, skills: ${JSON.stringify(gs.skills)}` : "";
             out.push("  () =>");
             out.push("    agent(");
             out.push("      `" + converted + "`,");
             out.push(
-              `      { label: '${gs.id}', phase: '${phaseTitle}', model: ${modelVar(gs.id)}${schemaArg} },`
+              `      { label: '${gs.id}', phase: '${phaseTitle}', model: ${modelVar(gs.id)}${schemaArg}${skillsArg} },`
             );
             out.push("    ),");
           }
@@ -198,10 +199,11 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
           const step = llmInLevel[0];
           stepVarNames.set(step.id, `r_${step.id}`);
           const converted = convertPromptTemplate(prompts[step.id], inputVars);
+          const skillsArg = step.skills?.length ? `, skills: ${JSON.stringify(step.skills)}` : "";
           out.push(`const r_${step.id} = await agent(`);
           out.push("  `" + converted + "`,");
           out.push(
-            `  { label: '${step.id}', phase: '${phaseTitle}', model: ${modelVar(step.id)} },`
+            `  { label: '${step.id}', phase: '${phaseTitle}', model: ${modelVar(step.id)}${skillsArg} },`
           );
           out.push(")");
           if (isFirstSingleLlm) {

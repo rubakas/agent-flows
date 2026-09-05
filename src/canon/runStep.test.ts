@@ -631,6 +631,159 @@ describe("runLlmStep — codex key isolation", () => {
   });
 });
 
+// ── skills declaration ────────────────────────────────────────────────────────
+
+describe("runLlmStep — skills", () => {
+  const entry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+
+  it("step with no skills emits exactly today's arg list (no --plugin-dir, Skill absent)", async () => {
+    // Regression guard: without skills declared, the argument list must be identical
+    // to what the code produced before the skills feature was added.
+    const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "hello", { spawn });
+
+    assert.ok(!capturedArgs.includes("--plugin-dir"), "must not add --plugin-dir without skills");
+    assert.ok(
+      !capturedArgs.some((a) => a.includes("Skill")),
+      "Skill must not appear in args without skills"
+    );
+    assert.ok(
+      !capturedArgs.includes("--restricted"),
+      "must not add --restricted without skills or permissions"
+    );
+  });
+
+  it("step with skills adds Skill to --tools and --allowedTools and --plugin-dir, no Bash", async () => {
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "use git", {
+      spawn,
+      skills: ["git", "chrome-test"],
+      env: { HOME: "/home/user" },
+    });
+
+    assert.ok(capturedArgs.includes("--restricted"), "must add --restricted for skills");
+    assert.ok(
+      capturedArgs.includes("--strict-mcp-config"),
+      "must add --strict-mcp-config for skills"
+    );
+    assert.ok(capturedArgs.includes("--plugin-dir"), "must add --plugin-dir");
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    const allowedIdx = capturedArgs.indexOf("--allowedTools");
+    assert.ok(toolsIdx !== -1, "must include --tools");
+    assert.ok(allowedIdx !== -1, "must include --allowedTools");
+    assert.equal(capturedArgs[toolsIdx + 1], "Skill", "--tools must be Skill when no permissions");
+    assert.equal(
+      capturedArgs[allowedIdx + 1],
+      "Skill",
+      "--allowedTools must be Skill when no permissions"
+    );
+    const pluginDirIdx = capturedArgs.indexOf("--plugin-dir");
+    assert.equal(
+      capturedArgs[pluginDirIdx + 1],
+      "/home/user/.claude",
+      "--plugin-dir must be $HOME/.claude"
+    );
+    assert.ok(!capturedArgs.includes("Bash"), "Bash must never be granted");
+  });
+
+  it("step with skills and permissions: read appends Skill to Read,Glob", async () => {
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "read and use skill", {
+      spawn,
+      contentsAccess: "read",
+      workspaceDir: repoRoot,
+      skills: ["git"],
+      env: { HOME: "/home/user" },
+    });
+
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    const allowedIdx = capturedArgs.indexOf("--allowedTools");
+    assert.equal(capturedArgs[toolsIdx + 1], "Read,Glob,Skill", "--tools must be Read,Glob,Skill");
+    assert.equal(
+      capturedArgs[allowedIdx + 1],
+      "Read,Glob,Skill",
+      "--allowedTools must be Read,Glob,Skill"
+    );
+    assert.ok(!capturedArgs.includes("Bash"), "Bash must never be granted");
+  });
+
+  it("step with skills and permissions: write appends Skill to Read,Glob,Edit,Write", async () => {
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "write and use skill", {
+      spawn,
+      contentsAccess: "write",
+      workspaceDir: repoRoot,
+      skills: ["git"],
+      env: { HOME: "/home/user" },
+    });
+
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    const allowedIdx = capturedArgs.indexOf("--allowedTools");
+    assert.equal(
+      capturedArgs[toolsIdx + 1],
+      "Read,Glob,Edit,Write,Skill",
+      "--tools must be Read,Glob,Edit,Write,Skill"
+    );
+    assert.equal(
+      capturedArgs[allowedIdx + 1],
+      "Read,Glob,Edit,Write,Skill",
+      "--allowedTools must be Read,Glob,Edit,Write,Skill"
+    );
+    assert.ok(!capturedArgs.includes("Bash"), "Bash must never be granted");
+  });
+
+  it("skills dir resolved from YOKE_SKILLS_DIR env var when set", async () => {
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "use skill", {
+      spawn,
+      skills: ["git"],
+      env: { HOME: "/home/user", YOKE_SKILLS_DIR: "/opt/project/.claude" },
+    });
+
+    const pluginDirIdx = capturedArgs.indexOf("--plugin-dir");
+    assert.ok(pluginDirIdx !== -1, "must include --plugin-dir");
+    assert.equal(
+      capturedArgs[pluginDirIdx + 1],
+      "/opt/project/.claude",
+      "YOKE_SKILLS_DIR must override default"
+    );
+  });
+});
+
 // ── runCheckStep — real execution ─────────────────────────────────────────────
 
 describe("runCheckStep — real execution", () => {

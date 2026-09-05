@@ -271,3 +271,28 @@ describe("generateN8nWorkflow — check step", () => {
     assert.doesNotThrow(() => JSON.stringify(wf));
   });
 });
+
+// ---------------------------------------------------------------------------
+// skills declaration surfaced in node parameters
+// ---------------------------------------------------------------------------
+
+describe("generateN8nWorkflow — skills in node parameters", () => {
+  it("llm node with skills carries the skills array in parameters", () => {
+    const loaded = makeLoaded(
+      [{ id: "coder", kind: "llm", role: "worker", skills: ["git", "chrome-test"] }],
+      { coder: "Write some code" }
+    );
+    const wf = generateN8nWorkflow(loaded);
+    const node = wf.nodes.find((n) => n.name === "coder")!;
+    assert.deepEqual(node.parameters.skills, ["git", "chrome-test"]);
+  });
+
+  it("llm node without skills carries an empty array", () => {
+    const loaded = makeLoaded([{ id: "plain", kind: "llm", role: "worker" }], {
+      plain: "Do something",
+    });
+    const wf = generateN8nWorkflow(loaded);
+    const node = wf.nodes.find((n) => n.name === "plain")!;
+    assert.deepEqual(node.parameters.skills, []);
+  });
+});

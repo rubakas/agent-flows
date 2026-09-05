@@ -10,7 +10,7 @@ import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
 
 /** Fields that are illegal on every non-llm step kind. */
-const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions"] as const;
+const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"] as const;
 
 /** Runs pipelineLevels and re-throws GraphError as a plain Error (preserving the message). */
 function assertLevels(steps: PipelineDef["steps"]): void {
@@ -197,6 +197,17 @@ export function loadPipeline(
           `Step "${step.id}": permissions.contents "${safeValue}" is invalid — ` +
             `must be "read", "write", or "none"`
         );
+      }
+    }
+
+    if (step.skills !== undefined) {
+      if (step.skills.length === 0) {
+        throw new Error(`Step "${step.id}": skills must not be empty`);
+      }
+      for (const skill of step.skills) {
+        if (typeof skill !== "string" || skill.trim() === "") {
+          throw new Error(`Step "${step.id}": skills entries must be non-blank strings`);
+        }
       }
     }
   }

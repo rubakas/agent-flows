@@ -77,6 +77,7 @@ function buildStepNode(step: StepDef, position: [number, number], promptText: st
       model: step.model ?? "",
       contentsAccess: step.permissions?.contents ?? "none",
       workspaceDir: WORKSPACE_DIR_EXPR,
+      skills: step.skills ?? [],
       prompt: promptText,
     });
   }

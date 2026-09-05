@@ -51,6 +51,14 @@ export interface StepRunnerDeps {
    */
   workspaceDir?: string;
   /**
+   * Named Agent Skills to make available to this step's agent. Requires claude CLI
+   * transport. The runtime adds `Skill` to the granted tool set and passes `--plugin-dir`
+   * pointing to the skills directory so the named skills are resolvable under `--restricted`.
+   * Skills grant instructions, not permissions — file access still requires `permissions`.
+   * The directory is read from the `YOKE_SKILLS_DIR` env var; defaults to `$HOME/.claude`.
+   */
+  skills?: string[];
+  /**
    * Restricts the claude CLI to a specific tool set when accessing the repo.
    * Maps from the canon's `permissions.contents` scope value.
    *
@@ -427,7 +435,8 @@ export async function runLlmStep(
 
       if (bin === "claude") {
         const extraArgs: string[] = [];
-        if (resolvedWorkspaceDir !== undefined) {
+        const hasSkills = (deps.skills?.length ?? 0) > 0;
+        if (resolvedWorkspaceDir !== undefined || hasSkills) {
           // --restricted makes the CLI ignore user/project/local settings files and
           // confines file tools to the working directory, so a target repo's own
           // .claude/settings.json cannot widen the granted tool set.
@@ -435,25 +444,30 @@ export async function runLlmStep(
           // target repo — the claude --help text names it as the companion flag for
           // exactly this use case.
           // --tools / --allowedTools narrow the tool set to the declared access level.
+          // Skill is appended when the step declares skills; Bash is never granted.
+          let baseTools: string;
           if (deps.contentsAccess === "read") {
-            extraArgs.push(
-              "--restricted",
-              "--strict-mcp-config",
-              "--tools",
-              "Read,Glob",
-              "--allowedTools",
-              "Read,Glob"
-            );
-          } else {
+            baseTools = "Read,Glob";
+          } else if (deps.contentsAccess === "write") {
             // "write": add Edit and Write; Bash is deliberately excluded.
-            extraArgs.push(
-              "--restricted",
-              "--strict-mcp-config",
-              "--tools",
-              "Read,Glob,Edit,Write",
-              "--allowedTools",
-              "Read,Glob,Edit,Write"
-            );
+            baseTools = "Read,Glob,Edit,Write";
+          } else {
+            // skills-only: no file access declared.
+            baseTools = "";
+          }
+          const toolSet = hasSkills ? (baseTools ? `${baseTools},Skill` : "Skill") : baseTools;
+          extraArgs.push(
+            "--restricted",
+            "--strict-mcp-config",
+            "--tools",
+            toolSet,
+            "--allowedTools",
+            toolSet
+          );
+          if (hasSkills) {
+            const rawEnv = deps.env ?? process.env;
+            const skillsDir = rawEnv.YOKE_SKILLS_DIR ?? `${rawEnv.HOME ?? ""}/.claude`;
+            extraArgs.push("--plugin-dir", skillsDir);
           }
         }
         const result = await runClaudeCli(

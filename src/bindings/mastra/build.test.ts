@@ -1481,3 +1481,49 @@ describe("buildPipelineWorkflow — export-spec in nested namespace reads namesp
     }
   });
 });
+
+// ── skills forwarding ─────────────────────────────────────────────────────────
+
+// This test MUST FAIL without the buildLlmStep skills forwarding change in buildSteps.ts:
+// the runner would receive deps.skills === undefined even when the step declares skills.
+describe("buildPipelineWorkflow — skills forwarding", () => {
+  it("step with skills declaration forwards skills to runner deps", async () => {
+    let capturedSkills: string[] | undefined = undefined;
+    const trackingRunner: typeof runLlmStep = async (entry, _prompt, deps = {}) => {
+      if (entry.id === "intake") capturedSkills = deps.skills;
+      return CANNED_RESPONSES[entry.id] ?? INTAKE_MD;
+    };
+
+    const pipeline: LoadedPipeline = {
+      ...CANNED_PIPELINE,
+      def: {
+        ...CANNED_PIPELINE.def,
+        steps: CANNED_PIPELINE.def.steps.map((s) =>
+          s.id === "intake" ? { ...s, skills: ["git", "chrome-test"] } : s
+        ),
+      },
+    };
+
+    const { storage, store, cleanup } = makeTestFixture("skills-fwd");
+    try {
+      const wf = buildPipelineWorkflow(pipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: trackingRunner,
+      });
+
+      const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(pipeline.def.id);
+      const run = await mastraWf.createRun();
+      await run.start({ inputData: { request: "Test skills forwarding" } });
+
+      assert.deepEqual(
+        capturedSkills,
+        ["git", "chrome-test"],
+        "skills must be forwarded to runner deps — fails without the binding change in buildSteps.ts"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+});

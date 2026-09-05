@@ -157,11 +157,18 @@ export function buildLlmStep(
         }
       }
 
+      // Tell the agent which skills are available and how to invoke them.
+      if (step.skills?.length) {
+        prompt += `\n\nAvailable skills: ${step.skills.join(", ")}. Invoke with /skill-name.`;
+      }
+
       // Thread per-step and pipeline-level timeouts into the runner deps.
       // runLlmStep resolves the effective timeout as: timeoutMs ?? defaultTimeoutMs.
       // The declared permissions travel with them: without it the canon's
       // `permissions.contents: read|write` would be silently dropped and the agent
       // would run with no repo access at all.
+      // skills travel the same way — a canon declaration dropped here is the exact
+      // bug class this project has hit before.
       const contentsValue = step.permissions?.contents;
       const runnerDeps: StepRunnerDeps = {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
@@ -171,6 +178,7 @@ export function buildLlmStep(
               ...(deps.cwd !== undefined ? { workspaceDir: deps.cwd } : {}),
             }
           : {}),
+        ...(step.skills?.length ? { skills: step.skills } : {}),
       };
 
       const raw = await runner(entry, prompt, runnerDeps);

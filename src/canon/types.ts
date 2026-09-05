@@ -35,6 +35,14 @@ export interface StepDef {
   dependsOn?: readonly string[];
   message?: string;
   /**
+   * Named Agent Skills this step may invoke. The field name `skills` is adopted from
+   * Anthropic's documented Agent Skills spec, not invented here. Only allowed on `llm`
+   * steps; the runtime resolves names to installed skills via `--plugin-dir`. Must be a
+   * non-empty array of non-blank strings. The canon does not validate that a named skill
+   * is installed — that is a runtime concern.
+   */
+  skills?: string[];
+  /**
    * Per-step deadline in milliseconds. Overrides the pipeline's `defaultTimeoutMs` and
    * the built-in default. Set to `0` to disable the deadline for this step — useful for
    * long-running steps that must not be killed mid-thought. `null` is not accepted; use `0`.

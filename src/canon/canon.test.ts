@@ -815,6 +815,128 @@ A feature description.
 });
 
 // ---------------------------------------------------------------------------
+// skills field validation
+// ---------------------------------------------------------------------------
+
+describe("loadPipeline — skills field validation", () => {
+  it("rejects skills on a non-llm step (same mechanism as permissions)", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: g1
+    kind: gate
+    message: Approve?
+    skills:
+      - git
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("g1"), `error must name step id; got: ${err.message}`);
+        assert.ok(
+          err.message.toLowerCase().includes("skills"),
+          `error must mention skills; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("rejects an empty skills array on an llm step", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    skills: []
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), `error must name step id; got: ${err.message}`);
+        assert.ok(
+          err.message.toLowerCase().includes("empty") ||
+            err.message.toLowerCase().includes("skills"),
+          `error must mention empty/skills; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("rejects a blank entry in skills", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    skills:
+      - git
+      - "   "
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), `error must name step id; got: ${err.message}`);
+        assert.ok(
+          err.message.toLowerCase().includes("blank") ||
+            err.message.toLowerCase().includes("skills"),
+          `error must mention blank/skills; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("accepts a valid skills array on an llm step and preserves it in the definition", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    skills:
+      - git
+      - chrome-test
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.deepEqual(def.steps[0].skills, ["git", "chrome-test"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // loop step validation
 // ---------------------------------------------------------------------------
 
