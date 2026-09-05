@@ -15,6 +15,7 @@ import {
   type LevelBuilder,
   buildAssembleStep,
   buildCheckStep,
+  buildExportSpecStep,
   buildGateStep,
   buildLlmStep,
   buildLoopStep,
@@ -109,6 +110,8 @@ function buildLevelsOntoBuilder(
         builder = builder.then(outcomeStep);
       } else if (step.kind === "check") {
         builder = builder.then(buildCheckStep(step, deps, def.defaultTimeoutMs));
+      } else if (step.kind === "export-spec") {
+        builder = builder.then(buildExportSpecStep(step.id, step.path!));
       } else {
         // Without this, an unhandled kind contributes no Mastra step and the run
         // silently skips it. `pipeline` steps in particular must already be gone.

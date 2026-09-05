@@ -239,6 +239,8 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
           out.push(`// gate '${step.id}': handled in chat by the orchestrating session`);
         } else if (step.kind === "persist-ticket") {
           out.push("// persist: pipe result.spec into 'pnpm persist'");
+        } else if (step.kind === "export-spec") {
+          out.push(`// export-spec '${step.id}': write spec.md to '${step.path}'`);
         } else if (step.kind === "loop") {
           out.push(
             `// loop '${step.id}': body pipeline '${step.pipeline}', cap ${step.maxIterations} iterations — Binding A does not implement the loop`

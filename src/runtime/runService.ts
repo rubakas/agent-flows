@@ -76,6 +76,10 @@ export interface GetResult {
   pipelineId: string;
   status: "running" | "suspended" | "success" | "failed";
   result?: unknown;
+  /** Present only when status is "suspended" — the pending gate's human-readable prompt. */
+  gateMessage?: string;
+  /** Present only when status is "suspended" — the spec the human is being asked to approve. */
+  spec?: unknown;
 }
 
 // ── Internal record ────────────────────────────────────────────────────────────
@@ -161,12 +165,18 @@ export class RunService {
   get(runId: string): GetResult | undefined {
     const record = this.registry.get(runId);
     if (!record) return undefined;
-    return {
+    const out: GetResult = {
       runId,
       pipelineId: record.pipelineId,
       status: record.status,
       result: record.result,
     };
+    if (record.status === "suspended") {
+      const payload = record.suspendPayload as Record<string, unknown> | undefined;
+      out.gateMessage = (payload?.message as string | undefined) ?? "Approve this spec?";
+      out.spec = payload?.spec;
+    }
+    return out;
   }
 
   /**

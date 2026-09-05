@@ -375,6 +375,72 @@ describe("RunService — payload is read from actual suspended step id, not hard
   });
 });
 
+// ── Tests: get — gate payload (pending gate retrievable from state) ───────────
+
+describe("RunService.get — suspended run carries gate payload for reconnecting clients", () => {
+  it("get() on a suspended run returns gateMessage and spec from the pending gate", async () => {
+    const mockRunId = "gate-payload-run-001";
+    const run = makeMockRun(mockRunId, suspendedResult(mockRunId), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    await service.waitForSettled(startResult.runId);
+
+    const got = service.get(startResult.runId);
+    assert.ok(got !== undefined, "get must find the suspended run");
+    assert.equal(got.status, "suspended");
+    assert.ok(
+      typeof got.gateMessage === "string" && got.gateMessage.length > 0,
+      `gateMessage must be a non-empty string; got ${JSON.stringify(got.gateMessage)}`
+    );
+    assert.ok(
+      got.spec !== undefined && got.spec !== null,
+      `spec must be present; got ${JSON.stringify(got.spec)}`
+    );
+  });
+
+  it("get() on a running run does not carry gateMessage or spec", async () => {
+    let resolveBackground!: (r: Record<string, unknown>) => void;
+    const pendingRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "gate-payload-running-001",
+      watchers: [],
+      start: () =>
+        new Promise<Record<string, unknown>>((resolve) => {
+          resolveBackground = resolve;
+        }),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(pendingRun as unknown as MockRun));
+    const startResult = await service.start("test-pipeline", { request: "test" });
+
+    const got = service.get(startResult.runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.status, "running");
+    assert.equal(got.gateMessage, undefined, "running run must not carry gateMessage");
+    assert.equal(got.spec, undefined, "running run must not carry spec");
+
+    // Resolve background so the run does not dangle.
+    resolveBackground(successResult());
+    await service.waitForSettled(startResult.runId);
+  });
+
+  it("get() on a completed run does not carry gateMessage or spec", async () => {
+    const run = makeMockRun("gate-payload-done-001", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    await service.waitForSettled(startResult.runId);
+
+    const got = service.get(startResult.runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.status, "success");
+    assert.equal(got.gateMessage, undefined, "completed run must not carry gateMessage");
+    assert.equal(got.spec, undefined, "completed run must not carry spec");
+  });
+});
+
 // ── Tests: subscribe ──────────────────────────────────────────────────────────
 
 describe("RunService.subscribe — step events and gate suspension", () => {

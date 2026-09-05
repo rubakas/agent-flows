@@ -35,3 +35,7 @@ steps:
   - id: persist
     kind: persist-ticket
     dependsOn: [approve]
+  - id: export
+    kind: export-spec
+    path: specs/spec-creation
+    dependsOn: [persist]

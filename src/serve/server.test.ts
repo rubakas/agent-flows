@@ -528,3 +528,115 @@ describe("SSE /api/runs/:id/events delivers snapshot first", () => {
     assert.ok(body.error.includes("no-such-run"), "error must name the unknown run id");
   });
 });
+
+// ── GET /api/runs/:id on a suspended run includes gate payload ────────────────
+
+describe("GET /api/runs/:id — suspended run includes gate payload", () => {
+  let srv: ServeHandle;
+  let runId: string;
+
+  before(async () => {
+    const suspendedStart = {
+      status: "suspended",
+      suspended: [["approve"]],
+      steps: {
+        approve: { suspendPayload: { message: "Approve this spec?", spec: { title: "T" } } },
+      },
+    };
+    const mockRun = makeMockRun("get-gate-run-01", suspendedStart, successResult());
+    const service = new RunService(makeMastra(mockRun));
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    runId = startResult.runId;
+    // Wait for the background run to settle at the gate before the test checks state.
+    await service.waitForSettled(runId);
+
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => srv.close());
+
+  it("returns gateMessage and spec when the run is suspended at a gate", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string; gateMessage?: string; spec?: unknown };
+    assert.equal(body.status, "suspended");
+    assert.ok(
+      typeof body.gateMessage === "string" && body.gateMessage.length > 0,
+      `gateMessage must be a non-empty string; got ${JSON.stringify(body.gateMessage)}`
+    );
+    assert.ok(
+      body.spec !== undefined && body.spec !== null,
+      `spec must be present in GET /api/runs/:id response; got ${JSON.stringify(body.spec)}`
+    );
+  });
+});
+
+// ── SSE snapshot carries gate payload for clients connecting after suspension ─
+// This is the bug scenario: a client connects AFTER the gate was raised.
+// The live gate.raised event has already fired; only the snapshot can deliver it.
+
+describe("SSE /api/runs/:id/events — snapshot carries gate payload for late-connecting clients", () => {
+  let srv: ServeHandle;
+  let runId: string;
+
+  before(async () => {
+    const suspendedStart = {
+      status: "suspended",
+      suspended: [["approve"]],
+      steps: {
+        approve: { suspendPayload: { message: "Approve this spec?", spec: { title: "T" } } },
+      },
+    };
+    const mockRun = makeMockRun("sse-gate-run-01", suspendedStart, successResult());
+    const service = new RunService(makeMastra(mockRun));
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    runId = startResult.runId;
+    // Gate fires here — waitForSettled resolves once the run is suspended.
+    // The client will connect AFTER this point, so the live event has already fired.
+    await service.waitForSettled(runId);
+
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => srv.close());
+
+  it("snapshot event for a client connecting after the gate fires includes gateMessage and spec", async () => {
+    // The gate was raised BEFORE this SSE connection is opened — this is the bug.
+    // A client that connects now can only learn the pending gate via the snapshot.
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}/events`);
+    assert.equal(res.status, 200);
+    const reader = res.body!.getReader();
+    const { value, done } = await reader.read();
+    assert.equal(done, false, "stream must not be immediately done");
+    const chunk = new TextDecoder().decode(value);
+    assert.ok(
+      chunk.startsWith("event: snapshot\n"),
+      `first chunk must be the snapshot event; got: ${JSON.stringify(chunk)}`
+    );
+    const dataLine = chunk.split("\n").find((l) => l.startsWith("data: "));
+    assert.ok(dataLine, "snapshot chunk must contain a data: line");
+    const snapshot = JSON.parse(dataLine.slice(6)) as {
+      status: string;
+      gateMessage?: string;
+      spec?: unknown;
+    };
+    assert.equal(snapshot.status, "suspended");
+    assert.ok(
+      typeof snapshot.gateMessage === "string" && snapshot.gateMessage.length > 0,
+      `snapshot.gateMessage must be a non-empty string; got ${JSON.stringify(snapshot.gateMessage)}`
+    );
+    assert.ok(
+      snapshot.spec !== undefined && snapshot.spec !== null,
+      `snapshot.spec must be present; got ${JSON.stringify(snapshot.spec)}`
+    );
+    await reader.cancel();
+  });
+});

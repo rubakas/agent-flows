@@ -103,6 +103,17 @@ function buildStepNode(step: StepDef, position: [number, number], promptText: st
     );
   }
 
+  if (step.kind === "export-spec") {
+    // TODO(binding-c): wire to a yoke node or file-write sub-workflow later
+    return makeNode(
+      step.id,
+      NOOP_TYPE,
+      position,
+      {},
+      `export-spec: writes spec.md to ${step.path}`
+    );
+  }
+
   // assemble-spec | persist-ticket
   // TODO(binding-c): these are yoke-runtime concerns; wire to a yoke node or sub-workflow later
   return makeNode(step.id, NOOP_TYPE, position, {});

@@ -18,7 +18,7 @@ describe("loadPipeline", () => {
   it("loads spec-creation.yaml successfully", () => {
     const { def, prompts } = loadPipeline(pipelinesYaml);
     assert.equal(def.id, "spec-creation");
-    assert.equal(def.steps.length, 7);
+    assert.equal(def.steps.length, 8);
 
     for (const id of ["intake", "enrich", "critic", "security"]) {
       assert.ok(id in prompts, `prompts["${id}"] should be loaded`);
@@ -34,8 +34,16 @@ describe("loadPipeline", () => {
     const levels = pipelineLevels(def.steps);
     assert.deepEqual(
       levels,
-      [["intake"], ["enrich"], ["critic", "security"], ["assemble"], ["approve"], ["persist"]],
-      "pipelineLevels must return the canonical six-level execution order"
+      [
+        ["intake"],
+        ["enrich"],
+        ["critic", "security"],
+        ["assemble"],
+        ["approve"],
+        ["persist"],
+        ["export"],
+      ],
+      "pipelineLevels must return the canonical seven-level execution order"
     );
   });
 
@@ -630,6 +638,86 @@ steps:
     assert.equal(def.steps.length, 2);
     assert.equal(def.steps.filter((s) => s.kind === "gate").length, 2);
   });
+
+  it("loads a valid export-spec step without throwing", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: exp
+    kind: export-spec
+    path: specs/my-feature
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+    });
+    assert.equal(def.steps[0].kind, "export-spec");
+    assert.equal(def.steps[0].path, "specs/my-feature");
+  });
+
+  it("throws when export-spec step is missing path", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: exp
+    kind: export-spec
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("exp"), `error must name the step id; got: ${err.message}`);
+        assert.ok(err.message.includes("path"), `error must mention "path"; got: ${err.message}`);
+        return true;
+      }
+    );
+  });
+
+  for (const forbiddenField of ["prompt", "model", "schema", "permissions", "role"] as const) {
+    it(`throws when export-spec step sets forbidden field "${forbiddenField}"`, () => {
+      const fieldYaml: Record<string, string> = {
+        prompt: "    prompt: prompts/intake.md",
+        model: "    model: sonnet",
+        schema: "    schema: weaknesses",
+        permissions: "    permissions:\n      contents: read",
+        role: "    role: worker",
+      };
+      const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: exp
+    kind: export-spec
+    path: specs/my-feature
+${fieldYaml[forbiddenField]}
+`;
+      assert.throws(
+        () =>
+          loadPipeline("/fake/pipelines/test.yaml", {
+            readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+          }),
+        (err: Error) => {
+          assert.ok(
+            err.message.includes("exp"),
+            `error must name step id for field "${forbiddenField}"; got: ${err.message}`
+          );
+          return true;
+        }
+      );
+    });
+  }
 
   it("loads a dependsOn pipeline that contains an isolated step (no edges in or out)", () => {
     // An isolated step is valid: pipelineLevels places it at level 0 and execution

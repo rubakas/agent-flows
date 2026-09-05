@@ -154,6 +154,7 @@ log(`Assembled: ${spec.requirements.length} requirements, ${spec.acceptanceCrite
 
 // gate 'approve': handled in chat by the orchestrating session
 // persist: pipe result.spec into 'pnpm persist'
+// export-spec 'export': write spec.md to 'specs/spec-creation'
 
 return {
   spec,

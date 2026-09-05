@@ -10,7 +10,8 @@
 // inside the fake runner, letting CANNED_RESPONSES key by step id cleanly.
 
 import assert from "node:assert/strict";
-import { unlinkSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -1248,6 +1249,235 @@ describe("buildPipelineWorkflow — permissions.contents is forwarded to the run
       assert.equal(seen[0].dir, "/tmp/some-project", "build cwd must reach the runner");
     } finally {
       cleanup();
+    }
+  });
+});
+
+// ── export-spec step ──────────────────────────────────────────────────────────
+
+// Pipeline fixture with an export-spec step after persist.
+function makeExportSpecPipeline(outDir: string): LoadedPipeline {
+  return {
+    def: {
+      id: "export-spec-test",
+      version: 1,
+      description: "Test pipeline with export-spec",
+      inputs: ["request"],
+      steps: [
+        { id: "intake", kind: "llm", model: "intake", prompt: "prompts/intake.md" },
+        {
+          id: "enrich",
+          kind: "llm",
+          model: "enrich",
+          prompt: "prompts/enrich.md",
+          dependsOn: ["intake"],
+        },
+        {
+          id: "critic",
+          kind: "llm",
+          model: "critic",
+          prompt: "prompts/critic.md",
+          schema: "weaknesses",
+          dependsOn: ["enrich"],
+        },
+        {
+          id: "security",
+          kind: "llm",
+          model: "security",
+          prompt: "prompts/security.md",
+          schema: "securityFindings",
+          dependsOn: ["enrich"],
+        },
+        { id: "assemble", kind: "assemble-spec", dependsOn: ["critic", "security"] },
+        { id: "approve", kind: "gate", message: "Approve?", dependsOn: ["assemble"] },
+        { id: "persist", kind: "persist-ticket", dependsOn: ["approve"] },
+        { id: "export", kind: "export-spec", path: outDir, dependsOn: ["persist"] },
+      ],
+    },
+    prompts: {
+      intake: "Draft a spec for: {{request}}",
+      enrich: "Enrich the draft:\n{{intake}}",
+      critic: "Critique:\n{{intake}}\n{{enrich}}",
+      security: "Security review:\n{{intake}}\n{{enrich}}",
+    },
+  };
+}
+
+describe("buildPipelineWorkflow — export-spec step writes spec.md", () => {
+  it("approved run writes Spec Kit markdown to the given directory", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "yoke-exportspec-exec-"));
+    const outDir = join(tmp, "spec-out");
+    try {
+      const pipeline = makeExportSpecPipeline(outDir);
+      const { storage, store, cleanup } = makeTestFixture("export-approve");
+      try {
+        const wf = buildPipelineWorkflow(pipeline, {
+          registry: FAKE_REGISTRY,
+          store,
+          runner: makeFakeRunner(CANNED_RESPONSES),
+        });
+
+        const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+        const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+        const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+        assert.equal(r1.status, "suspended", "should suspend at gate");
+
+        const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
+        assert.equal(r2.status, "success", "should succeed after approval");
+
+        // spec.md must exist and contain rendered Spec Kit markdown
+        const specPath = join(outDir, "spec.md");
+        assert.ok(existsSync(specPath), "spec.md must be written to the given directory");
+        const contents = await readFile(specPath, "utf8");
+        assert.ok(
+          contents.includes("# Feature Specification:"),
+          "written file must contain Spec Kit h1 header"
+        );
+        assert.ok(
+          contents.includes("## Requirements"),
+          "written file must contain Requirements section"
+        );
+
+        // Result must report the written path
+        const result = r2.result as Record<string, unknown>;
+        const exportResult = result.export as { path: string } | undefined;
+        assert.ok(exportResult?.path?.endsWith("spec.md"), "result must carry the written path");
+      } finally {
+        cleanup();
+      }
+    } finally {
+      await rm(tmp, { recursive: true });
+    }
+  });
+
+  it("rejected run does not write spec.md", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "yoke-exportspec-reject-"));
+    const outDir = join(tmp, "spec-out");
+    try {
+      const pipeline = makeExportSpecPipeline(outDir);
+      const { storage, store, cleanup } = makeTestFixture("export-reject");
+      try {
+        const wf = buildPipelineWorkflow(pipeline, {
+          registry: FAKE_REGISTRY,
+          store,
+          runner: makeFakeRunner(CANNED_RESPONSES),
+        });
+
+        const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+        const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+        const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+        assert.equal(r1.status, "suspended");
+
+        const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: false } });
+        assert.equal(r2.status, "success");
+
+        assert.ok(!existsSync(join(outDir, "spec.md")), "spec.md must NOT be written on rejection");
+      } finally {
+        cleanup();
+      }
+    } finally {
+      await rm(tmp, { recursive: true });
+    }
+  });
+});
+
+// Regression: namespaced export-spec reads spec from its namespace, not the bare key.
+// This test FAILS against a bare-key implementation (where export step reads ctx["spec"]
+// instead of ctx["plan.spec"]) — which would give undefined and throw.
+describe("buildPipelineWorkflow — export-spec in nested namespace reads namespaced spec key", () => {
+  it("plan.export reads plan.spec, not bare spec, and writes the file", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "yoke-exportspec-ns-"));
+    const outDir = join(tmp, "spec-ns-out");
+    try {
+      const pipeline: LoadedPipeline = {
+        def: {
+          id: "nested-export",
+          version: 1,
+          description: "Regression: export must read namespaced spec key",
+          inputs: ["request"],
+          steps: [
+            { id: "plan.intake", kind: "llm", model: "plan.intake", dependsOn: [] },
+            {
+              id: "plan.enrich",
+              kind: "llm",
+              model: "plan.enrich",
+              dependsOn: ["plan.intake"],
+            },
+            {
+              id: "plan.critic",
+              kind: "llm",
+              model: "plan.critic",
+              schema: "weaknesses",
+              dependsOn: ["plan.enrich"],
+            },
+            {
+              id: "plan.security",
+              kind: "llm",
+              model: "plan.security",
+              schema: "securityFindings",
+              dependsOn: ["plan.enrich"],
+            },
+            {
+              id: "plan.assemble",
+              kind: "assemble-spec",
+              dependsOn: ["plan.critic", "plan.security"],
+            },
+            {
+              id: "plan.approve",
+              kind: "gate",
+              message: "Approve?",
+              dependsOn: ["plan.assemble"],
+            },
+            { id: "plan.persist", kind: "persist-ticket", dependsOn: ["plan.approve"] },
+            { id: "plan.export", kind: "export-spec", path: outDir, dependsOn: ["plan.persist"] },
+          ],
+        },
+        prompts: {
+          "plan.intake": "Draft a spec for: {{request}}",
+          "plan.enrich": "Enrich: {{plan.intake}}",
+          "plan.critic": "Critique: {{plan.intake}} {{plan.enrich}}",
+          "plan.security": "Security: {{plan.intake}} {{plan.enrich}}",
+        },
+      };
+
+      const nsResponses: Record<string, string> = {
+        "plan.intake": INTAKE_MD,
+        "plan.enrich": ENRICH_MD,
+        "plan.critic": CRITIC_JSON,
+        "plan.security": SECURITY_JSON,
+      };
+
+      const { storage, store, cleanup } = makeTestFixture("export-ns");
+      try {
+        const wf = buildPipelineWorkflow(pipeline, {
+          registry: FAKE_REGISTRY,
+          store,
+          runner: makeFakeRunner(nsResponses),
+        });
+
+        const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+        const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+        const r1 = await run.start({ inputData: { request: "NS test" } });
+
+        assert.equal(
+          r1.status,
+          "suspended",
+          "should suspend at plan.approve gate — if it fails here, namespace reading is broken"
+        );
+
+        const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
+        assert.equal(r2.status, "success", "should succeed after approval");
+
+        // File must have been written — proves export read plan.spec, not undefined bare spec
+        assert.ok(
+          existsSync(join(outDir, "spec.md")),
+          "spec.md must be written — proves plan.export read plan.spec (namespaced), not bare spec"
+        );
+      } finally {
+        cleanup();
+      }
+    } finally {
+      await rm(tmp, { recursive: true });
     }
   });
 });

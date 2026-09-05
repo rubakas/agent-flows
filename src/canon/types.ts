@@ -14,7 +14,14 @@ export interface HardenedSpec {
 }
 
 export type StepKind =
-  "llm" | "gate" | "assemble-spec" | "persist-ticket" | "pipeline" | "loop" | "check";
+  | "llm"
+  | "gate"
+  | "assemble-spec"
+  | "persist-ticket"
+  | "export-spec"
+  | "pipeline"
+  | "loop"
+  | "check";
 
 export type Role = "reasoner" | "worker" | "scout";
 
@@ -53,6 +60,13 @@ export interface StepDef {
    * or `permissions`.
    */
   command?: string;
+  /**
+   * For `kind: "export-spec"` steps: the directory path to write the Spec Kit
+   * `spec.md` file into. The directory is created if it does not exist.
+   * Required and non-empty. Cannot be combined with `prompt`, `role`, `model`,
+   * `schema`, or `permissions`.
+   */
+  path?: string;
   /**
    * For `kind: "pipeline"` steps: names the id of the nested pipeline to
    * expand in place of this step at load time.

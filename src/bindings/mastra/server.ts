@@ -142,7 +142,8 @@ const approveTool = createTool({
 
 const getRunTool = createTool({
   id: "get_run",
-  description: "Get the current status and result of a pipeline run.",
+  description:
+    "Get the current status and result of a pipeline run. When the run is suspended at an approval gate, also returns the gate message and spec so the caller can review them before approving.",
   inputSchema: z.object({
     runId: z.string().describe("Run ID returned by run_pipeline"),
   }),
@@ -154,6 +155,8 @@ const getRunTool = createTool({
       pipelineId: got.pipelineId,
       status: got.status,
       result: got.result,
+      gateMessage: got.gateMessage,
+      spec: got.spec,
     };
   },
 });

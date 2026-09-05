@@ -4,6 +4,7 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { assembleSpec } from "../../canon/assemble.js";
+import { writeSpecKitSpec } from "../../canon/exportSpec.js";
 import { persistTicket } from "../../canon/persistTicket.js";
 import { getActiveProfile, resolveStepModel } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
@@ -287,6 +288,29 @@ export function buildPersistStep(stepId: string, store: TicketStore) {
       const spec = ctxData[specKey] as HardenedSpec;
       const { ticketId } = await persistTicket(store, spec);
       return { ...ctxData, [nsKey(stepId, "ticketId")]: ticketId, [approvedKey]: true };
+    },
+  });
+}
+
+export function buildExportSpecStep(stepId: string, outDir: string) {
+  return createStep({
+    id: stepId,
+    inputSchema: ctx,
+    outputSchema: ctx,
+    execute: async ({ inputData }) => {
+      const ctxData = inputData as Ctx;
+      const approvedKey = nsKey(stepId, "approved");
+      const specKey = nsKey(stepId, "spec");
+      if (ctxData[approvedKey] === false) {
+        return { ...ctxData };
+      }
+      const spec = ctxData[specKey] as HardenedSpec;
+      const writtenPath = await writeSpecKitSpec(
+        spec,
+        { input: ctxData.request as string | undefined },
+        outDir
+      );
+      return { ...ctxData, [stepId]: { path: writtenPath } };
     },
   });
 }

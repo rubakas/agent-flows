@@ -182,15 +182,15 @@ describe("generateN8nWorkflow — step kind → node type", () => {
 });
 
 // ---------------------------------------------------------------------------
-// spec-creation.yaml (real pipeline, 7 steps)
+// spec-creation.yaml (real pipeline, 8 steps)
 // ---------------------------------------------------------------------------
 
 describe("generateN8nWorkflow — spec-creation.yaml", () => {
   const loaded = loadPipeline(specCreationYaml);
   const wf = generateN8nWorkflow(loaded);
 
-  it("produces 8 nodes total (trigger + 7 steps)", () => {
-    assert.equal(wf.nodes.length, 8, `expected 8 nodes, got ${wf.nodes.length}`);
+  it("produces 9 nodes total (trigger + 8 steps)", () => {
+    assert.equal(wf.nodes.length, 9, `expected 9 nodes, got ${wf.nodes.length}`);
   });
 
   it("has a manual trigger node", () => {

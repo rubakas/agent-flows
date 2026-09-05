@@ -74,7 +74,8 @@ export function loadPipeline(
       step.kind === "check" ||
       step.kind === "gate" ||
       step.kind === "assemble-spec" ||
-      step.kind === "persist-ticket"
+      step.kind === "persist-ticket" ||
+      step.kind === "export-spec"
     ) {
       for (const field of NON_LLM_FORBIDDEN) {
         if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
@@ -114,6 +115,13 @@ export function loadPipeline(
       if (step.kind === "check") {
         if (!step.command) {
           throw new Error(`Step "${step.id}": check step requires command`);
+        }
+        continue;
+      }
+
+      if (step.kind === "export-spec") {
+        if (!step.path) {
+          throw new Error(`Step "${step.id}": export-spec step requires path`);
         }
         continue;
       }
