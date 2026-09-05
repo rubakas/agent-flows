@@ -678,3 +678,176 @@ describe("mastraDbPath", () => {
     assert.equal(mastraDbPath("/some/path/db.dir/yoke"), "/some/path/db.dir/yoke-mastra.db");
   });
 });
+
+// ── Loop step fixtures ─────────────────────────────────────────────────────────
+
+// Body pipeline: one LLM step "eval" whose output becomes the "until" key.
+const LOOP_BODY_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "build-round",
+    version: 1,
+    description: "Loop body",
+    inputs: ["request"],
+    steps: [{ id: "eval", kind: "llm", model: "eval", prompt: "check prompt" }],
+  },
+  prompts: { eval: "Evaluate: {{request}}" },
+};
+
+// Parent pipeline: one loop step "round" over LOOP_BODY_PIPELINE, until "eval" is truthy.
+const LOOP_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "loop-pipeline",
+    version: 1,
+    description: "Pipeline with a bounded loop",
+    inputs: ["request"],
+    steps: [
+      {
+        id: "round",
+        kind: "loop",
+        pipeline: "build-round",
+        maxIterations: 3,
+        until: "eval",
+      },
+    ],
+  },
+  prompts: {},
+  bodies: { round: LOOP_BODY_PIPELINE },
+};
+
+describe("buildPipelineWorkflow — loop converges before maxIterations", () => {
+  it("runs the expected number of iterations and records converged=true", async () => {
+    const callCounts: Record<string, number> = {};
+    const runner: typeof runLlmStep = async (entry, _prompt) => {
+      callCounts[entry.id] = (callCounts[entry.id] ?? 0) + 1;
+      // "eval" returns truthy on the 2nd call so the loop converges at iteration 2.
+      if (entry.id === "eval") return callCounts.eval >= 2 ? "done" : "";
+      return "";
+    };
+
+    const { storage, store, cleanup } = makeTestFixture("loop-converge");
+    try {
+      const wf = buildPipelineWorkflow(LOOP_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner,
+      });
+
+      const mastra = new Mastra({ storage, workflows: { [LOOP_PIPELINE.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(LOOP_PIPELINE.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: { request: "test" } });
+
+      assert.equal(r1.status, "success", "loop pipeline should succeed");
+      const result = r1.result as Record<string, unknown>;
+      const outcome = result.round as { converged: boolean; iterations: number };
+      assert.equal(outcome.converged, true, "should report converged=true");
+      assert.equal(outcome.iterations, 2, "should report 2 iterations");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("buildPipelineWorkflow — loop exhausts maxIterations without converging", () => {
+  it("stops at maxIterations without throwing and records converged=false", async () => {
+    const runner: typeof runLlmStep = async (_entry, _prompt) => "";
+
+    const { storage, store, cleanup } = makeTestFixture("loop-exhaust");
+    try {
+      const wf = buildPipelineWorkflow(LOOP_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner,
+      });
+
+      const mastra = new Mastra({ storage, workflows: { [LOOP_PIPELINE.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(LOOP_PIPELINE.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: { request: "test" } });
+
+      assert.equal(r1.status, "success", "loop pipeline must succeed even when not converged");
+      const result = r1.result as Record<string, unknown>;
+      const outcome = result.round as { converged: boolean; iterations: number };
+      assert.equal(outcome.converged, false, "should report converged=false");
+      assert.equal(outcome.iterations, 3, "should report 3 iterations (= maxIterations)");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("buildPipelineWorkflow — loop run independence (regression: no closure state leak)", () => {
+  it("two sequential runs on the same built workflow each report their own correct outcome", async () => {
+    // Phase 1 runner: eval returns truthy on the 2nd call so run 1 converges at iteration 2.
+    // Phase 2 runner: eval always returns falsy so run 2 exhausts maxIterations.
+    let phase = 1;
+    let run1EvalCount = 0;
+
+    const runner: typeof runLlmStep = async (entry, _prompt) => {
+      if (entry.id !== "eval") return "";
+      if (phase === 1) {
+        run1EvalCount += 1;
+        return run1EvalCount >= 2 ? "done" : "";
+      }
+      return "";
+    };
+
+    // Build the workflow ONCE; both runs reuse the same artifact.
+    const wf = buildPipelineWorkflow(LOOP_PIPELINE, {
+      registry: FAKE_REGISTRY,
+      store: new DrizzleTicketStore(makeInMemoryDb()),
+      runner,
+    });
+
+    // ── Run 1: should converge at iteration 2 ────────────────────────────────
+    const { storage: s1, store: store1, cleanup: cleanup1 } = makeTestFixture("loop-indep-r1");
+    try {
+      const mastra1 = new Mastra({ storage: s1, workflows: { [LOOP_PIPELINE.def.id]: wf } });
+      const mastraWf1 = mastra1.getWorkflow(LOOP_PIPELINE.def.id);
+      const run1 = await mastraWf1.createRun();
+      const r1 = await run1.start({ inputData: { request: "run-1" } });
+
+      assert.equal(r1.status, "success", "run 1 should succeed");
+      const outcome1 = (r1.result as Record<string, unknown>).round as {
+        converged: boolean;
+        iterations: number;
+      };
+      assert.equal(outcome1.converged, true, "run 1: should report converged=true");
+      assert.equal(outcome1.iterations, 2, "run 1: should report iterations=2");
+    } finally {
+      cleanup1();
+      void store1;
+    }
+
+    // Switch runner to phase 2 (never converges).
+    phase = 2;
+
+    // ── Run 2: should exhaust maxIterations without converging ───────────────
+    const { storage: s2, store: store2, cleanup: cleanup2 } = makeTestFixture("loop-indep-r2");
+    try {
+      const mastra2 = new Mastra({ storage: s2, workflows: { [LOOP_PIPELINE.def.id]: wf } });
+      const mastraWf2 = mastra2.getWorkflow(LOOP_PIPELINE.def.id);
+      const run2 = await mastraWf2.createRun();
+      const r2 = await run2.start({ inputData: { request: "run-2" } });
+
+      assert.equal(r2.status, "success", "run 2 should succeed");
+      const outcome2 = (r2.result as Record<string, unknown>).round as {
+        converged: boolean;
+        iterations: number;
+      };
+      assert.equal(
+        outcome2.converged,
+        false,
+        "run 2: should report converged=false (no closure leak from run 1)"
+      );
+      assert.equal(
+        outcome2.iterations,
+        LOOP_PIPELINE.def.steps[0].maxIterations,
+        "run 2: should report iterations=maxIterations (no closure leak from run 1)"
+      );
+    } finally {
+      cleanup2();
+      void store2;
+    }
+  });
+});

@@ -590,3 +590,129 @@ A feature description.
     assert.equal(spec.securityFindings?.[0].blocking, true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// loop step validation
+// ---------------------------------------------------------------------------
+
+describe("loadPipeline — loop step validation", () => {
+  function makeLoopYaml(overrides: string): string {
+    return `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: converge
+    kind: loop
+${overrides}
+`;
+  }
+
+  it("loads a valid loop step pipeline without throwing", () => {
+    const bodyYaml = `
+id: build-round
+version: 1
+description: body
+inputs:
+  - request
+steps:
+  - id: eval
+    kind: llm
+    role: worker
+    prompt: prompts/eval.md
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => {
+        if (p.endsWith("test.yaml"))
+          return makeLoopYaml("    pipeline: build-round\n    maxIterations: 3\n    until: passed");
+        if (p.endsWith("build-round.yaml")) return bodyYaml;
+        return "prompt content";
+      },
+    });
+    assert.equal(def.steps[0].kind, "loop");
+    assert.equal(def.steps[0].maxIterations, 3);
+    assert.equal(def.steps[0].until, "passed");
+  });
+
+  it("throws when loop step is missing pipeline", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeLoopYaml("    maxIterations: 3\n    until: passed")
+              : "prompt content",
+        }),
+      /converge.*requires pipeline|loop step requires pipeline/
+    );
+  });
+
+  it("throws when loop step is missing maxIterations", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeLoopYaml("    pipeline: build-round\n    until: passed")
+              : "prompt content",
+        }),
+      /maxIterations/
+    );
+  });
+
+  it("throws when loop step has maxIterations of zero", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeLoopYaml("    pipeline: build-round\n    maxIterations: 0\n    until: passed")
+              : "prompt content",
+        }),
+      /maxIterations/
+    );
+  });
+
+  it("throws when loop step has negative maxIterations", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeLoopYaml("    pipeline: build-round\n    maxIterations: -1\n    until: passed")
+              : "prompt content",
+        }),
+      /maxIterations/
+    );
+  });
+
+  it("throws when loop step is missing until", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeLoopYaml("    pipeline: build-round\n    maxIterations: 3")
+              : "prompt content",
+        }),
+      /until/
+    );
+  });
+
+  it("throws when loop step has a forbidden field (prompt)", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeLoopYaml(
+                  "    pipeline: build-round\n    maxIterations: 3\n    until: passed\n    prompt: prompts/x.md"
+                )
+              : "prompt content",
+        }),
+      /prompt/
+    );
+  });
+});

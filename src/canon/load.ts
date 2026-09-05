@@ -76,6 +76,36 @@ export function loadPipeline(
       continue;
     }
 
+    if (step.kind === "loop") {
+      if (!step.pipeline) {
+        throw new Error(`Step "${step.id}": loop step requires pipeline`);
+      }
+      if (!step.maxIterations || !Number.isInteger(step.maxIterations) || step.maxIterations <= 0) {
+        throw new Error(
+          `Step "${step.id}": loop step requires maxIterations to be a positive integer`
+        );
+      }
+      if (!step.until) {
+        throw new Error(`Step "${step.id}": loop step requires until`);
+      }
+      if (step.prompt !== undefined) {
+        throw new Error(`Step "${step.id}": loop step cannot set prompt`);
+      }
+      if (step.role !== undefined) {
+        throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
+      }
+      if (step.model !== undefined) {
+        throw new Error(`Step "${step.id}": loop step cannot set model`);
+      }
+      if (step.schema !== undefined) {
+        throw new Error(`Step "${step.id}": loop step cannot set schema`);
+      }
+      if (step.workspace !== undefined) {
+        throw new Error(`Step "${step.id}": loop step cannot set workspace`);
+      }
+      continue;
+    }
+
     if (step.kind === "llm") {
       if (!step.role && !step.model) {
         throw new Error(`Step "${step.id}": llm step requires role or model`);

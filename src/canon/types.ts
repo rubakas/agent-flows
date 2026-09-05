@@ -13,7 +13,7 @@ export interface HardenedSpec {
   securityFindings?: Finding[];
 }
 
-export type StepKind = "llm" | "gate" | "assemble-spec" | "persist-ticket" | "pipeline";
+export type StepKind = "llm" | "gate" | "assemble-spec" | "persist-ticket" | "pipeline" | "loop";
 
 export type Role = "reasoner" | "worker" | "scout";
 
@@ -41,11 +41,22 @@ export interface StepDef {
    */
   workspace?: "read";
   /**
-   * For `kind: "pipeline"` steps only. Names the id of the nested pipeline to
-   * expand in place of this step at load time. The referenced pipeline YAML
-   * must live in the same directory as the parent.
+   * For `kind: "pipeline"` steps: names the id of the nested pipeline to
+   * expand in place of this step at load time.
+   * For `kind: "loop"` steps: names the id of the pipeline that is the loop body.
+   * The referenced pipeline YAML must live in the same directory as the parent.
    */
   pipeline?: string;
+  /**
+   * For `kind: "loop"` steps only. Maximum number of times the body pipeline
+   * may run. Must be a positive integer. Exhausting the budget is not an error.
+   */
+  maxIterations?: number;
+  /**
+   * For `kind: "loop"` steps only. The context key that signals convergence.
+   * The loop stops as soon as `ctx[until]` is truthy or `maxIterations` is reached.
+   */
+  until?: string;
 }
 
 export interface PipelineDef {
@@ -60,4 +71,10 @@ export interface PipelineDef {
 export interface LoadedPipeline {
   def: PipelineDef;
   prompts: Record<string, string>;
+  /**
+   * Resolved loop bodies, keyed by the loop step's id. Populated by
+   * `expandNested` for every `kind: "loop"` step in the pipeline.
+   * Optional so that consumers that do not use loop steps are unaffected.
+   */
+  bodies?: Record<string, LoadedPipeline>;
 }

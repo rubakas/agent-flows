@@ -86,6 +86,17 @@ function buildStepNode(step: StepDef, position: [number, number], promptText: st
     return makeNode(step.id, NOOP_TYPE, position, {}, step.message);
   }
 
+  if (step.kind === "loop") {
+    // TODO(binding-c): loop body is a sub-workflow; Binding C does not execute it yet
+    return makeNode(
+      step.id,
+      NOOP_TYPE,
+      position,
+      {},
+      `loop over ${step.pipeline} (maxIterations: ${step.maxIterations}); Binding C does not execute this yet`
+    );
+  }
+
   // assemble-spec | persist-ticket
   // TODO(binding-c): these are yoke-runtime concerns; wire to a yoke node or sub-workflow later
   return makeNode(step.id, NOOP_TYPE, position, {});

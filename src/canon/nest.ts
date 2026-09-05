@@ -31,16 +31,45 @@ function expand(
     throw new GraphError(`nested pipeline max depth (${maxDepth}) exceeded`);
   }
 
-  const hasNested = loaded.def.steps.some((s) => s.kind === "pipeline");
+  const hasNested = loaded.def.steps.some((s) => s.kind === "pipeline" || s.kind === "loop");
   if (!hasNested) return loaded;
 
   // Maps each nesting step id → the namespaced ids of its terminal steps, so
   // parent steps that depended on the nesting step can be rewired.
+  // Maps each nesting step id → the namespaced ids of its terminal steps, so
+  // parent steps that depended on the nesting step can be rewired.
+  // Loop steps are kept intact, so they never enter this map.
   const terminalMap = new Map<string, string[]>();
   const rawSteps: StepDef[] = [];
   const expandedPrompts: Record<string, string> = { ...loaded.prompts };
+  const bodies: Record<string, LoadedPipeline> = {};
 
   for (const step of loaded.def.steps) {
+    if (step.kind === "loop") {
+      // Loop bodies are resolved and stored in the bodies map but the loop step
+      // itself is kept intact in the step list — expanding it would destroy the
+      // loop boundary the binding needs.
+      const bodyPipelineId = step.pipeline!;
+
+      const cycleIdx = stack.indexOf(bodyPipelineId);
+      if (cycleIdx !== -1) {
+        const chain = [...stack.slice(cycleIdx), bodyPipelineId].join(" -> ");
+        throw new GraphError(`cycle detected in nested pipelines: ${chain}`);
+      }
+
+      const bodyLoaded = resolve(bodyPipelineId);
+      const bodyExpanded = expand(
+        bodyLoaded,
+        resolve,
+        [...stack, bodyPipelineId],
+        maxDepth,
+        depth + 1
+      );
+      bodies[step.id] = bodyExpanded;
+      rawSteps.push(step);
+      continue;
+    }
+
     if (step.kind !== "pipeline") {
       rawSteps.push(step);
       continue;
@@ -104,8 +133,9 @@ function expand(
     }
   }
 
-  // Rewrite any dependsOn reference that names a nesting step to instead
-  // reference that step's terminal steps.
+  // Rewrite any dependsOn reference that names a pipeline nesting step to
+  // reference that step's terminal steps. Loop steps stay intact, so their
+  // ids are never in terminalMap and pass through unchanged.
   const finalSteps: StepDef[] = rawSteps.map((s) => {
     if (!s.dependsOn?.length) return s;
     const newDeps: string[] = [];
@@ -120,8 +150,12 @@ function expand(
     return { ...s, dependsOn: newDeps };
   });
 
-  return {
+  const result: LoadedPipeline = {
     def: { ...loaded.def, steps: finalSteps },
     prompts: expandedPrompts,
   };
+  if (Object.keys(bodies).length > 0) {
+    result.bodies = bodies;
+  }
+  return result;
 }

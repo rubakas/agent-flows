@@ -18,7 +18,7 @@ import { runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
 import type { ModelRegistry, ProviderProfile } from "../../canon/registry.js";
 import type { StepRunnerDeps } from "../../canon/runStep.js";
-import type { HardenedSpec, LoadedPipeline, StepDef } from "../../canon/types.js";
+import type { HardenedSpec, LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -290,26 +290,90 @@ export function validateModelOverrides(
   return null;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): any {
-  const { def, prompts } = loaded;
-
-  // Workflow input schema: pipeline inputs as strings + optional models override.
-  const inputShape: Record<string, z.ZodTypeAny> = {};
-  for (const inp of def.inputs) {
-    inputShape[inp] = z.string();
-  }
-  inputShape.models = z.record(z.string(), z.string()).optional();
+// Builds the loop body as a committed child workflow and returns the body,
+// condition, and outcome step that are chained by buildLevelsOntoBuilder.
+//
+// State is carried in the data flow rather than a closure so that concurrent
+// runs on the same built workflow cannot overwrite each other's state.
+function buildLoopStep(
+  step: StepDef,
+  body: LoadedPipeline,
+  deps: BuildDeps
+): {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  bodyWorkflow: any;
+  condition: (params: { inputData: unknown; iterationCount: number }) => Promise<boolean>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  outcomeStep: any;
+} {
+  const iterKey = `__${step.id}_iterations`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let builder: any = createWorkflow({
-    id: def.id,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    inputSchema: z.object(inputShape) as z.ZodObject<any>,
+  let bodyBuilder: any = createWorkflow({
+    id: `${step.id}__body`,
+    inputSchema: ctx,
     outputSchema: ctx,
   });
+  bodyBuilder = buildLevelsOntoBuilder(
+    bodyBuilder,
+    body.def,
+    body.prompts,
+    deps,
+    body.bodies ?? {}
+  );
 
-  // dependsOn path: topologically level the DAG and compile each level.
+  // Append a counter step so the iteration count travels in the data flow.
+  bodyBuilder = bodyBuilder.then(
+    createStep({
+      id: `__${step.id}_counter`,
+      inputSchema: ctx,
+      outputSchema: ctx,
+      execute: async ({ inputData }) => {
+        const rawCtx = inputData as Ctx;
+        const prev = (rawCtx[iterKey] as number | undefined) ?? 0;
+        return { ...rawCtx, [iterKey]: prev + 1 };
+      },
+    })
+  );
+
+  const bodyWorkflow = bodyBuilder.commit();
+
+  const condition = async ({
+    inputData,
+    iterationCount,
+  }: {
+    inputData: unknown;
+    iterationCount: number;
+  }): Promise<boolean> =>
+    Boolean((inputData as Ctx)?.[step.until!]) || iterationCount >= step.maxIterations!;
+
+  const outcomeStep = createStep({
+    id: `__${step.id}_outcome`,
+    inputSchema: ctx,
+    outputSchema: ctx,
+    execute: async ({ inputData }) => {
+      const rawCtx = inputData as Ctx;
+      const converged = Boolean(rawCtx[step.until!]);
+      const iterations = (rawCtx[iterKey] as number | undefined) ?? 0;
+      const { [iterKey]: _dropped, ...rest } = rawCtx;
+      return { ...rest, [step.id]: { converged, iterations } };
+    },
+  });
+
+  return { bodyWorkflow, condition, outcomeStep };
+}
+
+// Applies the topological levels of `def` onto `builder`, dispatching each
+// step to its builder function. `bodies` provides resolved loop-body pipelines.
+function buildLevelsOntoBuilder(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  builder: any,
+  def: PipelineDef,
+  prompts: Record<string, string>,
+  deps: BuildDeps,
+  bodies: Record<string, LoadedPipeline>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): any {
   const levels = pipelineLevels(def.steps);
   const stepById = new Map(def.steps.map((s) => [s.id, s]));
   const ancestorMap = computeAncestors(def.steps);
@@ -347,9 +411,42 @@ export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): 
         builder = builder.then(buildGateStep(step));
       } else if (step.kind === "persist-ticket") {
         builder = builder.then(buildPersistStep(step.id, deps.store));
+      } else if (step.kind === "loop") {
+        const body = bodies[step.id];
+        if (!body) {
+          throw new Error(
+            `Step "${step.id}": loop body not resolved — call expandNested before buildPipelineWorkflow`
+          );
+        }
+        const { bodyWorkflow, condition, outcomeStep } = buildLoopStep(step, body, deps);
+        builder = builder.dountil(bodyWorkflow, condition);
+        builder = builder.then(outcomeStep);
       }
     }
   }
 
+  return builder;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): any {
+  const { def, prompts } = loaded;
+
+  // Workflow input schema: pipeline inputs as strings + optional models override.
+  const inputShape: Record<string, z.ZodTypeAny> = {};
+  for (const inp of def.inputs) {
+    inputShape[inp] = z.string();
+  }
+  inputShape.models = z.record(z.string(), z.string()).optional();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let builder: any = createWorkflow({
+    id: def.id,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    inputSchema: z.object(inputShape) as z.ZodObject<any>,
+    outputSchema: ctx,
+  });
+
+  builder = buildLevelsOntoBuilder(builder, def, prompts, deps, loaded.bodies ?? {});
   return builder.commit();
 }

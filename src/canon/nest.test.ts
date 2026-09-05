@@ -164,6 +164,86 @@ describe("expandNested", () => {
     );
   });
 
+  it("keeps a loop step intact in the step list and stores its resolved body in bodies", () => {
+    // parent: loop step L with body pipeline B
+    // expected: L remains in step list, bodies["L"] = expanded B
+    const body = makePipeline("B", [{ id: "x", kind: "llm", role: "worker" }], { x: "prompt x" });
+    const parent = makePipeline("parent", [
+      {
+        id: "L",
+        kind: "loop",
+        pipeline: "B",
+        maxIterations: 3,
+        until: "passed",
+      },
+    ]);
+
+    const result = expandNested(parent, (id) => {
+      assert.equal(id, "B");
+      return body;
+    });
+
+    // The loop step L must remain as-is in the step list.
+    assert.equal(result.def.steps.length, 1);
+    assert.equal(result.def.steps[0].id, "L");
+    assert.equal(result.def.steps[0].kind, "loop");
+    assert.equal(result.def.steps[0].maxIterations, 3);
+    assert.equal(result.def.steps[0].until, "passed");
+    // The body must be resolved and stored.
+    assert.ok(result.bodies, "bodies map should be set");
+    assert.ok("L" in result.bodies, "bodies should contain key L");
+    assert.equal(result.bodies.L.def.id, "B");
+  });
+
+  it("expands a plain pipeline step inside a loop body", () => {
+    // inner: a plain nested pipeline step inside the loop body
+    // loop body B contains: n (pipeline:inner), where inner has step x
+    // after expand: B's bodies["L"] has steps [n.x], not [n]
+    const inner = makePipeline("inner", [{ id: "x", kind: "llm", role: "worker" }], {
+      x: "prompt x",
+    });
+    const body = makePipeline("B", [{ id: "n", kind: "pipeline", pipeline: "inner" }]);
+    const parent = makePipeline("parent", [
+      { id: "L", kind: "loop", pipeline: "B", maxIterations: 2, until: "done" },
+    ]);
+
+    const resolve = (id: string): LoadedPipeline => {
+      if (id === "B") return body;
+      if (id === "inner") return inner;
+      throw new Error(`unexpected: ${id}`);
+    };
+
+    const result = expandNested(parent, resolve);
+
+    assert.ok(result.bodies?.L, "loop body L must be resolved");
+    const resolvedBody = result.bodies?.L;
+    // The pipeline step inside the body should have been expanded to n.x
+    assert.deepEqual(
+      resolvedBody.def.steps.map((s) => s.id),
+      ["n.x"]
+    );
+  });
+
+  it("throws GraphError with the cycle chain when a loop body references its own pipeline", () => {
+    // pipeline A has a loop step whose body is A itself
+    const pA = makePipeline("A", [
+      { id: "loopStep", kind: "loop", pipeline: "A", maxIterations: 3, until: "done" },
+    ]);
+
+    assert.throws(
+      () => expandNested(pA, () => pA),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphError, "should be GraphError");
+        assert.ok(
+          err.message.startsWith("cycle detected in nested pipelines:"),
+          `unexpected message: ${String(err)}`
+        );
+        assert.ok(err.message.includes("A"), "chain names A");
+        return true;
+      }
+    );
+  });
+
   it("preserves all non-id fields (role, timeoutMs, message, workspace) on expanded steps", () => {
     const inner = makePipeline("inner", [
       {
