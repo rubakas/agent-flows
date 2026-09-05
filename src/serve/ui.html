@@ -637,8 +637,9 @@
           <div id="inspector-body"><p class="empty">Select a node on the canvas.</p></div>
           <div class="constraint">
             <b>An edge means dependency only.</b> It orders execution and scopes a step's context to
-            its ancestors. The canon stores no data routing along edges, no conditionals, no loops —
-            this is a DAG, not a flow language.
+            its ancestors. The canon stores no data routing along edges and no conditionals.
+            Repetition exists only as a bounded <code>loop</code> step with an iteration cap — the
+            graph itself stays acyclic.
           </div>
           <div id="run-panel" hidden></div>
         </aside>
