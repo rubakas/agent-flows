@@ -19,15 +19,15 @@ lifecycle can run as **one end-to-end pipeline** OR as **separate, independently
 
 2. **Seven leaf workflows, each runnable standalone, with this contract:**
 
-| Workflow       | Does                                                                                   | Repo access       | Human gate                            | Justifying pattern                                              |
-| -------------- | -------------------------------------------------------------------------------------- | ----------------- | ------------------------------------- | --------------------------------------------------------------- |
-| `investigate`  | Understand the request against the real repo; no edits                                 | `workspace: read` | no                                    | A1 chaining; A7 read-only agent                                 |
-| `plan`         | Draft implementation plan → adversarial critique + security → correct → assembled spec | read              | optional (review plan before approve) | Plan phase; A1 chaining                                         |
-| `verify-plan`  | Independent check that plan is complete/consistent in a fresh context                  | read-only         | no (feeds gate)                       | A6 evaluator-optimizer; Spec Kit `/analyze`                     |
-| `correct-plan` | Fold verify-plan feedback back into the plan; loop until clean                         | canon-write       | no                                    | A6 optimizer half; Spec Kit `/clarify` remediation              |
-| `develop`      | Execute the approved plan; write code + tests                                          | write             | no (runs post-gate)                   | Implement phase; A5 orchestrator-workers; A7                    |
-| `test`         | Run the runnable check (tests/build/lint); emit pass/fail + evidence                   | write or read     | no (feeds converge loop)              | "Give Claude a check it can run" (Anthropic best-practices); A6 |
-| `audit`        | Adversarial diff review in a fresh context; correctness/requirements gaps only         | read-only         | no (feeds converge loop)              | Adversarial-review subagent; A4 voting                          |
+| Workflow       | Does                                                                                   | Repo access                       | Human gate                            | Justifying pattern                                              |
+| -------------- | -------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------- | --------------------------------------------------------------- |
+| `investigate`  | Understand the request against the real repo; no edits                                 | `permissions: { contents: read }` | no                                    | A1 chaining; A7 read-only agent                                 |
+| `plan`         | Draft implementation plan → adversarial critique + security → correct → assembled spec | read                              | optional (review plan before approve) | Plan phase; A1 chaining                                         |
+| `verify-plan`  | Independent check that plan is complete/consistent in a fresh context                  | read-only                         | no (feeds gate)                       | A6 evaluator-optimizer; Spec Kit `/analyze`                     |
+| `correct-plan` | Fold verify-plan feedback back into the plan; loop until clean                         | canon-write                       | no                                    | A6 optimizer half; Spec Kit `/clarify` remediation              |
+| `develop`      | Execute the approved plan; write code + tests                                          | write                             | no (runs post-gate)                   | Implement phase; A5 orchestrator-workers; A7                    |
+| `test`         | Run the runnable check (tests/build/lint); emit pass/fail + evidence                   | write or read                     | no (feeds converge loop)              | "Give Claude a check it can run" (Anthropic best-practices); A6 |
+| `audit`        | Adversarial diff review in a fresh context; correctness/requirements gaps only         | read-only                         | no (feeds converge loop)              | Adversarial-review subagent; A4 voting                          |
 
 3. **Composite workflows compose these via self-nesting:**
    - `build` = `develop` → bounded loop(`test` → `audit` → correct-until-clean)
@@ -77,10 +77,12 @@ labeled "primitives" are not:
 3. **Single-gate limit — resolved.** `RunService` (commit `256aed3`) was hardcoding the approve step
    name; self-nesting exposed the bug. Multiple gates per run are now supported.
 
-4. **`workspace: write` — not a new primitive.** It is one line: widen `extraArgs` in
-   `src/canon/runStep.ts` from `"Read,Glob"` to `"Read,Glob,Edit,Write"`, and change the
-   `workspace?:` type in `src/canon/types.ts` to `"read" | "write"`. Directory plumbing and
-   permission handling already support both modes (see `docs/research/2026-09-05-existing-capabilities-vs-new-primitives.md` Question 1).
+4. **`permissions.contents: write` — not a new primitive.** It is one line: widen `extraArgs`
+   in `src/canon/runStep.ts` from `"Read,Glob"` to `"Read,Glob,Edit,Write"`. The
+   `permissions?: { contents: "read" | "write" | "none" }` field in `src/canon/types.ts` follows
+   the GitHub Actions `permissions:` convention (adopted verbatim — same key, same scope name,
+   same values). Directory plumbing and permission handling already support both modes
+   (see `docs/research/2026-09-05-existing-capabilities-vs-new-primitives.md` Question 1).
 
 **The `check` step kind: justified, not required.** The loop can close today with an `llm` step,
 structured output schema `{passed, output}`, and an `until:` condition — no new kind needed. But the

@@ -60,10 +60,10 @@ describe("generateN8nWorkflow — linear chain", () => {
     assert.equal(byName.get("stepC")?.type, YOKE_NODE_TYPE, "stepC type");
   });
 
-  it("llm nodes carry role, workspace, workspaceDir, and prompt parameters", () => {
+  it("llm nodes carry role, contentsAccess, workspaceDir, and prompt parameters", () => {
     const nodeA = wf.nodes.find((n) => n.name === "stepA")!;
     assert.equal(nodeA.parameters.role, "worker");
-    assert.equal(nodeA.parameters.workspace, "none");
+    assert.equal(nodeA.parameters.contentsAccess, "none");
     assert.equal(nodeA.parameters.workspaceDir, WORKSPACE_DIR_EXPR);
     assert.equal(nodeA.parameters.prompt, "Do A for {{request}}");
   });

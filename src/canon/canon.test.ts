@@ -424,37 +424,7 @@ steps:
     assert.equal(def.steps[0].dependsOn, undefined);
   });
 
-  it("rejects an unknown workspace value on a step", () => {
-    const yaml = `
-id: test
-version: 1
-description: test
-inputs:
-  - request
-steps:
-  - id: s1
-    kind: llm
-    model: sonnet
-    prompt: prompts/intake.md
-    workspace: admin
-`;
-    assert.throws(
-      () =>
-        loadPipeline("/fake/pipelines/test.yaml", {
-          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
-        }),
-      (err: Error) => {
-        assert.ok(err.message.includes("s1"), "error must name the step id");
-        assert.ok(
-          err.message.toLowerCase().includes("workspace") || err.message.includes("admin"),
-          "error must reference the invalid workspace value"
-        );
-        return true;
-      }
-    );
-  });
-
-  it('accepts workspace: "read" on a step and preserves it in the definition', () => {
+  it("rejects a deprecated workspace: key on a step (migration error)", () => {
     const yaml = `
 id: test
 version: 1
@@ -468,13 +438,23 @@ steps:
     prompt: prompts/intake.md
     workspace: read
 `;
-    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
-      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
-    });
-    assert.equal(def.steps[0].workspace, "read");
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), "migration error must name the step id");
+        assert.ok(
+          err.message.includes("workspace") && err.message.includes("permissions"),
+          `migration error must mention both "workspace" and "permissions"; got: ${err.message}`
+        );
+        return true;
+      }
+    );
   });
 
-  it('accepts workspace: "write" on a step and preserves it in the definition', () => {
+  it("rejects an invalid permissions.contents value on a step", () => {
     const yaml = `
 id: test
 version: 1
@@ -486,15 +466,120 @@ steps:
     kind: llm
     model: sonnet
     prompt: prompts/intake.md
-    workspace: write
+    permissions:
+      contents: admin
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), "error must name the step id");
+        assert.ok(
+          err.message.includes("permissions") || err.message.includes("admin"),
+          "error must reference the invalid permissions value"
+        );
+        return true;
+      }
+    );
+  });
+
+  it("rejects an unknown scope in permissions (only contents is allowed)", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      packages: read
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), "error must name the step id");
+        assert.ok(
+          err.message.includes("packages") || err.message.includes("unknown scope"),
+          `error must name the unknown scope; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it('accepts permissions.contents: "read" on a step and preserves it in the definition', () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      contents: read
 `;
     const { def } = loadPipeline("/fake/pipelines/test.yaml", {
       readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
     });
-    assert.equal(def.steps[0].workspace, "write");
+    assert.deepEqual(def.steps[0].permissions, { contents: "read" });
   });
 
-  it("rejects workspace: read on a gate step (workspace is only allowed on llm steps)", () => {
+  it('accepts permissions.contents: "write" on a step and preserves it in the definition', () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      contents: write
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.deepEqual(def.steps[0].permissions, { contents: "write" });
+  });
+
+  it('accepts permissions.contents: "none" on a step (explicit no-access)', () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      contents: none
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.deepEqual(def.steps[0].permissions, { contents: "none" });
+  });
+
+  it("rejects permissions: on a gate step (permissions is only allowed on llm steps)", () => {
     const yaml = `
 id: test
 version: 1
@@ -505,7 +590,8 @@ steps:
   - id: g1
     kind: gate
     message: Approve?
-    workspace: read
+    permissions:
+      contents: read
 `;
     assert.throws(
       () =>
@@ -515,8 +601,8 @@ steps:
       (err: Error) => {
         assert.ok(err.message.includes("g1"), `error must name step id "g1"; got: ${err.message}`);
         assert.ok(
-          err.message.toLowerCase().includes("workspace"),
-          `error must mention workspace; got: ${err.message}`
+          err.message.toLowerCase().includes("permissions"),
+          `error must mention permissions; got: ${err.message}`
         );
         return true;
       }
@@ -861,14 +947,16 @@ ${overrides}
     );
   });
 
-  it("throws when check step has workspace set", () => {
+  it("throws when check step has permissions set", () => {
     assert.throws(
       () =>
         loadPipeline("/fake/pipelines/test.yaml", {
           readFile: (p) =>
-            p.endsWith(".yaml") ? makeCheckYaml("    command: pnpm test\n    workspace: read") : "",
+            p.endsWith(".yaml")
+              ? makeCheckYaml("    command: pnpm test\n    permissions:\n      contents: read")
+              : "",
         }),
-      /workspace/
+      /permissions/
     );
   });
 });

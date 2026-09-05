@@ -7,12 +7,14 @@ steps:
   - id: correctness
     kind: llm
     role: reasoner
-    workspace: read
+    permissions:
+      contents: read
     prompt: prompts/audit-correctness.md
   - id: security
     kind: llm
     role: reasoner
-    workspace: read
+    permissions:
+      contents: read
     prompt: prompts/audit-security.md
   - id: synthesis
     kind: llm

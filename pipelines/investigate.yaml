@@ -7,7 +7,8 @@ steps:
   - id: survey
     kind: llm
     role: scout
-    workspace: read
+    permissions:
+      contents: read
     prompt: prompts/investigate-survey.md
   - id: findings
     kind: llm

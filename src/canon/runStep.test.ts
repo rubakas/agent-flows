@@ -335,7 +335,7 @@ describe("runLlmStep — deadline enforcement", () => {
 const repoRoot = new URL("../../..", import.meta.url).pathname.replace(/\/$/, "");
 
 describe('runLlmStep — workspace: "read"', () => {
-  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob --allowedTools Read,Glob and cwd=workspaceDir when workspaceAccess is "read"', async () => {
+  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob --allowedTools Read,Glob and cwd=workspaceDir when contentsAccess is "read"', async () => {
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -352,7 +352,7 @@ describe('runLlmStep — workspace: "read"', () => {
 
     await runLlmStep(entry, "analyze repo", {
       spawn,
-      workspaceAccess: "read",
+      contentsAccess: "read",
       workspaceDir: repoRoot,
     });
 
@@ -371,7 +371,7 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
   });
 
-  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob,Edit,Write --allowedTools Read,Glob,Edit,Write and cwd=workspaceDir when workspaceAccess is "write"', async () => {
+  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob,Edit,Write --allowedTools Read,Glob,Edit,Write and cwd=workspaceDir when contentsAccess is "write"', async () => {
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -388,7 +388,7 @@ describe('runLlmStep — workspace: "read"', () => {
 
     await runLlmStep(entry, "edit file", {
       spawn,
-      workspaceAccess: "write",
+      contentsAccess: "write",
       workspaceDir: repoRoot,
     });
 
@@ -431,7 +431,7 @@ describe('runLlmStep — workspace: "read"', () => {
 
     await runLlmStep(entry, "read something", {
       spawn,
-      workspaceAccess: "read",
+      contentsAccess: "read",
       workspaceDir: repoRoot,
     });
 
@@ -461,7 +461,7 @@ describe('runLlmStep — workspace: "read"', () => {
 
     await runLlmStep(entry, "write something", {
       spawn,
-      workspaceAccess: "write",
+      contentsAccess: "write",
       workspaceDir: repoRoot,
     });
 
@@ -474,7 +474,7 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.ok(strictMcpIdx < toolsIdx, "--strict-mcp-config must appear before --tools");
   });
 
-  it("claude: no --allowedTools and no cwd when workspaceAccess is not set", async () => {
+  it("claude: no --allowedTools and no cwd when contentsAccess is not set", async () => {
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -498,7 +498,7 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
   });
 
-  it('codex: sets cwd=workspaceDir when workspaceAccess is "read" (already has -s read-only)', async () => {
+  it('codex: sets cwd=workspaceDir when contentsAccess is "read" (already has -s read-only)', async () => {
     const entry: ModelEntry = {
       id: "codex-test",
       transport: "cli",
@@ -511,12 +511,12 @@ describe('runLlmStep — workspace: "read"', () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "analyze", { spawn, workspaceAccess: "read", workspaceDir: repoRoot });
+    await runLlmStep(entry, "analyze", { spawn, contentsAccess: "read", workspaceDir: repoRoot });
 
     assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
   });
 
-  it("codex: no cwd when workspaceAccess is not set", async () => {
+  it("codex: no cwd when contentsAccess is not set", async () => {
     const entry: ModelEntry = {
       id: "codex-test",
       transport: "cli",
@@ -534,7 +534,7 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
   });
 
-  it('codex: rejects when workspaceAccess is "write" (codex always runs read-only)', async () => {
+  it('codex: rejects when contentsAccess is "write" (codex always runs read-only)', async () => {
     const entry: ModelEntry = {
       id: "codex-test",
       transport: "cli",
@@ -543,12 +543,12 @@ describe('runLlmStep — workspace: "read"', () => {
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeCodexJsonlOutput("irrelevant")] });
 
     await assert.rejects(
-      runLlmStep(entry, "hi", { spawn, workspaceAccess: "write", workspaceDir: repoRoot }),
+      runLlmStep(entry, "hi", { spawn, contentsAccess: "write", workspaceDir: repoRoot }),
       /codex.*write|write.*codex/i
     );
   });
 
-  it('api transport: rejects when workspaceAccess is "read" (no CLI sandbox available)', async () => {
+  it('api transport: rejects when contentsAccess is "read" (no CLI sandbox available)', async () => {
     const entry: ModelEntry = {
       id: "ollama-qwen",
       transport: "api",
@@ -556,12 +556,12 @@ describe('runLlmStep — workspace: "read"', () => {
     };
 
     await assert.rejects(
-      runLlmStep(entry, "hi", { workspaceAccess: "read", workspaceDir: repoRoot }),
-      /api.*workspace|workspace.*api/i
+      runLlmStep(entry, "hi", { contentsAccess: "read", workspaceDir: repoRoot }),
+      /api.*permissions|permissions.*api/i
     );
   });
 
-  it('api transport: rejects when workspaceAccess is "write" (no CLI sandbox available)', async () => {
+  it('api transport: rejects when contentsAccess is "write" (no CLI sandbox available)', async () => {
     const entry: ModelEntry = {
       id: "ollama-qwen",
       transport: "api",
@@ -569,8 +569,8 @@ describe('runLlmStep — workspace: "read"', () => {
     };
 
     await assert.rejects(
-      runLlmStep(entry, "hi", { workspaceAccess: "write", workspaceDir: repoRoot }),
-      /api.*workspace|workspace.*api/i
+      runLlmStep(entry, "hi", { contentsAccess: "write", workspaceDir: repoRoot }),
+      /api.*permissions|permissions.*api/i
     );
   });
 
@@ -585,7 +585,7 @@ describe('runLlmStep — workspace: "read"', () => {
     await assert.rejects(
       runLlmStep(entry, "hi", {
         spawn,
-        workspaceAccess: "read",
+        contentsAccess: "read",
         workspaceDir: "/definitely/does/not/exist/yoke-test-9482",
       }),
       /workspaceDir/

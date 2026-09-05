@@ -75,7 +75,7 @@ function buildStepNode(step: StepDef, position: [number, number], promptText: st
     return makeNode(step.id, YOKE_NODE_TYPE, position, {
       role: step.role ?? "",
       model: step.model ?? "",
-      workspace: step.workspace ?? "none",
+      contentsAccess: step.permissions?.contents ?? "none",
       workspaceDir: WORKSPACE_DIR_EXPR,
       prompt: promptText,
     });

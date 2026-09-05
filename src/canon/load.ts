@@ -10,7 +10,7 @@ import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
 
 /** Fields that are illegal on every non-llm step kind. */
-const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "workspace"] as const;
+const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions"] as const;
 
 /** Runs pipelineLevels and re-throws GraphError as a plain Error (preserving the message). */
 function assertLevels(steps: PipelineDef["steps"]): void {
@@ -52,6 +52,13 @@ export function loadPipeline(
       throw new Error(`Duplicate step id "${step.id}"`);
     }
     ids.add(step.id);
+    // Migration guard: the deprecated `workspace` key was renamed to `permissions`.
+    if ((step as unknown as Record<string, unknown>).workspace !== undefined) {
+      throw new Error(
+        `Step "${step.id}": "workspace" has been renamed to "permissions". ` +
+          `Replace:\n  workspace: read|write\nwith:\n  permissions:\n    contents: read|write`
+      );
+    }
   }
 
   // When any step uses dependsOn, validate the full graph via the shared module.
@@ -160,10 +167,29 @@ export function loadPipeline(
       throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
     }
 
-    if (step.workspace !== undefined && step.workspace !== "read" && step.workspace !== "write") {
-      throw new Error(
-        `Step "${step.id}": invalid workspace value "${String(step.workspace)}" — only "read" or "write" is supported`
-      );
+    if (step.permissions !== undefined) {
+      const perms = step.permissions as unknown as Record<string, unknown>;
+      const unknownScopes = Object.keys(perms).filter((k) => k !== "contents");
+      if (unknownScopes.length > 0) {
+        throw new Error(
+          `Step "${step.id}": permissions contains unknown scope(s) "${unknownScopes.join('", "')}" — ` +
+            `only "contents" is supported`
+        );
+      }
+      const contentsValue = perms.contents;
+      if (
+        contentsValue !== undefined &&
+        contentsValue !== "read" &&
+        contentsValue !== "write" &&
+        contentsValue !== "none"
+      ) {
+        const safeValue =
+          typeof contentsValue === "string" ? contentsValue : JSON.stringify(contentsValue);
+        throw new Error(
+          `Step "${step.id}": permissions.contents "${safeValue}" is invalid — ` +
+            `must be "read", "write", or "none"`
+        );
+      }
     }
   }
 

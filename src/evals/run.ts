@@ -9,7 +9,7 @@
 //   plantedGapsFound     ≥ 50% — at least half the planted gaps must be surfaced
 //   existingFunctionality ≥ 50% — at least half the existing impls must be identified
 //
-// SAFETY: refuses any pipeline containing a step with workspace:write or kind:check.
+// SAFETY: refuses any pipeline containing a step with permissions.contents:write or kind:check.
 // Those pipelines write files in the owner's working repo or execute shell commands.
 
 // MUST be the very first line: disable Mastra telemetry before any @mastra import.

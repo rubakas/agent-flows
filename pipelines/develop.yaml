@@ -7,5 +7,6 @@ steps:
   - id: implement
     kind: llm
     role: worker
-    workspace: write
+    permissions:
+      contents: write
     prompt: prompts/develop-implement.md

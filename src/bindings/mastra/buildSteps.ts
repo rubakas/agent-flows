@@ -158,14 +158,15 @@ export function buildLlmStep(
 
       // Thread per-step and pipeline-level timeouts into the runner deps.
       // runLlmStep resolves the effective timeout as: timeoutMs ?? defaultTimeoutMs.
-      // The declared workspace access travels with them: without it the canon's
-      // `workspace: read|write` would be silently dropped and the agent would run
-      // with no repo access at all.
+      // The declared permissions travel with them: without it the canon's
+      // `permissions.contents: read|write` would be silently dropped and the agent
+      // would run with no repo access at all.
+      const contentsValue = step.permissions?.contents;
       const runnerDeps: StepRunnerDeps = {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
-        ...(step.workspace !== undefined
+        ...(contentsValue && contentsValue !== "none"
           ? {
-              workspaceAccess: step.workspace,
+              contentsAccess: contentsValue,
               ...(deps.cwd !== undefined ? { workspaceDir: deps.cwd } : {}),
             }
           : {}),

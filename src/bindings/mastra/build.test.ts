@@ -379,14 +379,14 @@ describe("buildPipelineWorkflow — schema retry preserves runnerDeps", () => {
       return CANNED_RESPONSES[entry.id] ?? INTAKE_MD;
     };
 
-    // Use the critic step with workspace: "read" so the assembled runnerDeps includes
-    // workspaceAccess and workspaceDir. The bug was that deps.runnerDeps ?? {} dropped them.
+    // Use the critic step with permissions.contents: "read" so the assembled runnerDeps
+    // includes contentsAccess and workspaceDir. The bug was that deps.runnerDeps ?? {} dropped them.
     const pipeline: LoadedPipeline = {
       ...CANNED_PIPELINE,
       def: {
         ...CANNED_PIPELINE.def,
         steps: CANNED_PIPELINE.def.steps.map((s) =>
-          s.id === "critic" ? { ...s, workspace: "read" as const } : s
+          s.id === "critic" ? { ...s, permissions: { contents: "read" as const } } : s
         ),
       },
     };
@@ -408,16 +408,16 @@ describe("buildPipelineWorkflow — schema retry preserves runnerDeps", () => {
       assert.equal(criticCalls, 2, "runner should be called twice for critic (first + retry)");
       assert.equal(capturedDeps.length, 2, "should have captured deps for both calls");
 
-      // Both calls must carry workspaceAccess from the assembled runnerDeps.
+      // Both calls must carry contentsAccess from the assembled runnerDeps.
       assert.equal(
-        capturedDeps[0]?.workspaceAccess,
+        capturedDeps[0]?.contentsAccess,
         "read",
-        "first call must have workspaceAccess: read"
+        "first call must have contentsAccess: read"
       );
       assert.equal(
-        capturedDeps[1]?.workspaceAccess,
+        capturedDeps[1]?.contentsAccess,
         "read",
-        "retry call must have workspaceAccess: read (was dropped before fix)"
+        "retry call must have contentsAccess: read (was dropped before fix)"
       );
       assert.equal(
         capturedDeps[1]?.workspaceDir,
@@ -1199,18 +1199,18 @@ describe("buildPipelineWorkflow — nested namespace assemble (regression)", () 
   });
 });
 
-// ── Workspace access reaches the runner ───────────────────────────────────────
-// Regression: the canon declared `workspace: read|write` but buildLlmStep only
-// threaded timeouts into the runner deps, so the declaration was silently
+// ── permissions.contents reaches the runner ───────────────────────────────────
+// Regression: the canon declared `permissions.contents: read|write` but buildLlmStep
+// only threaded timeouts into the runner deps, so the declaration was silently
 // dropped and the agent ran with no repo access.
 
-describe("buildPipelineWorkflow — workspace access is forwarded to the runner", () => {
-  it("passes the declared workspace and the build cwd through to runLlmStep", async () => {
+describe("buildPipelineWorkflow — permissions.contents is forwarded to the runner", () => {
+  it("passes the declared permissions.contents and the build cwd through to runLlmStep", async () => {
     const { storage, store, cleanup } = makeTestFixture("workspace-forward");
     try {
       const seen: { access?: string; dir?: string }[] = [];
       const capturingRunner: typeof runLlmStep = async (_entry, _prompt, runnerDeps) => {
-        seen.push({ access: runnerDeps?.workspaceAccess, dir: runnerDeps?.workspaceDir });
+        seen.push({ access: runnerDeps?.contentsAccess, dir: runnerDeps?.workspaceDir });
         return "surveyed";
       };
 
@@ -1221,7 +1221,12 @@ describe("buildPipelineWorkflow — workspace access is forwarded to the runner"
           description: "workspace forwarding",
           inputs: ["request"],
           steps: [
-            { id: "survey", kind: "llm" as const, model: "sonnet", workspace: "read" as const },
+            {
+              id: "survey",
+              kind: "llm" as const,
+              model: "sonnet",
+              permissions: { contents: "read" as const },
+            },
           ],
         },
         prompts: { survey: "Look at {{request}}" },
@@ -1239,7 +1244,7 @@ describe("buildPipelineWorkflow — workspace access is forwarded to the runner"
       await run.start({ inputData: { request: "audit the loader" } });
 
       assert.equal(seen.length, 1, "runner should be called once");
-      assert.equal(seen[0].access, "read", "declared workspace must reach the runner");
+      assert.equal(seen[0].access, "read", "declared permissions.contents must reach the runner");
       assert.equal(seen[0].dir, "/tmp/some-project", "build cwd must reach the runner");
     } finally {
       cleanup();

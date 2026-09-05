@@ -244,7 +244,7 @@ describe("expandNested", () => {
     );
   });
 
-  it("preserves all non-id fields (role, timeoutMs, message, workspace) on expanded steps", () => {
+  it("preserves all non-id fields (role, timeoutMs, message, permissions) on expanded steps", () => {
     const inner = makePipeline("inner", [
       {
         id: "s",
@@ -252,7 +252,7 @@ describe("expandNested", () => {
         role: "reasoner",
         timeoutMs: 5000,
         message: "custom message",
-        workspace: "read",
+        permissions: { contents: "read" as const },
       },
     ]);
     const parent = makePipeline("parent", [{ id: "n", kind: "pipeline", pipeline: "inner" }]);
@@ -265,7 +265,7 @@ describe("expandNested", () => {
     assert.deepEqual(step.role, "reasoner");
     assert.deepEqual(step.timeoutMs, 5000);
     assert.deepEqual(step.message, "custom message");
-    assert.deepEqual(step.workspace, "read");
+    assert.deepEqual(step.permissions, { contents: "read" });
     // pipeline field must NOT be present on the expanded step
     assert.equal("pipeline" in step ? step.pipeline : undefined, undefined);
   });

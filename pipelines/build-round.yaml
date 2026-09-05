@@ -12,6 +12,7 @@ steps:
   - id: fix
     kind: llm
     role: worker
-    workspace: write
+    permissions:
+      contents: write
     dependsOn: [test]
     prompt: prompts/build-fix.md

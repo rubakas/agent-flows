@@ -34,19 +34,23 @@ export interface StepDef {
    */
   timeoutMs?: number;
   /**
-   * Declares workspace access for the step's agent. When set to `"read"`,
-   * the agent is constrained to read-only file access (Read and Glob tools only).
-   * When set to `"write"`, the agent may also edit and create files (Edit and Write
-   * tools added); Bash/shell is never granted — that is the separate concern of the
-   * forthcoming check step kind. Absent = no repo access (default, fully backward
-   * compatible). Not supported for api transport.
+   * Declares repository access for the step's agent, following the GitHub Actions
+   * `permissions:` convention. Only the `contents` scope is supported.
+   *
+   * - `contents: "read"`: read-only file access (Read and Glob tools only).
+   * - `contents: "write"`: read + edit access (Edit and Write tools added);
+   *   Bash/shell is never granted — that is the separate concern of kind: "check".
+   * - `contents: "none"` or absent `permissions`: no repo access (default, fully
+   *   backward compatible). Not supported for api transport.
+   *
+   * Any scope other than `contents` is rejected at load time.
    */
-  workspace?: "read" | "write";
+  permissions?: { contents: "read" | "write" | "none" };
   /**
    * For `kind: "check"` steps: the shell command to execute via `/bin/sh -c`.
    * A non-zero exit code yields `passed: false`; it is not an error — the run continues.
    * Required and non-empty. Cannot be combined with `prompt`, `role`, `model`, `schema`,
-   * or `workspace`.
+   * or `permissions`.
    */
   command?: string;
   /**

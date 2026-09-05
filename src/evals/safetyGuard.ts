@@ -8,15 +8,15 @@ import type { LoadedPipeline } from "../canon/types.js";
 
 /**
  * Throws if `loaded` or any of its loop bodies contains a step that declares
- * workspace:write or kind:check. Checks bodies recursively (bodies can nest).
+ * permissions.contents:write or kind:check. Checks bodies recursively (bodies can nest).
  *
- * Only llm steps with workspace:read are safe for the eval runner.
+ * Only llm steps with permissions.contents:read are safe for the eval runner.
  */
 export function assertReadOnly(loaded: LoadedPipeline): void {
   for (const step of loaded.def.steps) {
-    if (step.workspace === "write") {
+    if (step.permissions?.contents === "write") {
       throw new Error(
-        `SAFETY: step "${step.id}" declares workspace:write — ` +
+        `SAFETY: step "${step.id}" declares permissions.contents:write — ` +
           `refusing to run (this pipeline may modify repo files)`
       );
     }

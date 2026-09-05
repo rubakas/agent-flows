@@ -46,12 +46,13 @@ export interface StepRunnerDeps {
   _builtInTimeoutMs?: number;
   /**
    * Absolute path to the project workspace root. Supplied by the caller; required
-   * when workspaceAccess is set. Defaults to process.cwd() when absent and
-   * workspaceAccess is "read".
+   * when contentsAccess is set. Defaults to process.cwd() when absent and
+   * contentsAccess is "read".
    */
   workspaceDir?: string;
   /**
-   * Restricts the claude CLI to a specific tool set when accessing a workspace.
+   * Restricts the claude CLI to a specific tool set when accessing the repo.
+   * Maps from the canon's `permissions.contents` scope value.
    *
    * Both modes add `--restricted --strict-mcp-config` so the target repository's
    * own `.claude/settings.json` (and any MCP server it declares) cannot widen
@@ -66,7 +67,7 @@ export interface StepRunnerDeps {
    *
    * Not supported for api transport or codex (both will throw at runtime).
    */
-  workspaceAccess?: "read" | "write";
+  contentsAccess?: "read" | "write";
 }
 
 // ── Deadline helper ───────────────────────────────────────────────────────────
@@ -381,14 +382,14 @@ export async function runLlmStep(
   prompt: string,
   deps: StepRunnerDeps = {}
 ): Promise<string> {
-  // Validate and resolve workspace access before creating any deadline.
+  // Validate and resolve repo access before creating any deadline.
   // Fail fast on configuration errors rather than timing out or running silently
   // against the wrong directory.
   let resolvedWorkspaceDir: string | undefined;
-  if (deps.workspaceAccess === "read" || deps.workspaceAccess === "write") {
+  if (deps.contentsAccess === "read" || deps.contentsAccess === "write") {
     if (entry.transport === "api") {
       throw new Error(
-        `runLlmStep: workspace "${deps.workspaceAccess}" is not supported for api transport — ` +
+        `runLlmStep: permissions.contents "${deps.contentsAccess}" is not supported for api transport — ` +
           `sandbox enforcement requires a CLI subprocess; api transport has no equivalent`
       );
     }
@@ -401,7 +402,7 @@ export async function runLlmStep(
     }
     if (!isDir) {
       throw new Error(
-        `runLlmStep: workspace "${deps.workspaceAccess}" declared but workspaceDir "${dir}" is not a valid directory`
+        `runLlmStep: permissions.contents "${deps.contentsAccess}" declared but workspaceDir "${dir}" is not a valid directory`
       );
     }
     resolvedWorkspaceDir = dir;
@@ -434,7 +435,7 @@ export async function runLlmStep(
           // target repo — the claude --help text names it as the companion flag for
           // exactly this use case.
           // --tools / --allowedTools narrow the tool set to the declared access level.
-          if (deps.workspaceAccess === "read") {
+          if (deps.contentsAccess === "read") {
             extraArgs.push(
               "--restricted",
               "--strict-mcp-config",
@@ -469,12 +470,12 @@ export async function runLlmStep(
       }
 
       if (bin === "codex") {
-        if (deps.workspaceAccess === "write") {
+        if (deps.contentsAccess === "write") {
           throw new Error(
-            `runLlmStep: workspace "write" is not supported for codex — codex always runs read-only`
+            `runLlmStep: permissions.contents "write" is not supported for codex — codex always runs read-only`
           );
         }
-        // workspace: "read" adds the cwd so the sandbox is rooted at the project directory.
+        // permissions.contents: "read" adds the cwd so the sandbox is rooted at the project directory.
         return await runCodexCli(
           prompt,
           entry.cli?.model,
