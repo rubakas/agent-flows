@@ -105,8 +105,10 @@ export default tseslint.config(
   // when tracing @mastra/core deep subpath exports (e.g. @mastra/core/mastra).
   // The Mastra workflow/run/tool APIs are dynamically typed (`any`); suppress
   // the unsafe-* family and require-await for these files only.
+  // src/evals/run.ts also imports @mastra/core/mastra (eval runner), so it
+  // gets the same no-cycle suppression.
   {
-    files: ["src/bindings/mastra/**"],
+    files: ["src/bindings/mastra/**", "src/evals/run.ts"],
     rules: {
       "import-x/no-cycle": "off",
       "@typescript-eslint/no-unsafe-assignment": "off",

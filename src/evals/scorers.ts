@@ -31,7 +31,7 @@
  * The phrase is used only for human-readable reporting; matching is on keywords.
  */
 
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 
 // ── Shared types ──────────────────────────────────────────────────────────────
@@ -102,7 +102,9 @@ export function citedPathsExist(output: string, repoRoot: string): PathCheckResu
   const invented: string[] = [];
 
   for (const p of candidates) {
-    if (existsSync(join(repoRoot, p))) {
+    // A directory is not a citation — counting it would let "src/" score a hit
+    // and inflate groundedness. Only a real file counts.
+    if (statSync(join(repoRoot, p), { throwIfNoEntry: false })?.isFile() === true) {
       found.push(p);
     } else {
       invented.push(p);
