@@ -179,6 +179,10 @@ export function buildLlmStep(
             }
           : {}),
         ...(step.skills?.length ? { skills: step.skills } : {}),
+        // allowPatterns and denyPatterns travel the same path as contentsAccess —
+        // a canon declaration dropped here is the bug class this project has hit before.
+        ...(step.permissions?.allow?.length ? { allowPatterns: step.permissions.allow } : {}),
+        ...(step.permissions?.deny?.length ? { denyPatterns: step.permissions.deny } : {}),
       };
 
       const raw = await runner(entry, prompt, runnerDeps);

@@ -156,6 +156,55 @@ export interface StepRunnerDeps {
    * Not supported for api transport or codex (both will throw at runtime).
    */
   contentsAccess?: "read" | "write";
+  /**
+   * Per-step exceptions to the effective deny set built from CREDENTIAL_DENY_PATTERNS
+   * and BUILD_CONFIG_DENY_PATTERNS. Each entry is a plain path glob (NOT a vendor
+   * rule string like `Read(...)`). The binding turns them into CLI deny-list subtractions.
+   *
+   * Matching rule: an entry A removes a deny pattern P when
+   * `normalisePattern(A) === normalisePattern(P)`. Normalisation: trim, convert
+   * backslash to forward-slash, strip leading `./`. This is exact string equality
+   * on the pattern strings — NOT file-path glob expansion. Consequently:
+   *   - `"**\/*.pem"` removes the stored pattern `"**\/*.pem"` (they are equal).
+   *   - `"fixtures/sample.pem"` does NOT remove `"**\/*.pem"` — the strings differ,
+   *     so `**\/*.pem` remains in the deny set and the specific file is still denied.
+   *   To allow a specific file covered by a broad default glob, that broad glob
+   *   string must appear verbatim in `allowPatterns`. This is intentional: removing
+   *   a narrow path silently while leaving the broad glob would make the allow
+   *   appear to work in the canon but do nothing in practice — the worst outcome.
+   *
+   * Key names `allow`/`deny` are adopted from Claude Code's own
+   * `permissions.allow`/`permissions.deny` settings format; the canon stays
+   * provider-neutral and this binding turns them into `--disallowedTools` subtractions.
+   *
+   * `allowPatterns` can never widen the tool set beyond `contentsAccess`: a step
+   * with `contentsAccess: "read"` still gets only Read and Glob in `--tools` —
+   * the allow list only affects which paths appear in `--disallowedTools`, not
+   * the granted tool set.
+   *
+   * Only meaningful when `contentsAccess` is set (validated at canon load time).
+   */
+  allowPatterns?: string[];
+  /**
+   * Additional deny patterns for this step only, prepended to the project defaults
+   * before `allowPatterns` subtraction. Plain path globs (not vendor rule strings).
+   * Applied as both Read and Edit denials (same as CREDENTIAL_DENY_PATTERNS).
+   *
+   * Only meaningful when `contentsAccess` is set (validated at canon load time).
+   */
+  denyPatterns?: string[];
+}
+
+// ── Pattern normalisation ─────────────────────────────────────────────────────
+
+/**
+ * Normalises a deny/allow pattern string for set membership comparison.
+ * Strips leading whitespace, converts backslashes to forward-slashes, and
+ * removes a leading `./` so that user-written `./fixtures/sample.pem` and
+ * the stored `fixtures/sample.pem` are treated as the same pattern.
+ */
+export function normalisePattern(p: string): string {
+  return p.trim().replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
 // ── Deadline helper ───────────────────────────────────────────────────────────
@@ -569,10 +618,33 @@ export async function runLlmStep(
           // can inspect the build configuration (e.g. to understand dependencies);
           // editing these files would let an injected prompt rewrite the test script
           // or CI pipeline and have it executed inside the same run.
-          const credentialDenyEntries = ["Read", "Edit"].flatMap((tool) =>
-            CREDENTIAL_DENY_PATTERNS.map((pat) => `${tool}(${pat})`)
+          //
+          // Per-step exceptions:
+          //   effective deny = (CREDENTIAL_DENY_PATTERNS ∪ denyPatterns ∪ BUILD_CONFIG_DENY_PATTERNS) − allowPatterns
+          //
+          // Subtraction is exact string equality after normalisePattern(). An allow
+          // entry removes a deny pattern only when the two normalised strings are
+          // identical — NOT by glob-expanding the allow entry against actual files.
+          // This means "**/*.pem" removes the stored pattern "**/*.pem", but a
+          // specific path like "fixtures/sample.pem" does NOT remove "**/*.pem".
+          // The intent: if a broad glob covers more than the operator intends to
+          // allow, they must name the broad glob explicitly; silent partial allows
+          // are the worst failure mode for a security control.
+          const allowSet = new Set((deps.allowPatterns ?? []).map(normalisePattern));
+
+          const effectiveCredentialPatterns = [
+            ...CREDENTIAL_DENY_PATTERNS,
+            ...(deps.denyPatterns ?? []),
+          ].filter((p) => !allowSet.has(normalisePattern(p)));
+
+          const effectiveBuildConfigPatterns = BUILD_CONFIG_DENY_PATTERNS.filter(
+            (p) => !allowSet.has(normalisePattern(p))
           );
-          const buildConfigDenyEntries = BUILD_CONFIG_DENY_PATTERNS.map((pat) => `Edit(${pat})`);
+
+          const credentialDenyEntries = ["Read", "Edit"].flatMap((tool) =>
+            effectiveCredentialPatterns.map((pat) => `${tool}(${pat})`)
+          );
+          const buildConfigDenyEntries = effectiveBuildConfigPatterns.map((pat) => `Edit(${pat})`);
           const disallowedToolsValue = [...credentialDenyEntries, ...buildConfigDenyEntries].join(
             ","
           );

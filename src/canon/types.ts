@@ -58,9 +58,47 @@ export interface StepDef {
    * - `contents: "none"` or absent `permissions`: no repo access (default, fully
    *   backward compatible). Not supported for api transport.
    *
-   * Any scope other than `contents` is rejected at load time.
+   * The optional `allow` and `deny` fields (key names adopted from Claude Code's
+   * own `permissions.allow`/`permissions.deny` settings format, not invented here)
+   * give per-step control over the project-wide credential and build-config deny
+   * set that the runtime applies whenever `contents` is set:
+   *
+   *   effective deny = (project defaults ∪ step.deny) − step.allow
+   *
+   * Both fields accept plain path globs — NOT vendor rule strings like
+   * `Read(...)`. The binding turns them into CLI rules; the canon stays
+   * provider-neutral.
+   *
+   * `allow` removes patterns from the effective deny set. Subtraction is exact
+   * string equality after normalisation (trim, backslash→forward-slash, strip
+   * leading `./`). Writing `"**\/*.pem"` removes the project-default `"**\/*.pem"`
+   * credential deny and grants access to all `.pem` files for this step. A
+   * specific path like `"fixtures/sample.pem"` only removes that exact string; it
+   * does NOT remove the broad `"**\/*.pem"` project default, which would still deny
+   * the file via glob matching. To allow a specific file covered by a broad glob,
+   * the broad glob itself must be named in `allow`.
+   *
+   * `allow` can never widen the tool set beyond `contents`: a step with
+   * `contents: "read"` that allows a path still cannot write it.
+   *
+   * `deny` adds step-only deny patterns on top of the project defaults, before
+   * `allow` subtraction. Useful for adding narrower restrictions specific to this
+   * step (e.g. deny a directory that is safe for other steps to read).
+   *
+   * Both fields require `contents` to be present; rejected otherwise — an
+   * exception to a deny list that is not applied is a silent no-op and the
+   * operator must be told, not guessed for.
+   *
+   * Any scope other than `contents` (plus the `allow`/`deny` sub-fields) is
+   * rejected at load time.
    */
-  permissions?: { contents: "read" | "write" | "none" };
+  permissions?: {
+    contents: "read" | "write" | "none";
+    /** Exceptions to the project-default deny set. Plain path globs. */
+    allow?: string[];
+    /** Additional deny patterns for this step only. Plain path globs. */
+    deny?: string[];
+  };
   /**
    * For `kind: "check"` steps: the shell command to execute via `/bin/sh -c`.
    * A non-zero exit code yields `passed: false`; it is not an error — the run continues.

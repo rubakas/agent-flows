@@ -457,6 +457,122 @@ describe("validateModelOverrides", () => {
   });
 });
 
+// ── allowPatterns / denyPatterns forwarding ───────────────────────────────────
+
+describe("buildLlmStep — forwards allowPatterns and denyPatterns to runner deps", () => {
+  it("allow and deny from step.permissions are forwarded to runner deps (canon drop = the bug class)", async () => {
+    const capturedDeps: StepRunnerDeps[] = [];
+    const trackingRunner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+      capturedDeps.push({ ...deps });
+      return "ok";
+    };
+
+    const fwdPipeline: LoadedPipeline = {
+      def: {
+        id: "fwd-test",
+        version: 1,
+        description: "forwarding test",
+        inputs: ["request"],
+        steps: [
+          {
+            id: "survey",
+            kind: "llm",
+            model: "survey",
+            prompt: "prompts/survey.md",
+            permissions: {
+              contents: "read" as const,
+              allow: ["**/*.pem"],
+              deny: ["src/internal/**"],
+            },
+          },
+        ],
+      },
+      prompts: { survey: "Analyze: {{request}}" },
+    };
+
+    const { storage, store, cleanup } = makeTestFixture("fwd-allow-deny");
+    try {
+      const wf = buildPipelineWorkflow(fwdPipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: trackingRunner,
+      });
+      const mastra = new Mastra({ storage, workflows: { [fwdPipeline.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(fwdPipeline.def.id);
+      const run = await mastraWf.createRun();
+      await run.start({ inputData: { request: "test" } });
+
+      assert.equal(capturedDeps.length, 1, "runner should be called once");
+      assert.deepEqual(
+        capturedDeps[0]?.allowPatterns,
+        ["**/*.pem"],
+        "allowPatterns must be forwarded to runner deps"
+      );
+      assert.deepEqual(
+        capturedDeps[0]?.denyPatterns,
+        ["src/internal/**"],
+        "denyPatterns must be forwarded to runner deps"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("step with no allow/deny: binding emits neither allowPatterns nor denyPatterns", async () => {
+    const capturedDeps: StepRunnerDeps[] = [];
+    const trackingRunner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+      capturedDeps.push({ ...deps });
+      return "ok";
+    };
+
+    const noFwdPipeline: LoadedPipeline = {
+      def: {
+        id: "no-fwd-test",
+        version: 1,
+        description: "no forwarding test",
+        inputs: ["request"],
+        steps: [
+          {
+            id: "basic",
+            kind: "llm",
+            model: "basic",
+            prompt: "prompts/basic.md",
+            permissions: { contents: "read" as const },
+          },
+        ],
+      },
+      prompts: { basic: "Analyze: {{request}}" },
+    };
+
+    const { storage, store, cleanup } = makeTestFixture("no-fwd-allow-deny");
+    try {
+      const wf = buildPipelineWorkflow(noFwdPipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: trackingRunner,
+      });
+      const mastra = new Mastra({ storage, workflows: { [noFwdPipeline.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(noFwdPipeline.def.id);
+      const run = await mastraWf.createRun();
+      await run.start({ inputData: { request: "test" } });
+
+      assert.equal(capturedDeps.length, 1, "runner should be called once");
+      assert.equal(
+        capturedDeps[0]?.allowPatterns,
+        undefined,
+        "allowPatterns must be absent when step.permissions has no allow"
+      );
+      assert.equal(
+        capturedDeps[0]?.denyPatterns,
+        undefined,
+        "denyPatterns must be absent when step.permissions has no deny"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 // ── dependsOn pipeline fixtures ───────────────────────────────────────────────
 
 // Sequential: a → b (two levels, one step each)

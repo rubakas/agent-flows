@@ -4,10 +4,41 @@ import { parse } from "yaml";
 import { GraphError, pipelineAncestors, pipelineLevels } from "./graph.js";
 import { expandNested } from "./nest.js";
 import { extractPlaceholders } from "./render.js";
+import {
+  BUILD_CONFIG_DENY_PATTERNS,
+  CREDENTIAL_DENY_PATTERNS,
+  normalisePattern,
+} from "./runStep.js";
 import { canonSchemas } from "./schemas.js";
 import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 
 const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
+
+// Returns true when an allow entry removes a given deny pattern.
+// Accepts the convenient form where an entry without the leading glob prefix
+// matches if it equals the trailing path segment of the deny pattern.
+// ".env.local" matches the deny pattern for that file because ".env.local"
+// is its last segment. This is safe — the removal is limited to that exact
+// named pattern, so no broader access is silently granted than intended.
+function allowEntryMatches(entry: string, deniedPattern: string): boolean {
+  const normEntry = normalisePattern(entry);
+  const normDenied = normalisePattern(deniedPattern);
+  if (normEntry === normDenied) return true;
+  const lastSegment = normDenied.split("/").pop() ?? normDenied;
+  return normEntry === lastSegment;
+}
+
+// Returns the deny pattern most likely intended by an unrecognised allow entry.
+// Finds the first pattern whose trailing segment contains the entry as a
+// substring, or whose segment is contained within the entry. Returns undefined
+// when nothing plausible is found; callers fall back to listing all patterns.
+function findSuggestion(entry: string, patterns: readonly string[]): string | undefined {
+  const low = normalisePattern(entry).toLowerCase();
+  return patterns.find((p) => {
+    const last = (normalisePattern(p).split("/").pop() ?? normalisePattern(p)).toLowerCase();
+    return last.includes(low) || low.includes(last);
+  });
+}
 
 /** Fields that are illegal on every non-llm step kind. */
 const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"] as const;
@@ -177,7 +208,9 @@ export function loadPipeline(
 
     if (step.permissions !== undefined) {
       const perms = step.permissions as unknown as Record<string, unknown>;
-      const unknownScopes = Object.keys(perms).filter((k) => k !== "contents");
+      const unknownScopes = Object.keys(perms).filter(
+        (k) => k !== "contents" && k !== "allow" && k !== "deny"
+      );
       if (unknownScopes.length > 0) {
         throw new Error(
           `Step "${step.id}": permissions contains unknown scope(s) "${unknownScopes.join('", "')}" — ` +
@@ -197,6 +230,56 @@ export function loadPipeline(
           `Step "${step.id}": permissions.contents "${safeValue}" is invalid — ` +
             `must be "read", "write", or "none"`
         );
+      }
+
+      // allow and deny are only meaningful when contents is declared — an exception
+      // to a deny list that is not applied is a silent no-op, so we reject this.
+      for (const field of ["allow", "deny"] as const) {
+        const fieldValue = perms[field];
+        if (fieldValue === undefined) continue;
+        if (contentsValue === undefined) {
+          throw new Error(
+            `Step "${step.id}": permissions.${field} requires permissions.contents to be set — ` +
+              `an exception to a deny list that is not applied is a silent no-op`
+          );
+        }
+        if (!Array.isArray(fieldValue) || (fieldValue as unknown[]).length === 0) {
+          throw new Error(
+            `Step "${step.id}": permissions.${field} must be a non-empty array of strings`
+          );
+        }
+        for (const entry of fieldValue as unknown[]) {
+          if (typeof entry !== "string" || entry.trim() === "") {
+            throw new Error(
+              `Step "${step.id}": permissions.${field} entries must be non-blank strings`
+            );
+          }
+        }
+      }
+
+      // Validate that each allow entry actually matches a deny pattern it could
+      // remove. An entry that removes nothing is a silent no-op and the
+      // operator must be told — this is exactly the class of bug this project
+      // has been bitten by before ("declared but silently dropped").
+      if (perms.allow !== undefined) {
+        const stepDenyEntries = Array.isArray(perms.deny) ? (perms.deny as string[]) : [];
+        const effectiveDenyPatterns: readonly string[] = [
+          ...CREDENTIAL_DENY_PATTERNS,
+          ...BUILD_CONFIG_DENY_PATTERNS,
+          ...stepDenyEntries,
+        ];
+        for (const entry of perms.allow as string[]) {
+          if (!effectiveDenyPatterns.some((p) => allowEntryMatches(entry, p))) {
+            const suggestion = findSuggestion(entry, effectiveDenyPatterns);
+            const hint =
+              suggestion != null
+                ? `did you mean "${suggestion}"?`
+                : `available patterns: ${[...effectiveDenyPatterns].map((p) => `"${p}"`).join(", ")}`;
+            throw new Error(
+              `Step "${step.id}": permissions.allow entry "${entry}" does not match any deny pattern — ${hint}`
+            );
+          }
+        }
       }
     }
 

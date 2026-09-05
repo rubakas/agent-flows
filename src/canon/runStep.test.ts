@@ -7,12 +7,14 @@ import {
   CREDENTIAL_DENY_PATTERNS,
   DEFAULT_STEP_TIMEOUT_MS,
   StepTimeoutError,
+  normalisePattern,
   runCheckStep,
   runLlmStep,
 } from "./runStep.js";
 import { makeFakeChild, makeFakeSpawn } from "./testing/fakeSpawn.js";
 import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
+import type { StepRunnerDeps } from "./runStep.js";
 
 // ── claude CLI ────────────────────────────────────────────────────────────────
 
@@ -1038,6 +1040,167 @@ describe("runCheckStep — real execution", () => {
     assert.ok(
       result.output.toLowerCase().includes("timeout") || result.output.includes("100ms"),
       `output should mention timeout; got: ${result.output}`
+    );
+  });
+});
+
+// ── per-step allow/deny patterns ──────────────────────────────────────────────
+
+describe("normalisePattern", () => {
+  it("strips leading ./", () => {
+    assert.equal(normalisePattern("./fixtures/sample.pem"), "fixtures/sample.pem");
+  });
+  it("converts backslashes to forward-slashes", () => {
+    assert.equal(normalisePattern("fixtures\\sample.pem"), "fixtures/sample.pem");
+  });
+  it("trims surrounding whitespace", () => {
+    assert.equal(normalisePattern("  **/*.pem  "), "**/*.pem");
+  });
+  it("leaves already-normal patterns unchanged", () => {
+    assert.equal(normalisePattern("**/*.pem"), "**/*.pem");
+    assert.equal(normalisePattern("fixtures/sample.pem"), "fixtures/sample.pem");
+  });
+});
+
+describe("runLlmStep — per-step allow/deny patterns", () => {
+  const entry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+
+  // Captures the --disallowedTools value emitted for a read-mode step.
+  async function captureDisallowed(extraDeps: Partial<StepRunnerDeps>): Promise<string> {
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let disallowed = "";
+    const spawn = ((_cmd: string, args: string[]) => {
+      const idx = args.indexOf("--disallowedTools");
+      if (idx !== -1) disallowed = args[idx + 1];
+      return child;
+    }) as unknown as SpawnFn;
+    await runLlmStep(entry, "test", {
+      spawn,
+      contentsAccess: "read",
+      workspaceDir: repoRoot,
+      ...extraDeps,
+    });
+    return disallowed;
+  }
+
+  it("no allow/deny: emits exactly the default deny list (regression guard)", async () => {
+    const disallowed = await captureDisallowed({});
+    for (const pat of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        disallowed.includes(`Read(${pat})`),
+        `default deny must include Read(${pat}); got: ${disallowed.slice(0, 200)}`
+      );
+    }
+    for (const pat of BUILD_CONFIG_DENY_PATTERNS) {
+      assert.ok(
+        disallowed.includes(`Edit(${pat})`),
+        `default deny must include Edit(${pat}); got: ${disallowed.slice(0, 200)}`
+      );
+    }
+  });
+
+  it("allowPatterns removes exactly the matching deny pattern and nothing else", async () => {
+    const patternToRemove = "**/*.pem";
+    const disallowed = await captureDisallowed({ allowPatterns: [patternToRemove] });
+
+    // The removed pattern must not appear for either Read or Edit.
+    assert.ok(
+      !disallowed.includes(`Read(${patternToRemove})`),
+      `Read(${patternToRemove}) should be absent after allow`
+    );
+    assert.ok(
+      !disallowed.includes(`Edit(${patternToRemove})`),
+      `Edit(${patternToRemove}) should be absent after allow`
+    );
+
+    // Every other credential deny pattern must remain.
+    for (const pat of CREDENTIAL_DENY_PATTERNS) {
+      if (pat === patternToRemove) continue;
+      assert.ok(
+        disallowed.includes(`Read(${pat})`),
+        `Read(${pat}) must remain when only ${patternToRemove} was allowed`
+      );
+    }
+  });
+
+  it("denyPatterns adds a step-only entry as both Read and Edit denial", async () => {
+    const stepDenyPattern = "src/internal/**";
+    const disallowed = await captureDisallowed({ denyPatterns: [stepDenyPattern] });
+
+    // Step-only pattern appears for both Read and Edit.
+    assert.ok(
+      disallowed.includes(`Read(${stepDenyPattern})`),
+      "step deny must appear as Read denial"
+    );
+    assert.ok(
+      disallowed.includes(`Edit(${stepDenyPattern})`),
+      "step deny must appear as Edit denial"
+    );
+
+    // Project defaults must still be present.
+    assert.ok(disallowed.includes("Read(**/.env)"), "default Read(**/.env) must remain");
+  });
+
+  it("allowPatterns with normalised form: leading ./ is stripped before comparison", async () => {
+    // Add a step-only pattern then allow it with a leading ./ prefix.
+    // Naive string equality would leave the deny intact; normalisation removes it.
+    const disallowed = await captureDisallowed({
+      denyPatterns: ["fixtures/sample.pem"],
+      allowPatterns: ["./fixtures/sample.pem"],
+    });
+
+    assert.ok(
+      !disallowed.includes("Read(fixtures/sample.pem)"),
+      "normalised allow (./fixtures/sample.pem → fixtures/sample.pem) must remove the deny entry"
+    );
+    // Default patterns must be unaffected.
+    assert.ok(disallowed.includes("Read(**/.env)"), "default Read(**/.env) must remain");
+  });
+
+  it("allow cannot widen contentsAccess: read step with allowPatterns still gets only Read,Glob tools", async () => {
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "test", {
+      spawn,
+      contentsAccess: "read",
+      workspaceDir: repoRoot,
+      allowPatterns: ["**/*.pem"],
+    });
+
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    assert.equal(
+      capturedArgs[toolsIdx + 1],
+      "Read,Glob",
+      "allow must not widen --tools beyond contentsAccess"
+    );
+    const allowedIdx = capturedArgs.indexOf("--allowedTools");
+    assert.equal(
+      capturedArgs[allowedIdx + 1],
+      "Read,Glob",
+      "allow must not widen --allowedTools beyond contentsAccess"
+    );
+  });
+
+  it("denyPatterns entry is subtractive: an allow covering it removes it", async () => {
+    const pat = "src/private/**";
+    const disallowed = await captureDisallowed({
+      denyPatterns: [pat],
+      allowPatterns: [pat],
+    });
+
+    // Pattern was added by denyPatterns and then removed by allowPatterns.
+    assert.ok(
+      !disallowed.includes(`Read(${pat})`),
+      "allow should cancel a step-level deny added by denyPatterns"
     );
   });
 });

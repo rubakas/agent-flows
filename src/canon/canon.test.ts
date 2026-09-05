@@ -617,6 +617,175 @@ steps:
     );
   });
 
+  it("rejects permissions.allow without permissions.contents", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      allow:
+        - "**/*.pem"
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), `error must name step id; got: ${err.message}`);
+        assert.ok(
+          err.message.includes("allow") && err.message.includes("contents"),
+          `error must mention allow and contents; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("rejects permissions.deny without permissions.contents", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      deny:
+        - "src/internal/**"
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), `error must name step id; got: ${err.message}`);
+        assert.ok(
+          err.message.includes("deny") && err.message.includes("contents"),
+          `error must mention deny and contents; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("rejects permissions.allow that is an empty array", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      contents: read
+      allow: []
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      /s1.*allow|allow.*s1/
+    );
+  });
+
+  it("rejects permissions.deny that is an empty array", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      contents: read
+      deny: []
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      /s1.*deny|deny.*s1/
+    );
+  });
+
+  it("rejects permissions.allow with a blank string entry", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      contents: read
+      allow:
+        - "  "
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      /s1.*allow|allow.*s1/
+    );
+  });
+
+  it("accepts permissions.allow and .deny on an llm step and preserves them in the definition", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    permissions:
+      contents: read
+      allow:
+        - "**/*.pem"
+      deny:
+        - "src/internal/**"
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.deepEqual(def.steps[0].permissions, {
+      contents: "read",
+      allow: ["**/*.pem"],
+      deny: ["src/internal/**"],
+    });
+  });
+
   it("loads a pipeline with two gates without throwing", () => {
     const yaml = `
 id: test
@@ -1444,6 +1613,83 @@ steps:
         return true;
       }
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// permissions.allow matchability validation
+// ---------------------------------------------------------------------------
+
+describe("loadPipeline — permissions.allow matchability", () => {
+  function makeLlmYaml(permissionsBlock: string): string {
+    return `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/s1.md
+    permissions:
+${permissionsBlock}
+`;
+  }
+
+  it("throws when an allow entry matches no deny pattern, naming step, entry, and hint", () => {
+    const yaml = makeLlmYaml(
+      "      contents: read\n      allow:\n        - totally-unknown-file.xyz"
+    );
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("s1"), `error must name the step; got: ${err.message}`);
+        assert.ok(
+          err.message.includes("totally-unknown-file.xyz"),
+          `error must name the entry; got: ${err.message}`
+        );
+        assert.ok(
+          err.message.includes("did you mean") || err.message.includes("available patterns"),
+          `error must include a hint; got: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("loads fine when an allow entry exactly matches a project-default deny pattern", () => {
+    const yaml = makeLlmYaml('      contents: read\n      allow:\n        - "**/.env.local"');
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.deepEqual(def.steps[0].permissions?.allow, ["**/.env.local"]);
+  });
+
+  it("loads fine when an allow entry matches the step's own deny entry", () => {
+    const yaml = makeLlmYaml(
+      "      contents: read\n      deny:\n        - src/private/**\n      allow:\n        - src/private/**"
+    );
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.deepEqual(def.steps[0].permissions?.allow, ["src/private/**"]);
+  });
+
+  it("convenient form: .env.local matches **/.env.local and loads fine (no ** prefix needed)", () => {
+    // Operators should not need to know the exact glob prefix; the trailing-segment
+    // match accepts ".env.local" as equivalent to "**/.env.local". This is safe
+    // because the removal is bounded to that exact deny pattern — no broader access
+    // is silently granted than the operator intended.
+    const yaml = makeLlmYaml("      contents: read\n      allow:\n        - .env.local");
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.deepEqual(def.steps[0].permissions?.allow, [".env.local"]);
   });
 });
 
