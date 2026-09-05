@@ -273,6 +273,108 @@ describe("RunService.approve — single-flight: two concurrent approvals resolve
   });
 });
 
+// ── Tests: two sequential gates ──────────────────────────────────────────────
+
+describe("RunService — two sequential gates: approve re-suspends at second gate", () => {
+  it("run suspends at A, approved, suspends at B, approved, then succeeds — asserting status and gate payloads", async () => {
+    const gateAResult: Record<string, unknown> = {
+      status: "suspended",
+      suspended: [["approve"]],
+      steps: {
+        approve: { suspendPayload: { message: "Approve gate A?", spec: { title: "A" } } },
+      },
+    };
+    const gateBResult: Record<string, unknown> = {
+      status: "suspended",
+      suspended: [["plan", "approve"]],
+      steps: {
+        "plan.approve": { suspendPayload: { message: "Approve gate B?", spec: { title: "B" } } },
+      },
+    };
+
+    let resumeCount = 0;
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-two-gates",
+      watchers: [],
+      start: async () => gateAResult,
+      resume: async () => {
+        resumeCount++;
+        return resumeCount === 1 ? gateBResult : successResult();
+      },
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun));
+
+    // start → suspended at gate A
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    assert.equal(startResult.status, "running");
+
+    const settled = await service.waitForSettled(startResult.runId);
+    assert.ok(settled !== undefined);
+    assert.equal(settled.status, "awaiting_approval");
+    assert.equal(settled.gateMessage, "Approve gate A?");
+    assert.deepEqual(settled.spec, { title: "A" });
+    assert.equal(service.get(startResult.runId)?.status, "suspended");
+
+    // approve gate A → re-suspends at gate B
+    const approvalA = await service.approve(startResult.runId, true);
+    assert.equal(approvalA.error, undefined, "approving gate A must not error");
+    assert.equal(approvalA.status, "awaiting_approval");
+    assert.equal(approvalA.gateMessage, "Approve gate B?");
+    assert.deepEqual(approvalA.spec, { title: "B" });
+    assert.equal(service.get(startResult.runId)?.status, "suspended");
+
+    // approve gate B → success
+    const approvalB = await service.approve(startResult.runId, true);
+    assert.equal(approvalB.error, undefined, "approving gate B must not error");
+    assert.equal(approvalB.status, "success");
+    assert.equal(service.get(startResult.runId)?.status, "success");
+    assert.equal(resumeCount, 2, "resume must be called exactly twice");
+  });
+});
+
+// ── Tests: payload from actual suspended step id ──────────────────────────────
+
+describe("RunService — payload is read from actual suspended step id, not hardcoded 'approve'", () => {
+  it("returns gateMessage and spec from a nested gate named plan.approve", async () => {
+    const nestedSuspendedResult: Record<string, unknown> = {
+      status: "suspended",
+      suspended: [["plan", "approve"]],
+      steps: {
+        "plan.approve": {
+          suspendPayload: { message: "Approve the plan?", spec: { title: "Plan" } },
+        },
+      },
+    };
+
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-nested-gate",
+      watchers: [],
+      start: async () => nestedSuspendedResult,
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun));
+    const startResult = await service.start("test-pipeline", { request: "test" });
+    const settled = await service.waitForSettled(startResult.runId);
+
+    assert.ok(settled !== undefined);
+    assert.equal(settled.status, "awaiting_approval");
+    assert.equal(
+      settled.gateMessage,
+      "Approve the plan?",
+      "gateMessage must come from plan.approve step, not hardcoded 'approve'"
+    );
+    assert.deepEqual(settled.spec, { title: "Plan" });
+
+    const approval = await service.approve(startResult.runId, true);
+    assert.equal(approval.error, undefined);
+    assert.equal(approval.status, "success");
+  });
+});
+
 // ── Tests: subscribe ──────────────────────────────────────────────────────────
 
 describe("RunService.subscribe — step events and gate suspension", () => {

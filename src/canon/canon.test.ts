@@ -474,6 +474,28 @@ steps:
     assert.equal(def.steps[0].workspace, "read");
   });
 
+  it("loads a pipeline with two gates without throwing", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: gate1
+    kind: gate
+    message: first gate?
+  - id: gate2
+    kind: gate
+    message: second gate?
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+    });
+    assert.equal(def.steps.length, 2);
+    assert.equal(def.steps.filter((s) => s.kind === "gate").length, 2);
+  });
+
   it("loads a dependsOn pipeline that contains an isolated step (no edges in or out)", () => {
     // An isolated step is valid: pipelineLevels places it at level 0 and execution
     // is well-defined. Rejecting it would make in-progress editor state unsaveable

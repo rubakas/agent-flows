@@ -136,17 +136,7 @@ export function loadPipeline(
 
   const expanded = expandNested({ def, prompts }, resolveNested);
 
-  // Gate count and graph validity are enforced on the expanded result.
-  let gateCount = 0;
-  for (const step of expanded.def.steps) {
-    if (step.kind === "gate") {
-      gateCount++;
-      if (gateCount > 1) {
-        throw new Error(`Step "${step.id}": v1 pipelines may have at most one gate`);
-      }
-    }
-  }
-
+  // Graph validity is enforced on the expanded result.
   const expandedHasDependsOn = expanded.def.steps.some((s) => s.dependsOn !== undefined);
   if (expandedHasDependsOn) {
     try {

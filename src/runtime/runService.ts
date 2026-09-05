@@ -63,7 +63,9 @@ export interface SettledResult {
 
 export interface ApproveResult {
   runId: string;
-  status?: "success" | "failed";
+  status?: "awaiting_approval" | "success" | "failed";
+  gateMessage?: string;
+  spec?: unknown;
   result?: unknown;
   /** Defined when the call could not be processed (no run, wrong status, etc.). */
   error?: string;
@@ -130,25 +132,7 @@ export class RunService {
     void run
       .start({ inputData: wfInput })
       .then((r1) => {
-        if (r1.status === "suspended") {
-          record.status = "suspended";
-          record.suspendedStep = r1.suspended?.[0] ?? ["approve"];
-          const gateStep = r1.steps?.approve;
-          const suspendPayload = gateStep?.suspendPayload;
-          record.suspendPayload = suspendPayload;
-          record.settle({
-            status: "awaiting_approval",
-            gateMessage: (suspendPayload?.message as string | undefined) ?? "Approve this spec?",
-            spec: suspendPayload?.spec,
-          });
-        } else if (r1.status === "success") {
-          record.status = "success";
-          record.result = r1.result;
-          record.settle({ status: "success", result: r1.result });
-        } else {
-          record.status = "failed";
-          record.settle({ status: "failed" });
-        }
+        record.settle(this.applyWorkflowResult(record, r1));
       })
       .catch(() => {
         record.status = "failed";
@@ -214,14 +198,49 @@ export class RunService {
       resumeData: { approved },
     });
 
-    if (r2.status === "success") {
-      record.status = "success";
-      record.result = r2.result;
-      return { runId, status: "success", result: r2.result };
-    }
+    const settled = this.applyWorkflowResult(record, r2);
 
-    record.status = "failed";
+    if (settled.status === "awaiting_approval") {
+      return {
+        runId,
+        status: "awaiting_approval",
+        gateMessage: settled.gateMessage,
+        spec: settled.spec,
+      };
+    }
+    if (settled.status === "success") {
+      return { runId, status: "success", result: settled.result };
+    }
     return { runId, status: "failed" };
+  }
+
+  /**
+   * Apply a Mastra workflow result to the run record and return the settled shape.
+   *
+   * Used by both start() (background) and approve() so the suspended/success/failed
+   * branching lives in exactly one place.
+   */
+  private applyWorkflowResult(record: RunRecord, r: RunResult): SettledResult {
+    if (r.status === "suspended") {
+      record.status = "suspended";
+      record.suspendedStep = r.suspended?.[0] ?? ["approve"];
+      const stepKey = record.suspendedStep.join(".");
+      const gateStep = r.steps?.[stepKey];
+      const suspendPayload = gateStep?.suspendPayload;
+      record.suspendPayload = suspendPayload;
+      return {
+        status: "awaiting_approval",
+        gateMessage: (suspendPayload?.message as string | undefined) ?? "Approve this spec?",
+        spec: suspendPayload?.spec,
+      };
+    }
+    if (r.status === "success") {
+      record.status = "success";
+      record.result = r.result;
+      return { status: "success", result: r.result };
+    }
+    record.status = "failed";
+    return { status: "failed" };
   }
 
   /**
