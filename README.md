@@ -134,6 +134,8 @@ Current milestone: land the hybrid — Binding C (built), the `n8n-nodes-yoke` n
 - [0012. Canon ontology: single-nesting pipeline](docs/decisions/0012-canon-ontology-single-nesting-pipeline.md) (topology rule amended by ADR-0014)
 - [0013. A visual editor meets the Charter's bar](docs/decisions/0013-visual-editor-meets-the-bar.md)
 - [0014. Canon topology: explicit edges](docs/decisions/0014-canon-topology-explicit-edges.md)
+- [0015. The SDLC is a library of composable workflows](docs/decisions/0015-sdlc-as-composable-workflows.md)
+- [0016. Prompt authoring: portable core in the canon, model-conditional knobs in bindings](docs/decisions/0016-prompt-authoring-convention.md)
 
 **Hardened Specs (per-feature):**
 See [`specs/`](specs/) for the full set: stage1-hardening, module-system, tracker-provider, executor, stage2-development, stage3-testing, stage4-audit, orchestrator-server, observability.
