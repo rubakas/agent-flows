@@ -38,8 +38,8 @@ const s = createScorer({
   description: "Every cited path exists on disk",
   judge: { model, instructions, tools }, // optional — omit for a pure-code scorer
 })
-  .preprocess(({ run, results }) => any)      // optional
-  .analyze(({ run, results }) => any)         // optional
+  .preprocess(({ run, results }) => any) // optional
+  .analyze(({ run, results }) => any) // optional
   .generateScore(({ run, results }) => number) // REQUIRED, returns a number
   .generateReason(({ run, results, score }) => string); // optional
 
@@ -50,9 +50,9 @@ Two facts that matter for us, both verified in `dist/evals/base.d.ts`:
 
 - A scorer with **no `judge`** is pure deterministic code — no LLM, no cost, no flakiness.
   The docs call this "deterministic logic without LLM involvement—no judge configuration needed."
-- `ScorerJudgeConfig.tools` exists, documented in-source as: *"e.g. a goal judge that inspects the
+- `ScorerJudgeConfig.tools` exists, documented in-source as: _"e.g. a goal judge that inspects the
   workspace with readonly tools to independently verify the agent's claims, rather than grading
-  text alone."* This is exactly the shape needed to grade "did `investigate` really read the repo".
+  text alone."_ This is exactly the shape needed to grade "did `investigate` really read the repo".
 - A scorer is **callable standalone** via `scorer.run({...})`. It does not require `runEvals`,
   a Mastra instance, or storage. This is what makes it droppable into the repo's existing
   `node:test` suite.
@@ -138,7 +138,7 @@ stage order.
 - **Datasets / experiments**: `mastra.datasets.get({id})` then
   `dataset.startExperiment({ targetType: "workflow", targetId, scorers, maxConcurrency })`
   → `ExperimentSummary { succeededCount, totalItems, status }`.
-- **Storage**: scores persist to the **`mastra_scorers`** table when storage is configured *and*
+- **Storage**: scores persist to the **`mastra_scorers`** table when storage is configured _and_
   the scorers are registered on the `Mastra` instance. Verified in the bundle: `runEvals` reads
   `target.getMastraInstance?.() || target.mastra` then `mastra?.getStorage()`, and only calls
   `saveScoresToStorage` when storage is non-null. Our `smoke.ts` already builds
@@ -146,7 +146,7 @@ stage order.
   `scorers: {...}` key away.
 - **UI**: Mastra Studio (Observability section) shows scores, per-item pass/fail and experiments.
   Requires the `mastra` CLI package (v1.27.3), **not installed here**.
-- **CLI**: no dedicated `mastra eval` command is documented. *(Unverified — absence of evidence.)*
+- **CLI**: no dedicated `mastra eval` command is documented. _(Unverified — absence of evidence.)_
   CI integration is documented only as "scorers can be part of your CI/CD pipeline", i.e. you run
   `runEvals` from a script and branch on `verdict`.
 
@@ -238,22 +238,22 @@ And: **"Most use cases need multidimensional evaluation along several success cr
 
 ### 2.3 Grading methods and when each applies
 
-| Method | Kind | When Anthropic says to use it |
-| --- | --- | --- |
-| **Exact match** | code | "perfect for tasks with clear-cut, categorical answers" |
-| **Cosine similarity** (Sentence-BERT) | code/embedding | "ideal for evaluating consistency because similar questions should yield semantically similar answers, even if the wording varies" |
-| **ROUGE-L** | code/metric | summarization / relevance; "High ROUGE-L scores indicate that the generated summary captures key information in a coherent order" |
-| **LLM Likert 1-5** | LLM judge | "ideal for evaluating nuanced aspects like empathy, professionalism, or patience that are difficult to quantify with traditional metrics" |
-| **LLM binary classification** | LLM judge | subtle/implicit properties "that rule-based systems might miss" |
-| **LLM ordinal scale** | LLM judge | degree of context utilization / multi-faceted quality |
-| **Human grading** | human | implicitly the fallback — the docs push hard away from it ("prioritize volume over quality") |
+| Method                                | Kind           | When Anthropic says to use it                                                                                                             |
+| ------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Exact match**                       | code           | "perfect for tasks with clear-cut, categorical answers"                                                                                   |
+| **Cosine similarity** (Sentence-BERT) | code/embedding | "ideal for evaluating consistency because similar questions should yield semantically similar answers, even if the wording varies"        |
+| **ROUGE-L**                           | code/metric    | summarization / relevance; "High ROUGE-L scores indicate that the generated summary captures key information in a coherent order"         |
+| **LLM Likert 1-5**                    | LLM judge      | "ideal for evaluating nuanced aspects like empathy, professionalism, or patience that are difficult to quantify with traditional metrics" |
+| **LLM binary classification**         | LLM judge      | subtle/implicit properties "that rule-based systems might miss"                                                                           |
+| **LLM ordinal scale**                 | LLM judge      | degree of context utilization / multi-faceted quality                                                                                     |
+| **Human grading**                     | human          | implicitly the fallback — the docs push hard away from it ("prioritize volume over quality")                                              |
 
 Crucial operational note for us, verbatim: **"Generally best practice to use a different model to
 evaluate than the model used to generate the evaluated output."** Yoke's `ModelRegistry` +
 `ProviderProfile` roles (`reasoner`/`worker`/`scout`, `src/canon/registry.ts`) make this trivial —
 score with a different role/provider than the step under test.
 
-Applied to prose-output steps: a spec or a critique is *not* purely prose. It has a schema
+Applied to prose-output steps: a spec or a critique is _not_ purely prose. It has a schema
 (`HardenedSpec`, `canonSchemas`), countable parts (requirements, acceptance criteria, findings), and
 cited artifacts (file paths). Anthropic's ordering says grade all of that with **code**, and reserve
 the **LLM judge** for the genuinely subjective residue — "is this acceptance criterion actually
@@ -277,7 +277,7 @@ blocking: boolean }`, all `required`, `additionalProperties: false`. Exported as
 How they are enforced (`src/bindings/mastra/build.ts`, `buildLlmStep`): the schema is **appended to
 the prompt** as an instruction, then `tryParseSchemaOutput` strips fences, `JSON.parse`s, and checks
 the top-level key is present. On failure there is **one retry** with the parse error fed back; a
-second failure throws `Step "<id>": <error>`. Note what this is *not*: the JSON Schema is never
+second failure throws `Step "<id>": <error>`. Note what this is _not_: the JSON Schema is never
 actually applied as a validator — only the presence of the top-level key is checked. Field types,
 the `severity` enum and `additionalProperties:false` are unverified at runtime.
 
@@ -318,7 +318,7 @@ scripts share one implementation).
    provider swap is real). Flags: `--db`, `--provider`, `--cheap` (pin every step to the profile's
    scout role), `--intake-model <id>`.
 3. `buildPipelineWorkflow` → `new Mastra({ storage, workflows })` → `createRun()` → `start()` with a
-   hardcoded input: *"Add a dark mode toggle to the web app…"*.
+   hardcoded input: _"Add a dark mode toggle to the web app…"_.
 4. On `suspended`, reads `steps.approve.suspendPayload.spec` and prints **counts**: requirements,
    acceptance criteria, weaknesses, security findings. Errors if `spec` is missing.
 5. Auto-approves via `run.resume({ step: r1.suspended[0], resumeData: { approved: true } })`.
@@ -334,26 +334,26 @@ payload → `resume` → verify persisted rows) that `runEvals` structurally can
 
 ### 3.4 Fixtures usable as a test task
 
-- `pipelines/spec-creation.yaml` — the only pipeline on disk. Per ADR-0015 §4 it *is* the `plan`
+- `pipelines/spec-creation.yaml` — the only pipeline on disk. Per ADR-0015 §4 it _is_ the `plan`
   workflow: `intake → enrich → (critic ‖ security) → assemble → [gate approve] → persist`.
 - `prompts/{intake,enrich,critic,security}.md`.
 - `CANNED_PIPELINE` / `CANNED_RESPONSES` in `build.test.ts` — a zero-cost deterministic pipeline.
 - `specs/001…015` — 15 real historical spec directories; a ready-made corpus of "what a good output
   of this repo's `plan` stage looks like", usable as `groundTruth` for reference-based scorers.
 - `docs/decisions/0001…0016` — 16 ADRs, similarly usable.
-- Hardcoded smoke input: the dark-mode-toggle request. Note it is *generic*, not repo-grounded —
+- Hardcoded smoke input: the dark-mode-toggle request. Note it is _generic_, not repo-grounded —
   it cannot test whether `investigate` actually reads this repo.
 
 ### 3.5 Correction to ADR-0015's "Consequences"
 
 ADR-0015 lists four blockers. Two are now stale (verified in code):
 
-| ADR-0015 claim | Actual state |
-| --- | --- |
-| "Self-nesting execution is the linchpin… no binding executes it" | **Implemented.** `src/canon/nest.ts` `expandNested()` flattens `kind:"pipeline"` steps with cycle + depth guards; `StepKind` includes `"pipeline"`. |
-| "Bounded-loop construct does not exist" | **Implemented.** `StepKind` includes `"loop"`; `StepDef.maxIterations` / `.until`; `buildLoopStep` in `build.ts` compiles to Mastra `.dountil(bodyWorkflow, condition)`; tested (convergence, exhaustion, run independence). |
-| "`workspace: write` is not implemented" | **Still true.** `StepDef.workspace?: "read"` only; `runStep.ts` passes `--allowedTools Read,Glob` for `claude`, `-s read-only` for `codex`. |
-| "A `check` / `command` step kind does not exist" | **Still true.** `StepKind = llm \| gate \| assemble-spec \| persist-ticket \| pipeline \| loop`. |
+| ADR-0015 claim                                                   | Actual state                                                                                                                                                                                                                 |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Self-nesting execution is the linchpin… no binding executes it" | **Implemented.** `src/canon/nest.ts` `expandNested()` flattens `kind:"pipeline"` steps with cycle + depth guards; `StepKind` includes `"pipeline"`.                                                                          |
+| "Bounded-loop construct does not exist"                          | **Implemented.** `StepKind` includes `"loop"`; `StepDef.maxIterations` / `.until`; `buildLoopStep` in `build.ts` compiles to Mastra `.dountil(bodyWorkflow, condition)`; tested (convergence, exhaustion, run independence). |
+| "`workspace: write` is not implemented"                          | **Still true.** `StepDef.workspace?: "read"` only; `runStep.ts` passes `--allowedTools Read,Glob` for `claude`, `-s read-only` for `codex`.                                                                                  |
+| "A `check` / `command` step kind does not exist"                 | **Still true.** `StepKind = llm \| gate \| assemble-spec \| persist-ticket \| pipeline \| loop`.                                                                                                                             |
 
 **Verdict 3: everything an eval layer needs already exists here — node:test + `scripts/test.sh` as
 the CI surface, `build.test.ts`'s canned-runner fixtures for zero-cost deterministic pipeline runs,
@@ -384,15 +384,15 @@ corpus; what is missing is only the scoring content, and no scorer code exists y
    a suspended run yields `output: undefined` to `scorers.workflow`. Cost to close: reuse the
    `start` → `resume` loop that `smoke.ts` and `runService.ts` already implement, then call
    `scorer.run({ input, output })` directly. Roughly ten lines in `smoke.ts`.
-2. **Domain scorers.** No prebuilt scorer knows what "grounded in *this* repo" or "an acceptance
+2. **Domain scorers.** No prebuilt scorer knows what "grounded in _this_ repo" or "an acceptance
    criterion that is objectively checkable" means. These must be written — but they are the
-   *content* of the eval, not a harness, and each is a single `createScorer` call.
+   _content_ of the eval, not a harness, and each is a single `createScorer` call.
 3. **`audit` cannot be honestly graded without seeded defects.** "Did it find real defects" has no
    ground truth on a clean diff. Needs a fixture diff with known planted bugs.
 4. **The three unwritten workflows.** `investigate`, `verify-plan`, `correct-plan`, `develop`,
    `test`, `audit` do not exist as pipelines yet — only `plan` (= `spec-creation.yaml`) is runnable,
    and `develop`/`test` remain blocked on `workspace: write` and a `check` step kind (§3.5).
-   Level (b) end-to-end evaluation of the *full* ADR-0015 cycle is not executable today at all.
+   Level (b) end-to-end evaluation of the _full_ ADR-0015 cycle is not executable today at all.
 
 **Verdict 4a: no bespoke eval harness is needed and none should be built — Mastra's scorer layer
 plus the repo's node:test suite and `smoke.ts` already cover both levels; the only custom code
@@ -411,10 +411,10 @@ No runner, no config, no CLI.
 
 **Two tiers, split by cost and determinism — this is the whole design:**
 
-| Tier | Runs in | Cost | Grades |
-| --- | --- | --- | --- |
-| **Free / deterministic** | `pnpm test` (i.e. every `pnpm check`) | zero | code-graded scorers over canned fixtures |
-| **Paid / judged** | `pnpm mastra:smoke` (already opt-in, already hits real models) | LLM calls | LLM-judge scorers over real runs |
+| Tier                     | Runs in                                                        | Cost      | Grades                                   |
+| ------------------------ | -------------------------------------------------------------- | --------- | ---------------------------------------- |
+| **Free / deterministic** | `pnpm test` (i.e. every `pnpm check`)                          | zero      | code-graded scorers over canned fixtures |
+| **Paid / judged**        | `pnpm mastra:smoke` (already opt-in, already hits real models) | LLM calls | LLM-judge scorers over real runs         |
 
 LLM-judge scorers must never enter `pnpm test`: `pnpm check` runs on every change, and
 nondeterministic paid assertions there would make the gate untrustworthy. This directly implements
@@ -433,7 +433,7 @@ against a fixture and asserting `score >= threshold`. Concretely:
   `acceptanceCriteria.length >= N`, `weaknesses` non-empty, every `Finding.severity` in the enum
   (closing the §3.1 gap that `build.ts` never actually validates). Judge half: a Likert/binary judge
   over each acceptance criterion — "is this objectively checkable by a script or a test, yes/no" —
-  scored as the pass fraction. Run the judge on a *different* role than the step under test
+  scored as the pass fraction. Run the judge on a _different_ role than the step under test
   (`registry.resolve` + `ProviderProfile.roles`), per Anthropic's cross-model rule.
 - `audit` finds real defects → **seeded-defect recall, code-graded.** Keep a fixture diff with N
   planted defects, each carrying a unique marker; score = fraction reported. `checks.includes` from
@@ -442,11 +442,11 @@ against a fixture and asserting `score >= threshold`. Concretely:
 **Level (b) — evaluate the whole pipeline.**
 Two complementary drivers, both already half-written:
 
-- *Free, in `pnpm test`*: reuse `build.test.ts`'s `makeFakeRunner` + `CANNED_RESPONSES` to run the
+- _Free, in `pnpm test`_: reuse `build.test.ts`'s `makeFakeRunner` + `CANNED_RESPONSES` to run the
   whole pipeline with zero LLM calls, then `runEvals({ target: workflow, scorers: { steps, trajectory },
-  gates })`. Per §1.5 both `steps` and `trajectory` scorers work on a run that suspends at `approve`.
+gates })`. Per §1.5 both `steps` and `trajectory` scorers work on a run that suspends at `approve`.
   This catches wiring/order/contract regressions — trajectory asserts the ADR-0015 stage order held.
-- *Paid, in `pnpm mastra:smoke`*: keep the existing `start` → resume → verify-rows flow verbatim and
+- _Paid, in `pnpm mastra:smoke`_: keep the existing `start` → resume → verify-rows flow verbatim and
   replace its count-printing with `await scorer.run({ input: request, output: spec })` calls;
   set `process.exitCode = 1` when any gate scorer misses 1.0, exactly as it already does on a
   missing ticket. Register the scorers on the existing `new Mastra({ storage })` so scores land in

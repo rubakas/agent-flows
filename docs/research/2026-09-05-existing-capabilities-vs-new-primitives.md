@@ -3,7 +3,7 @@
 Date: 2026-09-05
 Purpose: **ergonomics audit.** ADR-0015 "Consequences" lists four canon primitives as blockers. This
 note examines two of them — `workspace: write` and a `check`/`command` step kind — against what the
-tools we *already* use provide, before any code is written. Q3 is a short retrospective on the
+tools we _already_ use provide, before any code is written. Q3 is a short retrospective on the
 `kind: "loop"` implementation.
 
 **Ground rule (owner's):** facts only, primary sources cited. Anything not confirmed against a
@@ -38,7 +38,11 @@ const extraArgs: string[] = [];
 if (resolvedWorkspaceDir !== undefined) {
   extraArgs.push("--allowedTools", "Read,Glob");
 }
-const result = await runClaudeCli(prompt, { model, signal, cwd: resolvedWorkspaceDir, extraArgs }, deps);
+const result = await runClaudeCli(
+  prompt,
+  { model, signal, cwd: resolvedWorkspaceDir, extraArgs },
+  deps
+);
 ```
 
 `src/canon/runClaudeCli.ts` always spawns `claude -p --output-format text [--model M] [...extraArgs]`
@@ -146,12 +150,12 @@ The docs give the CI recipe verbatim:
 
 ### Local verification
 
-| Test | Command shape | Result |
-| --- | --- | --- |
-| **A** | today's exact read mode: `-p --allowedTools "Read,Glob"`, asked to create a file | **Write denied.** Model reported "the Write was denied… doesn't have Write permission granted", no file created. Read mode genuinely enforces. |
-| **B** | `-p --permission-mode acceptEdits`, cwd = target dir | **File created**, exact contents. No prompt, fully non-interactive. |
-| **F** | `-p --permission-mode acceptEdits`, asked to write to an **absolute path outside cwd** | **Refused, no file created.** Confinement to the working directory holds. |
-| **G** | **same mechanism as today, allowlist widened only**: `-p --allowedTools "Read,Glob,Edit,Write"` | **File created.** |
+| Test  | Command shape                                                                                   | Result                                                                                                                                         |
+| ----- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A** | today's exact read mode: `-p --allowedTools "Read,Glob"`, asked to create a file                | **Write denied.** Model reported "the Write was denied… doesn't have Write permission granted", no file created. Read mode genuinely enforces. |
+| **B** | `-p --permission-mode acceptEdits`, cwd = target dir                                            | **File created**, exact contents. No prompt, fully non-interactive.                                                                            |
+| **F** | `-p --permission-mode acceptEdits`, asked to write to an **absolute path outside cwd**          | **Refused, no file created.** Confinement to the working directory holds.                                                                      |
+| **G** | **same mechanism as today, allowlist widened only**: `-p --allowedTools "Read,Glob,Edit,Write"` | **File created.**                                                                                                                              |
 
 TEST G is the decisive one: it changes nothing but the string in the existing `extraArgs.push(...)`.
 
@@ -160,7 +164,7 @@ TEST G is the decisive one: it changes nothing but the string in the existing `e
 Two equivalent expressions, both already available, both non-interactive:
 
 1. **Widen the existing allowlist** — `--allowedTools "Read,Glob,Edit,Write"` (+ `Bash` if the step
-   needs to run commands). This is the *same* argv mechanism `runStep.ts` already uses. Verified
+   needs to run commands). This is the _same_ argv mechanism `runStep.ts` already uses. Verified
    by TEST G.
 2. **Switch the permission mode** — `--permission-mode acceptEdits`, which grants file
    create/edit plus `mkdir`/`touch`/`mv`/`cp` inside the cwd. Verified by TEST B.
@@ -176,7 +180,7 @@ paths are allowed) and buys nothing the two options above don't already give ins
 
 `runStep.ts`'s read mode uses `--allowedTools`, which per the docs means "executes without prompting"
 — an allow-list, not a restriction. Read-only holds today only because a `-p` run has no prompt to
-fall back on, so everything else is denied (TEST A confirms the behaviour). The flag that *removes*
+fall back on, so everything else is denied (TEST A confirms the behaviour). The flag that _removes_
 the tools is `--tools "Read,Glob"`, and `--permission-prompts none` makes the deny-on-prompt explicit
 rather than incidental. Tightening this is a one-line hardening, independent of Q1.
 
@@ -200,7 +204,8 @@ change, in the same function.
 enforces them by **appending the schema to the prompt** and parsing the reply, with one retry:
 
 ```ts
-prompt += `\n\nReturn ONLY a valid JSON object matching this JSON Schema` +
+prompt +=
+  `\n\nReturn ONLY a valid JSON object matching this JSON Schema` +
   ` (no markdown, no code fences, no commentary):\n${JSON.stringify(schema)}`;
 ```
 
@@ -225,8 +230,11 @@ claude -p --permission-mode dontAsk --allowedTools "Bash" "Read" \
 Returned, in the result JSON's `structured_output` field:
 
 ```json
-{ "passed": false, "exitCode": 1,
-  "output": "./run-checks.sh exited with code 1 (failure). Output:\ncheck 1: ok\ncheck 2: FAILED expected 3 got 4" }
+{
+  "passed": false,
+  "exitCode": 1,
+  "output": "./run-checks.sh exited with code 1 (failure). Output:\ncheck 1: ok\ncheck 2: FAILED expected 3 got 4"
+}
 ```
 
 The script's real exit code was 1. The `-p` result JSON also carries `permission_denials`, `is_error`
@@ -246,7 +254,11 @@ match because the model issued `./run-checks.sh; echo "EXIT_CODE=$?"`. The comma
 model still returned schema-valid output:
 
 ```json
-{ "passed": false, "exitCode": 1, "output": "Could not run ./run-checks.sh — Bash execution permission was denied…" }
+{
+  "passed": false,
+  "exitCode": 1,
+  "output": "Could not run ./run-checks.sh — Bash execution permission was denied…"
+}
 ```
 
 The `exitCode: 1` is **fabricated** — nothing produced it. The prose field was honest, but the
@@ -274,14 +286,14 @@ and `.../sandbox/types.d.ts` defines the result:
 
 ```ts
 export interface ExecutionResult {
-    success: boolean;      // Whether execution completed successfully (exitCode === 0)
-    exitCode: number;      // Exit code (0 = success)
-    stdout: string;
-    stderr: string;
-    executionTimeMs: number;
-    timedOut?: boolean;
-    killed?: boolean;
-    // + stdout/stderrTruncated, stdout/stderrDroppedBytes
+  success: boolean; // Whether execution completed successfully (exitCode === 0)
+  exitCode: number; // Exit code (0 = success)
+  stdout: string;
+  stderr: string;
+  executionTimeMs: number;
+  timedOut?: boolean;
+  killed?: boolean;
+  // + stdout/stderrTruncated, stdout/stderrDroppedBytes
 }
 ```
 
@@ -315,30 +327,30 @@ toggle. Two material limitations: **"This node isn't available on n8n Cloud"** (
 and it is **"disabled by default from n8n 2.0"** for security reasons. In Docker, commands run inside
 the n8n container, not the host.
 
-**Does it change the picture?** Only mildly, and it argues *for* a command step rather than against.
+**Does it change the picture?** Only mildly, and it argues _for_ a command step rather than against.
 Binding C today emits `n8n-nodes-base.noOp` for every non-`llm` kind (`src/bindings/n8n/build.ts`,
 `buildStepNode`). A canon `check` kind would map to a real, first-class n8n node instead of a no-op —
 whereas an `llm`-step-runs-the-tests approach maps onto the custom `n8n-nodes-yoke.yokeAgent` node
-and keeps the fabrication risk. It does not make a new kind *necessary*; it makes one *cheap and
-well-supported* on that binding.
+and keeps the fabrication risk. It does not make a new kind _necessary_; it makes one _cheap and
+well-supported_ on that binding.
 
 ### Tradeoffs, plainly
 
-| | `llm` step + `workspace: write` + schema | dedicated `check`/`command` step |
-| --- | --- | --- |
-| New canon code | none (Q1's one-line change covers it) | a new `StepKind` + a builder per binding |
-| Pass/fail source | model's report of an exit code | the exit code itself |
-| Can fabricate a result | **yes — observed in TEST C** | no |
-| Cost per loop iteration | a full model turn | ~0 |
-| Handles "run the tests, then judge if the failures matter" | yes | no — needs a following `llm` step |
-| Binding C mapping | custom yoke node | `n8n-nodes-base.executeCommand` (self-hosted only) |
+|                                                            | `llm` step + `workspace: write` + schema | dedicated `check`/`command` step                   |
+| ---------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------- |
+| New canon code                                             | none (Q1's one-line change covers it)    | a new `StepKind` + a builder per binding           |
+| Pass/fail source                                           | model's report of an exit code           | the exit code itself                               |
+| Can fabricate a result                                     | **yes — observed in TEST C**             | no                                                 |
+| Cost per loop iteration                                    | a full model turn                        | ~0                                                 |
+| Handles "run the tests, then judge if the failures matter" | yes                                      | no — needs a following `llm` step                  |
+| Binding C mapping                                          | custom yoke node                         | `n8n-nodes-base.executeCommand` (self-hosted only) |
 
 ### **Verdict: NOT NEEDED to unblock the loop — but a `check` kind is the right call for the termination signal specifically.**
 
-The canon as it stands *can* close the loop today: an `llm` step with write/Bash access, a
+The canon as it stands _can_ close the loop today: an `llm` step with write/Bash access, a
 `{passed, output}` schema (ideally enforced by `--json-schema` rather than prompt text), and
 `until: "<stepId>.passed"` is sufficient, and it needs no new step kind. The ADR's premise —
-"`test` is not an `llm` step" — is **not a capability gap**; it is a *trust* argument, and the trust
+"`test` is not an `llm` step" — is **not a capability gap**; it is a _trust_ argument, and the trust
 argument is correct: TEST C shows the model returning a fabricated `exitCode` for a command that
 never ran. A loop that terminates on a model's self-report can terminate on a lie.
 

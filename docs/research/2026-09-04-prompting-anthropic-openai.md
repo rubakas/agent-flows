@@ -33,20 +33,20 @@ Primary source for the whole table (single consolidated reference):
 `https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices`
 (overview: `https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview`).
 
-| # | Technique | Documented guidance (concise) |
-|---|-----------|-------------------------------|
-| 1 | **Be clear and direct** | "Claude responds well to clear, explicit instructions." Be specific about desired output format and constraints; give steps as numbered/bulleted lists "when the order or completeness of steps matters." If you want "above and beyond" behavior, explicitly request it. **Golden rule:** "Show your prompt to a colleague with minimal context on the task and ask them to follow it. If they'd be confused, Claude will be too." Frame: treat Claude as "a brilliant but new employee who lacks context on your norms and workflows." |
-| 2 | **Add context (explain the why)** | "Providing context or motivation behind your instructions … can help Claude better understand your goals." Example: instead of `NEVER use ellipses`, explain that a TTS engine can't pronounce them. "Claude is smart enough to generalize from the explanation." |
-| 3 | **Use examples (few-shot / multishot)** | "Examples are one of the most reliable ways to steer Claude's output format, tone, and structure." Make them **Relevant** (mirror the real use case), **Diverse** (cover edge cases so Claude doesn't latch onto unintended patterns), **Structured** (wrap in `<example>` tags; multiple in `<examples>`). "Include 3–5 examples for best results." |
-| 4 | **Structure prompts with XML tags** | "XML tags help Claude parse complex prompts unambiguously." Wrap each content type in its own tag (`<instructions>`, `<context>`, `<input>`). Use "consistent, descriptive tag names"; nest tags for natural hierarchy (`<documents>` › `<document index="n">`). |
-| 5 | **Give Claude a role (system prompt)** | "Setting a role in the system prompt focuses Claude's behavior and tone… Even a single sentence makes a difference." Role text goes in the `system` field. |
-| 6 | **Long-context prompting (20k+ tokens)** | **Put longform data at the top**, above the query/instructions/examples ("Queries at the end can improve response quality by up to 30 percent in tests"). Wrap each document in `<document>` with `<document_content>` and `<source>` subtags. **Ground responses in quotes:** ask Claude to pull relevant quotes into `<quotes>` tags *before* doing the task. |
-| 7 | **Control output format** | Prefer telling Claude **what to do, not what not to do** ("Your response should be composed of smoothly flowing prose paragraphs" beats "Do not use markdown"). Use **XML format indicators** (`<smoothly_flowing_prose_paragraphs>`). **Match your prompt style to the desired output** (e.g. remove markdown from the prompt to reduce markdown in the output). |
-| 8 | **Prefill — now removed for new models** | Classic prefill (a partial assistant message to continue from) is **no longer supported on the last assistant turn** starting with Claude 4.6 models and Claude Mythos Preview: such requests "return a 400 error." Migrate to **Structured Outputs**, direct system-prompt instructions ("Respond directly without preamble…"), XML output tags, or tool calling. Prefill still works on older models and for non-final assistant turns. |
-| 9 | **Explicit tool/action instructions** | Current models "follow instructions … literally" — "Can you suggest some changes" yields suggestions, not edits. Say "Change this function…" to make it act. `<default_to_action>` / `<do_not_act_before_instructions>` snippets steer proactivity. Dial back shouty language: "Where you might have said 'CRITICAL: You MUST use this tool when…', you can use more normal prompting like 'Use this tool when…'." |
-| 10 | **Thinking & reasoning (adaptive thinking)** | Current models use **adaptive thinking** (`thinking: {type: "adaptive"}`) — Claude decides when/how much to think, driven by the `effort` parameter and query complexity; `budget_tokens` is deprecated/errors on 4.7+. **"Prefer general instructions over prescriptive steps"** — "'think thoroughly' often produces better reasoning than a hand-written step-by-step plan." **Multishot works with thinking** (show reasoning in `<thinking>` tags in your examples). **Manual CoT is a fallback** when thinking is off (use `<thinking>`/`<answer>` tags). **Ask Claude to self-check** ("verify your answer against [criteria]"). Note: with thinking disabled, Opus 4.5 is "particularly sensitive to the word 'think'" — prefer "consider," "evaluate," "reason through." |
-| 11 | **Chain complex prompts** | With adaptive thinking + subagents, Claude handles most multi-step reasoning internally. Explicit chaining (sequential API calls) is "still useful when you need to inspect intermediate outputs or enforce a specific pipeline structure." Most common pattern is **self-correction**: draft → review against criteria → refine, each a separate call. |
-| 12 | **Agentic / long-horizon** | State tracking across context windows (git, `tests.json`, `progress.txt`); "emphasize incremental progress"; native subagent orchestration (watch for over-spawning); anti-over-engineering snippet ("Avoid over-engineering. Only make changes that are directly requested or clearly necessary."); anti-hallucination snippet ("Never speculate about code you have not opened … read the file before answering"). |
+| #   | Technique                                    | Documented guidance (concise)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Be clear and direct**                      | "Claude responds well to clear, explicit instructions." Be specific about desired output format and constraints; give steps as numbered/bulleted lists "when the order or completeness of steps matters." If you want "above and beyond" behavior, explicitly request it. **Golden rule:** "Show your prompt to a colleague with minimal context on the task and ask them to follow it. If they'd be confused, Claude will be too." Frame: treat Claude as "a brilliant but new employee who lacks context on your norms and workflows."                                                                                                                                                                                                                                          |
+| 2   | **Add context (explain the why)**            | "Providing context or motivation behind your instructions … can help Claude better understand your goals." Example: instead of `NEVER use ellipses`, explain that a TTS engine can't pronounce them. "Claude is smart enough to generalize from the explanation."                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 3   | **Use examples (few-shot / multishot)**      | "Examples are one of the most reliable ways to steer Claude's output format, tone, and structure." Make them **Relevant** (mirror the real use case), **Diverse** (cover edge cases so Claude doesn't latch onto unintended patterns), **Structured** (wrap in `<example>` tags; multiple in `<examples>`). "Include 3–5 examples for best results."                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 4   | **Structure prompts with XML tags**          | "XML tags help Claude parse complex prompts unambiguously." Wrap each content type in its own tag (`<instructions>`, `<context>`, `<input>`). Use "consistent, descriptive tag names"; nest tags for natural hierarchy (`<documents>` › `<document index="n">`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 5   | **Give Claude a role (system prompt)**       | "Setting a role in the system prompt focuses Claude's behavior and tone… Even a single sentence makes a difference." Role text goes in the `system` field.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 6   | **Long-context prompting (20k+ tokens)**     | **Put longform data at the top**, above the query/instructions/examples ("Queries at the end can improve response quality by up to 30 percent in tests"). Wrap each document in `<document>` with `<document_content>` and `<source>` subtags. **Ground responses in quotes:** ask Claude to pull relevant quotes into `<quotes>` tags _before_ doing the task.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 7   | **Control output format**                    | Prefer telling Claude **what to do, not what not to do** ("Your response should be composed of smoothly flowing prose paragraphs" beats "Do not use markdown"). Use **XML format indicators** (`<smoothly_flowing_prose_paragraphs>`). **Match your prompt style to the desired output** (e.g. remove markdown from the prompt to reduce markdown in the output).                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 8   | **Prefill — now removed for new models**     | Classic prefill (a partial assistant message to continue from) is **no longer supported on the last assistant turn** starting with Claude 4.6 models and Claude Mythos Preview: such requests "return a 400 error." Migrate to **Structured Outputs**, direct system-prompt instructions ("Respond directly without preamble…"), XML output tags, or tool calling. Prefill still works on older models and for non-final assistant turns.                                                                                                                                                                                                                                                                                                                                         |
+| 9   | **Explicit tool/action instructions**        | Current models "follow instructions … literally" — "Can you suggest some changes" yields suggestions, not edits. Say "Change this function…" to make it act. `<default_to_action>` / `<do_not_act_before_instructions>` snippets steer proactivity. Dial back shouty language: "Where you might have said 'CRITICAL: You MUST use this tool when…', you can use more normal prompting like 'Use this tool when…'."                                                                                                                                                                                                                                                                                                                                                                |
+| 10  | **Thinking & reasoning (adaptive thinking)** | Current models use **adaptive thinking** (`thinking: {type: "adaptive"}`) — Claude decides when/how much to think, driven by the `effort` parameter and query complexity; `budget_tokens` is deprecated/errors on 4.7+. **"Prefer general instructions over prescriptive steps"** — "'think thoroughly' often produces better reasoning than a hand-written step-by-step plan." **Multishot works with thinking** (show reasoning in `<thinking>` tags in your examples). **Manual CoT is a fallback** when thinking is off (use `<thinking>`/`<answer>` tags). **Ask Claude to self-check** ("verify your answer against [criteria]"). Note: with thinking disabled, Opus 4.5 is "particularly sensitive to the word 'think'" — prefer "consider," "evaluate," "reason through." |
+| 11  | **Chain complex prompts**                    | With adaptive thinking + subagents, Claude handles most multi-step reasoning internally. Explicit chaining (sequential API calls) is "still useful when you need to inspect intermediate outputs or enforce a specific pipeline structure." Most common pattern is **self-correction**: draft → review against criteria → refine, each a separate call.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 12  | **Agentic / long-horizon**                   | State tracking across context windows (git, `tests.json`, `progress.txt`); "emphasize incremental progress"; native subagent orchestration (watch for over-spawning); anti-over-engineering snippet ("Avoid over-engineering. Only make changes that are directly requested or clearly necessary."); anti-hallucination snippet ("Never speculate about code you have not opened … read the file before answering").                                                                                                                                                                                                                                                                                                                                                              |
 
 Prose notes worth carrying into yoke prompts: the **golden-rule / "new employee"** framing (row 1)
 is Anthropic's single most load-bearing principle — specificity beats cleverness. The **XML-tag**
@@ -67,17 +67,17 @@ now redirected/restructured — see below).
 
 ### B.1 — Current live guide (verified section-by-section)
 
-| # | Section | Documented guidance (concise) |
-|---|---------|-------------------------------|
-| 1 | **Choosing a model** | Reasoning models for complex, multi-step planning; GPT models are "fast, cost-efficient, and benefit from explicit instructions"; weigh large-vs-small trade-offs. |
-| 2 | **Message roles & instruction following** | Priority order **developer > user**. Use the `instructions` parameter for high-level tone/goals. Analogy: developer messages are "like a function and its arguments" — developer = the rules, user = the inputs. |
-| 3 | **Version prompts in code** | Store production prompts in application code (not reusable prompt objects); use typed function arguments for dynamic values; "add representative fixtures, tests, and evaluation checks before changing production prompts." |
-| 4 | **Message formatting (Markdown + XML)** | Use **Markdown headers/lists** to mark sections and **XML tags** to delineate content boundaries. Structure developer messages with **Identity, Instructions, Examples, Context**. |
-| 5 | **Few-shot learning** | Include a handful of **diverse** input/output examples showing desired outputs, placed inside the developer message. |
-| 6 | **Include relevant context (RAG)** | Add proprietary/external data the model wasn't trained on; constrain answers to those resources; mind context-window limits. |
-| 7 | **Coding / front-end best practices** | Define the agent's role and responsibilities; enforce structured tool use with examples; require thorough testing; set Markdown standards for clean output. |
-| 8 | **Agentic tasks** | "Plan tasks thoroughly; resolve full query before yielding control"; decompose into sub-tasks and "reflect after each tool call"; use a TODO tool to track progress. |
-| 9 | **Prompting reasoning models** | "Provide high-level guidance rather than precise instructions" and "trust the model to work out implementation details." |
+| #   | Section                                   | Documented guidance (concise)                                                                                                                                                                                                |
+| --- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Choosing a model**                      | Reasoning models for complex, multi-step planning; GPT models are "fast, cost-efficient, and benefit from explicit instructions"; weigh large-vs-small trade-offs.                                                           |
+| 2   | **Message roles & instruction following** | Priority order **developer > user**. Use the `instructions` parameter for high-level tone/goals. Analogy: developer messages are "like a function and its arguments" — developer = the rules, user = the inputs.             |
+| 3   | **Version prompts in code**               | Store production prompts in application code (not reusable prompt objects); use typed function arguments for dynamic values; "add representative fixtures, tests, and evaluation checks before changing production prompts." |
+| 4   | **Message formatting (Markdown + XML)**   | Use **Markdown headers/lists** to mark sections and **XML tags** to delineate content boundaries. Structure developer messages with **Identity, Instructions, Examples, Context**.                                           |
+| 5   | **Few-shot learning**                     | Include a handful of **diverse** input/output examples showing desired outputs, placed inside the developer message.                                                                                                         |
+| 6   | **Include relevant context (RAG)**        | Add proprietary/external data the model wasn't trained on; constrain answers to those resources; mind context-window limits.                                                                                                 |
+| 7   | **Coding / front-end best practices**     | Define the agent's role and responsibilities; enforce structured tool use with examples; require thorough testing; set Markdown standards for clean output.                                                                  |
+| 8   | **Agentic tasks**                         | "Plan tasks thoroughly; resolve full query before yielding control"; decompose into sub-tasks and "reflect after each tool call"; use a TODO tool to track progress.                                                         |
+| 9   | **Prompting reasoning models**            | "Provide high-level guidance rather than precise instructions" and "trust the model to work out implementation details."                                                                                                     |
 
 ### B.2 — GPT-4.1 prompting guide (verified)
 
@@ -97,7 +97,7 @@ now redirected/restructured — see below).
   JSON for documents.
 - **Long context (1M window):** "Place your instructions at both the beginning and end of provided
   context" — better than a single placement.
-- **Induced CoT (GPT-4.1 is *not* a reasoning model):** it "benefits from explicit step-by-step
+- **Induced CoT (GPT-4.1 is _not_ a reasoning model):** it "benefits from explicit step-by-step
   prompting," e.g. "Think carefully step by step about what documents are needed…".
 - **Tools:** use the API's `tools` field, not schemas injected into the prompt (~2% gain); clear
   names + detailed descriptions reduce hallucination.
@@ -146,19 +146,19 @@ real OpenAI framework and the tactics map cleanly onto the live sections in B.1�
 
 These are the safe rules for a single prompt that runs on either vendor. Each cites both sides.
 
-| Portable principle | Anthropic | OpenAI |
-|--------------------|-----------|--------|
-| **Be clear, explicit, specific; a colleague could follow it** | Be clear and direct + golden rule (A-1) | Write clear instructions; GPT-4.1 literal following (B.1-1/B.2); reasoning "brief, clear instructions" (B.3) |
-| **Positive, imperative instructions ("do X", not "don't")** | "Tell Claude what to do instead of what not to do" (A-7) | Clear-instruction tactics / specify the steps (B.4-1) |
-| **Structure the prompt with explicit delimiters/sections** | XML tags per content type (A-4) | Markdown + XML sections; delimiters (B.1-4, B.2, B.3) |
-| **Use a role / system(developer) block, kept separate from the task** | Give Claude a role in `system` (A-5) | Developer message / persona; developer-vs-user priority (B.1-2) |
-| **Provide context / reference material and ground answers in it** | Add context (A-2); ground responses in quotes (A-6) | Include relevant context / RAG (B.1-6); legacy "Provide reference text" (B.4-2) |
-| **Examples help steer format/behavior** | Use examples, 3–5, relevant + diverse (A-3) | Few-shot learning, diverse examples (B.1-5) — *but see D for reasoning-model caveat* |
-| **Decompose complex work; step-by-step for non-reasoning models** | Chain complex prompts; manual CoT fallback (A-10/A-11) | Split complex tasks; give time to think (B.4-3/4); GPT-4.1 planning + induced CoT (B.2) |
-| **In long context, anchor instructions at the boundaries** | Longform data at top, query at end (A-6) | GPT-4.1: instructions at beginning **and** end (B.2) |
-| **Prefer defining tools via the API tool interface, not prompt-injected schemas** | Tool-use docs (A-9) | GPT-4.1 explicit, ~2% gain (B.2) |
-| **Don't shout; avoid heavy all-caps / "CRITICAL: YOU MUST" on current models** | Dial back "CRITICAL: You MUST…" (A-9) | GPT-4.1 avoid excessive all-caps → over-literalness (B.2) |
-| **Test/evaluate prompt changes systematically; version them** | Overview assumes evals / "empirically test" | Version prompts in code + tests before changes (B.1-3); legacy "Test changes systematically" (B.4-6) |
+| Portable principle                                                                | Anthropic                                                | OpenAI                                                                                                       |
+| --------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Be clear, explicit, specific; a colleague could follow it**                     | Be clear and direct + golden rule (A-1)                  | Write clear instructions; GPT-4.1 literal following (B.1-1/B.2); reasoning "brief, clear instructions" (B.3) |
+| **Positive, imperative instructions ("do X", not "don't")**                       | "Tell Claude what to do instead of what not to do" (A-7) | Clear-instruction tactics / specify the steps (B.4-1)                                                        |
+| **Structure the prompt with explicit delimiters/sections**                        | XML tags per content type (A-4)                          | Markdown + XML sections; delimiters (B.1-4, B.2, B.3)                                                        |
+| **Use a role / system(developer) block, kept separate from the task**             | Give Claude a role in `system` (A-5)                     | Developer message / persona; developer-vs-user priority (B.1-2)                                              |
+| **Provide context / reference material and ground answers in it**                 | Add context (A-2); ground responses in quotes (A-6)      | Include relevant context / RAG (B.1-6); legacy "Provide reference text" (B.4-2)                              |
+| **Examples help steer format/behavior**                                           | Use examples, 3–5, relevant + diverse (A-3)              | Few-shot learning, diverse examples (B.1-5) — _but see D for reasoning-model caveat_                         |
+| **Decompose complex work; step-by-step for non-reasoning models**                 | Chain complex prompts; manual CoT fallback (A-10/A-11)   | Split complex tasks; give time to think (B.4-3/4); GPT-4.1 planning + induced CoT (B.2)                      |
+| **In long context, anchor instructions at the boundaries**                        | Longform data at top, query at end (A-6)                 | GPT-4.1: instructions at beginning **and** end (B.2)                                                         |
+| **Prefer defining tools via the API tool interface, not prompt-injected schemas** | Tool-use docs (A-9)                                      | GPT-4.1 explicit, ~2% gain (B.2)                                                                             |
+| **Don't shout; avoid heavy all-caps / "CRITICAL: YOU MUST" on current models**    | Dial back "CRITICAL: You MUST…" (A-9)                    | GPT-4.1 avoid excessive all-caps → over-literalness (B.2)                                                    |
+| **Test/evaluate prompt changes systematically; version them**                     | Overview assumes evals / "empirically test"              | Version prompts in code + tests before changes (B.1-3); legacy "Test changes systematically" (B.4-6)         |
 
 The overlap is large: **specificity, explicit structure with delimiters, a separate role block,
 grounded context, decomposition, boundary-anchored instructions, restrained tone, and systematic
@@ -169,18 +169,18 @@ on either model family.
 
 ## D. Where they DIFFER — provider-specific behavior
 
-Each row is a place where the *same* prompt text can behave differently across the two vendors.
+Each row is a place where the _same_ prompt text can behave differently across the two vendors.
 
-| Divergence | Anthropic | OpenAI | Portable resolution |
-|------------|-----------|--------|---------------------|
-| **Primary structuring syntax** | XML tags are the recommended default and thread through every technique | Markdown is the default; XML "performs well"; **JSON-as-prompt-scaffold underperforms** (GPT-4.1) | **XML tags are the common denominator** — Anthropic recommends them, OpenAI accepts them. Markdown headings are also accepted by both. **Avoid JSON as prompt structure.** |
-| **Prefilling the assistant turn** | Classic technique, **removed** on Claude 4.6+ (400 error); migrate to structured outputs / direct instructions / XML output tags | Not a documented technique; output shape is controlled by developer message + structured outputs | **Never rely on prefill** in a neutral prompt. Constrain output via explicit format instructions / XML output tags instead. |
-| **Chain-of-thought on reasoning models** | Adaptive thinking is on for many current models; "prefer general instructions over prescriptive steps"; manual CoT only a fallback; avoid the literal word "think" when thinking is off (Opus 4.5) | Reasoning models: **do NOT** add "think step by step"/"explain your reasoning" (unnecessary, may hurt). GPT-4.1 (non-reasoning): **does** benefit from explicit step-by-step | **Do not hard-code "think step by step."** Ask for the *outcome* (a plan, a checked answer). See E — genuine single-prompt tension. |
-| **Few-shot default** | Examples are "one of the most reliable ways" to steer (encourage 3–5) | Reasoning models: "start with zero-shot… without examples first"; GPT/GPT-4.1: examples help | Keep examples **optional and removable**; don't make a step depend on heavy few-shot if it may run on a reasoning model. |
-| **Role message naming** | `system` field (+ user/assistant) | `developer` (replaces system for o-series/current) with priority over `user`; `instructions` param | Keep role/system content in its **own block** so each binding maps it to the right role name. |
-| **Self-verification** | "Ask Claude to self-check" helps (except Opus 5, which over-verifies — remove the instruction) | Reasoning models verify internally; don't force it | Ask for a verified *result*, not a mandated verification *process*; let effort/model decide. |
-| **Reasoning-depth control** | `effort` parameter + adaptive thinking (`budget_tokens` deprecated) | Reasoning-effort / model choice; developer message | This is a **binding/config concern, not prompt text** — keep it out of the neutral `.md`. |
-| **Long-context instruction placement** | Data at top, single query at end | GPT-4.1: repeat instructions at start **and** end | Repeating the key instruction at the end is safe for both — the superset works everywhere. |
+| Divergence                               | Anthropic                                                                                                                                                                                          | OpenAI                                                                                                                                                                       | Portable resolution                                                                                                                                                        |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Primary structuring syntax**           | XML tags are the recommended default and thread through every technique                                                                                                                            | Markdown is the default; XML "performs well"; **JSON-as-prompt-scaffold underperforms** (GPT-4.1)                                                                            | **XML tags are the common denominator** — Anthropic recommends them, OpenAI accepts them. Markdown headings are also accepted by both. **Avoid JSON as prompt structure.** |
+| **Prefilling the assistant turn**        | Classic technique, **removed** on Claude 4.6+ (400 error); migrate to structured outputs / direct instructions / XML output tags                                                                   | Not a documented technique; output shape is controlled by developer message + structured outputs                                                                             | **Never rely on prefill** in a neutral prompt. Constrain output via explicit format instructions / XML output tags instead.                                                |
+| **Chain-of-thought on reasoning models** | Adaptive thinking is on for many current models; "prefer general instructions over prescriptive steps"; manual CoT only a fallback; avoid the literal word "think" when thinking is off (Opus 4.5) | Reasoning models: **do NOT** add "think step by step"/"explain your reasoning" (unnecessary, may hurt). GPT-4.1 (non-reasoning): **does** benefit from explicit step-by-step | **Do not hard-code "think step by step."** Ask for the _outcome_ (a plan, a checked answer). See E — genuine single-prompt tension.                                        |
+| **Few-shot default**                     | Examples are "one of the most reliable ways" to steer (encourage 3–5)                                                                                                                              | Reasoning models: "start with zero-shot… without examples first"; GPT/GPT-4.1: examples help                                                                                 | Keep examples **optional and removable**; don't make a step depend on heavy few-shot if it may run on a reasoning model.                                                   |
+| **Role message naming**                  | `system` field (+ user/assistant)                                                                                                                                                                  | `developer` (replaces system for o-series/current) with priority over `user`; `instructions` param                                                                           | Keep role/system content in its **own block** so each binding maps it to the right role name.                                                                              |
+| **Self-verification**                    | "Ask Claude to self-check" helps (except Opus 5, which over-verifies — remove the instruction)                                                                                                     | Reasoning models verify internally; don't force it                                                                                                                           | Ask for a verified _result_, not a mandated verification _process_; let effort/model decide.                                                                               |
+| **Reasoning-depth control**              | `effort` parameter + adaptive thinking (`budget_tokens` deprecated)                                                                                                                                | Reasoning-effort / model choice; developer message                                                                                                                           | This is a **binding/config concern, not prompt text** — keep it out of the neutral `.md`.                                                                                  |
+| **Long-context instruction placement**   | Data at top, single query at end                                                                                                                                                                   | GPT-4.1: repeat instructions at start **and** end                                                                                                                            | Repeating the key instruction at the end is safe for both — the superset works everywhere.                                                                                 |
 
 ---
 
@@ -192,56 +192,56 @@ GPT. Each rule is justified by a cited technique from A/B/C/D.
 **Rules that are unambiguously portable (adopt these as the house style):**
 
 1. **Open with a clear, explicit objective and the exact output/format/constraints** — written so a
-   colleague with no context could execute it. *(A-1 golden rule; B.1-1 / B.2 literal following;
-   B.3 "brief, clear instructions".)*
+   colleague with no context could execute it. _(A-1 golden rule; B.1-1 / B.2 literal following;
+   B.3 "brief, clear instructions".)_
 2. **Phrase instructions as positive imperatives** ("Do X", "Change Y"), not prohibitions; use a
-   numbered list when order or completeness matters. *(A-7 tell-what-to-do + A-1 sequential steps;
-   B.4-1 specify the steps.)*
+   numbered list when order or completeness matters. _(A-7 tell-what-to-do + A-1 sequential steps;
+   B.4-1 specify the steps.)_
 3. **Structure the prompt with XML tags** for each distinct block — `<instructions>`, `<context>`,
    `<input>`, `<examples>`, and an `<output_format>` or output tag for the result. Optionally mirror
-   with Markdown headings. **Do not use JSON as the prompt scaffold.** *(A-4 XML; B.1-4 / B.2 XML
-   accepted, JSON underperforms; D row 1.)*
+   with Markdown headings. **Do not use JSON as the prompt scaffold.** _(A-4 XML; B.1-4 / B.2 XML
+   accepted, JSON underperforms; D row 1.)_
 4. **Keep the role / system instructions in their own block**, separate from task/user content, so
    binding A maps it to Claude `system` and binding B maps it to OpenAI `developer`. Don't bake role
-   text into the user body. *(A-5; B.1-2; D row 5.)*
+   text into the user body. _(A-5; B.1-2; D row 5.)_
 5. **Put long/reference material at the top and the actual task at the end**; for very long prompts,
-   restate the one key instruction at the end too. *(A-6 data-at-top/query-at-end; B.2 begin-and-end;
-   D row 8 — the superset is safe.)*
+   restate the one key instruction at the end too. _(A-6 data-at-top/query-at-end; B.2 begin-and-end;
+   D row 8 — the superset is safe.)_
 6. **When reference material is included, instruct the step to ground its answer in it** (quote/cite
-   the relevant parts before answering). *(A-6 ground-in-quotes; B.1-6 RAG / B.4-2 reference text.)*
+   the relevant parts before answering). _(A-6 ground-in-quotes; B.1-6 RAG / B.4-2 reference text.)_
 7. **Prefer restrained, firm phrasing over shouting.** No walls of all-caps or "CRITICAL: YOU MUST";
-   current models over-trigger / turn over-literal. *(A-9 dial-back "MUST"; B.2 avoid all-caps.)*
+   current models over-trigger / turn over-literal. _(A-9 dial-back "MUST"; B.2 avoid all-caps.)_
 8. **Make action steps explicitly imperative.** If the step must edit files or run something, say so
    directly ("Change…", "Run…", "resolve the full task before yielding") — not "could you suggest".
-   Include the persistence + tool-use + planning intent for agentic steps. *(A-9 explicit action;
-   B.1-8 / B.2 persistence + tool-calling + planning.)*
+   Include the persistence + tool-use + planning intent for agentic steps. _(A-9 explicit action;
+   B.1-8 / B.2 persistence + tool-calling + planning.)_
 9. **State success criteria / "what done looks like" explicitly**, and ask for a verified result —
-   without prescribing a visible reasoning process (see the flag below). *(A-10 self-check; B.3 be
-   explicit about constraints.)*
+   without prescribing a visible reasoning process (see the flag below). _(A-10 self-check; B.3 be
+   explicit about constraints.)_
 10. **Never use assistant prefill** as a mechanism; it errors on Claude 4.6+ and isn't an OpenAI
-    concept. Constrain output via explicit format instructions / XML output tags. *(A-8; D row 2.)*
+    concept. Constrain output via explicit format instructions / XML output tags. _(A-8; D row 2.)_
 11. **Keep effort/thinking/reasoning-depth in the binding, not the prompt.** The neutral `.md`
     carries task intent; each binding sets Claude `effort`/adaptive-thinking or OpenAI
-    reasoning-effort/model. *(A-10; B.3; D row 7.)*
-12. **Version prompts in the repo and back them with evals before changing them.** *(Anthropic
-    overview "empirically test"; B.1-3 version-in-code + tests; B.4-6.)*
+    reasoning-effort/model. _(A-10; B.3; D row 7.)_
+12. **Version prompts in the repo and back them with evals before changing them.** _(Anthropic
+    overview "empirically test"; B.1-3 version-in-code + tests; B.4-6.)_
 
 **Places where a single prompt genuinely cannot be optimal for both — flag honestly:**
 
-- **Chain-of-thought wording (the big one).** If a yoke step can run on *either* a reasoning model
+- **Chain-of-thought wording (the big one).** If a yoke step can run on _either_ a reasoning model
   or a non-reasoning model, you cannot bake "think step by step / explain your reasoning" into the
-  shared text: it *helps* non-reasoning GPT-4.1 but is *discouraged and may hurt* reasoning models on
+  shared text: it _helps_ non-reasoning GPT-4.1 but is _discouraged and may hurt_ reasoning models on
   **both** vendors (OpenAI reasoning "avoid CoT"; Anthropic "prefer general instructions", avoid the
-  word "think" when thinking is off). **Mitigation:** phrase for the *outcome* ("Produce a short plan,
+  word "think" when thinking is off). **Mitigation:** phrase for the _outcome_ ("Produce a short plan,
   then the implementation" / "Return a checked answer") rather than mandating internal reasoning; or
   template the CoT line per-binding/per-model so it's injected only for non-reasoning targets.
-  *(D row 3.)*
+  _(D row 3.)_
 - **Few-shot volume.** Reasoning-model targets prefer zero-shot; non-reasoning targets benefit from
   3–5 examples. Keep `<examples>` **optional/removable** so a reasoning binding can drop them.
-  *(D row 4.)*
+  _(D row 4.)_
 - **Self-verification.** Asking for an explicit self-check helps some Claude/GPT models but is
-  redundant on reasoning models (and over-verifies on Opus 5). Prefer asking for a *verified result*
-  over a mandated verification *procedure*. *(D row 6.)*
+  redundant on reasoning models (and over-verifies on Opus 5). Prefer asking for a _verified result_
+  over a mandated verification _procedure_. _(D row 6.)_
 
 **Net recommendation for yoke:** author the neutral canon as **XML-tagged blocks** (role/system,
 instructions, context, input, examples, output-format), with **positive imperative instructions,
@@ -256,16 +256,19 @@ architecture already puts provider differences.
 ## Sources consulted (primary vendor docs)
 
 Anthropic:
+
 - Prompt engineering overview — `https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview`
 - Prompting best practices (consolidated reference; classic sub-pages redirect here) — `https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices`
 - Verified redirects: `.../prompt-engineering/be-clear-and-direct` and `.../multishot-prompting` → `claude-prompting-best-practices`; `docs.claude.com` → `platform.claude.com`.
 
 OpenAI (current, live):
+
 - Prompt engineering guide — `https://developers.openai.com/api/docs/guides/prompt-engineering`
 - Reasoning best practices — `https://developers.openai.com/api/docs/guides/reasoning-best-practices`
 - GPT-4.1 prompting guide (Cookbook) — `https://developers.openai.com/cookbook/examples/gpt4-1_prompting_guide`
 
 OpenAI (legacy, redirected — six-strategy framework, per-tactic detail _unverified against live page_):
+
 - `https://platform.openai.com/docs/guides/prompt-engineering` (now 301 → the developers.openai.com guide above)
 
 _Unverified items are marked inline. The six-strategy tactic detail could not be re-fetched from a
