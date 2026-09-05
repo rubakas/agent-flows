@@ -2,6 +2,7 @@
 // Eval runner for read-only pipelines.
 //
 // Usage: tsx src/evals/run.ts <fixture-name>
+// Usage: tsx src/evals/run.ts --list   (prints available fixtures and exits)
 // Available fixtures: bug-missing-detail, feature-collision
 //
 // Thresholds (exit non-zero if any falls below):
@@ -60,6 +61,11 @@ const pipelinesDir = join(repoRoot, "pipelines");
 // ── CLI args ──────────────────────────────────────────────────────────────────
 
 const KNOWN_FIXTURES = ["bug-missing-detail", "feature-collision"] as const;
+
+if (process.argv.includes("--list")) {
+  for (const name of KNOWN_FIXTURES) console.log(name);
+  process.exit(0);
+}
 
 const fixtureName = process.argv[2];
 if (!fixtureName || !(KNOWN_FIXTURES as readonly string[]).includes(fixtureName)) {
