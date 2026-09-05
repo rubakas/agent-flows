@@ -17,6 +17,43 @@ export type { SpawnFn } from "./runClaudeCli.js";
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 600_000;
 
+/**
+ * Glob patterns for files whose contents must never be read or written by a
+ * workspace step, even when `permissions.contents` is granted. Applied via
+ * `--disallowedTools` on every claude CLI invocation that declares a
+ * `contentsAccess`. Glob (listing filenames) is intentionally excluded — a step
+ * may discover that a credential file exists; it may not read or overwrite it.
+ *
+ * NOTE — .env.* variants: glob syntax cannot express "deny .env.production but
+ * allow .env.example". Only the exact `.env` filename is denied here. Files like
+ * `.env.production` are NOT covered; `.env.example`, `.env.sample`,
+ * `.env.template`, and `.env.dist` remain fully readable.
+ *
+ * NOTE — keyword patterns (*secret*, *token*, etc.): these match on the full
+ * path segment, which may incidentally deny source files whose names contain
+ * those words (e.g. `tokenizer.ts`). This is a deliberate conservative tradeoff
+ * following the owner's documented list.
+ */
+export const CREDENTIAL_DENY_PATTERNS: readonly string[] = [
+  "**/.env",
+  "**/*.key",
+  "**/*.pem",
+  "**/*.p12",
+  "**/*.pfx",
+  "**/*.jks",
+  "**/*.keystore",
+  "**/*.truststore",
+  "**/credentials.*",
+  "**/secrets.*",
+  "**/*-secrets.*",
+  "**/service-account*.json",
+  "**/*secret*",
+  "**/*credential*",
+  "**/*token*",
+  "**/*apikey*",
+  "**/*private-key*",
+];
+
 /** Thrown when a step's deadline fires before the transport completes. */
 export class StepTimeoutError extends Error {
   readonly timeoutMs: number;
@@ -464,6 +501,17 @@ export async function runLlmStep(
             "--allowedTools",
             toolSet
           );
+          if (resolvedWorkspaceDir !== undefined) {
+            // "Edit(pattern)" rules cover all file-editing tools (including Write);
+            // "Write(pattern)" is not a valid file permission deny rule and produces
+            // CLI warnings. "Read(pattern)" also suppresses Glob listing for the same
+            // path — granular "deny Read but allow Glob" is not achievable with this
+            // mechanism; the deny list is intentionally stricter on the side of security.
+            const disallowedToolsValue = ["Read", "Edit"]
+              .flatMap((tool) => CREDENTIAL_DENY_PATTERNS.map((pat) => `${tool}(${pat})`))
+              .join(",");
+            extraArgs.push("--disallowedTools", disallowedToolsValue);
+          }
           if (hasSkills) {
             const rawEnv = deps.env ?? process.env;
             const skillsDir = rawEnv.YOKE_SKILLS_DIR ?? `${rawEnv.HOME ?? ""}/.claude`;

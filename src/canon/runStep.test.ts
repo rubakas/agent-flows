@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { DEFAULT_STEP_TIMEOUT_MS, StepTimeoutError, runCheckStep, runLlmStep } from "./runStep.js";
+import {
+  CREDENTIAL_DENY_PATTERNS,
+  DEFAULT_STEP_TIMEOUT_MS,
+  StepTimeoutError,
+  runCheckStep,
+  runLlmStep,
+} from "./runStep.js";
 import { makeFakeChild, makeFakeSpawn } from "./testing/fakeSpawn.js";
 import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
@@ -780,6 +786,130 @@ describe("runLlmStep — skills", () => {
       capturedArgs[pluginDirIdx + 1],
       "/opt/project/.claude",
       "YOKE_SKILLS_DIR must override default"
+    );
+  });
+});
+
+// ── credential deny list ──────────────────────────────────────────────────────
+
+describe("runLlmStep — credential deny list", () => {
+  const entry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+
+  it("read mode: --disallowedTools is present and covers Read and Edit for every deny pattern", async () => {
+    // Edit rules cover all file-editing tools including Write; Write(pattern) is not
+    // a valid file permission deny rule. Write must not appear in --disallowedTools.
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "analyze", {
+      spawn,
+      contentsAccess: "read",
+      workspaceDir: repoRoot,
+    });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "read mode must emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+    assert.ok(typeof disallowedValue === "string", "--disallowedTools must have a value");
+
+    for (const pattern of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        disallowedValue.includes(`Read(${pattern})`),
+        `--disallowedTools must deny Read for pattern ${pattern}`
+      );
+      assert.ok(
+        disallowedValue.includes(`Edit(${pattern})`),
+        `--disallowedTools must deny Edit for pattern ${pattern}`
+      );
+    }
+    assert.ok(
+      !disallowedValue.includes("Write("),
+      "--disallowedTools must not include Write() — Edit covers all file-editing tools"
+    );
+  });
+
+  it("write mode: --disallowedTools is present and covers Read and Edit for every deny pattern", async () => {
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "edit file", {
+      spawn,
+      contentsAccess: "write",
+      workspaceDir: repoRoot,
+    });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "write mode must emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+    assert.ok(typeof disallowedValue === "string", "--disallowedTools must have a value");
+
+    for (const pattern of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        disallowedValue.includes(`Read(${pattern})`),
+        `--disallowedTools must deny Read for pattern ${pattern}`
+      );
+      assert.ok(
+        disallowedValue.includes(`Edit(${pattern})`),
+        `--disallowedTools must deny Edit for pattern ${pattern}`
+      );
+    }
+    assert.ok(
+      !disallowedValue.includes("Write("),
+      "--disallowedTools must not include Write() — Edit covers all file-editing tools"
+    );
+  });
+
+  it("--disallowedTools does not contain Glob()", async () => {
+    // Glob is not in the deny list. Note: empirically, Read(pattern) in --disallowedTools
+    // also suppresses Glob listing for that path — granular "deny Read but allow Glob"
+    // is not achievable with the current CLI mechanism.
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "analyze", {
+      spawn,
+      contentsAccess: "read",
+      workspaceDir: repoRoot,
+    });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "must emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+    assert.ok(!disallowedValue.includes("Glob("), "--disallowedTools must not contain Glob()");
+  });
+
+  it("step with no permissions does not emit --disallowedTools (regression guard)", async () => {
+    // A step without contentsAccess must not get --disallowedTools added to its
+    // argument list. Leaking the deny list into unrestricted steps would change
+    // behaviour for all pipelines that omit permissions.
+    const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "hello", { spawn });
+
+    assert.ok(
+      !capturedArgs.includes("--disallowedTools"),
+      "must not emit --disallowedTools when no permissions are declared"
     );
   });
 });
