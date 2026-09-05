@@ -1,4 +1,4 @@
-const FINDING = {
+export const FINDING = {
   type: "object",
   properties: {
     text: { type: "string" },
@@ -9,14 +9,14 @@ const FINDING = {
   additionalProperties: false,
 };
 
-const WEAK_SCHEMA = {
+export const WEAK_SCHEMA = {
   type: "object",
   properties: { weaknesses: { type: "array", items: FINDING } },
   required: ["weaknesses"],
   additionalProperties: false,
 };
 
-const SEC_SCHEMA = {
+export const SEC_SCHEMA = {
   type: "object",
   properties: { securityFindings: { type: "array", items: FINDING } },
   required: ["securityFindings"],

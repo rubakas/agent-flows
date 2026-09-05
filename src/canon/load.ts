@@ -63,7 +63,7 @@ export function loadPipeline(
   for (const step of def.steps) {
     if (step.kind === "pipeline" || step.kind === "loop" || step.kind === "check") {
       for (const field of NON_LLM_FORBIDDEN) {
-        if ((step as Record<string, unknown>)[field] !== undefined) {
+        if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
           throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
         }
       }
@@ -82,7 +82,11 @@ export function loadPipeline(
         if (!step.pipeline) {
           throw new Error(`Step "${step.id}": loop step requires pipeline`);
         }
-        if (!step.maxIterations || !Number.isInteger(step.maxIterations) || step.maxIterations <= 0) {
+        if (
+          !step.maxIterations ||
+          !Number.isInteger(step.maxIterations) ||
+          step.maxIterations <= 0
+        ) {
           throw new Error(
             `Step "${step.id}": loop step requires maxIterations to be a positive integer`
           );

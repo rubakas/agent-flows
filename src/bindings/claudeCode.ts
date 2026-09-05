@@ -6,7 +6,7 @@ import {
   resolveStepModel,
   type ProviderProfile,
 } from "../canon/registry.js";
-import { canonSchemas } from "../canon/schemas.js";
+import { FINDING } from "../canon/schemas.js";
 import type { LoadedPipeline, StepDef } from "../canon/types.js";
 
 // ---------------------------------------------------------------------------
@@ -117,16 +117,7 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
   const usedSchemas = new Set(def.steps.map((s) => s.schema).filter(Boolean) as string[]);
 
   if (usedSchemas.size > 0) {
-    // Extract FINDING from the weaknesses schema items (or securityFindings items).
-    const anySchema = canonSchemas[
-      usedSchemas.has("weaknesses") ? "weaknesses" : "securityFindings"
-    ] as {
-      properties: Record<string, { items: unknown }>;
-    };
-    const fieldName = usedSchemas.has("weaknesses") ? "weaknesses" : "securityFindings";
-    const findingSchema = anySchema.properties[fieldName].items;
-
-    out.push(`const FINDING = ${JSON.stringify(findingSchema, null, 2)}`);
+    out.push(`const FINDING = ${JSON.stringify(FINDING, null, 2)}`);
 
     if (usedSchemas.has("weaknesses")) {
       out.push("const WEAK_SCHEMA = {");
