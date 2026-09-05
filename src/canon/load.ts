@@ -1,8 +1,9 @@
 import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "yaml";
-import { GraphError, pipelineLevels } from "./graph.js";
+import { GraphError, pipelineAncestors, pipelineLevels } from "./graph.js";
 import { expandNested } from "./nest.js";
+import { extractPlaceholders } from "./render.js";
 import { canonSchemas } from "./schemas.js";
 import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 
@@ -198,6 +199,26 @@ export function loadPipeline(
         throw new Error(err.message, { cause: err });
       }
       throw err;
+    }
+  }
+
+  // Validate prompt placeholders against the keys each step can actually see
+  // at runtime: pipeline inputs plus transitive ancestor step ids.
+  // Uses extractPlaceholders from render.ts so the pattern cannot diverge.
+  const ancestorMap = pipelineAncestors(expanded.def.steps);
+  const alwaysAvailable = new Set([...expanded.def.inputs, "models"]);
+  for (const step of expanded.def.steps) {
+    const promptText = expanded.prompts[step.id];
+    if (promptText === undefined) continue;
+    const stepAncestors = ancestorMap.get(step.id) ?? new Set<string>();
+    const available = new Set([...alwaysAvailable, ...stepAncestors]);
+    for (const ph of extractPlaceholders(promptText)) {
+      if (!available.has(ph)) {
+        const availList = [...expanded.def.inputs, ...stepAncestors].join(", ");
+        throw new Error(
+          `Step "${step.id}": prompt references unknown placeholder "{{${ph}}}" — available: ${availList}`
+        );
+      }
     }
   }
 

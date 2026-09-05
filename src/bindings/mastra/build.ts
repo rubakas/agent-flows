@@ -10,7 +10,7 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { assembleSpec } from "../../canon/assemble.js";
-import { pipelineLevels } from "../../canon/graph.js";
+import { pipelineAncestors, pipelineLevels } from "../../canon/graph.js";
 import { persistTicket } from "../../canon/persistTicket.js";
 import { getActiveProfile, resolveStepModel } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
@@ -92,28 +92,6 @@ function tryParseSchemaOutput(
     };
   }
   return { ok: true, value: parsed };
-}
-
-// Returns the transitive ancestor set for every step in the pipeline.
-// Must only be called after pipelineLevels has validated the graph (no cycles).
-function computeAncestors(steps: readonly StepDef[]): Map<string, Set<string>> {
-  const depMap = new Map<string, readonly string[]>(steps.map((s) => [s.id, s.dependsOn ?? []]));
-  const cache = new Map<string, Set<string>>();
-
-  function getAncestors(id: string): Set<string> {
-    const cached = cache.get(id);
-    if (cached !== undefined) return cached;
-    const set = new Set<string>();
-    for (const dep of depMap.get(id) ?? []) {
-      set.add(dep);
-      for (const anc of getAncestors(dep)) set.add(anc);
-    }
-    cache.set(id, set);
-    return set;
-  }
-
-  for (const s of steps) getAncestors(s.id);
-  return cache;
 }
 
 // visibleKeys, when provided, limits which context keys are visible to the
@@ -408,7 +386,7 @@ function buildLevelsOntoBuilder(
 ): any {
   const levels = pipelineLevels(def.steps);
   const stepById = new Map(def.steps.map((s) => [s.id, s]));
-  const ancestorMap = computeAncestors(def.steps);
+  const ancestorMap = pipelineAncestors(def.steps);
   const alwaysVisible = new Set([...def.inputs, "models"]);
 
   for (let i = 0; i < levels.length; i++) {

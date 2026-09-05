@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GraphError, _computeLevels, pipelineLevels, pipelineToGraph } from "./graph.js";
+import {
+  GraphError,
+  _computeLevels,
+  pipelineAncestors,
+  pipelineLevels,
+  pipelineToGraph,
+} from "./graph.js";
 
 // ---------------------------------------------------------------------------
 // pipelineLevels
@@ -146,6 +152,74 @@ describe("pipelineLevels", () => {
         assert.ok(err instanceof GraphError, "should be GraphError");
         assert.ok(err.message.includes("a"), "message names 'a'");
         assert.ok(err.message.includes("b"), "message names 'b'");
+        return true;
+      }
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pipelineAncestors
+// ---------------------------------------------------------------------------
+
+describe("pipelineAncestors", () => {
+  it("returns an empty ancestor set for a step with no dependencies", () => {
+    const result = pipelineAncestors([{ id: "a" }]);
+    assert.deepEqual([...result.get("a")!], []);
+  });
+
+  it("returns the direct parent as the sole ancestor", () => {
+    const steps = [{ id: "a" }, { id: "b", dependsOn: ["a"] }];
+    const result = pipelineAncestors(steps);
+    assert.deepEqual(result.get("b"), new Set(["a"]));
+    assert.deepEqual(result.get("a"), new Set());
+  });
+
+  it("returns transitive ancestors for a linear chain", () => {
+    const steps = [{ id: "a" }, { id: "b", dependsOn: ["a"] }, { id: "c", dependsOn: ["b"] }];
+    const result = pipelineAncestors(steps);
+    assert.deepEqual(result.get("a"), new Set());
+    assert.deepEqual(result.get("b"), new Set(["a"]));
+    assert.deepEqual(result.get("c"), new Set(["a", "b"]));
+  });
+
+  it("deduplicates common ancestors in a diamond", () => {
+    // a fans out to b and c; both converge on d — a appears once in d's set
+    const steps = [
+      { id: "a" },
+      { id: "b", dependsOn: ["a"] },
+      { id: "c", dependsOn: ["a"] },
+      { id: "d", dependsOn: ["b", "c"] },
+    ];
+    const result = pipelineAncestors(steps);
+    assert.deepEqual(result.get("d"), new Set(["a", "b", "c"]));
+    assert.deepEqual(result.get("b"), new Set(["a"]));
+    assert.deepEqual(result.get("c"), new Set(["a"]));
+    assert.deepEqual(result.get("a"), new Set());
+  });
+
+  it("throws GraphError on a cycle, naming both members", () => {
+    const steps = [
+      { id: "a", dependsOn: ["b"] },
+      { id: "b", dependsOn: ["a"] },
+    ];
+    assert.throws(
+      () => pipelineAncestors(steps),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphError, "should be GraphError");
+        assert.ok(err.message.includes("a"), "message names 'a'");
+        assert.ok(err.message.includes("b"), "message names 'b'");
+        return true;
+      }
+    );
+  });
+
+  it("throws GraphError on an unknown dependency id, naming it", () => {
+    assert.throws(
+      () => pipelineAncestors([{ id: "a", dependsOn: ["ghost"] }]),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphError, "should be GraphError");
+        assert.ok(err.message.includes("ghost"), "message names the unknown id");
         return true;
       }
     );

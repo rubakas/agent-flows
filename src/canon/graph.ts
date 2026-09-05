@@ -134,6 +134,36 @@ export function pipelineLevels(steps: readonly GraphStep[]): readonly (readonly 
 }
 
 /**
+ * Returns the transitive ancestor set for every step in the pipeline.
+ *
+ * The ancestor set of a step contains all steps it directly or transitively
+ * depends on via `dependsOn`. A step with no dependencies has an empty set.
+ * The result is keyed by step id. Validates the graph first (same rules as
+ * `pipelineLevels`) and throws `GraphError` on any structural problem.
+ */
+export function pipelineAncestors(steps: readonly GraphStep[]): Map<string, Set<string>> {
+  validate(steps);
+
+  const depMap = new Map<string, readonly string[]>(steps.map((s) => [s.id, s.dependsOn ?? []]));
+  const cache = new Map<string, Set<string>>();
+
+  function getAncestors(id: string): Set<string> {
+    const cached = cache.get(id);
+    if (cached !== undefined) return cached;
+    const set = new Set<string>();
+    for (const dep of depMap.get(id)!) {
+      set.add(dep);
+      for (const anc of getAncestors(dep)) set.add(anc);
+    }
+    cache.set(id, set);
+    return set;
+  }
+
+  for (const s of steps) getAncestors(s.id);
+  return cache;
+}
+
+/**
  * Maps canon step declarations to a flat node/edge representation.
  *
  * One edge per `dependsOn` entry: `from` is the dependency, `to` is the

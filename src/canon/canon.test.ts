@@ -843,3 +843,193 @@ ${overrides}
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// prompt placeholder validation
+// ---------------------------------------------------------------------------
+
+describe("loadPipeline — prompt placeholder validation", () => {
+  it("loads fine when a prompt references only a declared input", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/s1.md
+`;
+    const { prompts } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "Hello {{request}}"),
+    });
+    assert.equal(prompts.s1, "Hello {{request}}");
+  });
+
+  it("loads fine when a prompt references an ancestor step id", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: survey
+    kind: llm
+    model: sonnet
+    prompt: prompts/survey.md
+  - id: findings
+    kind: llm
+    model: sonnet
+    prompt: prompts/findings.md
+    dependsOn: [survey]
+`;
+    const { prompts } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => {
+        if (p.endsWith("test.yaml")) return yaml;
+        if (p.includes("survey")) return "Request: {{request}}";
+        return "Based on {{survey}}";
+      },
+    });
+    assert.equal(prompts.findings, "Based on {{survey}}");
+  });
+
+  it("throws when a prompt references an unknown placeholder", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: findings
+    kind: llm
+    model: sonnet
+    prompt: prompts/findings.md
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "Based on {{servey}}"),
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("findings"), "error names the step");
+        assert.ok(err.message.includes("servey"), "error names the bad placeholder");
+        assert.ok(err.message.includes("available"), "error lists available keys");
+        return true;
+      }
+    );
+  });
+
+  it("throws when a prompt references a sibling step id (non-ancestor)", () => {
+    // survey and findings are siblings at level 0 — neither is an ancestor of the other
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: survey
+    kind: llm
+    model: sonnet
+    prompt: prompts/survey.md
+  - id: findings
+    kind: llm
+    model: sonnet
+    prompt: prompts/findings.md
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => {
+            if (p.endsWith("test.yaml")) return yaml;
+            if (p.includes("survey")) return "Request: {{request}}";
+            // findings references survey but survey is not an ancestor
+            return "Based on {{survey}}";
+          },
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("findings"), "error names the step");
+        assert.ok(err.message.includes("survey"), "error names the bad placeholder");
+        return true;
+      }
+    );
+  });
+
+  it("throws when a prompt references a later step id (not yet computed)", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: early
+    kind: llm
+    model: sonnet
+    prompt: prompts/early.md
+  - id: late
+    kind: llm
+    model: sonnet
+    prompt: prompts/late.md
+    dependsOn: [early]
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => {
+            if (p.endsWith("test.yaml")) return yaml;
+            // early references late, which has not run yet
+            if (p.includes("early")) return "Peek at {{late}}";
+            return "Output";
+          },
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("early"), "error names the offending step");
+        assert.ok(err.message.includes("late"), "error names the bad placeholder");
+        return true;
+      }
+    );
+  });
+
+  it("error message names the step, the placeholder, and what is available", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: survey
+    kind: llm
+    model: sonnet
+    prompt: prompts/survey.md
+  - id: findings
+    kind: llm
+    model: sonnet
+    prompt: prompts/findings.md
+    dependsOn: [survey]
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => {
+            if (p.endsWith("test.yaml")) return yaml;
+            if (p.includes("survey")) return "{{request}}";
+            return "{{servey}}"; // typo
+          },
+        }),
+      (err: Error) => {
+        assert.ok(err.message.includes("findings"), "names the step");
+        assert.ok(err.message.includes("servey"), "names the bad placeholder");
+        // available should include the input and the ancestor
+        assert.ok(err.message.includes("request"), "lists pipeline input");
+        assert.ok(err.message.includes("survey"), "lists ancestor step id");
+        return true;
+      }
+    );
+  });
+});
