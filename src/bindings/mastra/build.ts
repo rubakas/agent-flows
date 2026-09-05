@@ -113,6 +113,19 @@ function tryParseSchemaOutput(
   return { ok: true, value: parsed };
 }
 
+/** Builds the runner-deps base shared by every step kind (timeout fields). */
+function baseRunnerDeps(
+  step: StepDef,
+  deps: BuildDeps,
+  defaultTimeoutMs: number | undefined
+): StepRunnerDeps {
+  return {
+    ...(deps.runnerDeps ?? {}),
+    ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
+    ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+  };
+}
+
 // visibleKeys, when provided, limits which context keys are visible to the
 // prompt renderer (FR-005). The full accumulated context is always returned
 // so later steps can apply their own filter.
@@ -158,9 +171,7 @@ function buildLlmStep(
       // `workspace: read|write` would be silently dropped and the agent would run
       // with no repo access at all.
       const runnerDeps: StepRunnerDeps = {
-        ...(deps.runnerDeps ?? {}),
-        ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
-        ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+        ...baseRunnerDeps(step, deps, defaultTimeoutMs),
         ...(step.workspace !== undefined
           ? {
               workspaceAccess: step.workspace,
@@ -308,9 +319,7 @@ function buildCheckStep(step: StepDef, deps: BuildDeps, defaultTimeoutMs: number
     execute: async ({ inputData }) => {
       const rawCtx = inputData as Ctx;
       const result = await runCheckStep(step.command!, {
-        ...(deps.runnerDeps ?? {}),
-        ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
-        ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+        ...baseRunnerDeps(step, deps, defaultTimeoutMs),
         cwd: deps.cwd,
       });
       return { ...rawCtx, [step.id]: result };
