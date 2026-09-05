@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test 'src/**/*.test.ts'",
+    "test": "bash scripts/test.sh",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "check": "pnpm lint && pnpm typecheck && pnpm format:check && pnpm test",
