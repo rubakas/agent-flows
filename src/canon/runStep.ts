@@ -2,7 +2,7 @@
 
 import { spawn as defaultSpawn } from "node:child_process";
 import { statSync } from "node:fs";
-import { runClaudeCli } from "./runClaudeCli.js";
+import { runClaudeCli, SCRUBBED_KEYS } from "./runClaudeCli.js";
 import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
 
@@ -255,6 +255,104 @@ function runCodexCli(
         return;
       }
       signal.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
+    }
+  });
+}
+
+// ── Check step runner ─────────────────────────────────────────────────────────
+
+/** Maximum combined stdout+stderr retained in CheckResult.output (64 KB). */
+export const CHECK_OUTPUT_CAP = 65_536;
+
+/** Milliseconds between SIGTERM and SIGKILL when a check step is aborted. */
+const CHECK_KILL_ESCALATION_MS = 3_000;
+
+/** Returned by runCheckStep. `passed` is `exitCode === 0`. */
+export interface CheckResult {
+  passed: boolean;
+  exitCode: number;
+  output: string;
+}
+
+/**
+ * Runs `command` via `/bin/sh -c` and returns a CheckResult. Never throws:
+ * a non-zero exit is `passed: false`, a timeout is also `passed: false` with
+ * the reason stated in `output`.
+ *
+ * Reuses: DEFAULT_STEP_TIMEOUT_MS, createDeadline, StepRunnerDeps, defaultSpawn.
+ */
+export async function runCheckStep(
+  command: string,
+  deps: StepRunnerDeps & { cwd?: string } = {}
+): Promise<CheckResult> {
+  const effectiveTimeoutMs =
+    deps.timeoutMs ?? deps.defaultTimeoutMs ?? deps._builtInTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+
+  let deadline: DeadlineHandle | undefined;
+  if (effectiveTimeoutMs > 0) {
+    deadline = createDeadline(effectiveTimeoutMs, deps.signal);
+  }
+
+  const spawnFn = deps.spawn ?? defaultSpawn;
+  const rawEnv = deps.env ?? process.env;
+  const env: NodeJS.ProcessEnv = { ...rawEnv };
+  for (const key of SCRUBBED_KEYS) delete env[key];
+
+  const cwd = deps.cwd ?? process.cwd();
+
+  return new Promise<CheckResult>((resolve) => {
+    const child = spawnFn("/bin/sh", ["-c", command], { env, cwd });
+
+    // No stdin is needed; close it immediately so commands that read stdin don't hang.
+    child.stdin.end();
+
+    let combined = "";
+
+    const append = (data: string) => {
+      combined += data;
+      // Keep only the last CHECK_OUTPUT_CAP chars to bound memory and context size.
+      if (combined.length > CHECK_OUTPUT_CAP) {
+        combined = combined.slice(combined.length - CHECK_OUTPUT_CAP);
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => append(chunk.toString()));
+    child.stderr.on("data", (chunk: Buffer) => append(chunk.toString()));
+
+    child.on("error", (err) => {
+      deadline?.cancel();
+      resolve({ passed: false, exitCode: -1, output: `spawn error: ${err.message}` });
+    });
+
+    child.on("close", (code) => {
+      deadline?.cancel();
+      if (deadline?.signal.aborted) {
+        const reason = deadline.signal.reason as { name?: string } | undefined;
+        const msg =
+          reason?.name === "TimeoutError"
+            ? `Step timed out after ${effectiveTimeoutMs}ms`
+            : "Step was cancelled";
+        resolve({ passed: false, exitCode: -1, output: msg });
+        return;
+      }
+      const exitCode = code ?? -1;
+      resolve({ passed: exitCode === 0, exitCode, output: combined });
+    });
+
+    if (deadline) {
+      deadline.signal.addEventListener(
+        "abort",
+        () => {
+          child.kill("SIGTERM");
+          // Escalate to SIGKILL after a grace period; unref so the timer does not
+          // prevent the process from exiting once the promise resolves.
+          const esc = setTimeout(() => child.kill("SIGKILL"), CHECK_KILL_ESCALATION_MS);
+          if (typeof (esc as { unref?: () => void }).unref === "function") {
+            (esc as { unref: () => void }).unref();
+          }
+        },
+        { once: true }
+      );
     }
   });
 }

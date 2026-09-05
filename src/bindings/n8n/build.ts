@@ -81,6 +81,12 @@ function buildStepNode(step: StepDef, position: [number, number], promptText: st
     });
   }
 
+  if (step.kind === "check") {
+    return makeNode(step.id, "n8n-nodes-base.executeCommand", position, {
+      command: step.command ?? "",
+    });
+  }
+
   if (step.kind === "gate") {
     // TODO(binding-c): map gate to a real HITL/Wait node
     return makeNode(step.id, NOOP_TYPE, position, {}, step.message);

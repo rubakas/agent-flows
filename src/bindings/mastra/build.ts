@@ -14,7 +14,7 @@ import { pipelineLevels } from "../../canon/graph.js";
 import { persistTicket } from "../../canon/persistTicket.js";
 import { getActiveProfile, resolveStepModel } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
-import { runLlmStep } from "../../canon/runStep.js";
+import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
 import type { ModelRegistry, ProviderProfile } from "../../canon/registry.js";
 import type { StepRunnerDeps } from "../../canon/runStep.js";
@@ -44,6 +44,8 @@ export interface BuildDeps {
   profile?: ProviderProfile;
   runner?: typeof runLlmStep;
   runnerDeps?: StepRunnerDeps;
+  /** Working directory for check step commands. Defaults to process.cwd(). */
+  cwd?: string;
 }
 
 function stripFences(text: string): string {
@@ -271,6 +273,36 @@ function buildPersistStep(stepId: string, store: TicketStore) {
   });
 }
 
+// Resolves a dot-separated path into a nested context value.
+// "test.passed" → ctx["test"]["passed"]; single-segment paths behave as before.
+function resolveDotPath(ctx: Ctx, path: string): unknown {
+  const parts = path.split(".");
+  let cur: unknown = ctx;
+  for (const p of parts) {
+    if (cur == null || typeof cur !== "object") return undefined;
+    cur = (cur as Ctx)[p];
+  }
+  return cur;
+}
+
+function buildCheckStep(step: StepDef, deps: BuildDeps, defaultTimeoutMs: number | undefined) {
+  return createStep({
+    id: step.id,
+    inputSchema: ctx,
+    outputSchema: ctx,
+    execute: async ({ inputData }) => {
+      const rawCtx = inputData as Ctx;
+      const result = await runCheckStep(step.command!, {
+        ...(deps.runnerDeps ?? {}),
+        ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
+        ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+        cwd: deps.cwd,
+      });
+      return { ...rawCtx, [step.id]: result };
+    },
+  });
+}
+
 /**
  * Validates a caller-supplied models override map against known registry ids.
  * Returns an error string if any value is unknown, or null if all are valid.
@@ -345,7 +377,7 @@ function buildLoopStep(
     inputData: unknown;
     iterationCount: number;
   }): Promise<boolean> =>
-    Boolean((inputData as Ctx)?.[step.until!]) || iterationCount >= step.maxIterations!;
+    Boolean(resolveDotPath(inputData as Ctx, step.until!)) || iterationCount >= step.maxIterations!;
 
   const outcomeStep = createStep({
     id: `__${step.id}_outcome`,
@@ -353,7 +385,7 @@ function buildLoopStep(
     outputSchema: ctx,
     execute: async ({ inputData }) => {
       const rawCtx = inputData as Ctx;
-      const converged = Boolean(rawCtx[step.until!]);
+      const converged = Boolean(resolveDotPath(rawCtx, step.until!));
       const iterations = (rawCtx[iterKey] as number | undefined) ?? 0;
       const { [iterKey]: _dropped, ...rest } = rawCtx;
       return { ...rest, [step.id]: { converged, iterations } };
@@ -421,6 +453,8 @@ function buildLevelsOntoBuilder(
         const { bodyWorkflow, condition, outcomeStep } = buildLoopStep(step, body, deps);
         builder = builder.dountil(bodyWorkflow, condition);
         builder = builder.then(outcomeStep);
+      } else if (step.kind === "check") {
+        builder = builder.then(buildCheckStep(step, deps, def.defaultTimeoutMs));
       }
     }
   }

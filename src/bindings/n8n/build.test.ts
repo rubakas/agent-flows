@@ -249,3 +249,25 @@ describe("generateN8nWorkflow — spec-creation.yaml", () => {
     assert.doesNotThrow(() => JSON.stringify(wf));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Check step → executeCommand node
+// ---------------------------------------------------------------------------
+
+describe("generateN8nWorkflow — check step", () => {
+  const loaded = makeLoaded([{ id: "runTests", kind: "check", command: "pnpm test" }]);
+  const wf = generateN8nWorkflow(loaded);
+  const byName = new Map(wf.nodes.map((n) => [n.name, n]));
+
+  it("check step maps to n8n-nodes-base.executeCommand", () => {
+    assert.equal(byName.get("runTests")?.type, "n8n-nodes-base.executeCommand");
+  });
+
+  it("executeCommand node carries the command in parameters", () => {
+    assert.equal(byName.get("runTests")?.parameters.command, "pnpm test");
+  });
+
+  it("serialises to JSON without throwing", () => {
+    assert.doesNotThrow(() => JSON.stringify(wf));
+  });
+});

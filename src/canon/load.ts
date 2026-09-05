@@ -106,6 +106,28 @@ export function loadPipeline(
       continue;
     }
 
+    if (step.kind === "check") {
+      if (!step.command) {
+        throw new Error(`Step "${step.id}": check step requires command`);
+      }
+      if (step.prompt !== undefined) {
+        throw new Error(`Step "${step.id}": check step cannot set prompt`);
+      }
+      if (step.role !== undefined) {
+        throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
+      }
+      if (step.model !== undefined) {
+        throw new Error(`Step "${step.id}": check step cannot set model`);
+      }
+      if (step.schema !== undefined) {
+        throw new Error(`Step "${step.id}": check step cannot set schema`);
+      }
+      if (step.workspace !== undefined) {
+        throw new Error(`Step "${step.id}": check step cannot set workspace`);
+      }
+      continue;
+    }
+
     if (step.kind === "llm") {
       if (!step.role && !step.model) {
         throw new Error(`Step "${step.id}": llm step requires role or model`);

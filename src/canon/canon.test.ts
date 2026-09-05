@@ -736,3 +736,110 @@ steps:
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// check step validation
+// ---------------------------------------------------------------------------
+
+describe("loadPipeline — check step validation", () => {
+  function makeCheckYaml(overrides: string): string {
+    return `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: verify
+    kind: check
+${overrides}
+`;
+  }
+
+  it("loads a valid check step without throwing", () => {
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? makeCheckYaml("    command: pnpm test") : ""),
+    });
+    assert.equal(def.steps[0].kind, "check");
+    assert.equal(def.steps[0].command, "pnpm test");
+  });
+
+  it("throws when check step is missing command", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? makeCheckYaml("") : ""),
+        }),
+      /command/
+    );
+  });
+
+  it("throws when check step has an empty command", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? makeCheckYaml("    command: ''") : ""),
+        }),
+      /command/
+    );
+  });
+
+  it("throws when check step has prompt set", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeCheckYaml("    command: pnpm test\n    prompt: prompts/x.md")
+              : "prompt content",
+        }),
+      /prompt/
+    );
+  });
+
+  it("throws when check step has role set", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml") ? makeCheckYaml("    command: pnpm test\n    role: worker") : "",
+        }),
+      /role/
+    );
+  });
+
+  it("throws when check step has model set", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml") ? makeCheckYaml("    command: pnpm test\n    model: sonnet") : "",
+        }),
+      /model/
+    );
+  });
+
+  it("throws when check step has schema set", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeCheckYaml("    command: pnpm test\n    schema: weaknesses")
+              : "",
+        }),
+      /schema/
+    );
+  });
+
+  it("throws when check step has workspace set", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml") ? makeCheckYaml("    command: pnpm test\n    workspace: read") : "",
+        }),
+      /workspace/
+    );
+  });
+});

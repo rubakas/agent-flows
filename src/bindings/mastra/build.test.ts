@@ -851,3 +851,184 @@ describe("buildPipelineWorkflow — loop run independence (regression: no closur
     }
   });
 });
+
+// ── Check step fixtures ────────────────────────────────────────────────────────
+
+// A single-step pipeline with a check step that always passes.
+const CHECK_PASS_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "check-pass-pipeline",
+    version: 1,
+    description: "Pipeline with a passing check step",
+    inputs: [],
+    steps: [{ id: "test", kind: "check", command: "exit 0" }],
+  },
+  prompts: {},
+};
+
+// A single-step pipeline with a check step that always fails.
+const CHECK_FAIL_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "check-fail-pipeline",
+    version: 1,
+    description: "Pipeline with a failing check step",
+    inputs: [],
+    steps: [{ id: "test", kind: "check", command: "exit 1" }],
+  },
+  prompts: {},
+};
+
+describe("buildPipelineWorkflow — check step result in context", () => {
+  it("passing check step lands { passed:true, exitCode:0 } in ctx under step id", async () => {
+    const { storage, store, cleanup } = makeTestFixture("check-pass");
+    try {
+      const wf = buildPipelineWorkflow(CHECK_PASS_PIPELINE, { registry: FAKE_REGISTRY, store });
+      const mastra = new Mastra({ storage, workflows: { [CHECK_PASS_PIPELINE.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(CHECK_PASS_PIPELINE.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(r1.status, "success");
+      const result = r1.result as Record<string, unknown>;
+      const check = result.test as { passed: boolean; exitCode: number; output: string };
+      assert.equal(check.passed, true, "passed should be true for exit 0");
+      assert.equal(check.exitCode, 0);
+      assert.equal(typeof check.output, "string");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("failing check step lands { passed:false, exitCode:1 } in ctx without throwing", async () => {
+    const { storage, store, cleanup } = makeTestFixture("check-fail");
+    try {
+      const wf = buildPipelineWorkflow(CHECK_FAIL_PIPELINE, { registry: FAKE_REGISTRY, store });
+      const mastra = new Mastra({ storage, workflows: { [CHECK_FAIL_PIPELINE.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(CHECK_FAIL_PIPELINE.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(r1.status, "success", "workflow must succeed even when check fails");
+      const result = r1.result as Record<string, unknown>;
+      const check = result.test as { passed: boolean; exitCode: number; output: string };
+      assert.equal(check.passed, false, "passed should be false for exit 1");
+      assert.equal(check.exitCode, 1);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// Loop body pipeline: one check step whose exit code determines convergence.
+const CHECK_LOOP_BODY_PASS: LoadedPipeline = {
+  def: {
+    id: "check-body-pass",
+    version: 1,
+    description: "Loop body with always-passing check",
+    inputs: [],
+    steps: [{ id: "test", kind: "check", command: "exit 0" }],
+  },
+  prompts: {},
+};
+
+const CHECK_LOOP_BODY_FAIL: LoadedPipeline = {
+  def: {
+    id: "check-body-fail",
+    version: 1,
+    description: "Loop body with always-failing check",
+    inputs: [],
+    steps: [{ id: "test", kind: "check", command: "exit 1" }],
+  },
+  prompts: {},
+};
+
+// Loop reads `test.passed` via dot-notation to decide convergence.
+const LOOP_CHECK_PASS_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "loop-check-pass",
+    version: 1,
+    description: "Loop converging on check.passed",
+    inputs: [],
+    steps: [
+      {
+        id: "run",
+        kind: "loop",
+        pipeline: "check-body-pass",
+        maxIterations: 3,
+        until: "test.passed",
+      },
+    ],
+  },
+  prompts: {},
+  bodies: { run: CHECK_LOOP_BODY_PASS },
+};
+
+const LOOP_CHECK_FAIL_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "loop-check-fail",
+    version: 1,
+    description: "Loop that never converges (check always fails)",
+    inputs: [],
+    steps: [
+      {
+        id: "run",
+        kind: "loop",
+        pipeline: "check-body-fail",
+        maxIterations: 2,
+        until: "test.passed",
+      },
+    ],
+  },
+  prompts: {},
+  bodies: { run: CHECK_LOOP_BODY_FAIL },
+};
+
+describe("buildPipelineWorkflow — loop terminates on check.passed (the convergence signal)", () => {
+  it("loop converges after 1 iteration when check passes (exit 0)", async () => {
+    const { storage, store, cleanup } = makeTestFixture("loop-check-converge");
+    try {
+      const wf = buildPipelineWorkflow(LOOP_CHECK_PASS_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+      });
+      const mastra = new Mastra({ storage, workflows: { [LOOP_CHECK_PASS_PIPELINE.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(LOOP_CHECK_PASS_PIPELINE.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(r1.status, "success");
+      const result = r1.result as Record<string, unknown>;
+      const outcome = result.run as { converged: boolean; iterations: number };
+      assert.equal(outcome.converged, true, "should converge when check.passed is true");
+      assert.equal(outcome.iterations, 1, "should stop after 1 iteration (exit 0 always passes)");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("loop exhausts maxIterations when check never passes (exit 1)", async () => {
+    const { storage, store, cleanup } = makeTestFixture("loop-check-exhaust");
+    try {
+      const wf = buildPipelineWorkflow(LOOP_CHECK_FAIL_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+      });
+      const mastra = new Mastra({ storage, workflows: { [LOOP_CHECK_FAIL_PIPELINE.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(LOOP_CHECK_FAIL_PIPELINE.def.id);
+      const run = await mastraWf.createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(r1.status, "success", "loop must not throw when check never passes");
+      const result = r1.result as Record<string, unknown>;
+      const outcome = result.run as { converged: boolean; iterations: number };
+      assert.equal(
+        outcome.converged,
+        false,
+        "should not converge when check.passed is always false"
+      );
+      assert.equal(outcome.iterations, 2, "should exhaust maxIterations");
+    } finally {
+      cleanup();
+    }
+  });
+});

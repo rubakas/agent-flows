@@ -252,6 +252,8 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
           out.push(
             `// loop '${step.id}': body pipeline '${step.pipeline}', cap ${step.maxIterations} iterations — Binding A does not implement the loop`
           );
+        } else if (step.kind === "check") {
+          out.push(`// check '${step.id}': run \`${step.command}\``);
         }
       }
     }

@@ -13,7 +13,8 @@ export interface HardenedSpec {
   securityFindings?: Finding[];
 }
 
-export type StepKind = "llm" | "gate" | "assemble-spec" | "persist-ticket" | "pipeline" | "loop";
+export type StepKind =
+  "llm" | "gate" | "assemble-spec" | "persist-ticket" | "pipeline" | "loop" | "check";
 
 export type Role = "reasoner" | "worker" | "scout";
 
@@ -41,6 +42,13 @@ export interface StepDef {
    * compatible). Not supported for api transport.
    */
   workspace?: "read" | "write";
+  /**
+   * For `kind: "check"` steps: the shell command to execute via `/bin/sh -c`.
+   * A non-zero exit code yields `passed: false`; it is not an error — the run continues.
+   * Required and non-empty. Cannot be combined with `prompt`, `role`, `model`, `schema`,
+   * or `workspace`.
+   */
+  command?: string;
   /**
    * For `kind: "pipeline"` steps: names the id of the nested pipeline to
    * expand in place of this step at load time.

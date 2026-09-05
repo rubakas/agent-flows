@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { DEFAULT_STEP_TIMEOUT_MS, StepTimeoutError, runLlmStep } from "./runStep.js";
+import { DEFAULT_STEP_TIMEOUT_MS, StepTimeoutError, runCheckStep, runLlmStep } from "./runStep.js";
 import { makeFakeChild, makeFakeSpawn } from "./testing/fakeSpawn.js";
 import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
@@ -521,6 +521,44 @@ describe('runLlmStep — workspace: "read"', () => {
         workspaceDir: "/definitely/does/not/exist/yoke-test-9482",
       }),
       /workspaceDir/
+    );
+  });
+});
+
+// ── runCheckStep — real execution ─────────────────────────────────────────────
+
+describe("runCheckStep — real execution", () => {
+  it("command exiting 0 yields passed:true with exitCode 0", async () => {
+    const result = await runCheckStep("exit 0");
+    assert.equal(result.passed, true);
+    assert.equal(result.exitCode, 0);
+    assert.equal(typeof result.output, "string");
+  });
+
+  it("command exiting non-zero yields passed:false with that exit code, no throw", async () => {
+    const result = await runCheckStep("exit 1");
+    assert.equal(result.passed, false);
+    assert.equal(result.exitCode, 1);
+  });
+
+  it("command exiting with arbitrary code captures that exact code", async () => {
+    const result = await runCheckStep("exit 42");
+    assert.equal(result.passed, false);
+    assert.equal(result.exitCode, 42);
+  });
+
+  it("stdout is captured in the output field", async () => {
+    const result = await runCheckStep("printf 'hello world'");
+    assert.ok(result.output.includes("hello world"), "output should contain printed text");
+  });
+
+  it("timeout yields passed:false and output mentions the timeout", async () => {
+    const result = await runCheckStep("sleep 60", { timeoutMs: 100 });
+    assert.equal(result.passed, false);
+    assert.equal(result.exitCode, -1);
+    assert.ok(
+      result.output.toLowerCase().includes("timeout") || result.output.includes("100ms"),
+      `output should mention timeout; got: ${result.output}`
     );
   });
 });
