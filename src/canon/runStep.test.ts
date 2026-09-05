@@ -335,7 +335,7 @@ describe("runLlmStep — deadline enforcement", () => {
 const repoRoot = new URL("../../..", import.meta.url).pathname.replace(/\/$/, "");
 
 describe('runLlmStep — workspace: "read"', () => {
-  it('claude: spawns with --tools Read,Glob --allowedTools Read,Glob and cwd=workspaceDir when workspaceAccess is "read"', async () => {
+  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob --allowedTools Read,Glob and cwd=workspaceDir when workspaceAccess is "read"', async () => {
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -356,6 +356,11 @@ describe('runLlmStep — workspace: "read"', () => {
       workspaceDir: repoRoot,
     });
 
+    assert.ok(capturedArgs.includes("--restricted"), "must include --restricted flag");
+    assert.ok(
+      capturedArgs.includes("--strict-mcp-config"),
+      "must include --strict-mcp-config flag"
+    );
     assert.ok(capturedArgs.includes("--tools"), "must include --tools flag");
     assert.ok(capturedArgs.includes("--allowedTools"), "must include --allowedTools flag");
     // Both flags must carry exactly the same restricted set.
@@ -366,7 +371,7 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
   });
 
-  it('claude: spawns with --tools Read,Glob,Edit,Write --allowedTools Read,Glob,Edit,Write and cwd=workspaceDir when workspaceAccess is "write"', async () => {
+  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob,Edit,Write --allowedTools Read,Glob,Edit,Write and cwd=workspaceDir when workspaceAccess is "write"', async () => {
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -387,6 +392,11 @@ describe('runLlmStep — workspace: "read"', () => {
       workspaceDir: repoRoot,
     });
 
+    assert.ok(capturedArgs.includes("--restricted"), "must include --restricted flag");
+    assert.ok(
+      capturedArgs.includes("--strict-mcp-config"),
+      "must include --strict-mcp-config flag"
+    );
     assert.ok(capturedArgs.includes("--tools"), "must include --tools flag");
     assert.ok(capturedArgs.includes("--allowedTools"), "must include --allowedTools flag");
     const toolsIdx = capturedArgs.indexOf("--tools");
@@ -404,6 +414,64 @@ describe('runLlmStep — workspace: "read"', () => {
     // Bash must not appear in the tool set.
     assert.ok(!capturedArgs.includes("Bash"), "Bash must not be granted in write mode");
     assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
+  });
+
+  it("claude: read mode exact arg list includes --restricted and --strict-mcp-config before tool flags", async () => {
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "read something", {
+      spawn,
+      workspaceAccess: "read",
+      workspaceDir: repoRoot,
+    });
+
+    // --restricted and --strict-mcp-config must both appear in the argument list.
+    // They must appear before --tools so the CLI processes them first.
+    const restrictedIdx = capturedArgs.indexOf("--restricted");
+    const strictMcpIdx = capturedArgs.indexOf("--strict-mcp-config");
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    assert.ok(restrictedIdx !== -1, "read mode must pass --restricted");
+    assert.ok(strictMcpIdx !== -1, "read mode must pass --strict-mcp-config");
+    assert.ok(restrictedIdx < toolsIdx, "--restricted must appear before --tools");
+    assert.ok(strictMcpIdx < toolsIdx, "--strict-mcp-config must appear before --tools");
+  });
+
+  it("claude: write mode exact arg list includes --restricted and --strict-mcp-config before tool flags", async () => {
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "write something", {
+      spawn,
+      workspaceAccess: "write",
+      workspaceDir: repoRoot,
+    });
+
+    const restrictedIdx = capturedArgs.indexOf("--restricted");
+    const strictMcpIdx = capturedArgs.indexOf("--strict-mcp-config");
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    assert.ok(restrictedIdx !== -1, "write mode must pass --restricted");
+    assert.ok(strictMcpIdx !== -1, "write mode must pass --strict-mcp-config");
+    assert.ok(restrictedIdx < toolsIdx, "--restricted must appear before --tools");
+    assert.ok(strictMcpIdx < toolsIdx, "--strict-mcp-config must appear before --tools");
   });
 
   it("claude: no --allowedTools and no cwd when workspaceAccess is not set", async () => {

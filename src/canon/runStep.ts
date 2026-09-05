@@ -51,10 +51,20 @@ export interface StepRunnerDeps {
    */
   workspaceDir?: string;
   /**
-   * When "read", the claude CLI agent is restricted to Read and Glob tools via
-   * --tools Read,Glob --allowedTools Read,Glob. When "write", Edit and Write are
-   * added (--tools Read,Glob,Edit,Write); Bash is never granted. Not supported for
-   * api transport or codex (both will throw at runtime).
+   * Restricts the claude CLI to a specific tool set when accessing a workspace.
+   *
+   * Both modes add `--restricted --strict-mcp-config` so the target repository's
+   * own `.claude/settings.json` (and any MCP server it declares) cannot widen
+   * the granted tool set. `--restricted` is a vendor-supported flag that ignores
+   * user/project/local settings files and confines file tools to the working
+   * directory. `--strict-mcp-config` extends that guarantee to MCP servers.
+   *
+   * - "read": grants Read and Glob only (`--tools Read,Glob --allowedTools Read,Glob`).
+   *   The agent can inspect the project but cannot modify any file.
+   * - "write": adds Edit and Write (`--tools Read,Glob,Edit,Write`). Bash is never
+   *   granted in either mode.
+   *
+   * Not supported for api transport or codex (both will throw at runtime).
    */
   workspaceAccess?: "read" | "write";
 }
@@ -417,13 +427,27 @@ export async function runLlmStep(
       if (bin === "claude") {
         const extraArgs: string[] = [];
         if (resolvedWorkspaceDir !== undefined) {
+          // --restricted makes the CLI ignore user/project/local settings files and
+          // confines file tools to the working directory, so a target repo's own
+          // .claude/settings.json cannot widen the granted tool set.
+          // --strict-mcp-config extends that guarantee to MCP servers declared in the
+          // target repo — the claude --help text names it as the companion flag for
+          // exactly this use case.
+          // --tools / --allowedTools narrow the tool set to the declared access level.
           if (deps.workspaceAccess === "read") {
-            // --tools restricts the available tool set; --allowedTools auto-approves
-            // those same tools so -p runs without prompts.
-            extraArgs.push("--tools", "Read,Glob", "--allowedTools", "Read,Glob");
+            extraArgs.push(
+              "--restricted",
+              "--strict-mcp-config",
+              "--tools",
+              "Read,Glob",
+              "--allowedTools",
+              "Read,Glob"
+            );
           } else {
             // "write": add Edit and Write; Bash is deliberately excluded.
             extraArgs.push(
+              "--restricted",
+              "--strict-mcp-config",
               "--tools",
               "Read,Glob,Edit,Write",
               "--allowedTools",
