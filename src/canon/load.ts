@@ -151,9 +151,9 @@ export function loadPipeline(
       throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
     }
 
-    if (step.workspace !== undefined && step.workspace !== "read") {
+    if (step.workspace !== undefined && step.workspace !== "read" && step.workspace !== "write") {
       throw new Error(
-        `Step "${step.id}": invalid workspace value "${String(step.workspace)}" — only "read" is supported`
+        `Step "${step.id}": invalid workspace value "${String(step.workspace)}" — only "read" or "write" is supported`
       );
     }
   }

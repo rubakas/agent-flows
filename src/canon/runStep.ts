@@ -51,12 +51,12 @@ export interface StepRunnerDeps {
    */
   workspaceDir?: string;
   /**
-   * When "read", the spawned CLI agent runs with cwd=workspaceDir and is restricted
-   * to read-only file access via the CLI sandbox flag (--allowedTools for claude,
-   * the existing -s read-only for codex). Not supported for api transport — will
-   * throw at runtime because sandbox enforcement requires a CLI subprocess.
+   * When "read", the claude CLI agent is restricted to Read and Glob tools via
+   * --tools Read,Glob --allowedTools Read,Glob. When "write", Edit and Write are
+   * added (--tools Read,Glob,Edit,Write); Bash is never granted. Not supported for
+   * api transport or codex (both will throw at runtime).
    */
-  workspaceAccess?: "read";
+  workspaceAccess?: "read" | "write";
 }
 
 // ── Deadline helper ───────────────────────────────────────────────────────────
@@ -270,10 +270,10 @@ export async function runLlmStep(
   // Fail fast on configuration errors rather than timing out or running silently
   // against the wrong directory.
   let resolvedWorkspaceDir: string | undefined;
-  if (deps.workspaceAccess === "read") {
+  if (deps.workspaceAccess === "read" || deps.workspaceAccess === "write") {
     if (entry.transport === "api") {
       throw new Error(
-        `runLlmStep: workspace "read" is not supported for api transport — ` +
+        `runLlmStep: workspace "${deps.workspaceAccess}" is not supported for api transport — ` +
           `sandbox enforcement requires a CLI subprocess; api transport has no equivalent`
       );
     }
@@ -286,7 +286,7 @@ export async function runLlmStep(
     }
     if (!isDir) {
       throw new Error(
-        `runLlmStep: workspace "read" declared but workspaceDir "${dir}" is not a valid directory`
+        `runLlmStep: workspace "${deps.workspaceAccess}" declared but workspaceDir "${dir}" is not a valid directory`
       );
     }
     resolvedWorkspaceDir = dir;
@@ -312,10 +312,19 @@ export async function runLlmStep(
       if (bin === "claude") {
         const extraArgs: string[] = [];
         if (resolvedWorkspaceDir !== undefined) {
-          // Restrict to read-only tools: Read (read file contents) and Glob (find files).
-          // This is the real mechanism from `claude --help --allowedTools`.
-          // Edit, Write, and Bash are not in the allowlist and are therefore denied.
-          extraArgs.push("--allowedTools", "Read,Glob");
+          if (deps.workspaceAccess === "read") {
+            // --tools restricts the available tool set; --allowedTools auto-approves
+            // those same tools so -p runs without prompts.
+            extraArgs.push("--tools", "Read,Glob", "--allowedTools", "Read,Glob");
+          } else {
+            // "write": add Edit and Write; Bash is deliberately excluded.
+            extraArgs.push(
+              "--tools",
+              "Read,Glob,Edit,Write",
+              "--allowedTools",
+              "Read,Glob,Edit,Write"
+            );
+          }
         }
         const result = await runClaudeCli(
           prompt,
@@ -331,8 +340,12 @@ export async function runLlmStep(
       }
 
       if (bin === "codex") {
-        // codex already spawns with -s read-only unconditionally; workspace: "read"
-        // adds the cwd so the sandbox is rooted at the project directory.
+        if (deps.workspaceAccess === "write") {
+          throw new Error(
+            `runLlmStep: workspace "write" is not supported for codex — codex always runs read-only`
+          );
+        }
+        // workspace: "read" adds the cwd so the sandbox is rooted at the project directory.
         return await runCodexCli(
           prompt,
           entry.cli?.model,

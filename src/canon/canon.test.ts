@@ -424,7 +424,7 @@ steps:
     assert.equal(def.steps[0].dependsOn, undefined);
   });
 
-  it("rejects an invalid workspace value on a step", () => {
+  it("rejects an unknown workspace value on a step", () => {
     const yaml = `
 id: test
 version: 1
@@ -436,7 +436,7 @@ steps:
     kind: llm
     model: sonnet
     prompt: prompts/intake.md
-    workspace: write
+    workspace: admin
 `;
     assert.throws(
       () =>
@@ -446,7 +446,7 @@ steps:
       (err: Error) => {
         assert.ok(err.message.includes("s1"), "error must name the step id");
         assert.ok(
-          err.message.toLowerCase().includes("workspace") || err.message.includes("write"),
+          err.message.toLowerCase().includes("workspace") || err.message.includes("admin"),
           "error must reference the invalid workspace value"
         );
         return true;
@@ -472,6 +472,26 @@ steps:
       readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
     });
     assert.equal(def.steps[0].workspace, "read");
+  });
+
+  it('accepts workspace: "write" on a step and preserves it in the definition', () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+    workspace: write
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+    assert.equal(def.steps[0].workspace, "write");
   });
 
   it("loads a pipeline with two gates without throwing", () => {

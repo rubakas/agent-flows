@@ -335,7 +335,7 @@ describe("runLlmStep — deadline enforcement", () => {
 const repoRoot = new URL("../../..", import.meta.url).pathname.replace(/\/$/, "");
 
 describe('runLlmStep — workspace: "read"', () => {
-  it('claude: spawns with --allowedTools Read,Glob and cwd=workspaceDir when workspaceAccess is "read"', async () => {
+  it('claude: spawns with --tools Read,Glob --allowedTools Read,Glob and cwd=workspaceDir when workspaceAccess is "read"', async () => {
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -356,8 +356,53 @@ describe('runLlmStep — workspace: "read"', () => {
       workspaceDir: repoRoot,
     });
 
+    assert.ok(capturedArgs.includes("--tools"), "must include --tools flag");
     assert.ok(capturedArgs.includes("--allowedTools"), "must include --allowedTools flag");
-    assert.ok(capturedArgs.includes("Read,Glob"), "must restrict to Read,Glob only");
+    // Both flags must carry exactly the same restricted set.
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    const allowedIdx = capturedArgs.indexOf("--allowedTools");
+    assert.equal(capturedArgs[toolsIdx + 1], "Read,Glob", "--tools must be Read,Glob");
+    assert.equal(capturedArgs[allowedIdx + 1], "Read,Glob", "--allowedTools must be Read,Glob");
+    assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
+  });
+
+  it('claude: spawns with --tools Read,Glob,Edit,Write --allowedTools Read,Glob,Edit,Write and cwd=workspaceDir when workspaceAccess is "write"', async () => {
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { child } = makeFakeChild({ stdoutChunks: ["wrote file"] });
+    let capturedArgs: string[] = [];
+    let capturedCwd: string | undefined;
+    const spawn = ((_cmd: string, args: string[], opts: { cwd?: string }) => {
+      capturedArgs = args;
+      capturedCwd = opts.cwd;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "edit file", {
+      spawn,
+      workspaceAccess: "write",
+      workspaceDir: repoRoot,
+    });
+
+    assert.ok(capturedArgs.includes("--tools"), "must include --tools flag");
+    assert.ok(capturedArgs.includes("--allowedTools"), "must include --allowedTools flag");
+    const toolsIdx = capturedArgs.indexOf("--tools");
+    const allowedIdx = capturedArgs.indexOf("--allowedTools");
+    assert.equal(
+      capturedArgs[toolsIdx + 1],
+      "Read,Glob,Edit,Write",
+      "--tools must be Read,Glob,Edit,Write"
+    );
+    assert.equal(
+      capturedArgs[allowedIdx + 1],
+      "Read,Glob,Edit,Write",
+      "--allowedTools must be Read,Glob,Edit,Write"
+    );
+    // Bash must not appear in the tool set.
+    assert.ok(!capturedArgs.includes("Bash"), "Bash must not be granted in write mode");
     assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
   });
 
@@ -421,6 +466,20 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
   });
 
+  it('codex: rejects when workspaceAccess is "write" (codex always runs read-only)', async () => {
+    const entry: ModelEntry = {
+      id: "codex-test",
+      transport: "cli",
+      cli: { bin: "codex", model: "o4-mini" },
+    };
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeCodexJsonlOutput("irrelevant")] });
+
+    await assert.rejects(
+      runLlmStep(entry, "hi", { spawn, workspaceAccess: "write", workspaceDir: repoRoot }),
+      /codex.*write|write.*codex/i
+    );
+  });
+
   it('api transport: rejects when workspaceAccess is "read" (no CLI sandbox available)', async () => {
     const entry: ModelEntry = {
       id: "ollama-qwen",
@@ -430,6 +489,19 @@ describe('runLlmStep — workspace: "read"', () => {
 
     await assert.rejects(
       runLlmStep(entry, "hi", { workspaceAccess: "read", workspaceDir: repoRoot }),
+      /api.*workspace|workspace.*api/i
+    );
+  });
+
+  it('api transport: rejects when workspaceAccess is "write" (no CLI sandbox available)', async () => {
+    const entry: ModelEntry = {
+      id: "ollama-qwen",
+      transport: "api",
+      api: { endpoint: "http://localhost:11434/v1/chat/completions", model: "qwen2.5:1.5b" },
+    };
+
+    await assert.rejects(
+      runLlmStep(entry, "hi", { workspaceAccess: "write", workspaceDir: repoRoot }),
       /api.*workspace|workspace.*api/i
     );
   });

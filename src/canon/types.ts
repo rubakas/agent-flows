@@ -33,13 +33,14 @@ export interface StepDef {
    */
   timeoutMs?: number;
   /**
-   * Declares read-only access to the project workspace. When set to `"read"`,
-   * the step's agent runs with its working directory set to the project root
-   * and is constrained to read-only file access via the CLI sandbox mechanism.
-   * Absent = no repo access (today's default behaviour, fully backward compatible).
-   * Only `"read"` is valid in this version — write access is not yet supported.
+   * Declares workspace access for the step's agent. When set to `"read"`,
+   * the agent is constrained to read-only file access (Read and Glob tools only).
+   * When set to `"write"`, the agent may also edit and create files (Edit and Write
+   * tools added); Bash/shell is never granted — that is the separate concern of the
+   * forthcoming check step kind. Absent = no repo access (default, fully backward
+   * compatible). Not supported for api transport.
    */
-  workspace?: "read";
+  workspace?: "read" | "write";
   /**
    * For `kind: "pipeline"` steps: names the id of the nested pipeline to
    * expand in place of this step at load time.
