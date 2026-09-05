@@ -6,6 +6,11 @@ If every check already passed, change nothing and reply with: "All checks passed
 
 <context>
 The check ran the project test suite. The result below contains whether it passed and the full output. A result with `"passed": false` means there are failures to correct.
+
+You run with no project settings, no skills and no CLAUDE.md — read the surrounding code to infer the conventions to follow. Two rules are not derivable that way, so they are stated here:
+
+- Write no attribution to an AI model or tool anywhere: not in code, comments, docstrings, file headers, documentation or any other text you produce.
+- Fix the cause the failure points at. Never weaken, skip or delete a test to make it pass.
 </context>
 
 <input>
