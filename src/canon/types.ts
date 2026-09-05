@@ -13,7 +13,7 @@ export interface HardenedSpec {
   securityFindings?: Finding[];
 }
 
-export type StepKind = "llm" | "gate" | "assemble-spec" | "persist-ticket";
+export type StepKind = "llm" | "gate" | "assemble-spec" | "persist-ticket" | "pipeline";
 
 export type Role = "reasoner" | "worker" | "scout";
 
@@ -40,6 +40,12 @@ export interface StepDef {
    * Only `"read"` is valid in this version — write access is not yet supported.
    */
   workspace?: "read";
+  /**
+   * For `kind: "pipeline"` steps only. Names the id of the nested pipeline to
+   * expand in place of this step at load time. The referenced pipeline YAML
+   * must live in the same directory as the parent.
+   */
+  pipeline?: string;
 }
 
 export interface PipelineDef {

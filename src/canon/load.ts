@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { parse } from "yaml";
 import { GraphError, pipelineLevels } from "./graph.js";
+import { expandNested } from "./nest.js";
 import { canonSchemas } from "./schemas.js";
 import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 
@@ -50,15 +51,29 @@ export function loadPipeline(
     }
   }
 
-  let gateCount = 0;
   const prompts: Record<string, string> = {};
 
   for (const step of def.steps) {
-    if (step.kind === "gate") {
-      gateCount++;
-      if (gateCount > 1) {
-        throw new Error(`Step "${step.id}": v1 pipelines may have at most one gate`);
+    if (step.kind === "pipeline") {
+      if (!step.pipeline) {
+        throw new Error(`Step "${step.id}": pipeline step requires pipeline`);
       }
+      if (step.prompt !== undefined) {
+        throw new Error(`Step "${step.id}": pipeline step cannot set prompt`);
+      }
+      if (step.role !== undefined) {
+        throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
+      }
+      if (step.model !== undefined) {
+        throw new Error(`Step "${step.id}": pipeline step cannot set model`);
+      }
+      if (step.schema !== undefined) {
+        throw new Error(`Step "${step.id}": pipeline step cannot set schema`);
+      }
+      if (step.workspace !== undefined) {
+        throw new Error(`Step "${step.id}": pipeline step cannot set workspace`);
+      }
+      continue;
     }
 
     if (step.kind === "llm") {
@@ -113,7 +128,38 @@ export function loadPipeline(
     }
   }
 
-  return { def, prompts };
+  // Resolve and expand nested pipelines. The resolve callback loads a sibling
+  // YAML from the same directory as the parent, recursively validated.
+  const pipelineDir = dirname(resolve(yamlPath));
+  const resolveNested = (pipelineId: string): LoadedPipeline =>
+    loadPipeline(join(pipelineDir, `${pipelineId}.yaml`), deps);
+
+  const expanded = expandNested({ def, prompts }, resolveNested);
+
+  // Gate count and graph validity are enforced on the expanded result.
+  let gateCount = 0;
+  for (const step of expanded.def.steps) {
+    if (step.kind === "gate") {
+      gateCount++;
+      if (gateCount > 1) {
+        throw new Error(`Step "${step.id}": v1 pipelines may have at most one gate`);
+      }
+    }
+  }
+
+  const expandedHasDependsOn = expanded.def.steps.some((s) => s.dependsOn !== undefined);
+  if (expandedHasDependsOn) {
+    try {
+      pipelineLevels(expanded.def.steps);
+    } catch (err) {
+      if (err instanceof GraphError) {
+        throw new Error(err.message, { cause: err });
+      }
+      throw err;
+    }
+  }
+
+  return expanded;
 }
 
 export function listPipelines(dir: string): string[] {
