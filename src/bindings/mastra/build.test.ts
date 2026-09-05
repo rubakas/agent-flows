@@ -1125,3 +1125,51 @@ describe("buildPipelineWorkflow — nested namespace assemble (regression)", () 
     }
   });
 });
+
+// ── Workspace access reaches the runner ───────────────────────────────────────
+// Regression: the canon declared `workspace: read|write` but buildLlmStep only
+// threaded timeouts into the runner deps, so the declaration was silently
+// dropped and the agent ran with no repo access.
+
+describe("buildPipelineWorkflow — workspace access is forwarded to the runner", () => {
+  it("passes the declared workspace and the build cwd through to runLlmStep", async () => {
+    const { storage, store, cleanup } = makeTestFixture("workspace-forward");
+    try {
+      const seen: { access?: string; dir?: string }[] = [];
+      const capturingRunner: typeof runLlmStep = async (_entry, _prompt, runnerDeps) => {
+        seen.push({ access: runnerDeps?.workspaceAccess, dir: runnerDeps?.workspaceDir });
+        return "surveyed";
+      };
+
+      const pipeline = {
+        def: {
+          id: "ws-forward",
+          version: 1,
+          description: "workspace forwarding",
+          inputs: ["request"],
+          steps: [
+            { id: "survey", kind: "llm" as const, model: "sonnet", workspace: "read" as const },
+          ],
+        },
+        prompts: { survey: "Look at {{request}}" },
+      };
+
+      const wf = buildPipelineWorkflow(pipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: capturingRunner,
+        cwd: "/tmp/some-project",
+      });
+
+      const mastra = new Mastra({ storage, workflows: { "ws-forward": wf } });
+      const run = await mastra.getWorkflow("ws-forward").createRun();
+      await run.start({ inputData: { request: "audit the loader" } });
+
+      assert.equal(seen.length, 1, "runner should be called once");
+      assert.equal(seen[0].access, "read", "declared workspace must reach the runner");
+      assert.equal(seen[0].dir, "/tmp/some-project", "build cwd must reach the runner");
+    } finally {
+      cleanup();
+    }
+  });
+});
