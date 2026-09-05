@@ -22,7 +22,7 @@
     "bindings:n8n": "tsx src/bindings/n8n/write-cli.ts",
     "mcp": "tsx src/bindings/mastra/server.ts",
     "mastra:smoke": "tsx src/bindings/mastra/smoke.ts",
-    "evals:run": "tsx src/evals/run.ts",
+    "evals:run": "bash scripts/evals-run.sh",
     "serve": "tsx src/serve/server.ts"
   },
   "dependencies": {
