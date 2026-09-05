@@ -10,12 +10,18 @@ steps:
     kind: gate
     message: Commit all staged changes and open a pull request?
   # Runs real git commands. The gate above must pass before these steps execute.
+  # `git add -u` stages only files git already tracks: `-A` would sweep in local,
+  # untracked files such as .claude/launch.json that were never meant to be committed.
+  # The message is a fixed string on purpose. Check commands are NOT placeholder-
+  # rendered, and they must not be: interpolating model output into a shell string
+  # is command injection. A descriptive message is the operator's job on amend.
   - id: commit
     kind: check
-    command: 'git add -A && git commit -m "feat: apply approved plan"'
+    command: 'git add -u && git commit -m "feat: apply approved plan"'
     dependsOn: [approve]
   # Runs real gh commands; creates a publicly visible pull request.
+  # Refuses on the default branch — a PR needs a head branch distinct from base.
   - id: pr
     kind: check
-    command: gh pr create --fill
+    command: '[ "$(git branch --show-current)" != "main" ] && gh pr create --fill'
     dependsOn: [commit]
