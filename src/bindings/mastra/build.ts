@@ -470,6 +470,12 @@ function buildLevelsOntoBuilder(
         builder = builder.then(outcomeStep);
       } else if (step.kind === "check") {
         builder = builder.then(buildCheckStep(step, deps, def.defaultTimeoutMs));
+      } else {
+        // Without this, an unhandled kind contributes no Mastra step and the run
+        // silently skips it. `pipeline` steps in particular must already be gone.
+        throw new Error(
+          `Step "${step.id}": kind "${step.kind}" is not executable — pipeline steps must be expanded before buildPipelineWorkflow`
+        );
       }
     }
   }

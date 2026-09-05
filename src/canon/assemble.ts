@@ -1,8 +1,6 @@
 import { ASSEMBLE_JS } from "./assembleSource.js";
 import type { Finding, HardenedSpec } from "./types.js";
 
-export type { HardenedSpec } from "./types.js";
-
 interface AssembleInput {
   request?: string;
   intake: string;

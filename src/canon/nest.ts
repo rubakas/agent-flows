@@ -63,8 +63,6 @@ function expand(
 
   // Maps each nesting step id → the namespaced ids of its terminal steps, so
   // parent steps that depended on the nesting step can be rewired.
-  // Maps each nesting step id → the namespaced ids of its terminal steps, so
-  // parent steps that depended on the nesting step can be rewired.
   // Loop steps are kept intact, so they never enter this map.
   const terminalMap = new Map<string, string[]>();
   const rawSteps: StepDef[] = [];
