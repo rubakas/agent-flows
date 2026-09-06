@@ -100,13 +100,17 @@ pnpm run doctor               # verify all prerequisites; fix hints for each mis
 
 **Built (ready to use):**
 
-- **Provider-neutral canon** — `pipelines/*.yaml` + `prompts/*.md` + loader (`src/canon/`); schema includes llm, gate, assemble-spec, persist-ticket; step ordering is explicit via `dependsOn` edges (ADR-0014), compiled to parallel levels. A step may declare `permissions: { contents: read }` to run its agent read-only in the project directory (follows the GitHub Actions `permissions:` convention).
+- **Provider-neutral canon** — `pipelines/*.yaml` + `prompts/*.md` + loader (`src/canon/`); schema includes llm, gate, assemble-spec, persist-ticket, check, loop, pipeline, export-spec; step ordering is explicit via `dependsOn` edges (ADR-0014), compiled to parallel levels. A step may declare `permissions: { contents: read }` to run its agent read-only in the project directory (follows the GitHub Actions `permissions:` convention); `permissions` replaces the deprecated `workspace` key. LLM steps may declare `skills` to invoke named Agent Skills. Hardening is unconditional: every claude CLI invocation gets `--restricted --strict-mcp-config`. Check steps run shell commands with an allowlist-controlled environment (`PATH`, `HOME`, `SHELL`, `TMPDIR`, `LANG`, and any vars declared via the step's `env` field). Pipelines install into `<project>/.agent-flows/` via `pnpm agent-flows install`. Audit runs inside the build pipeline (`build.yaml`) after the converge loop, not as a separate top-level workflow.
 - **Binding A** — Claude Code dynamic workflow generator (`.claude/workflows/*.js`, generated via `pnpm bindings:claude`); approval gates happen in chat between runs; subscription-billed; exit path is Binding B.
 - **Binding B** — Mastra interpreter + MCP server (Apache-2.0); durable suspend/resume HITL; steps execute via the open model registry (`pnpm mcp` starts the server; `pnpm mastra:smoke` runs standalone).
 - **Binding C** — n8n workflow generator (`.n8n-workflows/*.json`, generated via `pnpm bindings:n8n`); the canon compiles to an n8n workflow whose llm steps reference the installable `n8n-nodes-agent-flows.agentFlowsAgent` community node (`integrations/n8n-nodes-agent-flows/`). n8n provides the visual editor and execution surface; the canon stays the git-backed source.
 - **Model registry** — open; CLI aliases + passthrough of any model id; local `claude`/`codex` CLIs on subscription auth, Ollama local models, keyed APIs via LiteLLM.
 - **SQLite ticket store** — pipeline source of truth (better-sqlite3 + Drizzle); persisted by the `persist-ticket` step in each pipeline run.
-- **Layer-0 key isolation** — agent-flows process environment holds no real provider keys; child processes receive scrubbed environment (Charter invariant).
+- **Layer-0 key isolation** — agent-flows process environment holds no real provider keys; LLM child processes (claude CLI) receive a scrubbed environment with credential keys removed; check step child processes receive only the allowlisted base env plus any vars explicitly declared on the step (Charter invariant).
+
+**Planned, not yet built:**
+
+- `verify-plan` and `correct-plan` workflows — named in ADR-0015 as the plan-verification and correction stages of the SDLC pipeline; no pipeline YAML files for these stages exist yet.
 
 ## Current direction
 

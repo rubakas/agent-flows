@@ -193,6 +193,15 @@ export interface StepRunnerDeps {
    * Only meaningful when `contentsAccess` is set (validated at canon load time).
    */
   denyPatterns?: string[];
+  /**
+   * Per-step extension to `CHECK_ENV_ALLOWLIST` for `runCheckStep`. Names the
+   * additional environment variable names (beyond the base allowlist) that the
+   * check step's shell command may receive. Corresponds to `StepDef.env`.
+   *
+   * Any variable not in `CHECK_ENV_ALLOWLIST` and not listed here is stripped before
+   * `/bin/sh -c` is invoked. Only meaningful in `runCheckStep`; ignored by `runLlmStep`.
+   */
+  envAllowlist?: string[];
 }
 
 // ── Pattern normalisation ─────────────────────────────────────────────────────
@@ -269,9 +278,72 @@ function createDeadline(timeoutMs: number, parentSignal?: AbortSignal): Deadline
   return { signal: controller.signal, cancel, timeoutMs };
 }
 
-// ── Shared env-scrubbing helper ───────────────────────────────────────────────
+/**
+ * Base set of environment variable names that every check step receives from the
+ * parent process without needing an explicit declaration. These are standard
+ * OS-level variables required by virtually any shell command; withholding them
+ * would break basic toolchain operations.
+ *
+ * Determined empirically: `pnpm test` succeeds under `env -i PATH HOME TMPDIR
+ * SHELL LANG` on macOS and Linux. The additional variables below are
+ * widely expected by build tools and are safe to forward unconditionally because
+ * they carry no credentials.
+ *
+ * Any variable not in this set must be declared on the step via `StepDef.env`.
+ * A step that needs `GH_TOKEN` must declare `env: [GH_TOKEN]`.
+ */
+export const CHECK_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+  // Core: required for any shell command to function
+  "PATH",
+  "HOME",
+  "SHELL",
+  "TMPDIR",
+  // Locale: affects output encoding of many CLI tools
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  // Terminal: used by interactive-mode detection in some CLIs
+  "TERM",
+  // User identity: used by git (falls back to HOME/.gitconfig when names absent)
+  "USER",
+  "LOGNAME",
+  // CI detection: read by test reporters and build tools
+  "CI",
+  // Node / pnpm toolchain:
+  // PATH and HOME cover pnpm's binary discovery and store location in practice
+  // (verified empirically above). NODE_OPTIONS and PNPM_HOME are included as
+  // safety valves for steps that pass node flags or use a non-standard pnpm store.
+  "NODE_OPTIONS",
+  "PNPM_HOME",
+]);
 
-/** Returns a shallow copy of `rawEnv` with all SCRUBBED_KEYS removed. */
+// ── Shared env helpers ────────────────────────────────────────────────────────
+
+/**
+ * Builds the child environment for a check step from the base allowlist plus
+ * any per-step declared variable names. Variables not in either set are stripped.
+ *
+ * This is the allowlist replacement for the old `scrubEnv()` denylist. The old
+ * approach removed only the three SCRUBBED_KEYS, allowing any other credential
+ * (GH_TOKEN, LITELLM_MASTER_KEY, DATABASE_URL, etc.) to reach `/bin/sh -c`.
+ * An allowlist closes that class of leak by default: a variable is absent unless
+ * it is explicitly named.
+ */
+function buildCheckEnv(
+  rawEnv: NodeJS.ProcessEnv,
+  extraAllowed: readonly string[]
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of [...CHECK_ENV_ALLOWLIST, ...extraAllowed]) {
+    const val = rawEnv[key];
+    if (val !== undefined) env[key] = val;
+  }
+  return env;
+}
+
+/** Returns a shallow copy of `rawEnv` with all SCRUBBED_KEYS removed.
+ * Used by the codex and API transports which do not run a shell and
+ * therefore do not need the full check-step allowlist approach. */
 function scrubEnv(rawEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...rawEnv };
   for (const key of SCRUBBED_KEYS) delete env[key];
@@ -467,7 +539,7 @@ export async function runCheckStep(
   }
 
   const spawnFn = deps.spawn ?? defaultSpawn;
-  const env = scrubEnv(deps.env ?? process.env);
+  const env = buildCheckEnv(deps.env ?? process.env, deps.envAllowlist ?? []);
 
   const cwd = deps.cwd ?? process.cwd();
 
@@ -691,14 +763,21 @@ export async function runLlmStep(
             `runLlmStep: permissions.contents "write" is not supported for codex — codex always runs read-only`
           );
         }
-        // permissions.contents: "read" adds the cwd so the sandbox is rooted at the project directory.
-        return await runCodexCli(
-          prompt,
-          entry.cli?.model,
-          deps,
-          effectiveSignal,
-          resolvedWorkspaceDir
-        );
+        if (deps.contentsAccess === "read") {
+          // codex exec has no --disallowedTools or file-deny mechanism (confirmed via
+          // `codex exec --help`: only -s read-only|workspace-write|danger-full-access).
+          // Without a deny list, credential files (.env, *.pem, id_rsa) in the workspace
+          // are readable by the agent. A silent gap is not acceptable; the loader must
+          // refuse this combination. Use the claude transport with contents: read for
+          // controlled workspace access with CREDENTIAL_DENY_PATTERNS enforcement.
+          throw new Error(
+            `runLlmStep: permissions.contents "read" is not supported for codex — ` +
+              `codex exec has no file-deny mechanism, so credential files (.env, *.pem, id_rsa) ` +
+              `cannot be excluded from the workspace. Use the claude transport with ` +
+              `permissions.contents: read for workspace access with credential deny lists.`
+          );
+        }
+        return await runCodexCli(prompt, entry.cli?.model, deps, effectiveSignal, undefined);
       }
 
       throw new Error(`runLlmStep: unknown cli bin "${String(bin)}"`);

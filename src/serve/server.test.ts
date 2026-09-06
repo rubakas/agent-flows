@@ -1070,3 +1070,134 @@ describe("GET /api/skills/:name and GET /api/agents/:name — content endpoints"
     assert.equal(body.content.length, CONTENT_CAP, "content must be exactly CONTENT_CAP bytes");
   });
 });
+
+// ── GET /api/export/:id and POST /api/import ──────────────────────────────────
+
+describe("GET /api/export/:id — export workflow bundle", () => {
+  let srv: ServeHandle;
+
+  before(async () => {
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => srv.close());
+
+  it("returns 200 with application/x-yaml content for a known pipeline", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/export/investigate`);
+    assert.equal(res.status, 200);
+    const ct = res.headers.get("content-type") ?? "";
+    assert.ok(
+      ct.startsWith("application/x-yaml"),
+      `content-type must be application/x-yaml; got ${ct}`
+    );
+    const body = await res.text();
+    assert.ok(body.includes("bundleVersion"), "bundle must contain bundleVersion field");
+    assert.ok(body.includes("sourcePipeline"), "bundle must contain sourcePipeline field");
+    assert.ok(body.includes("investigate"), "bundle must reference the pipeline id");
+  });
+
+  it("returns Content-Disposition attachment header for browser download", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/export/investigate`);
+    assert.equal(res.status, 200);
+    const cd = res.headers.get("content-disposition") ?? "";
+    assert.ok(
+      cd.includes("attachment") && cd.includes("investigate.yoke-bundle.yaml"),
+      `Content-Disposition must be attachment with filename; got: "${cd}"`
+    );
+  });
+
+  it("returns 422 for a non-existent pipeline id", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/export/nonexistent-pipeline`);
+    assert.equal(res.status, 422);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.length > 0, "error must be non-empty");
+  });
+
+  it("returns 400 for an unsafe pipeline id", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/export/..%2Fevil`);
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.length > 0, "error must be non-empty");
+  });
+});
+
+describe("POST /api/import — import workflow bundle", () => {
+  let srv: ServeHandle;
+  let tmpProjectDir: string;
+
+  before(async () => {
+    tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-import-http-test-")));
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir: tmpProjectDir,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpProjectDir, { recursive: true, force: true });
+  });
+
+  it("imports a valid bundle and returns written/skipped report", async () => {
+    // Export investigate from the server itself, then post it back as import.
+    const exportRes = await fetch(`http://127.0.0.1:${srv.port}/api/export/investigate`);
+    assert.equal(exportRes.status, 200, "export must succeed before import test");
+    const bundleText = await exportRes.text();
+
+    const importRes = await mutate(srv.port, "POST", "/api/import", {
+      bundle: bundleText,
+      overwrite: false,
+    });
+    assert.equal(importRes.status, 200);
+    const body = (await importRes.json()) as { written: string[]; skipped: string[] };
+    assert.ok(Array.isArray(body.written), "written must be an array");
+    assert.ok(Array.isArray(body.skipped), "skipped must be an array");
+    assert.ok(body.written.length > 0, "at least one file must be written");
+  });
+
+  it("skips files on second import of the same bundle", async () => {
+    const exportRes = await fetch(`http://127.0.0.1:${srv.port}/api/export/investigate`);
+    const bundleText = await exportRes.text();
+
+    // Second import — files already exist from the previous test.
+    const importRes = await mutate(srv.port, "POST", "/api/import", {
+      bundle: bundleText,
+      overwrite: false,
+    });
+    assert.equal(importRes.status, 200);
+    const body = (await importRes.json()) as { written: string[]; skipped: string[] };
+    assert.equal(body.written.length, 0, "second import must write nothing");
+    assert.ok(body.skipped.length > 0, "second import must report skips");
+  });
+
+  it("rejects a bundle with a traversal path and returns 422", async () => {
+    const maliciousBundle =
+      "bundleVersion: 1\nsourcePipeline: evil\nexportedAt: 2026-01-01T00:00:00.000Z\n" +
+      'files:\n  - path: "../evil.txt"\n    content: "# bad"\n';
+
+    const res = await mutate(srv.port, "POST", "/api/import", { bundle: maliciousBundle });
+    assert.equal(res.status, 422);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.length > 0, "error must be non-empty");
+  });
+
+  it("rejects an invalid bundle and returns 422", async () => {
+    const res = await mutate(srv.port, "POST", "/api/import", {
+      bundle: "this is not a valid bundle yaml",
+    });
+    assert.equal(res.status, 422);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.length > 0, "error message must be non-empty");
+  });
+
+  it("returns 400 when bundle field is missing", async () => {
+    const res = await mutate(srv.port, "POST", "/api/import", { overwrite: false });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.includes("bundle"), "error must mention the missing field");
+  });
+});

@@ -107,6 +107,19 @@ export interface StepDef {
    */
   command?: string;
   /**
+   * For `kind: "check"` steps only: an explicit per-step allowlist of environment variable
+   * names that this step's shell command may receive, on top of the built-in base set
+   * (`CHECK_ENV_ALLOWLIST` in runStep.ts: PATH, HOME, SHELL, TMPDIR, LANG, etc.).
+   *
+   * Any variable not in the base set or in this list is stripped before `/bin/sh -c`
+   * is invoked. A step that needs `GH_TOKEN` must declare `env: [GH_TOKEN]` here.
+   *
+   * Must be a non-empty array of valid environment variable name strings (letters, digits,
+   * underscore; must start with letter or underscore). Only meaningful on `check` steps —
+   * rejected on all other step kinds.
+   */
+  env?: string[];
+  /**
    * For `kind: "export-spec"` steps: the directory path to write the Spec Kit
    * `spec.md` file into. The directory is created if it does not exist.
    * Required and non-empty. Cannot be combined with `prompt`, `role`, `model`,

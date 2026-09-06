@@ -530,22 +530,21 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
   });
 
-  it('codex: sets cwd=workspaceDir when contentsAccess is "read" (already has -s read-only)', async () => {
+  it('codex: rejects when contentsAccess is "read" (no file-deny mechanism; credential files cannot be excluded)', async () => {
+    // This MUST FAIL before the codex+read rejection fix:
+    // the current code allows codex + read and sets cwd, so the promise resolves
+    // instead of rejecting, causing assert.rejects to fail.
     const entry: ModelEntry = {
       id: "codex-test",
       transport: "cli",
       cli: { bin: "codex", model: "o4-mini" },
     };
-    const { child } = makeFakeChild({ stdoutChunks: [makeCodexJsonlOutput("ok")] });
-    let capturedCwd: string | undefined;
-    const spawn = ((_cmd: string, _args: string[], opts: { cwd?: string }) => {
-      capturedCwd = opts.cwd;
-      return child;
-    }) as unknown as SpawnFn;
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeCodexJsonlOutput("irrelevant")] });
 
-    await runLlmStep(entry, "analyze", { spawn, contentsAccess: "read", workspaceDir: repoRoot });
-
-    assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
+    await assert.rejects(
+      runLlmStep(entry, "analyze", { spawn, contentsAccess: "read", workspaceDir: repoRoot }),
+      /codex.*credential|codex.*deny|codex.*read|contents.*codex/i
+    );
   });
 
   it("codex: no cwd when contentsAccess is not set", async () => {
@@ -1053,6 +1052,83 @@ describe("runCheckStep — real execution", () => {
     assert.ok(
       result.output.toLowerCase().includes("timeout") || result.output.includes("100ms"),
       `output should mention timeout; got: ${result.output}`
+    );
+  });
+});
+
+// ── runCheckStep — environment allowlist ──────────────────────────────────────
+
+describe("runCheckStep — environment allowlist", () => {
+  // This MUST FAIL before the allowlist fix: scrubEnv() only removes SCRUBBED_KEYS,
+  // so GH_TOKEN passes through untouched. After the fix, only CHECK_ENV_ALLOWLIST
+  // vars (PATH, HOME, SHELL, TMPDIR, LANG, etc.) reach the child by default.
+  it("strips env vars not in the base allowlist from the child environment", async () => {
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const spawn = ((_cmd: string, _args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
+      capturedEnv = opts.env;
+      const { child } = makeFakeChild({ exitCode: 0 });
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runCheckStep("echo hi", {
+      spawn,
+      env: {
+        PATH: "/usr/bin",
+        HOME: "/home/user",
+        TMPDIR: "/tmp",
+        SHELL: "/bin/sh",
+        LANG: "en_US.UTF-8",
+        GH_TOKEN: "ghp_secret",
+        LITELLM_MASTER_KEY: "sk-master",
+        DATABASE_URL: "postgres://localhost/db",
+      },
+    });
+
+    assert.ok(capturedEnv !== undefined, "spawn must have been called");
+    assert.equal(capturedEnv.PATH, "/usr/bin", "PATH must be preserved (it is in the allowlist)");
+    assert.equal(capturedEnv.HOME, "/home/user", "HOME must be preserved (it is in the allowlist)");
+    assert.equal(
+      capturedEnv.GH_TOKEN,
+      undefined,
+      "GH_TOKEN must be stripped — not in base allowlist and not declared in envAllowlist"
+    );
+    assert.equal(
+      capturedEnv.LITELLM_MASTER_KEY,
+      undefined,
+      "LITELLM_MASTER_KEY must be stripped — not in base allowlist"
+    );
+    assert.equal(
+      capturedEnv.DATABASE_URL,
+      undefined,
+      "DATABASE_URL must be stripped — not in base allowlist"
+    );
+  });
+
+  it("passes declared envAllowlist vars to the child alongside base allowlist vars", async () => {
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const spawn = ((_cmd: string, _args: string[], opts: { env?: NodeJS.ProcessEnv }) => {
+      capturedEnv = opts.env;
+      const { child } = makeFakeChild({ exitCode: 0 });
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runCheckStep("echo hi", {
+      spawn,
+      env: {
+        PATH: "/usr/bin",
+        HOME: "/home/user",
+        GH_TOKEN: "ghp_secret",
+        OTHER_SECRET: "must-not-appear",
+      },
+      envAllowlist: ["GH_TOKEN"],
+    });
+
+    assert.ok(capturedEnv !== undefined, "spawn must have been called");
+    assert.equal(capturedEnv.GH_TOKEN, "ghp_secret", "GH_TOKEN must be present when declared");
+    assert.equal(
+      capturedEnv.OTHER_SECRET,
+      undefined,
+      "OTHER_SECRET must be absent — not declared in envAllowlist"
     );
   });
 });

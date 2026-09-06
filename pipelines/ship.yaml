@@ -21,7 +21,9 @@ steps:
     dependsOn: [approve]
   # Runs real gh commands; creates a publicly visible pull request.
   # Refuses on the default branch — a PR needs a head branch distinct from base.
+  # GH_TOKEN is declared so it passes through the check step's env allowlist.
   - id: pr
     kind: check
     command: '[ "$(git branch --show-current)" != "main" ] && gh pr create --fill'
+    env: [GH_TOKEN]
     dependsOn: [commit]

@@ -43,6 +43,9 @@ function findSuggestion(entry: string, patterns: readonly string[]): string | un
 /** Fields that are illegal on every non-llm step kind. */
 const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"] as const;
 
+/** Fields that are illegal on every step kind OTHER than "check". */
+const NON_CHECK_FORBIDDEN = ["env"] as const;
+
 /** Runs pipelineLevels and re-throws GraphError as a plain Error (preserving the message). */
 function assertLevels(steps: PipelineDef["steps"]): void {
   try {
@@ -113,6 +116,14 @@ export function loadPipeline(
           throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
         }
       }
+      // env is only valid on check steps; reject it on all other non-llm kinds.
+      if (step.kind !== "check") {
+        for (const field of NON_CHECK_FORBIDDEN) {
+          if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
+            throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
+          }
+        }
+      }
       if (step.role !== undefined) {
         throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
       }
@@ -147,6 +158,28 @@ export function loadPipeline(
         if (!step.command) {
           throw new Error(`Step "${step.id}": check step requires command`);
         }
+        // Validate the optional env allowlist field.
+        const envField = (step as unknown as Record<string, unknown>).env;
+        if (envField !== undefined) {
+          if (!Array.isArray(envField) || (envField as unknown[]).length === 0) {
+            throw new Error(
+              `Step "${step.id}": env must be a non-empty array of environment variable name strings`
+            );
+          }
+          for (const entry of envField as unknown[]) {
+            if (
+              typeof entry !== "string" ||
+              entry.trim() === "" ||
+              !/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry)
+            ) {
+              throw new Error(
+                `Step "${step.id}": env entries must be valid environment variable names ` +
+                  `(letters, digits, underscore; must start with a letter or underscore); ` +
+                  `got: ${JSON.stringify(entry)}`
+              );
+            }
+          }
+        }
         continue;
       }
 
@@ -162,6 +195,12 @@ export function loadPipeline(
     }
 
     if (step.kind === "llm") {
+      // env is only valid on check steps; reject it on llm steps too.
+      for (const field of NON_CHECK_FORBIDDEN) {
+        if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
+          throw new Error(`Step "${step.id}": llm step cannot set ${field}`);
+        }
+      }
       if (!step.role && !step.model) {
         throw new Error(`Step "${step.id}": llm step requires role or model`);
       }

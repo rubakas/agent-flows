@@ -1338,6 +1338,98 @@ ${overrides}
       /permissions/
     );
   });
+
+  // env field validation tests — MUST FAIL before load.ts validates the env field.
+  // Currently load.ts ignores env on check steps, so malformed values are silently
+  // accepted instead of rejected. After the fix, each of these throws.
+  it("loads a valid check step with a declared env field", () => {
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) =>
+        p.endsWith(".yaml")
+          ? makeCheckYaml("    command: pnpm test\n    env:\n      - GH_TOKEN")
+          : "",
+    });
+    assert.deepEqual(def.steps[0].env, ["GH_TOKEN"]);
+  });
+
+  it("throws when check step env contains a non-string entry", () => {
+    // This MUST FAIL before the fix: load.ts currently ignores env entirely,
+    // so this call succeeds instead of throwing.
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeCheckYaml("    command: pnpm test\n    env:\n      - 123")
+              : "",
+        }),
+      /env/
+    );
+  });
+
+  it("throws when check step env is an empty array", () => {
+    // This MUST FAIL before the fix: load.ts currently ignores env entirely.
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml") ? makeCheckYaml("    command: pnpm test\n    env: []") : "",
+        }),
+      /env/
+    );
+  });
+
+  it("throws when check step env contains a blank string", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeCheckYaml("    command: pnpm test\n    env:\n      - ''")
+              : "",
+        }),
+      /env/
+    );
+  });
+
+  it("throws when check step env contains an invalid variable name", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeCheckYaml("    command: pnpm test\n    env:\n      - 123BADNAME")
+              : "",
+        }),
+      /env/
+    );
+  });
+
+  it("throws when a non-check step kind has env set", () => {
+    // env is only valid on check steps. gate steps must reject it.
+    // This MUST FAIL before the fix: load.ts currently doesn't check env on gate steps.
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: approve
+    kind: gate
+    env:
+      - GH_TOKEN
+`
+              : "",
+        }),
+      /env/
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

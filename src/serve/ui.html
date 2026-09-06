@@ -734,6 +734,7 @@
         <h1>agent-flows</h1>
         <span class="desc">DAG editor</span>
         <div class="actions">
+          <button class="btn" id="import-btn">Import bundle</button>
           <button class="btn primary" id="new-pipeline-btn">+ New pipeline</button>
         </div>
       </header>
@@ -829,6 +830,19 @@
       </div>
     </div>
 
+    <!-- ═══════════════════════════════════ Import bundle modal ════════════════════ -->
+    <input type="file" id="import-file" accept=".yaml,.yml" hidden />
+    <div id="import-modal" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
+        <h3 id="import-modal-title">Import bundle</h3>
+        <div id="import-result" hidden></div>
+        <div id="import-error" class="error-box" hidden></div>
+        <div class="modal-actions">
+          <button class="btn" id="import-close">Close</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══════════════════════════════════ Skill / agent content modal ══════════ -->
     <div id="content-modal" class="modal-overlay" hidden>
       <div
@@ -914,15 +928,16 @@
           .map((p) => {
             const isInstalled = installedSet.has(p.id);
             const result = S.installResults[p.id];
+            const exportBtn = `<a class="btn btn-icon" href="/api/export/${encodeURIComponent(p.id)}" download="${escH(p.id)}.yoke-bundle.yaml" title="Export ${escH(p.id)} as bundle" aria-label="Export ${escH(p.id)}">Export</a>`;
             let actionHtml;
             if (isBundled) {
               if (isInstalled) {
-                actionHtml = `<span class="tag" style="color:var(--ok);border-color:var(--ok)">installed</span>`;
+                actionHtml = `<span class="tag" style="color:var(--ok);border-color:var(--ok)">installed</span>${exportBtn}`;
               } else {
-                actionHtml = `<button class="btn btn-icon" data-install="${escH(p.id)}">Install</button>`;
+                actionHtml = `<button class="btn btn-icon" data-install="${escH(p.id)}">Install</button>${exportBtn}`;
               }
             } else {
-              actionHtml = `<button class="btn btn-icon" data-del="${escH(p.id)}" title="Delete ${escH(p.id)}" aria-label="Delete ${escH(p.id)}">✕</button>`;
+              actionHtml = `<button class="btn btn-icon" data-del="${escH(p.id)}" title="Delete ${escH(p.id)}" aria-label="Delete ${escH(p.id)}">✕</button>${exportBtn}`;
             }
             const sourcePrefix = isBundled ? "bundled — " : "project — ";
             const resultHtml =
@@ -930,7 +945,7 @@
             return `<div class="pipeline-card" role="button" tabindex="0" data-pid="${escH(p.id)}">
         <div class="card-top">
           <span class="pid">${escH(p.id)}</span>
-          ${actionHtml}
+          <span style="display:flex;gap:0.35rem;flex-shrink:0">${actionHtml}</span>
         </div>
         <span class="pdesc">${escH(p.description || "")}</span>
         <span class="ppath">${escH(sourcePrefix)}${escH(p.path)}</span>
@@ -1802,6 +1817,79 @@
       el("content-modal").addEventListener("keydown", (e) => {
         if (e.key === "Escape") {
           el("content-modal").hidden = true;
+        }
+      });
+
+      // ══════════════════════════════════════════════════════════════════════════════
+      // Import bundle
+      // POST /api/import { bundle: <yaml text> } → { written, skipped } | { error }
+      // ══════════════════════════════════════════════════════════════════════════════
+
+      el("import-btn").addEventListener("click", () => {
+        el("import-file").value = "";
+        el("import-file").click();
+      });
+
+      el("import-file").addEventListener("change", () => {
+        const file = el("import-file").files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          void doImport(reader.result);
+        };
+        reader.readAsText(file);
+      });
+
+      async function doImport(bundleText) {
+        const resultEl = el("import-result");
+        const errEl = el("import-error");
+        resultEl.hidden = true;
+        errEl.hidden = true;
+        el("import-modal").hidden = false;
+        el("import-close").focus();
+
+        try {
+          const res = await fetch("/api/import", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ bundle: bundleText, overwrite: false }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            errEl.textContent = data.error || `HTTP ${res.status}`;
+            errEl.hidden = false;
+            return;
+          }
+          const writtenLines = (data.written || []).map(
+            (p) => `<span class="r-written">written: ${escH(p)}</span>`
+          );
+          const skippedLines = (data.skipped || []).map(
+            (p) => `<span class="r-skipped">skipped (already exists): ${escH(p)}</span>`
+          );
+          const combined = [...writtenLines, ...skippedLines];
+          resultEl.innerHTML =
+            `<div class="install-result" style="margin:0 0 0.5rem">` +
+            (combined.length > 0
+              ? combined.join("<br>")
+              : `<span class="r-skipped">No files changed</span>`) +
+            `</div>`;
+          resultEl.hidden = false;
+          // Refresh list so newly imported pipelines appear.
+          await loadList();
+          await loadEnvironment();
+        } catch (err) {
+          errEl.textContent = `Request error: ${err.message}`;
+          errEl.hidden = false;
+        }
+      }
+
+      el("import-close").addEventListener("click", () => {
+        el("import-modal").hidden = true;
+      });
+
+      el("import-modal").addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          el("import-modal").hidden = true;
         }
       });
 

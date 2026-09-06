@@ -23,6 +23,7 @@ import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draf
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import { listPipelines, loadPipeline } from "../canon/load.js";
 import { makeDb, type DbInstance } from "../db/index.js";
+import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../install/bundle.js";
 import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
@@ -52,6 +53,7 @@ const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
 const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
 const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
 const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
+const RE_EXPORT = /^\/api\/export\/([^/]+)$/u;
 
 // Safe pipeline id: lowercase alphanumeric and hyphens, must start with a letter or digit.
 // Prohibits dot, slash, backslash, space — blocks all path-traversal attempts.
@@ -829,6 +831,52 @@ async function handleRequest(
       content: truncated ? raw.slice(0, CONTENT_CAP) : raw,
       truncated,
     });
+    return;
+  }
+
+  // GET /api/export/:id — export a pipeline and its full closure as a YAML bundle
+  const exportMatch = RE_EXPORT.exec(pathname);
+  if (method === "GET" && exportMatch) {
+    const id = decodeURIComponent(exportMatch[1]);
+    if (!isSafeId(id)) {
+      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
+      return;
+    }
+    try {
+      const bundle = exportBundle(id, ctx.pipelinesDir);
+      const yamlText = stringifyBundle(bundle);
+      res.writeHead(200, {
+        "Content-Type": "application/x-yaml",
+        "Content-Disposition": `attachment; filename="${id}.yoke-bundle.yaml"`,
+      });
+      res.end(yamlText);
+    } catch (err) {
+      json(res, 422, { error: safePath((err as Error).message, root) });
+    }
+    return;
+  }
+
+  // POST /api/import — import a workflow bundle into .agent-flows/
+  if (method === "POST" && pathname === "/api/import") {
+    const raw = await readBody(req);
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { bundle: bundleText, overwrite } = parsed.value;
+    if (typeof bundleText !== "string") {
+      json(res, 400, { error: 'Field "bundle" must be a string' });
+      return;
+    }
+    const doOverwrite = overwrite === true;
+    try {
+      const bundle = parseBundle(bundleText);
+      const report = importBundle(bundle, ctx.projectDir, doOverwrite);
+      json(res, 200, report);
+    } catch (err) {
+      json(res, 422, { error: safePath((err as Error).message, root) });
+    }
     return;
   }
 
