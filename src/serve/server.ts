@@ -13,6 +13,7 @@ import {
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
 import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
@@ -541,8 +542,9 @@ if (process.argv[1] === __filename) {
   const port = parseInt(getArgValue("--port", "7411"), 10);
   const projectDir = resolveProjectDir();
   console.log(`agent-flows serve: running steps in ${projectDir}`);
+  const { pipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
+  console.log(`agent-flows serve: pipelines from ${pipelinesSource} (${pipelinesDir})`);
   const dbPath = getArgValue("--db", join(process.cwd(), "agent-flows.sqlite"));
-  const pipelinesDir = join(process.cwd(), "pipelines");
 
   // Non-literal specifiers prevent import-x/no-cycle from traversing into
   // @mastra/core's deep subpath exports, which crash the resolver —

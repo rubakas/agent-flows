@@ -15,7 +15,7 @@ import { RunService } from "../../runtime/runService.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
 import { mastraDbPath } from "./paths.js";
-import { loadCatalog } from "./pipelineLoader.js";
+import { loadCatalog, resolveCanonDir } from "./pipelineLoader.js";
 import { resolveProjectDir } from "./projectDir.js";
 import type { PipelineCatalog } from "./pipelineLoader.js";
 import type { MastraLike } from "../../runtime/runService.js";
@@ -53,7 +53,8 @@ console.error(`agent-flows MCP server: running steps in ${projectDir}`);
 
 // ── Load pipelines ────────────────────────────────────────────────────────────
 
-const pipelinesDir = join(repoRoot, "pipelines");
+const { pipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
+console.error(`agent-flows MCP server: pipelines from ${pipelinesSource} (${pipelinesDir})`);
 
 function buildFreshMastra(catalog: PipelineCatalog): Mastra {
   const workflows: Record<string, unknown> = {};

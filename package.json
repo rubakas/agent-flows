@@ -23,6 +23,8 @@
     "mcp": "tsx src/bindings/mastra/server.ts",
     "mastra:smoke": "tsx src/bindings/mastra/smoke.ts",
     "evals:run": "bash scripts/evals-run.sh",
+    "flows:install": "bash scripts/install.sh install",
+    "flows:list": "bash scripts/install.sh list",
     "serve": "tsx src/serve/server.ts"
   },
   "dependencies": {
