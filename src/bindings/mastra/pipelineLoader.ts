@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 // When running via tsx (source), __dirname is src/bindings/mastra.
 // Bundled pipelines live three directories up, then pipelines/.
-const BUNDLED_PIPELINES_DIR = join(__dirname, "..", "..", "..", "pipelines");
+export const BUNDLED_PIPELINES_DIR = join(__dirname, "..", "..", "..", "pipelines");
 
 export interface LoadError {
   file: string;

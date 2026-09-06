@@ -600,6 +600,85 @@
         color: var(--err);
         margin: 0.8rem 0;
       }
+
+      /* ── pipeline card delete button ── */
+      .card-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 0.5rem;
+      }
+      .btn-icon {
+        font-family: var(--mono);
+        font-size: 0.68rem;
+        padding: 0.1rem 0.5rem;
+        flex-shrink: 0;
+        line-height: 1.4;
+      }
+
+      /* ── environment / install / skills panels ── */
+      .env-section {
+        margin-top: 1.8rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--line);
+      }
+      .install-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.4rem 0.7rem;
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        margin-bottom: 0.4rem;
+        background: var(--sunk);
+        gap: 0.6rem;
+      }
+      .install-item .iname {
+        font-family: var(--mono);
+        font-size: 0.82rem;
+      }
+      .install-result {
+        font-family: var(--mono);
+        font-size: 0.74rem;
+        margin: -0.35rem 0 0.45rem;
+        padding: 0.35rem 0.6rem;
+        border-radius: 0 0 2px 2px;
+        background: var(--sunk);
+        border: 1px solid var(--line);
+        border-top: none;
+        line-height: 1.6;
+      }
+      .r-written {
+        color: var(--ok);
+      }
+      .r-skipped {
+        color: var(--muted);
+      }
+      .r-err {
+        color: var(--err);
+      }
+      .tag-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.3rem;
+        margin-bottom: 0.75rem;
+      }
+      .tag {
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        padding: 0.1rem 0.45rem;
+        background: var(--sunk);
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        color: var(--ink-2);
+      }
+      .hint {
+        font-size: 0.76rem;
+        color: var(--muted);
+        margin: 0 0 0.5rem;
+        line-height: 1.5;
+      }
     </style>
   </head>
   <body>
@@ -608,10 +687,14 @@
       <header class="bar">
         <h1>agent-flows</h1>
         <span class="desc">DAG editor</span>
+        <div class="actions">
+          <button class="btn primary" id="new-pipeline-btn">+ New pipeline</button>
+        </div>
       </header>
       <div class="list-body">
         <h2>Pipelines</h2>
         <div id="list-items">Loading…</div>
+        <div id="env-panel"></div>
       </div>
     </section>
 
@@ -660,6 +743,46 @@
       </div>
     </div>
 
+    <!-- ═══════════════════════════════════ Create pipeline modal ═══════════════ -->
+    <div id="create-modal" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
+        <h3 id="create-modal-title">New pipeline</h3>
+        <div class="field">
+          <label for="create-id-input">id</label>
+          <input id="create-id-input" type="text" placeholder="my-pipeline" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="create-desc-input">description</label>
+          <input id="create-desc-input" type="text" placeholder="What this pipeline does" />
+        </div>
+        <div id="create-error" class="error-box" hidden></div>
+        <div class="modal-actions">
+          <button class="btn" id="create-cancel">Cancel</button>
+          <button class="btn primary" id="create-submit">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════ Delete confirm modal ══════════════════ -->
+    <div id="delete-modal" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+        <h3 id="delete-modal-title">Delete pipeline</h3>
+        <p style="font-size: 0.85rem; color: var(--ink-2); margin: 0 0 0.8rem">
+          Delete
+          <strong
+            id="delete-target-name"
+            style="font-family: var(--mono); color: var(--ink)"
+          ></strong
+          >? This removes the YAML file and cannot be undone.
+        </p>
+        <div id="delete-error" class="error-box" hidden></div>
+        <div class="modal-actions">
+          <button class="btn" id="delete-cancel">Cancel</button>
+          <button class="btn danger" id="delete-confirm">Delete</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       "use strict";
 
@@ -676,6 +799,10 @@
         stepStatuses: {}, // stepId → status string
         suspendedStepId: null,
         sseSource: null,
+        // manage
+        deleteTarget: null, // id of pipeline awaiting delete confirmation
+        env: null, // cached GET /api/environment response
+        installResults: {}, // wfId → result html (persists across panel re-renders)
       };
 
       // ── DOM helpers ───────────────────────────────────────────────────────────────
@@ -723,7 +850,10 @@
             .map(
               (p) => `
       <div class="pipeline-card" role="button" tabindex="0" data-pid="${escH(p.id)}">
-        <span class="pid">${escH(p.id)}</span>
+        <div class="card-top">
+          <span class="pid">${escH(p.id)}</span>
+          <button class="btn btn-icon" data-del="${escH(p.id)}" title="Delete ${escH(p.id)}" aria-label="Delete ${escH(p.id)}">✕</button>
+        </div>
         <span class="pdesc">${escH(p.description || "")}</span>
         <span class="ppath">${escH(p.path)}</span>
       </div>`
@@ -738,6 +868,13 @@
                 e.preventDefault();
                 openPipeline(pid);
               }
+            });
+          });
+
+          items.querySelectorAll("[data-del]").forEach((btn) => {
+            btn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              showDeleteModal(btn.dataset.del);
             });
           });
         } catch (err) {
@@ -1233,6 +1370,227 @@
         }
       }
 
+      // ══════════════════════════════════════════════════════════════════════════════
+      // Environment panel
+      // GET /api/environment → show launch context, install section, skills & agents
+      // ══════════════════════════════════════════════════════════════════════════════
+
+      async function loadEnvironment() {
+        const panel = el("env-panel");
+        try {
+          const res = await fetch("/api/environment");
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          S.env = await res.json();
+          renderEnvPanel(S.env);
+        } catch (err) {
+          panel.innerHTML = `<div class="env-section"><div class="error-box">Could not load environment: ${escH(err.message)}</div></div>`;
+        }
+      }
+
+      function renderEnvPanel(env) {
+        const panel = el("env-panel");
+        const installedSet = new Set(env.installed);
+        const uninstalled = env.available.filter((id) => !installedSet.has(id));
+        const isBundled = env.pipelinesSource === "bundled";
+
+        let html = "";
+
+        // ── Launch context ──
+        html += `<div class="env-section">
+          <h2>Launch context</h2>
+          <div class="field">
+            <label>Project</label>
+            <div class="ro">${escH(env.projectDir)}</div>
+          </div>
+          <div class="field">
+            <label>Pipelines</label>
+            <div class="ro">from <strong>${escH(env.pipelinesSource)}</strong> catalog${isBundled ? " — read-only, cannot create or delete" : ""}</div>
+          </div>
+          <div class="field">
+            <label>Installed</label>
+            <div class="ro">${env.installed.length} of ${env.available.length} bundled available</div>
+          </div>
+        </div>`;
+
+        // ── Install ──
+        if (env.available.length > 0) {
+          html += `<div class="env-section"><h2>Available to install</h2>`;
+          if (uninstalled.length === 0) {
+            html += `<p class="empty">All ${env.available.length} bundled workflow${env.available.length === 1 ? "" : "s"} already installed.</p>`;
+          } else {
+            for (const wfId of uninstalled) {
+              const result = S.installResults[wfId];
+              html += `<div class="install-item">
+                <span class="iname">${escH(wfId)}</span>
+                <button class="btn btn-icon" data-install="${escH(wfId)}">Install</button>
+              </div>`;
+              if (result) {
+                html += `<div class="install-result">${result}</div>`;
+              }
+            }
+          }
+          html += `</div>`;
+        }
+
+        // ── Skills & agents ──
+        if (env.skills.length > 0 || env.agents.length > 0) {
+          html += `<div class="env-section">
+            <h2>Skills &amp; agents</h2>
+            <p class="hint">Names from agent-notes. A step references them via its <code>skills:</code> field — agent-flows does not own them.</p>`;
+          if (env.skills.length > 0) {
+            html += `<div class="field">
+              <label>Skills (${env.skills.length})</label>
+              <div class="tag-list">${env.skills.map((s) => `<span class="tag">${escH(s)}</span>`).join("")}</div>
+            </div>`;
+          }
+          if (env.agents.length > 0) {
+            html += `<div class="field">
+              <label>Agents (${env.agents.length})</label>
+              <div class="tag-list">${env.agents.map((a) => `<span class="tag">${escH(a)}</span>`).join("")}</div>
+            </div>`;
+          }
+          html += `</div>`;
+        }
+
+        panel.innerHTML = html;
+
+        panel.querySelectorAll("[data-install]").forEach((btn) => {
+          btn.addEventListener("click", () => installSingle(btn.dataset.install));
+        });
+      }
+
+      async function installSingle(wfId) {
+        // Optimistically disable the button while request is in flight.
+        const btn = el("env-panel").querySelector(`[data-install="${CSS.escape(wfId)}"]`);
+        if (btn) btn.disabled = true;
+        try {
+          const res = await fetch("/api/install", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ ids: [wfId] }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            S.installResults[wfId] =
+              `<span class="r-err">Error: ${escH(data.error || `HTTP ${res.status}`)}</span>`;
+          } else {
+            const writtenLines = (data.written || []).map(
+              (p) => `<span class="r-written">written: ${escH(p)}</span>`
+            );
+            const skippedLines = (data.skipped || []).map(
+              (p) => `<span class="r-skipped">skipped (already exists): ${escH(p)}</span>`
+            );
+            const combined = [...writtenLines, ...skippedLines];
+            S.installResults[wfId] =
+              combined.length > 0
+                ? combined.join("<br>")
+                : `<span class="r-skipped">No files changed</span>`;
+          }
+        } catch (err) {
+          S.installResults[wfId] = `<span class="r-err">Error: ${escH(err.message)}</span>`;
+        }
+        // Reload env to update installed counts; the result is preserved via S.installResults.
+        await loadEnvironment();
+      }
+
+      // ══════════════════════════════════════════════════════════════════════════════
+      // Create pipeline
+      // POST /api/pipelines → 201 { id, path } | 400 unsafe id | 409 duplicate
+      // ══════════════════════════════════════════════════════════════════════════════
+
+      function showCreateModal() {
+        el("create-id-input").value = "";
+        el("create-desc-input").value = "";
+        el("create-error").hidden = true;
+        el("create-error").textContent = "";
+        el("create-modal").hidden = false;
+        el("create-id-input").focus();
+      }
+
+      async function submitCreate() {
+        const id = el("create-id-input").value.trim();
+        const description = el("create-desc-input").value.trim();
+        const errBox = el("create-error");
+        const submitBtn = el("create-submit");
+
+        errBox.hidden = true;
+        if (!id) {
+          errBox.textContent = "Pipeline id is required.";
+          errBox.hidden = false;
+          el("create-id-input").focus();
+          return;
+        }
+
+        submitBtn.disabled = true;
+        try {
+          const res = await fetch("/api/pipelines", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id, description }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            errBox.textContent = data.error || `HTTP ${res.status}`;
+            errBox.hidden = false;
+            return;
+          }
+          el("create-modal").hidden = true;
+          await loadList();
+          openPipeline(data.id);
+        } catch (err) {
+          errBox.textContent = `Request error: ${err.message}`;
+          errBox.hidden = false;
+        } finally {
+          submitBtn.disabled = false;
+        }
+      }
+
+      // ══════════════════════════════════════════════════════════════════════════════
+      // Delete pipeline
+      // DELETE /api/pipelines/:id → 200 { ok, id } | 409 dependants | 403 bundled
+      // ══════════════════════════════════════════════════════════════════════════════
+
+      function showDeleteModal(id) {
+        S.deleteTarget = id;
+        el("delete-target-name").textContent = id;
+        el("delete-error").hidden = true;
+        el("delete-error").textContent = "";
+        el("delete-modal").hidden = false;
+        el("delete-confirm").focus();
+      }
+
+      async function confirmDelete() {
+        const id = S.deleteTarget;
+        if (!id) return;
+        const errBox = el("delete-error");
+        const confirmBtn = el("delete-confirm");
+
+        errBox.hidden = true;
+        confirmBtn.disabled = true;
+        try {
+          const res = await fetch(`/api/pipelines/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            // Surface the API response verbatim — includes dependant names on 409.
+            errBox.textContent = data.error || `HTTP ${res.status}`;
+            errBox.hidden = false;
+            return;
+          }
+          el("delete-modal").hidden = true;
+          S.deleteTarget = null;
+          await loadList();
+        } catch (err) {
+          errBox.textContent = `Request error: ${err.message}`;
+          errBox.hidden = false;
+        } finally {
+          confirmBtn.disabled = false;
+        }
+      }
+
       // ── Event wiring ──────────────────────────────────────────────────────────────
 
       el("back-btn").addEventListener("click", () => {
@@ -1259,9 +1617,38 @@
         if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") startRun();
       });
 
+      el("new-pipeline-btn").addEventListener("click", showCreateModal);
+
+      el("create-cancel").addEventListener("click", () => {
+        el("create-modal").hidden = true;
+      });
+      el("create-submit").addEventListener("click", submitCreate);
+      el("create-modal").addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          el("create-modal").hidden = true;
+          return;
+        }
+        if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") submitCreate();
+      });
+
+      el("delete-cancel").addEventListener("click", () => {
+        el("delete-modal").hidden = true;
+        S.deleteTarget = null;
+      });
+      el("delete-confirm").addEventListener("click", confirmDelete);
+      el("delete-modal").addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          el("delete-modal").hidden = true;
+          S.deleteTarget = null;
+          return;
+        }
+        if (e.key === "Enter") confirmDelete();
+      });
+
       // ── Boot ──────────────────────────────────────────────────────────────────────
       showView("list");
       loadList();
+      loadEnvironment();
     </script>
   </body>
 </html>

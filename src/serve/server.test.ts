@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -638,5 +639,321 @@ describe("SSE /api/runs/:id/events — snapshot carries gate payload for late-co
       `snapshot.spec must be present; got ${JSON.stringify(snapshot.spec)}`
     );
     await reader.cancel();
+  });
+});
+
+// ── POST /api/pipelines — create ─────────────────────────────────────────────
+
+describe("POST /api/pipelines — create new pipeline", () => {
+  let srv: ServeHandle;
+  let tmpRoot: string;
+  let tmpPipelinesDir: string;
+
+  before(async () => {
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-create-test-")));
+    tmpPipelinesDir = join(tmpRoot, "pipelines");
+    mkdirSync(tmpPipelinesDir);
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: tmpPipelinesDir,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("creates a valid pipeline that is immediately loadable (201)", async () => {
+    const res = await mutate(srv.port, "POST", "/api/pipelines", {
+      id: "my-new-pipeline",
+      description: "A test pipeline",
+    });
+    assert.equal(res.status, 201, `expected 201, got ${res.status}`);
+    const body = (await res.json()) as { id: string; path: string };
+    assert.equal(body.id, "my-new-pipeline");
+    assert.ok(body.path.endsWith("my-new-pipeline.yaml"), "path must end with yaml filename");
+
+    // Verify the file is on disk and loadable via GET.
+    const getRes = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/my-new-pipeline`);
+    assert.equal(getRes.status, 200, "created pipeline must be immediately loadable via GET");
+    const getBody = (await getRes.json()) as { def: { id: string } };
+    assert.equal(getBody.def.id, "my-new-pipeline");
+  });
+
+  it("rejects a duplicate id → 409", async () => {
+    await mutate(srv.port, "POST", "/api/pipelines", { id: "dup-pipeline" });
+    const res = await mutate(srv.port, "POST", "/api/pipelines", { id: "dup-pipeline" });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.includes("dup-pipeline"), "error must name the duplicate id");
+  });
+
+  it("rejects a path-traversal id with ../ → 400", async () => {
+    const res = await mutate(srv.port, "POST", "/api/pipelines", { id: "../evil" });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.toLowerCase().includes("id"), "error must mention id");
+  });
+
+  it("rejects an id with uppercase letters → 400", async () => {
+    const res = await mutate(srv.port, "POST", "/api/pipelines", { id: "Bad-Id" });
+    assert.equal(res.status, 400);
+  });
+
+  it("POST without application/json content-type → 403", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ id: "x" }),
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+// ── DELETE /api/pipelines/:id ─────────────────────────────────────────────────
+
+describe("DELETE /api/pipelines/:id — remove project pipeline", () => {
+  let srv: ServeHandle;
+  let tmpRoot: string;
+  let tmpPipelinesDir: string;
+
+  before(async () => {
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-delete-test-")));
+    tmpPipelinesDir = join(tmpRoot, "pipelines");
+    mkdirSync(tmpPipelinesDir);
+
+    // Write a standalone pipeline and a parent that nests it.
+    writeFileSync(
+      join(tmpPipelinesDir, "leaf.yaml"),
+      "id: leaf\nversion: 1\ndescription: leaf\ninputs: []\nsteps:\n  - id: start\n    kind: gate\n"
+    );
+    writeFileSync(
+      join(tmpPipelinesDir, "parent.yaml"),
+      "id: parent\nversion: 1\ndescription: parent\ninputs: []\nsteps:\n  - id: child\n    kind: pipeline\n    pipeline: leaf\n"
+    );
+    writeFileSync(
+      join(tmpPipelinesDir, "orphan.yaml"),
+      "id: orphan\nversion: 1\ndescription: orphan\ninputs: []\nsteps:\n  - id: start\n    kind: gate\n"
+    );
+
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: tmpPipelinesDir,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("deletes an unreferenced project pipeline → 200", async () => {
+    const res = await mutate(srv.port, "DELETE", "/api/pipelines/orphan", {});
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; id: string };
+    assert.equal(body.ok, true);
+    assert.equal(body.id, "orphan");
+    assert.equal(existsSync(join(tmpPipelinesDir, "orphan.yaml")), false, "file must be removed");
+  });
+
+  it("refuses to delete a pipeline nested by another → 409 naming the dependant", async () => {
+    const res = await mutate(srv.port, "DELETE", "/api/pipelines/leaf", {});
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.includes("parent"), "error must name the dependant pipeline");
+    assert.ok(
+      existsSync(join(tmpPipelinesDir, "leaf.yaml")),
+      "leaf must still exist after refusal"
+    );
+  });
+
+  it("refuses to delete from the bundled catalog → 403", async () => {
+    const bundledSrv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+    });
+    try {
+      const res = await mutate(bundledSrv.port, "DELETE", "/api/pipelines/spec-creation", {});
+      assert.equal(res.status, 403);
+      const body = (await res.json()) as { error: string };
+      assert.ok(body.error.toLowerCase().includes("bundled"), "error must mention bundled");
+    } finally {
+      await bundledSrv.close();
+    }
+  });
+
+  it("DELETE without application/json content-type → 403", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/leaf`, {
+      method: "DELETE",
+      headers: { "content-type": "text/plain" },
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+// ── POST /api/install ─────────────────────────────────────────────────────────
+
+describe("POST /api/install — install from bundled catalog", () => {
+  let srv: ServeHandle;
+  let tmpProjectDir: string;
+
+  before(async () => {
+    tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-install-test-")));
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      projectDir: tmpProjectDir,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpProjectDir, { recursive: true, force: true });
+  });
+
+  it("installs a pipeline and returns written/skipped lists (200)", async () => {
+    const res = await mutate(srv.port, "POST", "/api/install", {
+      ids: ["spec-creation"],
+      overwrite: false,
+    });
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    const body = (await res.json()) as { written: string[]; skipped: string[] };
+    assert.ok(Array.isArray(body.written), "written must be an array");
+    assert.ok(Array.isArray(body.skipped), "skipped must be an array");
+    assert.ok(body.written.length > 0, "at least one file must be written");
+    assert.ok(
+      body.written.some((p) => p.includes("spec-creation")),
+      "written must include spec-creation.yaml"
+    );
+  });
+
+  it("skips existing files when overwrite is omitted", async () => {
+    const res = await mutate(srv.port, "POST", "/api/install", {
+      ids: ["spec-creation"],
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { written: string[]; skipped: string[] };
+    assert.equal(body.written.length, 0, "nothing should be written when files already exist");
+    assert.ok(body.skipped.length > 0, "existing files must be reported as skipped");
+  });
+
+  it("overwrites when overwrite=true", async () => {
+    const res = await mutate(srv.port, "POST", "/api/install", {
+      ids: ["spec-creation"],
+      overwrite: true,
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { written: string[]; skipped: string[] };
+    assert.ok(body.written.length > 0, "files must be written when overwrite=true");
+    assert.equal(body.skipped.length, 0, "nothing should be skipped when overwrite=true");
+  });
+
+  it("rejects an unknown pipeline id → 422", async () => {
+    const res = await mutate(srv.port, "POST", "/api/install", {
+      ids: ["does-not-exist"],
+    });
+    assert.equal(res.status, 422);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.length > 0, "error must describe the failure");
+  });
+
+  it("POST without application/json content-type → 403", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/install`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ ids: ["spec-creation"] }),
+    });
+    assert.equal(res.status, 403);
+  });
+});
+
+// ── GET /api/environment ──────────────────────────────────────────────────────
+
+describe("GET /api/environment — launch-point description", () => {
+  let bundledSrv: ServeHandle;
+  let projectSrv: ServeHandle;
+  let tmpProjectDir: string;
+
+  before(async () => {
+    tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-env-test-")));
+
+    // Server A: pipelinesDir === bundledPipelinesDir → source = "bundled"
+    bundledSrv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      projectDir: tmpProjectDir,
+    });
+
+    // Server B: pipelinesDir is a project copy → source = "project"
+    const projectPipelinesDir = join(tmpProjectDir, ".agent-flows", "pipelines");
+    mkdirSync(projectPipelinesDir, { recursive: true });
+    writeFileSync(
+      join(projectPipelinesDir, "custom.yaml"),
+      "id: custom\nversion: 1\ndescription: custom\ninputs: []\nsteps:\n  - id: s\n    kind: gate\n"
+    );
+    projectSrv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: projectPipelinesDir,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      projectDir: tmpProjectDir,
+    });
+  });
+  after(async () => {
+    await bundledSrv.close();
+    await projectSrv.close();
+    rmSync(tmpProjectDir, { recursive: true, force: true });
+  });
+
+  it("reports pipelinesSource=bundled and lists available pipelines", async () => {
+    const res = await fetch(`http://127.0.0.1:${bundledSrv.port}/api/environment`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      pipelinesSource: string;
+      available: string[];
+      installed: string[];
+      skills: string[];
+      agents: string[];
+    };
+    assert.equal(body.pipelinesSource, "bundled");
+    assert.ok(
+      Array.isArray(body.available) && body.available.length > 0,
+      "available must list the bundled pipelines"
+    );
+    assert.ok(body.available.includes("spec-creation"), "spec-creation must be in available");
+    assert.ok(Array.isArray(body.installed), "installed must be an array");
+    assert.ok(Array.isArray(body.skills), "skills must be an array");
+    assert.ok(Array.isArray(body.agents), "agents must be an array");
+    for (const skill of body.skills) {
+      assert.equal(typeof skill, "string", "each skill must be a string name — no file contents");
+    }
+  });
+
+  it("reports pipelinesSource=project and lists the installed pipeline", async () => {
+    const res = await fetch(`http://127.0.0.1:${projectSrv.port}/api/environment`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pipelinesSource: string; installed: string[] };
+    assert.equal(body.pipelinesSource, "project");
+    assert.ok(
+      Array.isArray(body.installed) && body.installed.includes("custom"),
+      "installed must include the project pipeline"
+    );
+  });
+
+  it("bad Host header → 403", async () => {
+    const result = await rawGetWithHost(
+      bundledSrv.port,
+      "/api/environment",
+      "evil.attacker.example"
+    );
+    assert.equal(result.status, 403);
   });
 });

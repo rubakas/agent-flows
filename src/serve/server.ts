@@ -4,22 +4,26 @@
 // dependencies — node:http only.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import {
   createServer as nodeCreateServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { dirname, join, relative } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
+import { parse, stringify } from "yaml";
+
+import { BUNDLED_PIPELINES_DIR, resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
 import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import { listPipelines, loadPipeline } from "../canon/load.js";
 import { makeDb, type DbInstance } from "../db/index.js";
+import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -46,6 +50,14 @@ const RE_DRAFT_SAVE = /^\/api\/drafts\/(\d+)\/save$/u;
 const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
 const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
 const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
+
+// Safe pipeline id: lowercase alphanumeric and hyphens, must start with a letter or digit.
+// Prohibits dot, slash, backslash, space — blocks all path-traversal attempts.
+const RE_SAFE_ID = /^[a-z0-9][a-z0-9-]*$/u;
+
+function isSafeId(id: string): boolean {
+  return RE_SAFE_ID.test(id) && id.length <= 100;
+}
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
 
@@ -142,6 +154,48 @@ function findPipelineById(pipelinesDir: string, id: string): PipelineEntry | und
   return undefined;
 }
 
+/**
+ * Raw step shape for dependant scanning — avoids full loadPipeline (which
+ * expands nested steps in place and loses the original pipeline references).
+ */
+interface RawStep {
+  kind?: string;
+  pipeline?: string;
+}
+interface RawPipeline {
+  id?: string;
+  steps?: RawStep[];
+}
+
+/**
+ * Returns ids of pipelines in pipelinesDir that directly reference targetId
+ * as a nested pipeline (kind: pipeline or kind: loop step).
+ * Uses raw YAML parsing so that malformed files and the target file itself
+ * do not prevent scanning the rest of the catalog.
+ */
+function findDependants(pipelinesDir: string, targetId: string): string[] {
+  let files: string[];
+  try {
+    files = listPipelines(pipelinesDir);
+  } catch {
+    return [];
+  }
+  const dependants: string[] = [];
+  for (const filePath of files) {
+    try {
+      const raw = parse(readFileSync(filePath, "utf8")) as RawPipeline;
+      if (raw.id === targetId) continue; // skip self
+      const hasRef = (raw.steps ?? []).some(
+        (s) => (s.kind === "pipeline" || s.kind === "loop") && s.pipeline === targetId
+      );
+      if (hasRef) dependants.push(raw.id ?? filePath);
+    } catch {
+      // skip unparseable files
+    }
+  }
+  return dependants;
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 export interface ServeOptions {
@@ -153,6 +207,10 @@ export interface ServeOptions {
   pipelinesDir?: string;
   /** Injected RunService for tests; constructed from Mastra in CLI mode. */
   runService?: RunService;
+  /** The user's project directory (install target). Defaults to process.cwd(). */
+  projectDir?: string;
+  /** The tool's bundled pipeline catalog directory. Defaults to BUNDLED_PIPELINES_DIR. */
+  bundledPipelinesDir?: string;
 }
 
 export interface ServeHandle {
@@ -169,6 +227,8 @@ interface HandlerCtx {
   runService: RunService | null;
   uiPath: string;
   boundPort: number;
+  projectDir: string;
+  bundledPipelinesDir: string;
 }
 
 // ── startServer ────────────────────────────────────────────────────────────────
@@ -184,6 +244,8 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
   const db = makeDb(dbPath);
   const runService = opts.runService ?? null;
   const uiPath = join(__dirname, "ui.html");
+  const projectDir = opts.projectDir ?? process.cwd();
+  const bundledPipelinesDir = opts.bundledPipelinesDir ?? BUNDLED_PIPELINES_DIR;
 
   // boundPort is updated once the OS assigns a port (important when port: 0).
   let boundPort = opts.port ?? 7411;
@@ -196,6 +258,8 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
       runService,
       uiPath,
       boundPort,
+      projectDir,
+      bundledPipelinesDir,
     }).catch((err: unknown) => {
       if (!res.headersSent) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -245,7 +309,7 @@ async function handleRequest(
     return;
   }
 
-  const isMutating = method === "POST" || method === "PUT";
+  const isMutating = method === "POST" || method === "PUT" || method === "DELETE";
 
   if (isMutating) {
     // Content-type guard — kills simple-form CSRF
@@ -303,6 +367,50 @@ async function handleRequest(
     return;
   }
 
+  // POST /api/pipelines — create a new pipeline in the project canon directory
+  if (method === "POST" && pathname === "/api/pipelines") {
+    const raw = await readBody(req);
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { id, description } = parsed.value;
+    if (typeof id !== "string" || !isSafeId(id)) {
+      json(res, 400, {
+        error:
+          'Field "id" must be a non-empty lowercase alphanumeric+hyphen string (no dots or slashes)',
+      });
+      return;
+    }
+    // Refuse mutations against the bundled catalog — only project copies are writable.
+    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+      json(res, 403, { error: "Cannot create pipelines in the bundled catalog" });
+      return;
+    }
+    const destPath = join(ctx.pipelinesDir, `${id}.yaml`);
+    if (existsSync(destPath)) {
+      json(res, 409, { error: `Pipeline "${id}" already exists` });
+      return;
+    }
+    const desc =
+      typeof description === "string" && description.trim().length > 0
+        ? description.trim()
+        : "New pipeline";
+    // Produce a minimal skeleton that passes loadPipeline immediately.
+    // Uses kind:gate for the single stub step — gate requires no prompt file or role.
+    const skeleton = stringify({
+      id,
+      version: 1,
+      description: desc,
+      inputs: [] as string[],
+      steps: [{ id: "start", kind: "gate" }],
+    });
+    writeFileSync(destPath, skeleton, "utf8");
+    json(res, 201, { id, path: relative(root, destPath) });
+    return;
+  }
+
   // GET /api/pipelines/:id
   const pipelineDetailMatch = RE_PIPELINE_DETAIL.exec(pathname);
   if (method === "GET" && pipelineDetailMatch) {
@@ -319,6 +427,38 @@ async function handleRequest(
       levels: pipelineLevels(def.steps),
       graph: pipelineToGraph(def.steps),
     });
+    return;
+  }
+
+  // DELETE /api/pipelines/:id — remove a pipeline from the project canon directory
+  if (method === "DELETE" && pipelineDetailMatch) {
+    const id = decodeURIComponent(pipelineDetailMatch[1]);
+    // Validate the decoded id so that percent-encoded traversal attempts are caught.
+    if (!isSafeId(id)) {
+      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
+      return;
+    }
+    // Refuse mutations against the bundled catalog.
+    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+      json(res, 403, { error: "Cannot delete from the bundled pipeline catalog" });
+      return;
+    }
+    const entry = findPipelineById(ctx.pipelinesDir, id);
+    if (!entry) {
+      json(res, 404, { error: `Pipeline "${id}" not found` });
+      return;
+    }
+    // Refuse if any sibling pipeline nests this one — deleting it would break their loads.
+    const dependants = findDependants(ctx.pipelinesDir, id);
+    if (dependants.length > 0) {
+      json(res, 409, {
+        error: `Cannot delete "${id}": referenced by ${dependants.join(", ")}`,
+      });
+      return;
+    }
+    await readBody(req); // consume body
+    rmSync(entry.filePath);
+    json(res, 200, { ok: true, id });
     return;
   }
 
@@ -523,6 +663,87 @@ async function handleRequest(
     return;
   }
 
+  // POST /api/install — install bundled workflows into the project directory
+  if (method === "POST" && pathname === "/api/install") {
+    const raw = await readBody(req);
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { ids, overwrite } = parsed.value;
+    if (
+      !Array.isArray(ids) ||
+      ids.length === 0 ||
+      !(ids as unknown[]).every((i) => typeof i === "string")
+    ) {
+      json(res, 400, { error: 'Field "ids" must be a non-empty array of strings' });
+      return;
+    }
+    const doOverwrite = overwrite === true;
+    try {
+      const report = installWorkflow(
+        ids as string[],
+        ctx.bundledPipelinesDir,
+        ctx.projectDir,
+        doOverwrite
+      );
+      json(res, 200, report);
+    } catch (err) {
+      json(res, 422, { error: safePath((err as Error).message, root) });
+    }
+    return;
+  }
+
+  // GET /api/environment — describe the launch-point context
+  if (method === "GET" && pathname === "/api/environment") {
+    const skillsBase = process.env.AGENT_FLOWS_SKILLS_DIR ?? join(homedir(), ".claude");
+    const skillsSubdir = join(skillsBase, "skills");
+    const agentsSubdir = join(skillsBase, "agents");
+
+    // Skills: subdirectory (or symlink-to-directory) names inside <skillsBase>/skills/.
+    // Return names only; never read file contents.
+    let skills: string[] = [];
+    try {
+      skills = readdirSync(skillsSubdir)
+        .filter((name) => {
+          try {
+            return statSync(join(skillsSubdir, name)).isDirectory();
+          } catch {
+            return false;
+          }
+        })
+        .sort();
+    } catch {
+      // skills subdirectory does not exist — return empty
+    }
+
+    // Agents: .md filenames (minus extension) in <skillsBase>/agents/.
+    // Return names only; never read file contents.
+    let agents: string[] = [];
+    try {
+      agents = readdirSync(agentsSubdir)
+        .filter((f) => f.endsWith(".md"))
+        .map((f) => f.slice(0, -3))
+        .sort();
+    } catch {
+      // agents subdirectory does not exist — return empty
+    }
+
+    const isBundled = resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir);
+
+    json(res, 200, {
+      projectDir: ctx.projectDir,
+      pipelinesSource: isBundled ? "bundled" : "project",
+      pipelinesDir: ctx.pipelinesDir,
+      installed: listInstalled(ctx.projectDir),
+      available: listAvailable(ctx.bundledPipelinesDir),
+      skills,
+      agents,
+    });
+    return;
+  }
+
   // 404 fallback
   json(res, 404, { error: `Not found: ${method} ${pathname}` });
 }
@@ -583,7 +804,7 @@ if (process.argv[1] === __filename) {
   const mastra = new Mastra({ storage: mastraStorage, workflows });
   const runService = new RunServiceClass(mastra);
 
-  const handle = await startServer({ port, dbPath, pipelinesDir, runService });
+  const handle = await startServer({ port, dbPath, pipelinesDir, runService, projectDir });
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
   console.log(`agent-flows serve listening on http://127.0.0.1:${handle.port}`);
 }
