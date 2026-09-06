@@ -1,11 +1,11 @@
 # 015. Meta-MVP: a DAG editor for the canon
 
-| Field        | Value                                                                                                                                                                                    |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Feature Name | Meta-MVP                                                                                                                                                                                 |
-| Branch       | `015-meta-mvp`                                                                                                                                                                           |
+| Field        | Value                                                                                                                                                                                                                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Feature Name | Meta-MVP                                                                                                                                                                                                                                                                                                                       |
+| Branch       | `015-meta-mvp`                                                                                                                                                                                                                                                                                                                 |
 | Status       | Superseded (2026-09-04) — the agent-flows-served DAG editor direction was superseded by the n8n hybrid (Binding C). See ADR-0013 and `docs/research/2026-09-04-n8n-spike.md`. Body kept as historical record. Note: this spec uses `.yoke/` as the canon installation directory; the code installs to `.agent-flows/` instead. |
-| Created      | 2026-09-03                                                                                                                                                                               |
+| Created      | 2026-09-03                                                                                                                                                                                                                                                                                                                     |
 
 **Context:** The Charter defines Yoke as a harness for "building, editing and running" dynamic
 workflows; spec 014 records that only running is implemented. This spec closes the editing half.

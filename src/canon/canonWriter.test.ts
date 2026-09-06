@@ -140,7 +140,10 @@ describe("saveDraft — comment and key order preservation", () => {
 
       const written = readFileSync(pipelinePath, "utf8");
       assert.ok(written.includes("# Top-level pipeline comment"), "top-level comment must survive");
-      assert.ok(written.includes("# This step approves the work"), "step-level comment must survive");
+      assert.ok(
+        written.includes("# This step approves the work"),
+        "step-level comment must survive"
+      );
     } finally {
       cleanup();
     }
@@ -439,7 +442,10 @@ describe("saveDraftAndRegenerate — failed save does not regenerate", () => {
         assert.equal(result.reason, "conflict");
         assert.deepEqual(result.regenerated, []);
       }
-      assert.ok(!existsSync(join(root, ".claude", "workflows", "test.js")), "no .js must be written");
+      assert.ok(
+        !existsSync(join(root, ".claude", "workflows", "test.js")),
+        "no .js must be written"
+      );
     } finally {
       cleanup();
     }
@@ -457,7 +463,10 @@ describe("saveDraftAndRegenerate — failed save does not regenerate", () => {
         assert.equal(result.reason, "invalid");
         assert.deepEqual(result.regenerated, []);
       }
-      assert.ok(!existsSync(join(root, ".claude", "workflows", "test.js")), "no .js must be written");
+      assert.ok(
+        !existsSync(join(root, ".claude", "workflows", "test.js")),
+        "no .js must be written"
+      );
     } finally {
       cleanup();
     }

@@ -24,14 +24,10 @@ export function assertSafePath(root: string, entryPath: string): void {
   // strips the leading slash from non-first arguments, making "/etc/passwd"
   // appear to resolve inside root.
   if (entryPath.startsWith("/") || entryPath.startsWith("\\")) {
-    throw new Error(
-      `Path ${JSON.stringify(entryPath)} escapes the root directory — rejected`
-    );
+    throw new Error(`Path ${JSON.stringify(entryPath)} escapes the root directory — rejected`);
   }
   const resolved = resolve(join(root, entryPath));
   if (!isContained(root, resolved)) {
-    throw new Error(
-      `Path ${JSON.stringify(entryPath)} escapes the root directory — rejected`
-    );
+    throw new Error(`Path ${JSON.stringify(entryPath)} escapes the root directory — rejected`);
   }
 }

@@ -1,11 +1,11 @@
 # 019. Dogfood loop
 
-| Field        | Value                          |
-| ------------ | ------------------------------ |
-| Feature Name | Dogfood loop                   |
-| Branch       | `019-dogfood-loop`             |
-| Status       | Draft                          |
-| Created      | 2026-09-07                     |
+| Field        | Value              |
+| ------------ | ------------------ |
+| Feature Name | Dogfood loop       |
+| Branch       | `019-dogfood-loop` |
+| Status       | Draft              |
+| Created      | 2026-09-07         |
 
 ## Question
 
@@ -15,11 +15,12 @@ How can the tool develop the tool itself, under supervision, so that every lifec
 
 ## Evidence
 
-The scaffolding-based testing approach (small synthetic requests) does not catch composition defects. The `spec-creation` pipeline, the `develop` phase, and the `build-round` loop have all been audited and tested individually — each works in isolation. But the *assembly* of a cycle from these pieces, running against a real spec file with the full plan-develop-build-review spine, has not been validated against defects in cross-step coordination, context threading, or step-output consumption. A sandbox environment where agent-flows develops specs from the agent-flows codebase itself, with every step's output captured and each diff graded before porting to the real repository, closes that gap.
+The scaffolding-based testing approach (small synthetic requests) does not catch composition defects. The `spec-creation` pipeline, the `develop` phase, and the `build-round` loop have all been audited and tested individually — each works in isolation. But the _assembly_ of a cycle from these pieces, running against a real spec file with the full plan-develop-build-review spine, has not been validated against defects in cross-step coordination, context threading, or step-output consumption. A sandbox environment where agent-flows develops specs from the agent-flows codebase itself, with every step's output captured and each diff graded before porting to the real repository, closes that gap.
 
 ## Verdict
 
 **IMPLEMENT** — add a supervised dogfood loop that:
+
 1. Clones the real repository into an isolated sandbox.
 2. Runs a complete cycle (plan→develop→build→review) against a real spec.
 3. Captures all step outputs for inspection.
@@ -34,15 +35,15 @@ A **supervised cycle** runs in the background against a sandbox copy of the agen
 
 ### Functional Requirements
 
-| ID     | Requirement |
-| ------ | ---- |
-| FR-001 | The sandbox is a full copy of the agent-flows working tree at `/Users/en3e/code/rubakas/newfolder`, including `.git` (so `git status --porcelain` and `git diff` work inside it) and `node_modules` (so `pnpm test` runs with no install step). |
-| FR-002 | The sandbox's git remote is removed on creation, so no sandbox run can push to the real repository. |
-| FR-003 | The daemon runs from the real repository as its working directory with `AGENT_FLOWS_PROJECT_DIR` pointing at the sandbox, so the canon under test is the real one and every write lands in the sandbox. |
-| FR-004 | The task given to a cycle is a real spec already on disk (the first is `specs/016-provider-profiles/spec.md`), not a synthetic prompt. |
+| ID     | Requirement                                                                                                                                                                                                                                                                            |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| FR-001 | The sandbox is a full copy of the agent-flows working tree at `/Users/en3e/code/rubakas/newfolder`, including `.git` (so `git status --porcelain` and `git diff` work inside it) and `node_modules` (so `pnpm test` runs with no install step).                                        |
+| FR-002 | The sandbox's git remote is removed on creation, so no sandbox run can push to the real repository.                                                                                                                                                                                    |
+| FR-003 | The daemon runs from the real repository as its working directory with `AGENT_FLOWS_PROJECT_DIR` pointing at the sandbox, so the canon under test is the real one and every write lands in the sandbox.                                                                                |
+| FR-004 | The task given to a cycle is a real spec already on disk (the first is `specs/016-provider-profiles/spec.md`), not a synthetic prompt.                                                                                                                                                 |
 | FR-005 | Every step is observable while the run is in flight and after it: the SSE stream at `GET /api/runs/:id/events` is captured to a file, and after completion `GET /api/runs/:id` returns `result` — the full accumulated context keyed by step id, so each step's output is inspectable. |
-| FR-006 | The sandbox is re-copied from the real repository before each run, so runs never compound on each other. |
-| FR-007 | A diff produced in the sandbox is ported to the real repository only after it passes the grading rubric below, and is re-verified in the real repository before being committed. |
+| FR-006 | The sandbox is re-copied from the real repository before each run, so runs never compound on each other.                                                                                                                                                                               |
+| FR-007 | A diff produced in the sandbox is ported to the real repository only after it passes the grading rubric below, and is re-verified in the real repository before being committed.                                                                                                       |
 
 ### Grading Rubric
 
@@ -79,6 +80,7 @@ A sandbox diff is accepted only when ALL of these hold, each checked explicitly:
 ## Why sandbox isolation
 
 The sandbox isolation prevents:
+
 - Accidental commits or pushes to the real repository (remote is removed).
 - Compound failures from successive runs (sandbox is re-copied each time).
 - Unvetted diffs landing in the real codebase (grading gate before port).

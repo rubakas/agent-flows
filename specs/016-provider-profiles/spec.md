@@ -1,11 +1,11 @@
 # 016. Provider profiles as project data
 
-| Field        | Value                          |
-| ------------ | ------------------------------ |
+| Field        | Value                             |
+| ------------ | --------------------------------- |
 | Feature Name | Provider profiles as project data |
-| Branch       | `016-provider-profiles`        |
-| Status       | Draft                          |
-| Created      | 2026-09-06                     |
+| Branch       | `016-provider-profiles`           |
+| Status       | Draft                             |
+| Created      | 2026-09-06                        |
 
 **Context:** The charter claims "swapping providers is a registry edit, not a rewrite", but the provider→role mapping lives in a TypeScript literal (`DEFAULT_PROFILES`, `src/canon/registry.ts:64-77`) and the model registry in another (`defaultRegistry`, `registry.ts:29-55`). A user cannot add a provider, change which model backs a role, or set a default provider without editing source. A pipeline's model mapping also does not travel with its exported bundle (`src/install/bundle.ts` exports only `pipelines/*.yaml` and prompt files). This spec makes the provider list, the provider→role mapping, and the default provider selection **data**: one YAML file in the project, loaded and merged over the built-ins, round-tripped through export/import.
 
@@ -13,13 +13,13 @@
 
 ## Requirements
 
-| ID     | Requirement                                                                                                                                | Status |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| FR-001 | A project file `.agent-flows/providers.yaml` can declare model entries, provider profiles, and a default provider, without any TS edit.    | TODO   |
-| FR-002 | Project declarations merge over built-ins by id (project wins); built-ins remain available; absent file ⇒ behavior identical to today.     | TODO   |
-| FR-003 | A malformed file fails loudly at startup with a descriptive error naming the offending field — never a silent fallback.                    | TODO   |
-| FR-004 | The existing resolution chain (per-run `models` > step `model` > step `role`) is unchanged; only the profile/registry *sources* change.    | TODO   |
-| FR-005 | `providers.yaml` travels with exported bundles and is validated on import; the importer's existing file wins unless `overwrite`.           | TODO   |
+| ID     | Requirement                                                                                                                             | Status |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| FR-001 | A project file `.agent-flows/providers.yaml` can declare model entries, provider profiles, and a default provider, without any TS edit. | TODO   |
+| FR-002 | Project declarations merge over built-ins by id (project wins); built-ins remain available; absent file ⇒ behavior identical to today.  | TODO   |
+| FR-003 | A malformed file fails loudly at startup with a descriptive error naming the offending field — never a silent fallback.                 | TODO   |
+| FR-004 | The existing resolution chain (per-run `models` > step `model` > step `role`) is unchanged; only the profile/registry _sources_ change. | TODO   |
+| FR-005 | `providers.yaml` travels with exported bundles and is validated on import; the importer's existing file wins unless `overwrite`.        | TODO   |
 
 ---
 
@@ -42,8 +42,8 @@
 
 ```yaml
 version: 1
-defaultProvider: budget          # optional; must name a profile below or a built-in
-models:                          # optional; entries merge over defaultRegistry() by id
+defaultProvider: budget # optional; must name a profile below or a built-in
+models: # optional; entries merge over defaultRegistry() by id
   - id: deepseek
     transport: api
     api:
@@ -52,17 +52,18 @@ models:                          # optional; entries merge over defaultRegistry(
   - id: gpt5
     transport: cli
     cli: { bin: codex, model: gpt-5 }
-  - id: sonnet                   # overrides the built-in "sonnet" entry
+  - id: sonnet # overrides the built-in "sonnet" entry
     transport: cli
     cli: { bin: claude, model: claude-sonnet-4-5 }
-profiles:                        # optional; profiles merge over DEFAULT_PROFILES by id
-  - id: budget                   # new profile
+profiles: # optional; profiles merge over DEFAULT_PROFILES by id
+  - id: budget # new profile
     roles: { reasoner: deepseek, worker: gpt5, scout: haiku }
-  - id: anthropic                # overrides the built-in "anthropic" profile
+  - id: anthropic # overrides the built-in "anthropic" profile
     roles: { reasoner: opus, worker: sonnet, scout: haiku }
 ```
 
 Rules:
+
 - `version` must be `1` (same idiom as `bundleVersion`, `bundle.ts:103`).
 - `models[].transport` must be `"cli"` or `"api"`; `cli.bin` must be `"claude"` or `"codex"` (the existing `ModelEntry` constraint, `registry.ts:10`). New binaries are out of scope.
 - `profiles[].roles` must map **exactly** the three roles `reasoner`, `worker`, `scout` (`Role`, `src/canon/types.ts:26`); missing or unknown role keys are errors.
@@ -99,8 +100,8 @@ Minimal surface; `ModelRegistry` and `resolveStepModel` are untouched.
 
 ```ts
 export interface ProviderConfig {
-  models: ModelEntry[];          // project entries only, [] when file absent
-  profiles: ProviderProfile[];   // project entries only, [] when file absent
+  models: ModelEntry[]; // project entries only, [] when file absent
+  profiles: ProviderProfile[]; // project entries only, [] when file absent
   defaultProvider?: string;
 }
 export function loadProviders(
@@ -123,10 +124,12 @@ export function getActiveProfile(env?: NodeJS.ProcessEnv, config?: ProviderConfi
 ```
 
 **Composition roots** — each gains `const providers = loadProviders(projectDir)` and threads it:
+
 - `src/serve/server.ts:931` → `defaultRegistry(process.env, providers.models)`; `:937` → add `profile: getActiveProfile(process.env, providers)` to the deps object (consumed at `buildSteps.ts:133`; verify `build.ts`'s deps type includes `profile` and add the field if not).
 - `src/bindings/claudeCode.ts:74-75`, `src/bindings/write-cli.ts:18`, `src/doctor.ts:96-97`, `src/canon/canonWriter.ts:135`, `src/bindings/mastra/{server.ts:46, smoke.ts:40,59}`, `src/evals/run.ts:131-132` — same two-line pattern where a `projectDir`/cwd is in scope.
 
 **`src/install/bundle.ts`**:
+
 - `exportBundle` (`:53`): after the prompt loop, if `<root>/providers.yaml` exists, append `{ path: "providers.yaml", content }` to `files`. No signature change.
 - `importBundle` (`:204`): in the phase-2 temp-dir validation (`:227-237`), if the bundle contains `providers.yaml`, validate it there; a validation failure aborts the import exactly like a pipeline failure. Phase-3 write/skip semantics need no change.
 
@@ -142,7 +145,7 @@ No new dependencies. No zod in the canon layer.
 
 ## Round-trip through export/import
 
-The file travels. Rationale: role indirection keeps *pipelines* portable, but a pipeline authored against a custom profile (e.g. `budget` above) is unrunnable on import without the profile definition — the mapping is part of the workflow's meaning, so it rides in the bundle. Safety comes free from existing `importBundle` semantics: the importer's own `providers.yaml` is skipped unless `overwrite` (`bundle.ts:246-249`), so importing a bundle never silently replaces local provider choices, and phase-2 validation rejects a malformed bundled file before any write. Machine-local concerns (endpoints, env-var names) stay overridable because the importer's file wins by default.
+The file travels. Rationale: role indirection keeps _pipelines_ portable, but a pipeline authored against a custom profile (e.g. `budget` above) is unrunnable on import without the profile definition — the mapping is part of the workflow's meaning, so it rides in the bundle. Safety comes free from existing `importBundle` semantics: the importer's own `providers.yaml` is skipped unless `overwrite` (`bundle.ts:246-249`), so importing a bundle never silently replaces local provider choices, and phase-2 validation rejects a malformed bundled file before any write. Machine-local concerns (endpoints, env-var names) stay overridable because the importer's file wins by default.
 
 ## Out of scope
 
@@ -156,11 +159,13 @@ The file travels. Rationale: role indirection keeps *pipelines* portable, but a 
 ## Test plan
 
 `src/canon/loadProviders.test.ts`:
+
 - `absent-file-returns-empty-config` — no file ⇒ `{ models: [], profiles: [] }`, no throw.
 - `parses-full-example` — the literal example above parses into the expected `ProviderConfig`.
 - `rejects-bad-version`, `rejects-unknown-top-level-key`, `rejects-duplicate-model-id`, `rejects-duplicate-profile-id`, `rejects-missing-role-key`, `rejects-unknown-role-key`, `rejects-bad-transport`, `rejects-bad-cli-bin`, `rejects-unknown-default-provider` — each asserts the error message names the offending field (FR-003).
 
 `src/canon/registry.test.ts` (additions):
+
 - `extra-entry-overrides-builtin-by-id` — `defaultRegistry(env, [sonnetOverride])` resolves `"sonnet"` to the override.
 - `builtin-survives-extra` — with extras present, an untouched built-in id still resolves.
 - `project-profile-overrides-builtin`, `new-profile-resolvable`, `unknown-profile-error-lists-union`.
@@ -168,6 +173,7 @@ The file travels. Rationale: role indirection keeps *pipelines* portable, but a 
 - `zero-arg-calls-unchanged` — `defaultRegistry()`, `getProfile("anthropic")`, `getActiveProfile({})` behave exactly as before (FR-002 regression guard).
 
 `src/install/bundle.test.ts` (additions):
+
 - `export-includes-providers-yaml-when-present`, `export-omits-when-absent`.
 - `import-skips-existing-providers-yaml` / `import-overwrites-with-flag`.
 - `import-rejects-malformed-bundled-providers` — nothing written to the project (mirrors `bundle.test.ts:250` idiom).

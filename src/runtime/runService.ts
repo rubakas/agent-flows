@@ -268,7 +268,9 @@ export class RunService {
     }
     record.status = "failed";
     const errStr = r.error
-      ? (r.error.name ? `${r.error.name}: ${r.error.message}` : r.error.message)
+      ? r.error.name
+        ? `${r.error.name}: ${r.error.message}`
+        : r.error.message
       : "workflow failed";
     record.error = errStr;
     return { status: "failed", error: errStr };

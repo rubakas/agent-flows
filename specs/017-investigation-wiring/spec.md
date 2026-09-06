@@ -1,11 +1,11 @@
 # 017. Investigation wiring and export-spec path resolution
 
-| Field        | Value                          |
-| ------------ | ------------------------------ |
-| Feature Name | Investigation wiring           |
-| Branch       | `017-investigation-wiring`     |
-| Status       | Active                         |
-| Created      | 2026-09-06                     |
+| Field        | Value                      |
+| ------------ | -------------------------- |
+| Feature Name | Investigation wiring       |
+| Branch       | `017-investigation-wiring` |
+| Status       | Active                     |
+| Created      | 2026-09-06                 |
 
 **Context:** Two confirmed defects, both surfaced by a live run of the `cycle` pipeline today.
 
@@ -65,14 +65,14 @@ as today, so there are no forced migrations.
 
 ## Requirements
 
-| ID     | Requirement                                                                                                                                                                                                                                                                                                                                                                       | Status |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| FR-001 | `PipelineDef` gains `optionalInputs?: string[]`. A name listed there must also appear in `inputs`; violation is rejected at load time. `buildPipelineWorkflow` emits `z.string().optional().default("")` for each optional input instead of `z.string()`.                                                                                                                        | TODO   |
-| FR-002 | `pipelines/spec-creation.yaml` adds `findings` to `inputs` and declares `optionalInputs: [findings]`. A standalone trigger supplying only `request` must succeed; the generated Zod schema must accept the omission of `findings`.                                                                                                                                                | TODO   |
-| FR-003 | `prompts/intake.md` references `{{findings}}`. When `findings` is non-empty the model is instructed to ground requirements in the surveyed code; when empty it falls back to the request alone. The prompt must not bloat: add one conditional instruction block in the terse style of the existing prompt.                                                                         | TODO   |
-| FR-004 | `pipelines/cycle.yaml` and `pipelines/cycle-dev.yaml` add `with: { findings: investigate.findings }` to the `plan` step so the investigate pipeline's `findings` step output reaches `spec-creation`'s `intake` prompt. Both files must stay in sync.                                                                                                                            | TODO   |
-| FR-005 | `buildExportSpecStep` in `build.ts` resolves a relative `step.path` against `deps.cwd` (falling back to `process.cwd()` when `deps.cwd` is absent). An absolute `step.path` is used unchanged (standard `path.resolve` semantics). `buildCheckStep` already follows this pattern; export-spec must match it.                                                                     | TODO   |
-| FR-006 | Tests that would fail without each fix: (a) an export-spec test asserting the written `spec.md` lands in `join(deps.cwd, step.path)` when `step.path` is relative; (b) a test loading the real `cycle.yaml` and asserting the `plan` step's `with` map contains `findings: "investigate.findings"`.                                                                              | TODO   |
+| ID     | Requirement                                                                                                                                                                                                                                                                                                  | Status |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| FR-001 | `PipelineDef` gains `optionalInputs?: string[]`. A name listed there must also appear in `inputs`; violation is rejected at load time. `buildPipelineWorkflow` emits `z.string().optional().default("")` for each optional input instead of `z.string()`.                                                    | TODO   |
+| FR-002 | `pipelines/spec-creation.yaml` adds `findings` to `inputs` and declares `optionalInputs: [findings]`. A standalone trigger supplying only `request` must succeed; the generated Zod schema must accept the omission of `findings`.                                                                           | TODO   |
+| FR-003 | `prompts/intake.md` references `{{findings}}`. When `findings` is non-empty the model is instructed to ground requirements in the surveyed code; when empty it falls back to the request alone. The prompt must not bloat: add one conditional instruction block in the terse style of the existing prompt.  | TODO   |
+| FR-004 | `pipelines/cycle.yaml` and `pipelines/cycle-dev.yaml` add `with: { findings: investigate.findings }` to the `plan` step so the investigate pipeline's `findings` step output reaches `spec-creation`'s `intake` prompt. Both files must stay in sync.                                                        | TODO   |
+| FR-005 | `buildExportSpecStep` in `build.ts` resolves a relative `step.path` against `deps.cwd` (falling back to `process.cwd()` when `deps.cwd` is absent). An absolute `step.path` is used unchanged (standard `path.resolve` semantics). `buildCheckStep` already follows this pattern; export-spec must match it. | TODO   |
+| FR-006 | Tests that would fail without each fix: (a) an export-spec test asserting the written `spec.md` lands in `join(deps.cwd, step.path)` when `step.path` is relative; (b) a test loading the real `cycle.yaml` and asserting the `plan` step's `with` map contains `findings: "investigate.findings"`.          | TODO   |
 
 ---
 
@@ -100,10 +100,10 @@ as today, so there are no forced migrations.
 
 ## Test plan
 
-| Test name                                                                   | File                                              | What it guards                                                                                 |
-| --------------------------------------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `export-spec step resolves relative path against deps.cwd`                  | `src/bindings/mastra/build.test.ts`               | D2: spec.md written to `join(deps.cwd, step.path)`, not `join(process.cwd(), step.path)`      |
-| `cycle.yaml plan step wires investigate.findings into spec-creation`        | `src/canon/canon.test.ts`                         | D1: `plan` step in cycle has `with.findings === "investigate.findings"`                        |
-| `cycle-dev.yaml plan step wires investigate.findings into spec-creation`    | `src/canon/canon.test.ts`                         | D1: same for cycle-dev                                                                         |
-| `spec-creation standalone run succeeds without findings input`              | `src/canon/canon.test.ts`                         | FR-002: optional input schema accepts omission of `findings`                                   |
-| `optionalInputs entry not in inputs is rejected at load time`               | `src/canon/canon.test.ts`                         | FR-001: load.ts rejects a misconfigured optionalInputs list                                    |
+| Test name                                                                | File                                | What it guards                                                                           |
+| ------------------------------------------------------------------------ | ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| `export-spec step resolves relative path against deps.cwd`               | `src/bindings/mastra/build.test.ts` | D2: spec.md written to `join(deps.cwd, step.path)`, not `join(process.cwd(), step.path)` |
+| `cycle.yaml plan step wires investigate.findings into spec-creation`     | `src/canon/canon.test.ts`           | D1: `plan` step in cycle has `with.findings === "investigate.findings"`                  |
+| `cycle-dev.yaml plan step wires investigate.findings into spec-creation` | `src/canon/canon.test.ts`           | D1: same for cycle-dev                                                                   |
+| `spec-creation standalone run succeeds without findings input`           | `src/canon/canon.test.ts`           | FR-002: optional input schema accepts omission of `findings`                             |
+| `optionalInputs entry not in inputs is rejected at load time`            | `src/canon/canon.test.ts`           | FR-001: load.ts rejects a misconfigured optionalInputs list                              |

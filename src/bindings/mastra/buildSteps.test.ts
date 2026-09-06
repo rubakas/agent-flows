@@ -62,11 +62,15 @@ describe("buildCheckStep — step.env reaches the child process", () => {
         command: "echo hi",
         env: [sentinelKey],
       };
-      const checkStep = buildCheckStep(step, {
-        registry: NOOP_REGISTRY,
-        store: NOOP_STORE,
-        runnerDeps: { spawn },
-      }, undefined);
+      const checkStep = buildCheckStep(
+        step,
+        {
+          registry: NOOP_REGISTRY,
+          store: NOOP_STORE,
+          runnerDeps: { spawn },
+        },
+        undefined
+      );
 
       await (checkStep as any).execute({ inputData: {}, suspend: () => undefined as never });
 
@@ -93,11 +97,15 @@ describe("buildCheckStep — step.env reaches the child process", () => {
         command: "echo hi",
         // No env declaration — undeclaredKey must be absent from child env
       };
-      const checkStep = buildCheckStep(step, {
-        registry: NOOP_REGISTRY,
-        store: NOOP_STORE,
-        runnerDeps: { spawn },
-      }, undefined);
+      const checkStep = buildCheckStep(
+        step,
+        {
+          registry: NOOP_REGISTRY,
+          store: NOOP_STORE,
+          runnerDeps: { spawn },
+        },
+        undefined
+      );
 
       await (checkStep as any).execute({ inputData: {}, suspend: () => undefined as never });
 

@@ -1956,10 +1956,7 @@ describe("spec-creation — findings is an optional input", () => {
   it("loads with optionalInputs containing 'findings'", () => {
     const { def } = loadPipeline(pipelinesYaml);
     assert.ok(def.inputs.includes("findings"), "findings must be in inputs");
-    assert.ok(
-      def.optionalInputs?.includes("findings"),
-      "findings must be in optionalInputs"
-    );
+    assert.ok(def.optionalInputs?.includes("findings"), "findings must be in optionalInputs");
   });
 });
 
