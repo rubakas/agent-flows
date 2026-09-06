@@ -50,6 +50,8 @@ const RE_DRAFT_SAVE = /^\/api\/drafts\/(\d+)\/save$/u;
 const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
 const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
 const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
+const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
+const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
 
 // Safe pipeline id: lowercase alphanumeric and hyphens, must start with a letter or digit.
 // Prohibits dot, slash, backslash, space — blocks all path-traversal attempts.
@@ -57,6 +59,27 @@ const RE_SAFE_ID = /^[a-z0-9][a-z0-9-]*$/u;
 
 function isSafeId(id: string): boolean {
   return RE_SAFE_ID.test(id) && id.length <= 100;
+}
+
+// Maximum bytes returned by the skill/agent content endpoint.
+export const CONTENT_CAP = 65_536;
+
+/**
+ * Pre-check for skill/agent names supplied by the client.
+ * Blocks the most obvious traversal forms before the resolve-based containment check.
+ */
+function isSafeName(name: string): boolean {
+  return name.length > 0 && name.length <= 200 && !name.startsWith(".") && !/[/\\\0]/u.test(name);
+}
+
+/**
+ * Verify that `filePath` (after path.resolve) is strictly inside `dir`.
+ * This is the definitive containment check — isSafeName is a fast pre-filter only.
+ */
+function isContained(dir: string, filePath: string): boolean {
+  const base = resolve(dir);
+  const target = resolve(filePath);
+  return target === base || target.startsWith(base + "/");
 }
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
@@ -211,6 +234,8 @@ export interface ServeOptions {
   projectDir?: string;
   /** The tool's bundled pipeline catalog directory. Defaults to BUNDLED_PIPELINES_DIR. */
   bundledPipelinesDir?: string;
+  /** Root directory containing skills/ and agents/ subdirs. Defaults to AGENT_FLOWS_SKILLS_DIR or ~/.claude. */
+  skillsBase?: string;
 }
 
 export interface ServeHandle {
@@ -229,6 +254,7 @@ interface HandlerCtx {
   boundPort: number;
   projectDir: string;
   bundledPipelinesDir: string;
+  skillsBase: string;
 }
 
 // ── startServer ────────────────────────────────────────────────────────────────
@@ -246,6 +272,8 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
   const uiPath = join(__dirname, "ui.html");
   const projectDir = opts.projectDir ?? process.cwd();
   const bundledPipelinesDir = opts.bundledPipelinesDir ?? BUNDLED_PIPELINES_DIR;
+  const skillsBase =
+    opts.skillsBase ?? process.env.AGENT_FLOWS_SKILLS_DIR ?? join(homedir(), ".claude");
 
   // boundPort is updated once the OS assigns a port (important when port: 0).
   let boundPort = opts.port ?? 7411;
@@ -260,6 +288,7 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
       boundPort,
       projectDir,
       bundledPipelinesDir,
+      skillsBase,
     }).catch((err: unknown) => {
       if (!res.headersSent) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -697,9 +726,8 @@ async function handleRequest(
 
   // GET /api/environment — describe the launch-point context
   if (method === "GET" && pathname === "/api/environment") {
-    const skillsBase = process.env.AGENT_FLOWS_SKILLS_DIR ?? join(homedir(), ".claude");
-    const skillsSubdir = join(skillsBase, "skills");
-    const agentsSubdir = join(skillsBase, "agents");
+    const skillsSubdir = join(ctx.skillsBase, "skills");
+    const agentsSubdir = join(ctx.skillsBase, "agents");
 
     // Skills: subdirectory (or symlink-to-directory) names inside <skillsBase>/skills/.
     // Return names only; never read file contents.
@@ -740,6 +768,66 @@ async function handleRequest(
       available: listAvailable(ctx.bundledPipelinesDir),
       skills,
       agents,
+    });
+    return;
+  }
+
+  // GET /api/skills/:name — return the content of one skill's SKILL.md
+  const skillMatch = RE_SKILL_CONTENT.exec(pathname);
+  if (method === "GET" && skillMatch) {
+    const name = decodeURIComponent(skillMatch[1]);
+    if (!isSafeName(name)) {
+      json(res, 400, { error: `Skill name contains invalid characters` });
+      return;
+    }
+    const skillsSubdir = join(ctx.skillsBase, "skills");
+    const skillFile = join(skillsSubdir, name, "SKILL.md");
+    if (!isContained(skillsSubdir, skillFile)) {
+      json(res, 400, { error: `Skill name contains invalid characters` });
+      return;
+    }
+    if (!existsSync(skillFile)) {
+      json(res, 404, { error: `Skill "${name}" not found` });
+      return;
+    }
+    const raw = readFileSync(skillFile, "utf8");
+    const truncated = raw.length > CONTENT_CAP;
+    json(res, 200, {
+      kind: "skill",
+      name,
+      filePath: skillFile,
+      content: truncated ? raw.slice(0, CONTENT_CAP) : raw,
+      truncated,
+    });
+    return;
+  }
+
+  // GET /api/agents/:name — return the content of one agent's .md file
+  const agentMatch = RE_AGENT_CONTENT.exec(pathname);
+  if (method === "GET" && agentMatch) {
+    const name = decodeURIComponent(agentMatch[1]);
+    if (!isSafeName(name)) {
+      json(res, 400, { error: `Agent name contains invalid characters` });
+      return;
+    }
+    const agentsSubdir = join(ctx.skillsBase, "agents");
+    const agentFile = join(agentsSubdir, `${name}.md`);
+    if (!isContained(agentsSubdir, agentFile)) {
+      json(res, 400, { error: `Agent name contains invalid characters` });
+      return;
+    }
+    if (!existsSync(agentFile)) {
+      json(res, 404, { error: `Agent "${name}" not found` });
+      return;
+    }
+    const raw = readFileSync(agentFile, "utf8");
+    const truncated = raw.length > CONTENT_CAP;
+    json(res, 200, {
+      kind: "agent",
+      name,
+      filePath: agentFile,
+      content: truncated ? raw.slice(0, CONTENT_CAP) : raw,
+      truncated,
     });
     return;
   }

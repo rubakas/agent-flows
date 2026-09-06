@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { RunService, type MastraLike } from "../runtime/runService.js";
-import { startServer, type ServeHandle } from "./server.js";
+import { startServer, type ServeHandle, CONTENT_CAP } from "./server.js";
 
 // ── Mock RunService helpers (mirrors runService.test.ts pattern) ──────────────
 
@@ -955,5 +955,118 @@ describe("GET /api/environment — launch-point description", () => {
       "evil.attacker.example"
     );
     assert.equal(result.status, 403);
+  });
+});
+
+// ── GET /api/skills/:name and GET /api/agents/:name ───────────────────────────
+
+describe("GET /api/skills/:name and GET /api/agents/:name — content endpoints", () => {
+  let srv: ServeHandle;
+  let tmpRoot: string;
+
+  before(async () => {
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-content-test-")));
+    const skillsDir = join(tmpRoot, "skills");
+    const agentsDir = join(tmpRoot, "agents");
+
+    mkdirSync(join(skillsDir, "my-skill"), { recursive: true });
+    writeFileSync(join(skillsDir, "my-skill", "SKILL.md"), "# My Skill\nThis skill does things.\n");
+
+    // A large skill used to test truncation: CONTENT_CAP + 100 bytes of content
+    mkdirSync(join(skillsDir, "big-skill"), { recursive: true });
+    writeFileSync(join(skillsDir, "big-skill", "SKILL.md"), "x".repeat(CONTENT_CAP + 100));
+
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, "my-agent.md"), "# My Agent\nThis agent does things.\n");
+
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      skillsBase: tmpRoot,
+    });
+  });
+
+  after(async () => {
+    await srv.close();
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("fetching an existing skill returns its content (200)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/skills/my-skill`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      kind: string;
+      name: string;
+      filePath: string;
+      content: string;
+      truncated: boolean;
+    };
+    assert.equal(body.kind, "skill");
+    assert.equal(body.name, "my-skill");
+    assert.ok(body.content.includes("My Skill"), "content must include skill text");
+    assert.equal(body.truncated, false);
+    assert.ok(
+      typeof body.filePath === "string" && body.filePath.length > 0,
+      "filePath must be present"
+    );
+  });
+
+  it("fetching an existing agent returns its content (200)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/agents/my-agent`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      kind: string;
+      name: string;
+      filePath: string;
+      content: string;
+      truncated: boolean;
+    };
+    assert.equal(body.kind, "agent");
+    assert.equal(body.name, "my-agent");
+    assert.ok(body.content.includes("My Agent"), "content must include agent text");
+    assert.equal(body.truncated, false);
+    assert.ok(
+      typeof body.filePath === "string" && body.filePath.length > 0,
+      "filePath must be present"
+    );
+  });
+
+  it("a traversal name (encoded slash) is rejected with 400", async () => {
+    // encodeURIComponent("../evil") → "..%2Fevil"; the %2F is preserved in the path
+    // segment and decoded server-side, revealing the slash which isSafeName rejects.
+    const res1 = await fetch(
+      `http://127.0.0.1:${srv.port}/api/skills/${encodeURIComponent("../evil")}`
+    );
+    assert.equal(res1.status, 400, "skill traversal must be rejected");
+    const body1 = (await res1.json()) as { error: string };
+    assert.ok(body1.error.length > 0, "error message must be non-empty");
+
+    const res2 = await fetch(
+      `http://127.0.0.1:${srv.port}/api/agents/${encodeURIComponent("../evil")}`
+    );
+    assert.equal(res2.status, 400, "agent traversal must be rejected");
+  });
+
+  it("an unknown skill returns 404 with the name in the error", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/skills/nonexistent`);
+    assert.equal(res.status, 404);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.includes("nonexistent"), "error must name the unknown skill");
+  });
+
+  it("an unknown agent returns 404 with the name in the error", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/agents/nonexistent`);
+    assert.equal(res.status, 404);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.includes("nonexistent"), "error must name the unknown agent");
+  });
+
+  it("content is truncated and truncated=true when file exceeds CONTENT_CAP", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/skills/big-skill`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { content: string; truncated: boolean };
+    assert.equal(body.truncated, true, "truncated must be true for oversized file");
+    assert.equal(body.content.length, CONTENT_CAP, "content must be exactly CONTENT_CAP bytes");
   });
 });
