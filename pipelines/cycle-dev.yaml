@@ -1,6 +1,6 @@
-id: cycle
+id: cycle-dev
 version: 1
-description: Full development lifecycle — investigate, plan, build, and ship
+description: Full development lifecycle — investigate, plan, and build (stops before ship; no commit, no PR)
 inputs:
   - request
 steps:
@@ -19,7 +19,3 @@ steps:
     with:
       plan: plan.correct.revise
     dependsOn: [plan]
-  - id: ship
-    kind: pipeline
-    pipeline: ship
-    dependsOn: [build]

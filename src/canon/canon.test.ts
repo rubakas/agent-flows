@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse } from "yaml";
 import { assembleSpec } from "./assemble.js";
 import { pipelineLevels } from "./graph.js";
 import { loadPipeline } from "./load.js";
@@ -18,7 +19,8 @@ describe("loadPipeline", () => {
   it("loads spec-creation.yaml successfully", () => {
     const { def, prompts } = loadPipeline(pipelinesYaml);
     assert.equal(def.id, "spec-creation");
-    assert.equal(def.steps.length, 8);
+    // 4 llm + assemble + 3 (verify.*) + 1 (correct.revise) + approve + persist + export = 12
+    assert.equal(def.steps.length, 12);
 
     for (const id of ["intake", "enrich", "critic", "security"]) {
       assert.ok(id in prompts, `prompts["${id}"] should be loaded`);
@@ -39,11 +41,14 @@ describe("loadPipeline", () => {
         ["enrich"],
         ["critic", "security"],
         ["assemble"],
+        ["verify.correctness", "verify.security"],
+        ["verify.synthesis"],
+        ["correct.revise"],
         ["approve"],
         ["persist"],
         ["export"],
       ],
-      "pipelineLevels must return the canonical seven-level execution order"
+      "pipelineLevels must return the canonical ten-level execution order"
     );
   });
 
@@ -1911,6 +1916,187 @@ steps:
         }),
       (err: Error) => {
         assert.ok(err.message.includes("myInput"), "names the unresolvable placeholder");
+        return true;
+      }
+    );
+  });
+});
+
+// ── D1 — Investigation wiring (spec 017) ─────────────────────────────────────
+
+describe("cycle.yaml — plan step wires investigate.findings into spec-creation", () => {
+  it("plan step has with.findings === 'investigate.findings'", () => {
+    const raw = readFileSync(join(repoRoot, "pipelines", "cycle.yaml"), "utf8");
+    const doc = parse(raw);
+    const plan = doc.steps.find((s: { id: string }) => s.id === "plan");
+    assert.ok(plan, "plan step must exist");
+    assert.equal(
+      plan.with?.findings,
+      "investigate.findings",
+      "plan step must wire investigate.findings into findings input"
+    );
+  });
+});
+
+describe("cycle-dev.yaml — plan step wires investigate.findings into spec-creation", () => {
+  it("plan step has with.findings === 'investigate.findings'", () => {
+    const raw = readFileSync(join(repoRoot, "pipelines", "cycle-dev.yaml"), "utf8");
+    const doc = parse(raw);
+    const plan = doc.steps.find((s: { id: string }) => s.id === "plan");
+    assert.ok(plan, "plan step must exist");
+    assert.equal(
+      plan.with?.findings,
+      "investigate.findings",
+      "plan step must wire investigate.findings into findings input"
+    );
+  });
+});
+
+describe("spec-creation — findings is an optional input", () => {
+  it("loads with optionalInputs containing 'findings'", () => {
+    const { def } = loadPipeline(pipelinesYaml);
+    assert.ok(def.inputs.includes("findings"), "findings must be in inputs");
+    assert.ok(
+      def.optionalInputs?.includes("findings"),
+      "findings must be in optionalInputs"
+    );
+  });
+});
+
+describe("loadPipeline — rejects optionalInputs entry not in inputs", () => {
+  it("throws when an optionalInputs name is absent from inputs", () => {
+    const yaml = `\
+id: test
+version: 1
+description: test
+inputs:
+  - request
+optionalInputs:
+  - findings
+steps: []
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      /optionalInputs.*findings|findings.*inputs/
+    );
+  });
+});
+
+// ── D2 — Plan verification and correction (spec 018) ─────────────────────────
+
+describe("spec-creation — verify and correct steps present after expansion (spec 018)", () => {
+  it("expanded def contains verify.synthesis and correct.revise", () => {
+    const { def } = loadPipeline(pipelinesYaml);
+    const ids = def.steps.map((s) => s.id);
+    assert.ok(ids.includes("verify.synthesis"), "expanded def must include verify.synthesis");
+    assert.ok(ids.includes("correct.revise"), "expanded def must include correct.revise");
+  });
+
+  it("correct.revise prompt placeholders resolve without error (ancestor check passes)", () => {
+    // loadPipeline throws on any unresolved placeholder — if this passes, the
+    // {{plan}} and {{findings}} in correct-plan.md are reachable from correct.revise.
+    assert.doesNotThrow(() => loadPipeline(pipelinesYaml));
+  });
+});
+
+describe("cycle.yaml — build step uses plan.correct.revise (spec 018)", () => {
+  it("build step has with.plan === 'plan.correct.revise'", () => {
+    const raw = readFileSync(join(repoRoot, "pipelines", "cycle.yaml"), "utf8");
+    const doc = parse(raw);
+    const build = doc.steps.find((s: { id: string }) => s.id === "build");
+    assert.ok(build, "build step must exist");
+    assert.equal(
+      build.with?.plan,
+      "plan.correct.revise",
+      "build step must wire plan.correct.revise as the plan input"
+    );
+  });
+});
+
+describe("cycle-dev.yaml — build step uses plan.correct.revise (spec 018)", () => {
+  it("build step has with.plan === 'plan.correct.revise'", () => {
+    const raw = readFileSync(join(repoRoot, "pipelines", "cycle-dev.yaml"), "utf8");
+    const doc = parse(raw);
+    const build = doc.steps.find((s: { id: string }) => s.id === "build");
+    assert.ok(build, "build step must exist");
+    assert.equal(
+      build.with?.plan,
+      "plan.correct.revise",
+      "build step must wire plan.correct.revise as the plan input"
+    );
+  });
+});
+
+describe("spec 018 — negative: with-value typo is caught by placeholder validation", () => {
+  // `with` *values* are not validated by nest.ts (it only checks keys); the
+  // placeholder check in load.ts is what catches a dangling reference.
+  // A typo of `findings: verify` (instead of `findings: verify.synthesis`)
+  // causes {{findings}} in the correct-inner prompt to be rewritten to
+  // {{verify}}, which is not in the ancestor set — load must throw.
+  it("rejects findings: verify (should be verify.synthesis) with a placeholder error", () => {
+    const verifyInnerYaml = `
+id: verify-inner
+version: 1
+description: verify inner
+inputs:
+  - request
+steps:
+  - id: synthesis
+    kind: llm
+    role: reasoner
+    prompt: prompts/synthesis.md
+`;
+    const correctInnerYaml = `
+id: correct-inner
+version: 1
+description: correct inner
+inputs:
+  - findings
+steps:
+  - id: revise
+    kind: llm
+    role: reasoner
+    prompt: prompts/revise.md
+`;
+    const outerYaml = `
+id: outer
+version: 1
+description: outer
+inputs:
+  - request
+steps:
+  - id: verify
+    kind: pipeline
+    pipeline: verify-inner
+  - id: correct
+    kind: pipeline
+    pipeline: correct-inner
+    with:
+      findings: verify
+    dependsOn: [verify]
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/outer.yaml", {
+          readFile: (p) => {
+            if (p.endsWith("outer.yaml")) return outerYaml;
+            if (p.endsWith("verify-inner.yaml")) return verifyInnerYaml;
+            if (p.endsWith("correct-inner.yaml")) return correctInnerYaml;
+            if (p.endsWith("synthesis.md")) return "Synthesis: {{request}}";
+            if (p.endsWith("revise.md")) return "Revise: {{findings}}";
+            throw new Error(`unexpected read: ${p}`);
+          },
+        }),
+      (err: Error) => {
+        // The rewritten placeholder {{verify}} is not a valid ancestor id after
+        // expansion (verify was expanded to verify.synthesis); load must name it.
+        assert.ok(
+          err.message.includes("verify"),
+          `expected error to mention "verify", got: ${err.message}`
+        );
         return true;
       }
     );

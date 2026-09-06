@@ -3,6 +3,9 @@ version: 1
 description: Harden a feature request into an adversarially reviewed spec
 inputs:
   - request
+  - findings
+optionalInputs:
+  - findings
 steps:
   - id: intake
     kind: llm
@@ -28,10 +31,23 @@ steps:
   - id: assemble
     kind: assemble-spec
     dependsOn: [critic, security]
+  - id: verify
+    kind: pipeline
+    pipeline: audit
+    with:
+      plan: assemble
+    dependsOn: [assemble]
+  - id: correct
+    kind: pipeline
+    pipeline: correct-plan
+    with:
+      plan: assemble
+      findings: verify.synthesis
+    dependsOn: [verify]
   - id: approve
     kind: gate
-    message: Approve this hardened spec?
-    dependsOn: [assemble]
+    message: Approve this hardened, verified spec?
+    dependsOn: [correct]
   - id: persist
     kind: persist-ticket
     dependsOn: [approve]

@@ -1,0 +1,13 @@
+id: correct-plan
+version: 1
+description: Fold verification findings back into a plan, producing a complete revised plan
+inputs:
+  - plan
+  - findings
+steps:
+  - id: revise
+    kind: llm
+    role: reasoner
+    permissions:
+      contents: read
+    prompt: prompts/correct-plan.md
