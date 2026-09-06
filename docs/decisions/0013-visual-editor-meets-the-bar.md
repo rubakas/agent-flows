@@ -6,7 +6,7 @@ Amends: ADR-0011 (operating surface), the README Charter. Does not revive ADR-00
 
 ## Context
 
-The Charter states that Yoke is a harness for "building, editing and running" dynamic workflows,
+The Charter states that agent-flows is a harness for "building, editing and running" dynamic workflows,
 and spec 014 records that only running is implemented. The same Charter defers visual authoring:
 
 > A visual workflow editor is desirable but no evaluated option has met the bar, so it is
@@ -22,7 +22,7 @@ The Charter's deferral is a bar, not a ban. The question is whether any option c
 
 ## Decision
 
-1. **A web editor shipped inside Yoke clears the bar, and visual authoring is no longer out of
+1. **A web editor shipped inside agent-flows clears the bar, and visual authoring is no longer out of
    scope.** It inverts each property that disqualified Rivet: it ships with the canon, it updates
    when the canon updates, and it runs in a window the operator already has open — Claude Code's
    browser pane, T3 Code's desktop Browser panel, or an ordinary browser. It is one web
@@ -32,7 +32,7 @@ The Charter's deferral is a bar, not a ban. The question is whether any option c
    definitions remain files; the sentence deferring a visual editor is replaced by a statement that
    the editor is part of the product and writes the same files chat writes.
 
-3. **The editor is served by a loopback-only local process.** `yoke serve` binds `127.0.0.1` and
+3. **The editor is served by a loopback-only local process.** `agent-flows serve` binds `127.0.0.1` and
    refuses any non-loopback bind. This does not revive ADR-0010's orchestrator, which was removed
    as a single-machine, chat-first decision: there is no remote execution, no remote approve, no
    multi-user access and no network-reachable control plane. The daemon serves an editor to the
@@ -43,7 +43,7 @@ The Charter's deferral is a bar, not a ban. The question is whether any option c
    half-written edit never reaches disk, but nothing an agent, a CLI or git reads ever comes from
    that database.
 
-5. **The root is where the harness was launched**, not where Yoke is installed. There is no project
+5. **The root is where the harness was launched**, not where agent-flows is installed. There is no project
    registry and no multi-project bookkeeping; a scope flag selects a project-local pipeline or a
    global one.
 

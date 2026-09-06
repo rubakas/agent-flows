@@ -34,9 +34,9 @@ function hasFlag(flag: string): boolean {
   return args.includes(flag);
 }
 
-const dbPath = getFlag("--db", "/tmp/yoke-mastra-smoke.sqlite");
+const dbPath = getFlag("--db", "/tmp/agent-flows-mastra-smoke.sqlite");
 const mastraDb = mastraDbPath(dbPath);
-const providerId = getFlag("--provider", process.env.YOKE_PROVIDER ?? "anthropic");
+const providerId = getFlag("--provider", process.env.AGENT_FLOWS_PROVIDER ?? "anthropic");
 const profile = getProfile(providerId);
 
 // --intake-model: explicit override for the intake step only, opt-in (no default)
@@ -53,9 +53,9 @@ console.log(`Smoke: provider=${providerId} db=${dbPath}`);
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
-const mastraStorage = new LibSQLStore({ id: "yoke-smoke", url: `file:${mastraDb}` });
-const yokeDb = makeDb(dbPath);
-const store = new DrizzleTicketStore(yokeDb);
+const mastraStorage = new LibSQLStore({ id: "agent-flows-smoke", url: `file:${mastraDb}` });
+const db = makeDb(dbPath);
+const store = new DrizzleTicketStore(db);
 const registry = defaultRegistry();
 
 const pipelinesDir = join(repoRoot, "pipelines");

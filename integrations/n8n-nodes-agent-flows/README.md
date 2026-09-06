@@ -1,10 +1,10 @@
-# n8n-nodes-yoke
+# n8n-nodes-agent-flows
 
 A community n8n node package that runs a read-only coding agent (the `claude` CLI) as a typed, sandboxed workflow step. Used as the execution primitive for Binding C's generated n8n workflows.
 
 ## Node type
 
-`n8n-nodes-yoke.yokeAgent`
+`n8n-nodes-agent-flows.yokeAgent`
 
 ## Requirements
 
@@ -17,11 +17,11 @@ A community n8n node package that runs a read-only coding agent (the `claude` CL
 ```sh
 # From the n8n user-data directory (default: ~/.n8n)
 cd ~/.n8n/nodes
-npm install /path/to/n8n-nodes-yoke
+npm install /path/to/n8n-nodes-agent-flows
 
 # Or, once published to npm:
 cd ~/.n8n/nodes
-npm install n8n-nodes-yoke
+npm install n8n-nodes-agent-flows
 ```
 
 n8n auto-discovers packages whose names match `n8n-nodes-*` from `~/.n8n/nodes/node_modules/` — no database entry or UI interaction required.
@@ -90,7 +90,7 @@ n8n auto-discovers packages whose names match `n8n-nodes-*` from `~/.n8n/nodes/n
 ## Development
 
 ```sh
-cd integrations/n8n-nodes-yoke
+cd integrations/n8n-nodes-agent-flows
 npm install
 npm run build      # tsc → dist/
 npm run test:ts    # unit tests (no n8n required)
@@ -108,7 +108,7 @@ Tests cover: model resolution, path validation, environment scrubbing, and argv 
 
 ```sh
 SPIKE=/path/to/n8n-spike
-DEST="$SPIKE/n8n-data/.n8n/nodes/node_modules/n8n-nodes-yoke"
+DEST="$SPIKE/n8n-data/.n8n/nodes/node_modules/n8n-nodes-agent-flows"
 mkdir -p "$DEST"
 cp package.json "$DEST/"
 cp -r dist "$DEST/"
@@ -116,4 +116,4 @@ cp -r dist "$DEST/"
 ln -sf /path/to/n8n/node_modules/n8n-workflow "$DEST/node_modules/n8n-workflow"
 ```
 
-Then import and execute a workflow referencing `n8n-nodes-yoke.yokeAgent`.
+Then import and execute a workflow referencing `n8n-nodes-agent-flows.yokeAgent`.

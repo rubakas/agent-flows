@@ -135,7 +135,7 @@ export interface StepRunnerDeps {
    * transport. The runtime adds `Skill` to the granted tool set and passes `--plugin-dir`
    * pointing to the skills directory so the named skills are resolvable under `--restricted`.
    * Skills grant instructions, not permissions — file access still requires `permissions`.
-   * The directory is read from the `YOKE_SKILLS_DIR` env var; defaults to `$HOME/.claude`.
+   * The directory is read from the `AGENT_FLOWS_SKILLS_DIR` env var; defaults to `$HOME/.claude`.
    */
   skills?: string[];
   /**
@@ -653,7 +653,7 @@ export async function runLlmStep(
 
         if (hasSkills) {
           const rawEnv = deps.env ?? process.env;
-          const skillsDir = rawEnv.YOKE_SKILLS_DIR ?? `${rawEnv.HOME ?? ""}/.claude`;
+          const skillsDir = rawEnv.AGENT_FLOWS_SKILLS_DIR ?? `${rawEnv.HOME ?? ""}/.claude`;
           extraArgs.push("--plugin-dir", skillsDir);
         }
         const result = await runClaudeCli(

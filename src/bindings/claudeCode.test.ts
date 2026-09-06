@@ -108,7 +108,7 @@ describe("generateWorkflowScript — structural checks", () => {
     // entire script in an async function — `return` and `await` are then valid.
     const wrapped =
       "(async function() {\n" + s.replace(/^export const meta/, "const meta") + "\n})";
-    const tmpFile = join(tmpdir(), "yoke-gen-syntax-check.mjs");
+    const tmpFile = join(tmpdir(), "agent-flows-gen-syntax-check.mjs");
     writeFileSync(tmpFile, wrapped);
     try {
       execSync(`node --check ${tmpFile}`, { stdio: "pipe" });

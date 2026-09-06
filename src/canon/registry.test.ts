@@ -159,18 +159,18 @@ describe("getProfile", () => {
 });
 
 describe("getActiveProfile", () => {
-  it("defaults to anthropic when YOKE_PROVIDER not set", () => {
+  it("defaults to anthropic when AGENT_FLOWS_PROVIDER not set", () => {
     const p = getActiveProfile({});
     assert.equal(p.id, "anthropic");
   });
 
-  it("selects the profile named by YOKE_PROVIDER", () => {
-    const p = getActiveProfile({ YOKE_PROVIDER: "openai" });
+  it("selects the profile named by AGENT_FLOWS_PROVIDER", () => {
+    const p = getActiveProfile({ AGENT_FLOWS_PROVIDER: "openai" });
     assert.equal(p.id, "openai");
   });
 
-  it("throws on unknown YOKE_PROVIDER value", () => {
-    assert.throws(() => getActiveProfile({ YOKE_PROVIDER: "bad-provider" }), /bad-provider/);
+  it("throws on unknown AGENT_FLOWS_PROVIDER value", () => {
+    assert.throws(() => getActiveProfile({ AGENT_FLOWS_PROVIDER: "bad-provider" }), /bad-provider/);
   });
 });
 

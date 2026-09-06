@@ -253,7 +253,7 @@ steps:
   });
 
   it("rejects a symlink that points outside the pipeline root", (t) => {
-    const tmp = mkdtempSync(join(tmpdir(), "yoke-symlink-test-"));
+    const tmp = mkdtempSync(join(tmpdir(), "agent-flows-symlink-test-"));
     const outsideDir = join(tmp, "outside");
     const rootDir = join(tmp, "root");
     const promptsDir = join(rootDir, "prompts");

@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadPipeline } from "../../canon/load.js";
-import { WORKSPACE_DIR_EXPR, YOKE_NODE_TYPE, generateN8nWorkflow } from "./build.js";
+import { WORKSPACE_DIR_EXPR, AGENT_FLOWS_NODE_TYPE, generateN8nWorkflow } from "./build.js";
 import type { LoadedPipeline, StepDef } from "../../canon/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -55,9 +55,9 @@ describe("generateN8nWorkflow — linear chain", () => {
     // 3 steps + 1 trigger
     assert.equal(wf.nodes.length, 4);
     const byName = new Map(wf.nodes.map((n) => [n.name, n]));
-    assert.equal(byName.get("stepA")?.type, YOKE_NODE_TYPE, "stepA type");
-    assert.equal(byName.get("stepB")?.type, YOKE_NODE_TYPE, "stepB type");
-    assert.equal(byName.get("stepC")?.type, YOKE_NODE_TYPE, "stepC type");
+    assert.equal(byName.get("stepA")?.type, AGENT_FLOWS_NODE_TYPE, "stepA type");
+    assert.equal(byName.get("stepB")?.type, AGENT_FLOWS_NODE_TYPE, "stepB type");
+    assert.equal(byName.get("stepC")?.type, AGENT_FLOWS_NODE_TYPE, "stepC type");
   });
 
   it("llm nodes carry role, contentsAccess, workspaceDir, and prompt parameters", () => {
@@ -162,8 +162,8 @@ describe("generateN8nWorkflow — step kind → node type", () => {
   const wf = generateN8nWorkflow(loaded);
   const byName = new Map(wf.nodes.map((n) => [n.name, n]));
 
-  it("llm → YOKE_NODE_TYPE", () => {
-    assert.equal(byName.get("llmStep")?.type, YOKE_NODE_TYPE);
+  it("llm → AGENT_FLOWS_NODE_TYPE", () => {
+    assert.equal(byName.get("llmStep")?.type, AGENT_FLOWS_NODE_TYPE);
   });
 
   it("gate → n8n-nodes-base.noOp with message as notes", () => {
@@ -198,11 +198,15 @@ describe("generateN8nWorkflow — spec-creation.yaml", () => {
     assert.ok(trigger, "manual trigger missing");
   });
 
-  it("all llm steps use YOKE_NODE_TYPE", () => {
+  it("all llm steps use AGENT_FLOWS_NODE_TYPE", () => {
     const llmIds = ["intake", "enrich", "critic", "security"];
     const byName = new Map(wf.nodes.map((n) => [n.name, n]));
     for (const id of llmIds) {
-      assert.equal(byName.get(id)?.type, YOKE_NODE_TYPE, `${id} should be ${YOKE_NODE_TYPE}`);
+      assert.equal(
+        byName.get(id)?.type,
+        AGENT_FLOWS_NODE_TYPE,
+        `${id} should be ${AGENT_FLOWS_NODE_TYPE}`
+      );
     }
   });
 
@@ -235,7 +239,7 @@ describe("generateN8nWorkflow — spec-creation.yaml", () => {
   });
 
   it("llm nodes carry workspaceDir as WORKSPACE_DIR_EXPR", () => {
-    const llmNodes = wf.nodes.filter((n) => n.type === YOKE_NODE_TYPE);
+    const llmNodes = wf.nodes.filter((n) => n.type === AGENT_FLOWS_NODE_TYPE);
     for (const n of llmNodes) {
       assert.equal(
         n.parameters.workspaceDir,

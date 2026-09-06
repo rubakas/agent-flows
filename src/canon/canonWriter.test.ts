@@ -33,7 +33,7 @@ const REAL_PIPELINE_PATH = join(REPO_ROOT, "pipelines", "spec-creation.yaml");
  * Returns { root, pipelineDir, pipelinePath }.
  */
 function makeTmpPipelineDir(name = "test") {
-  const root = mkdtempSync(join(tmpdir(), "yoke-writer-test-"));
+  const root = mkdtempSync(join(tmpdir(), "agent-flows-writer-test-"));
   const pipelineDir = join(root, "pipelines");
   mkdirSync(pipelineDir);
   const pipelinePath = join(pipelineDir, `${name}.yaml`);
@@ -453,7 +453,7 @@ describe("undo ops replay", () => {
 
   it("replaying ops in seq order reconstructs the edit history", () => {
     const db = makeInMemoryDb();
-    const root = mkdtempSync(join(tmpdir(), "yoke-undo-test-"));
+    const root = mkdtempSync(join(tmpdir(), "agent-flows-undo-test-"));
     const pipelineDir = join(root, "pipelines");
     mkdirSync(pipelineDir);
     const pipelinePath = join(pipelineDir, "undo.yaml");

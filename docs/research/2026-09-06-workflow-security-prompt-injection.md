@@ -30,7 +30,7 @@ it can reach.** Everything below follows from that.
 ### 1.2 What each source documents as an actual control
 
 **Anthropic — `platform.claude.com` "Mitigate jailbreaks and prompt injections".** This page splits
-the threat model into direct (user is adversary) and indirect (user trusted, third-party *content* is
+the threat model into direct (user is adversary) and indirect (user trusted, third-party _content_ is
 adversary). Yoke is squarely the indirect case. Its documented controls, in the page's own order:
 
 1. **Put untrusted content only in tool results** — never in `system` prompts or plain user `text`
@@ -49,13 +49,13 @@ adversary). Yoke is squarely the indirect case. Its documented controls, in the 
    boolean output, run on the raw tool output before it is returned as a `tool_result`.
 8. **Red-team your own agent** with deliberately poisoned documents before deploying.
 
-Note what is *absent* from that list as a standalone answer: telling the model to ignore injected
+Note what is _absent_ from that list as a standalone answer: telling the model to ignore injected
 instructions appears only as item 3, one layer among eight, and the page closes with "By layering
 these strategies…". The companion research page states the same thing about model training —
 robustness is trained in via RL, classifiers scan untrusted content entering the window, and human
 red teams still find attacks. Training is layer one of three, not the answer.
 
-**Anthropic — Claude Code security docs.** These matter because yoke's executor *is* the `claude`
+**Anthropic — Claude Code security docs.** These matter because yoke's executor _is_ the `claude`
 CLI. Documented protections: permission system, working-directory boundary, sandboxed bash tool
 (filesystem + network isolation, OS-enforced), network-command approval (`curl`/`wget` not
 auto-approved), isolated context window for web fetch, trust verification for new codebases and MCP
@@ -83,7 +83,7 @@ guardrails for PII/jailbreak detection; "always enable tool approvals so end use
 confirm every operation, including reads and writes."
 
 **OWASP LLM01:2025 Prompt Injection** — seven mitigations: constrain model behavior; define and
-validate output formats with *deterministic code*; input and output filtering; **enforce privilege
+validate output formats with _deterministic code_; input and output filtering; **enforce privilege
 control** ("provide the application with its own API tokens for extensible functionality, and handle
 these functions in code rather than providing them to the model"); **require human approval** for
 high-risk or privileged operations; **segregate external content** (separate and clearly denote
@@ -94,7 +94,7 @@ untrusted content); adversarial testing.
 purpose-specific tools); minimize extension permissions; execute in user context; require user
 approval for high-impact actions; **complete mediation** — "implement authorization in downstream
 systems rather than relying on an LLM to decide if an action is allowed or not." Monitoring and rate
-limiting are listed separately as *damage-limiting*, not preventive.
+limiting are listed separately as _damage-limiting_, not preventive.
 
 **OWASP LLM05:2025 Improper Output Handling** — the direct match for yoke's step-to-step edges.
 "Treat the model as any other user, adopting a zero-trust approach." The named primary vulnerability:
@@ -140,7 +140,7 @@ Exact stdout:
     YOKE_BASH_RAN
 ```
 
-Bash executed with no approval. The two warning lines are the operator's *personal*
+Bash executed with no approval. The two warning lines are the operator's _personal_
 `~/.claude/settings.json` deny rules being loaded — direct evidence that user/project/local settings
 apply on this path, which is exactly what `--restricted` exists to prevent. With
 `--restricted --strict-mcp-config --tools Read,Glob --allowedTools Read,Glob` the same prompt returns
@@ -158,7 +158,7 @@ working-directory boundary are real, not decorative.
 in a scratch directory, the agent rewrote `package.json`'s `"test"` script to `"echo PWNED"` with no
 approval, while a write to `.claude/settings.json` was blocked by the permission system ("Claude
 requested permissions to write to …/.claude/settings.json, but you haven't granted it yet"). So
-`--restricted` closes the *self-escalation* route but not the *build-config* route.
+`--restricted` closes the _self-escalation_ route but not the _build-config_ route.
 
 Two further structural facts:
 
@@ -179,7 +179,7 @@ partially-scrubbed environment.
 
 A step with `permissions: { contents: read }` (`investigate.survey`, `audit.correctness`,
 `audit.security`) opens README files, comments, test fixtures and dependency source. Any of those may
-contain text addressed to the agent. That text lands in the step's *output string*, which
+contain text addressed to the agent. That text lands in the step's _output string_, which
 `ctxVars` (`src/bindings/mastra/buildSteps.ts:70`) passes to `renderPrompt` and drops verbatim into
 the next prompt: `prompts/investigate-findings.md` contains `{{survey}}` inside a `<context>` block.
 
@@ -200,7 +200,7 @@ single-turn `claude -p` call, not as a labelled `tool_result`; it is never tagge
 and yoke's own instructions sit in the same undifferentiated text stream.
 
 **Status: OPEN.** No control addresses it. The read-only steps' `--tools Read,Glob` limits what the
-poisoned step can *do*, but does nothing about what it *says* to the next step.
+poisoned step can _do_, but does nothing about what it _says_ to the next step.
 
 ### 2.2 Path B — the same content reaching a `contents: write` step
 
@@ -237,16 +237,16 @@ steps.**
   since `--restricted` is what removes it and it isn't passed. Also the repo's own MCP servers, since
   `--strict-mcp-config` isn't passed and `-p` skips the trust dialog. **OPEN.**
 - **`read`/`write` steps:** no Bash, no WebFetch, no MCP. The only outbound channel is the step's own
-  text output. That gives a *staged* exfil chain: a read step lifts a secret into its output → it
+  text output. That gives a _staged_ exfil chain: a read step lifts a secret into its output → it
   flows into a write step's prompt (§2.1) → the write step embeds it in a source file → `ship.yaml`
   commits it and opens a public PR. **PARTIALLY CLOSED.** `CREDENTIAL_DENY_PATTERNS` blocks the named
   credential files at the source, and `ship.yaml`'s `approve` gate is a genuine human checkpoint
-  before anything becomes public — but the gate presents the *spec*, not the diff, so the operator is
+  before anything becomes public — but the gate presents the _spec_, not the diff, so the operator is
   approving intent, not content.
 - **`check` steps:** the one place with a shell, an inherited environment and unrestricted network.
   `runCheckStep` scrubs three variable names (**F6**) and passes the rest, including `GH_TOKEN`. The
   `command` is a static YAML string authored by the operator, so there is no direct injection — but
-  §2.2 shows the *file the command executes* is model-writable. **OPEN via §2.2.**
+  §2.2 shows the _file the command executes_ is model-writable. **OPEN via §2.2.**
 
 ### 2.4 Path D — a `check` step's output flowing onward
 
@@ -255,7 +255,7 @@ straight through, and `ship.yaml` documents the reason in a comment ("interpolat
 a shell string is command injection"). That is correct and worth keeping — it is OWASP LLM05's named
 failure mode, and yoke already avoids it.
 
-What remains is the reverse direction: hostile *output*. `pnpm test` prints whatever the test files
+What remains is the reverse direction: hostile _output_. `pnpm test` prints whatever the test files
 print, and test files are model-writable (§2.2) and repo-supplied. That output is capped at 64 KB
 (`CHECK_OUTPUT_CAP`), JSON-encoded by `ctxVars`, and fed to `build-fix.md`'s `{{test}}` — a step with
 `contents: write`. So a fabricated "failure" narrative in test output can steer the writing agent. The
@@ -283,14 +283,14 @@ target repo's settings and MCP configuration load silently on any step that isn'
 
 ## 3. Controls to implement, ranked by risk reduced ÷ effort
 
-### C1 — Make the `--restricted` block unconditional  ★ highest value
+### C1 — Make the `--restricted` block unconditional ★ highest value
 
 - **Prevents:** default `llm` steps having Bash, WebFetch, network egress, the operator's personal
   settings, and the workspace's own settings + MCP servers. Closes §2.3's default-step branch
   outright and most of §2.5 in advance.
 - **Implementation:** `src/canon/runStep.ts:491` — hoist the `--restricted --strict-mcp-config
-  --tools <set> --allowedTools <set>` push out of the `if (resolvedWorkspaceDir !== undefined ||
-  hasSkills)` guard so it always runs. `baseTools` already computes `""` for the no-permissions case
+--tools <set> --allowedTools <set>` push out of the `if (resolvedWorkspaceDir !== undefined ||
+hasSkills)` guard so it always runs. `baseTools` already computes `""` for the no-permissions case
   (line 508), and `--tools ""` is the documented way to disable all tools. Also set `cwd` to the
   workspace root unconditionally so a no-permissions step is not left inheriting the daemon's cwd.
   Rewrite `src/canon/runStep.test.ts:483`, which currently asserts today's behaviour as correct.
@@ -300,25 +300,25 @@ target repo's settings and MCP configuration load silently on any step that isn'
 - **Source:** Anthropic mitigate-jailbreaks §"Limit Claude's access to sensitive data and actions";
   OWASP LLM06 "Minimize Extensions" / "Avoid Open-Ended Extensions".
 
-### C2 — Split the deny list: credentials denied for Read+Edit, execution-defining files denied for Edit  ★
+### C2 — Split the deny list: credentials denied for Read+Edit, execution-defining files denied for Edit ★
 
 - **Prevents:** the verified §2.2 write→execute pivot. A `contents: write` step could not rewrite the
   script that the next `check` step runs.
 - **Implementation:** `src/canon/runStep.ts:33` — keep `CREDENTIAL_DENY_PATTERNS` as the Read+Edit
   list, add a second `EXECUTION_DENY_PATTERNS` applied as `Edit(...)` only (Read stays allowed so an
-  agent can still *understand* the build): `**/package.json`, `**/pnpm-lock.yaml`,
+  agent can still _understand_ the build): `**/package.json`, `**/pnpm-lock.yaml`,
   `**/.github/workflows/**`, `**/.git/**`, `**/.husky/**`, `**/Makefile`, `**/*.config.js`,
   `**/*.config.ts`, `**/*.config.mjs`, `**/vitest.config.*`, `**/node_modules/**`. Emit them in the
   same `--disallowedTools` join at line 525.
 - **Cost:** ~15 lines of data plus a two-line change to the join. Follows the existing comment's rule
   — named files and file types, no keyword wildcards.
-- **Incompleteness:** a test *file* is still writable and is still executed by `pnpm test`. This
+- **Incompleteness:** a test _file_ is still writable and is still executed by `pnpm test`. This
   narrows the pivot to "code the plan was supposed to touch anyway"; it does not eliminate it. C3
   covers the residue.
 - **Source:** OWASP LLM06 "Minimize Extension Permissions"; OWASP LLM05 (shell/exec as the named
   primary vulnerability).
 
-### C3 — Give `check` steps an allowlisted environment instead of a 3-item denylist  ★
+### C3 — Give `check` steps an allowlisted environment instead of a 3-item denylist ★
 
 - **Prevents:** secret exfiltration through the one step that has both a shell and unrestricted
   network. Today `GH_TOKEN` and `LITELLM_MASTER_KEY` are handed to `/bin/sh -c` verbatim.
@@ -361,7 +361,7 @@ target repo's settings and MCP configuration load silently on any step that isn'
   is denied automatically", and the security docs say which permission mode a session starts in
   "depends on your plan, the surface you start it from, and your settings and your organization's."
 - **Implementation:** `src/canon/runStep.ts` — append `--permission-mode manual --permission-prompts
-  none` to `extraArgs` alongside C1.
+none` to `extraArgs` alongside C1.
 - **Cost:** 2 lines.
 - **Incompleteness:** with `--allowedTools` already naming the granted set, this mostly removes
   ambiguity rather than removing capability. Cheap enough that the determinism is worth it on its own.
@@ -393,20 +393,20 @@ target repo's settings and MCP configuration load silently on any step that isn'
   directly-endorsed control on the list.
 - For yoke specifically it earns a low rank: it adds a model call and a failure mode to every edge, it
   produces false positives on exactly the content yoke handles (a security-review step legitimately
-  *quotes* injection-looking text), and it is much more valuable once §2.5's multi-repo plumbing
+  _quotes_ injection-looking text), and it is much more valuable once §2.5's multi-repo plumbing
   exists and the workspace is genuinely untrusted. Revisit it then, not now.
 
 ### Ranking
 
-| # | Control | Risk reduced | Effort | Files |
-|---|---------|--------------|--------|-------|
-| 1 | C1 unconditional `--restricted` | very high | ~6 lines | `src/canon/runStep.ts`, `src/canon/runStep.test.ts` |
-| 2 | C2 execution-file Edit denies | high | ~15 lines | `src/canon/runStep.ts` |
-| 3 | C3 check-step env allowlist | high | ~25 lines + canon field | `src/canon/runStep.ts`, `src/canon/types.ts`, `src/canon/load.ts` |
-| 4 | C4 gate before first write | medium-high | ~4 lines YAML | `pipelines/build.yaml`, `pipelines/ship.yaml` |
-| 5 | C5 pin permission mode | medium | 2 lines | `src/canon/runStep.ts` |
-| 6 | C6 label/escape untrusted output | medium (partial by nature) | ~20 lines + evals | `src/bindings/mastra/buildSteps.ts`, `prompts/*.md` |
-| 7 | C7 injection screen | unclear here | high | defer |
+| #   | Control                          | Risk reduced               | Effort                  | Files                                                             |
+| --- | -------------------------------- | -------------------------- | ----------------------- | ----------------------------------------------------------------- |
+| 1   | C1 unconditional `--restricted`  | very high                  | ~6 lines                | `src/canon/runStep.ts`, `src/canon/runStep.test.ts`               |
+| 2   | C2 execution-file Edit denies    | high                       | ~15 lines               | `src/canon/runStep.ts`                                            |
+| 3   | C3 check-step env allowlist      | high                       | ~25 lines + canon field | `src/canon/runStep.ts`, `src/canon/types.ts`, `src/canon/load.ts` |
+| 4   | C4 gate before first write       | medium-high                | ~4 lines YAML           | `pipelines/build.yaml`, `pipelines/ship.yaml`                     |
+| 5   | C5 pin permission mode           | medium                     | 2 lines                 | `src/canon/runStep.ts`                                            |
+| 6   | C6 label/escape untrusted output | medium (partial by nature) | ~20 lines + evals       | `src/bindings/mastra/buildSteps.ts`, `prompts/*.md`               |
+| 7   | C7 injection screen              | unclear here               | high                    | defer                                                             |
 
 ### Already correct — do not regress
 
@@ -454,7 +454,7 @@ other contexts and net-negative here. Declining them deliberately:
   container would close is C3's env allowlist, at a hundred times the cost.
 - **A policy engine, signed pipeline manifests, or a canon provenance chain.** The canon is a handful
   of YAML files in a git repo the owner controls, edited by the owner. The attacker in this threat
-  model influences *repository content*, not the pipeline definition. Signing the definition secures
+  model influences _repository content_, not the pipeline definition. Signing the definition secures
   the part that was never at risk.
 - **Audit logging and monitoring pipelines.** OWASP lists these explicitly as damage-limiting, not
   preventive. There is one operator, sessions are minutes long, and the JSONL sink from ADR-0009 was
@@ -472,7 +472,7 @@ other contexts and net-negative here. Declining them deliberately:
   and it is still premature while the workspace is the owner's own repo (F5). It becomes worth
   building on the same commit that lets a run target a foreign repository.
 
-**Verdict: decline anything whose value depends on multiple users, an untrusted operator, or a hostile pipeline author — none of those exist here; the whole real threat surface is untrusted file *content* meeting a step with more privilege than it needs.**
+**Verdict: decline anything whose value depends on multiple users, an untrusted operator, or a hostile pipeline author — none of those exist here; the whole real threat surface is untrusted file _content_ meeting a step with more privilege than it needs.**
 
 ---
 

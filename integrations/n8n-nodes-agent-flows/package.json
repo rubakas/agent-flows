@@ -1,7 +1,7 @@
 {
-  "name": "n8n-nodes-yoke",
+  "name": "n8n-nodes-agent-flows",
   "version": "0.1.0",
-  "description": "Yoke coding-agent node for n8n — a typed, sandboxed interface to the claude CLI",
+  "description": "agent-flows coding-agent node for n8n — a typed, sandboxed interface to the claude CLI",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",

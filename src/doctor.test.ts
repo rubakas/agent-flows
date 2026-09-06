@@ -228,7 +228,7 @@ describe("runDoctor", () => {
   });
 
   it("openai profile: codex CLI present → transport ok", async () => {
-    const results = await runDoctor(makeOkProbes({ env: { YOKE_PROVIDER: "openai" } }));
+    const results = await runDoctor(makeOkProbes({ env: { AGENT_FLOWS_PROVIDER: "openai" } }));
     const check = results.find((r) => r.name === "openai: codex CLI transport");
     assert.ok(check, "openai transport check missing");
     assert.equal(check.status, "ok");
@@ -237,7 +237,7 @@ describe("runDoctor", () => {
   it("openai profile: codex CLI missing → transport fail", async () => {
     const results = await runDoctor(
       makeOkProbes({
-        env: { YOKE_PROVIDER: "openai" },
+        env: { AGENT_FLOWS_PROVIDER: "openai" },
         which: (bin) => (bin === "codex" ? undefined : `/usr/bin/${bin}`),
       })
     );
@@ -250,7 +250,7 @@ describe("runDoctor", () => {
   it("local profile: api transport reachable → ok", async () => {
     const results = await runDoctor(
       makeOkProbes({
-        env: { YOKE_PROVIDER: "local" },
+        env: { AGENT_FLOWS_PROVIDER: "local" },
         reachable: async (_url) => true,
       })
     );
@@ -262,7 +262,7 @@ describe("runDoctor", () => {
   it("local profile: api transport unreachable → fail", async () => {
     const results = await runDoctor(
       makeOkProbes({
-        env: { YOKE_PROVIDER: "local" },
+        env: { AGENT_FLOWS_PROVIDER: "local" },
         reachable: async (_url) => false,
       })
     );
@@ -272,8 +272,10 @@ describe("runDoctor", () => {
     assert.ok(check.detail.includes("unreachable"), `detail: ${check.detail}`);
   });
 
-  it("invalid YOKE_PROVIDER → active provider fails", async () => {
-    const results = await runDoctor(makeOkProbes({ env: { YOKE_PROVIDER: "invalid-provider" } }));
+  it("invalid AGENT_FLOWS_PROVIDER → active provider fails", async () => {
+    const results = await runDoctor(
+      makeOkProbes({ env: { AGENT_FLOWS_PROVIDER: "invalid-provider" } })
+    );
     const check = results.find((r) => r.name === "Active provider");
     assert.ok(check, "Active provider check missing");
     assert.equal(check.status, "fail");

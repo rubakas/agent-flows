@@ -125,9 +125,9 @@ function extractRunError(runResult: unknown): string {
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
-const dbPath = `/tmp/yoke-eval-${fixtureName}.sqlite`;
+const dbPath = `/tmp/agent-flows-eval-${fixtureName}.sqlite`;
 const mastraDb = mastraDbPath(dbPath);
-const providerId = process.env.YOKE_PROVIDER ?? "anthropic";
+const providerId = process.env.AGENT_FLOWS_PROVIDER ?? "anthropic";
 const profile = getProfile(providerId);
 const registry = defaultRegistry();
 
@@ -162,9 +162,9 @@ console.log(
 
 // ── Run ───────────────────────────────────────────────────────────────────────
 
-const mastraStorage = new LibSQLStore({ id: "yoke-eval", url: `file:${mastraDb}` });
-const yokeDb = makeDb(dbPath);
-const store = new DrizzleTicketStore(yokeDb);
+const mastraStorage = new LibSQLStore({ id: "agent-flows-eval", url: `file:${mastraDb}` });
+const db = makeDb(dbPath);
+const store = new DrizzleTicketStore(db);
 
 const wf = buildPipelineWorkflow(loaded, { registry, store, profile, cwd: repoRoot });
 const mastra = new Mastra({ storage: mastraStorage, workflows: { [loaded.def.id]: wf } });

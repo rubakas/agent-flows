@@ -264,15 +264,15 @@ async function runClaude(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
 
 export class YokeAgent implements INodeType {
   description: INodeTypeDescription = {
-    displayName: 'Yoke Coding Agent',
-    name: 'yokeAgent',
+    displayName: 'Agent Flows Coding Agent',
+    name: 'agentFlowsAgent',
     icon: 'fa:robot',
     group: ['transform'],
     version: 1,
     description:
       'Run a sandboxed read-only coding agent (claude CLI) as a typed workflow step. ' +
       'The prompt is delivered via stdin; the agent environment is scrubbed of n8n secrets.',
-    defaults: { name: 'Yoke Agent' },
+    defaults: { name: 'Agent Flows Agent' },
     inputs: [NodeConnectionTypes.Main],
     outputs: [NodeConnectionTypes.Main],
     properties: [
@@ -398,7 +398,7 @@ export class YokeAgent implements INodeType {
           workspaceCwd = await validateWorkspaceDirectory(rawWorkspaceDir);
         } else {
           // none: spawn in a node-created temp directory to prevent inheriting n8n's cwd
-          tempDir = join(tmpdir(), `yoke-agent-none-${randomUUID()}`);
+          tempDir = join(tmpdir(), `agent-flows-agent-none-${randomUUID()}`);
           await fs.mkdir(tempDir, { recursive: true });
           workspaceCwd = tempDir;
         }

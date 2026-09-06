@@ -139,7 +139,7 @@ describe("pipelineLevels", () => {
   // validate(), to confirm the loop guard itself throws rather than spinning
   // when a cycle slips through. The public path cannot reach this branch today
   // (validate() catches every cycle first), but if validate() is ever weakened
-  // or reordered the guard keeps the yoke serve daemon from hanging instead of
+  // or reordered the guard keeps the agent-flows serve daemon from hanging instead of
   // failing loudly (see ADR-0014).
   it("_computeLevels guard throws GraphError on a cycle, naming stuck ids (defence-in-depth)", () => {
     const steps = [

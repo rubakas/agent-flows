@@ -1,10 +1,10 @@
 {
   "mcpServers": {
-    "yoke": {
+    "agent-flows": {
       "command": "bash",
       "args": ["scripts/mcp-serve.sh"],
       "env": {
-        "YOKE_PROVIDER": "anthropic"
+        "AGENT_FLOWS_PROVIDER": "anthropic"
       }
     }
   }

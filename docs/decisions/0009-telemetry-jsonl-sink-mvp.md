@@ -7,7 +7,7 @@
 
 ## Decision
 
-Ship a dependency-free `JsonlTelemetrySink` as the MVP `TelemetrySink` implementation. It appends span/log events as JSONL to a configurable file (`YOKE_TELEMETRY_PATH`, default `./yoke-telemetry.jsonl`) and exposes an `onEvent` hook for the orchestrator's live flow-monitor. A `NoopTelemetrySink` is included for tests. The OTel/OpenInference→Phoenix exporter (ADR-0005, FR-003) is deferred as a drop-in `TelemetrySink` module — no `@opentelemetry/*` or `@arizeai/*` dependencies are added now.
+Ship a dependency-free `JsonlTelemetrySink` as the MVP `TelemetrySink` implementation. It appends span/log events as JSONL to a configurable file (`AGENT_FLOWS_TELEMETRY_PATH`, default `./agent-flows-telemetry.jsonl`) and exposes an `onEvent` hook for the orchestrator's live flow-monitor. A `NoopTelemetrySink` is included for tests. The OTel/OpenInference→Phoenix exporter (ADR-0005, FR-003) is deferred as a drop-in `TelemetrySink` module — no `@opentelemetry/*` or `@arizeai/*` dependencies are added now.
 
 ## Context
 
@@ -17,4 +17,4 @@ ADR-0004 (supply-chain security) requires careful vetting of every dependency. T
 
 - Phoenix UI is not wired yet; operators read JSONL directly or via the orchestrator's event stream.
 - Swapping in an `OtelSink` later requires only a new module descriptor + manifest flip — zero core changes.
-- Span attrs follow the `yoke.*` convention (FR-002) from day one, so the OTel exporter will emit correct semantic attributes when it lands.
+- Span attrs follow the `agent-flows.*` convention (FR-002) from day one, so the OTel exporter will emit correct semantic attributes when it lands.

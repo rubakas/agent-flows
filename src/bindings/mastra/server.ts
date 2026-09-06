@@ -29,19 +29,19 @@ const dbFlagIdx = process.argv.indexOf("--db");
 const ticketDbPath =
   dbFlagIdx !== -1 && process.argv[dbFlagIdx + 1]
     ? process.argv[dbFlagIdx + 1]
-    : join(repoRoot, "yoke.sqlite");
+    : join(repoRoot, "agent-flows.sqlite");
 
 const mastraDb = mastraDbPath(ticketDbPath);
 
 // ── Storage ──────────────────────────────────────────────────────────────────
 
 const mastraStorage = new LibSQLStore({
-  id: "yoke-mastra",
+  id: "agent-flows-mastra",
   url: `file:${mastraDb}`,
 });
 
-const yokeDb = makeDb(ticketDbPath);
-const store = new DrizzleTicketStore(yokeDb);
+const db = makeDb(ticketDbPath);
+const store = new DrizzleTicketStore(db);
 const registry = defaultRegistry();
 
 // ── Load pipelines ────────────────────────────────────────────────────────────
@@ -181,8 +181,8 @@ const getRunTool = createTool({
 // ── Start MCP server ──────────────────────────────────────────────────────────
 
 const server = new MCPServer({
-  id: "yoke-mastra",
-  name: "Yoke Mastra Binding",
+  id: "agent-flows-mastra",
+  name: "Agent Flows Mastra Binding",
   version: "1.0.0",
   tools: {
     list_pipelines: listPipelinesTool,

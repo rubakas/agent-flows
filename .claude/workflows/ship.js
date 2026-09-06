@@ -12,8 +12,8 @@ if (!plan) {
 const models = (args && args.models) || {}
 
 // gate 'approve': handled in chat by the orchestrating session
-// check 'commit': run `git add -A && git commit -m "feat: apply approved plan"`
-// check 'pr': run `gh pr create --fill`
+// check 'commit': run `git add -u && git commit -m "feat: apply approved plan"`
+// check 'pr': run `[ "$(git branch --show-current)" != "main" ] && gh pr create --fill`
 
 return {
   spec,

@@ -4,7 +4,7 @@ Status: Accepted (2026-09-05)
 
 ## Context
 
-Yoke's purpose is automating the owner's repeated development lifecycle. A primary-source survey of
+agent-flows's purpose is automating the owner's repeated development lifecycle. A primary-source survey of
 Anthropic's workflow guidance and GitHub's Spec Kit framework (`docs/research/2026-09-04-agentic-dev-workflow-patterns.md`)
 found two independent vendors documenting the same lifecycle spine: `research → plan → verify-plan →
 correct-plan → [human gate] → develop → test → audit → converge`. Verification appears twice — once on
@@ -45,7 +45,7 @@ These four principles fall directly from the surveyed primary sources (see
 
 1. **Read is separated from write; the transition is gated by a human.** The first repo-writing
    workflow (`develop`) runs only after the `plan` gate. This is Anthropic's explore-before-code
-   discipline and Yoke's Charter rule (ADR-0011).
+   discipline and agent-flows's Charter rule (ADR-0011).
 
 2. **Verification happens twice, each in a fresh context.** Once on the plan (stage `verify-plan`)
    and once on the code (stage `audit`). A reviewer running in a fresh context sees only the diff

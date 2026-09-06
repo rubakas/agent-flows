@@ -86,9 +86,9 @@ export function getProfile(id: string): ProviderProfile {
   return profile;
 }
 
-/** Returns the active profile from YOKE_PROVIDER env, defaulting to "anthropic". */
+/** Returns the active profile from AGENT_FLOWS_PROVIDER env, defaulting to "anthropic". */
 export function getActiveProfile(env: NodeJS.ProcessEnv = process.env): ProviderProfile {
-  return getProfile(env.YOKE_PROVIDER ?? "anthropic");
+  return getProfile(env.AGENT_FLOWS_PROVIDER ?? "anthropic");
 }
 
 /**

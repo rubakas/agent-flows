@@ -1,12 +1,12 @@
-# Yoke
+# agent-flows
 
 A modular, TypeScript workflow-control harness for LLM-driven software development.
 
-Yoke turns a request into a **hardened spec** through an adversarial pipeline: intake → enrichment → parallel criticism and security review → assembly → approval gate → persisted ticket. Pipelines are defined once as provider-neutral data (YAML + prompt files) and executed by thin bindings to Claude, Mastra, or other runtimes.
+agent-flows turns a request into a **hardened spec** through an adversarial pipeline: intake → enrichment → parallel criticism and security review → assembly → approval gate → persisted ticket. Pipelines are defined once as provider-neutral data (YAML + prompt files) and executed by thin bindings to Claude, Mastra, or other runtimes.
 
 ## Charter
 
-**What Yoke is.** A harness for building, editing and running dynamic workflows for
+**What agent-flows is.** A harness for building, editing and running dynamic workflows for
 LLM-assisted software development. Workflows, steps, skills and agents are provider-neutral
 templates stored as data. The same template runs against whichever model providers are
 currently active.
@@ -25,7 +25,7 @@ pane, T3 Code's desktop Browser panel, or an ordinary browser.
 
 1. Provider portability is an acceptance criterion, not a feature — the same pipeline must
    run under at least two independent providers.
-2. Layer-0 key isolation — no provider API keys in the Yoke process environment; child
+2. Layer-0 key isolation — no provider API keys in the agent-flows process environment; child
    processes receive a scrubbed environment (ADR-0004).
 3. The canon stays provider-neutral; anything harness-specific lives in a binding
    (ADR-0011).
@@ -60,7 +60,7 @@ Manual workflow from the client:
 3. If the run returns `status: "awaiting_approval"`, review the spec and call `approve` with the `runId`.
 4. Call `get_run` at any time to check status.
 
-**Switching providers:** edit the `YOKE_PROVIDER` value in `.mcp.json` (`anthropic` → `openai` or `local`) and restart the client. No pipeline or prompt changes needed.
+**Switching providers:** edit the `AGENT_FLOWS_PROVIDER` value in `.mcp.json` (`anthropic` → `openai` or `local`) and restart the client. No pipeline or prompt changes needed.
 
 ```sh
 pnpm mcp                      # also launchable standalone (stdio, for testing)
@@ -73,8 +73,8 @@ pnpm bindings:n8n             # generate .n8n-workflows/*.json from the canon
 ```
 
 Install the typed node so both the n8n editor and CLI load it — copy the built
-`integrations/n8n-nodes-yoke` into `<N8N_USER_FOLDER>/.n8n/nodes/node_modules/`, then import the
-generated workflow. See `integrations/n8n-nodes-yoke/README.md`.
+`integrations/n8n-nodes-agent-flows` into `<N8N_USER_FOLDER>/.n8n/nodes/node_modules/`, then import the
+generated workflow. See `integrations/n8n-nodes-agent-flows/README.md`.
 
 **Node version:** everything requires Node ≥ 22 (`better-sqlite3` is built for it). If your shell
 defaults to an older node, `scripts/dev-serve.sh` and `scripts/mcp-serve.sh` force Node 22 via nvm —
@@ -103,18 +103,18 @@ pnpm run doctor               # verify all prerequisites; fix hints for each mis
 - **Provider-neutral canon** — `pipelines/*.yaml` + `prompts/*.md` + loader (`src/canon/`); schema includes llm, gate, assemble-spec, persist-ticket; step ordering is explicit via `dependsOn` edges (ADR-0014), compiled to parallel levels. A step may declare `permissions: { contents: read }` to run its agent read-only in the project directory (follows the GitHub Actions `permissions:` convention).
 - **Binding A** — Claude Code dynamic workflow generator (`.claude/workflows/*.js`, generated via `pnpm bindings:claude`); approval gates happen in chat between runs; subscription-billed; exit path is Binding B.
 - **Binding B** — Mastra interpreter + MCP server (Apache-2.0); durable suspend/resume HITL; steps execute via the open model registry (`pnpm mcp` starts the server; `pnpm mastra:smoke` runs standalone).
-- **Binding C** — n8n workflow generator (`.n8n-workflows/*.json`, generated via `pnpm bindings:n8n`); the canon compiles to an n8n workflow whose llm steps reference the installable `n8n-nodes-yoke.yokeAgent` community node (`integrations/n8n-nodes-yoke/`). n8n provides the visual editor and execution surface; the canon stays the git-backed source.
+- **Binding C** — n8n workflow generator (`.n8n-workflows/*.json`, generated via `pnpm bindings:n8n`); the canon compiles to an n8n workflow whose llm steps reference the installable `n8n-nodes-agent-flows.agentFlowsAgent` community node (`integrations/n8n-nodes-agent-flows/`). n8n provides the visual editor and execution surface; the canon stays the git-backed source.
 - **Model registry** — open; CLI aliases + passthrough of any model id; local `claude`/`codex` CLIs on subscription auth, Ollama local models, keyed APIs via LiteLLM.
 - **SQLite ticket store** — pipeline source of truth (better-sqlite3 + Drizzle); persisted by the `persist-ticket` step in each pipeline run.
-- **Layer-0 key isolation** — Yoke process environment holds no real provider keys; child processes receive scrubbed environment (Charter invariant).
+- **Layer-0 key isolation** — agent-flows process environment holds no real provider keys; child processes receive scrubbed environment (Charter invariant).
 
 ## Current direction
 
 **One canonical pipeline definition, many execution backends.** Chat-first operation via any MCP-capable client (Claude Code, Codex, or other). The same canon (provider-neutral YAML + prompts) runs unchanged against any configured model provider — swapping providers is a registry edit, not a code change (ADR-0011, ADR-0012). Provider portability is an acceptance criterion, enforced by smoke-testing the same pipeline under at least two independent bindings.
 
-**The visual editor is n8n, not a Yoke-built one** (evaluated live 2026-09-04; see `docs/research/2026-09-04-n8n-spike.md` and `docs/research/2026-09-04-n8n-and-alternatives.md`). Rebuilding a node editor — the canvas is only a library (n8n uses Vue Flow); the forms, modals, inspector and execution UI are years of work — is not worth it for a private tool. Instead the canon compiles to n8n via Binding C, and the typed coding-agent step ships as an installable n8n node. n8n gives the editor and runtime for free; Yoke keeps the git-backed canon, the provider-neutral role→model registry, and the typed repo-access grounding (`permissions.contents`) that n8n has no concept of. The earlier direction — a Yoke-served DAG editor (ADR-0013, spec 015) — is superseded by this hybrid; the level-band web editor built under it (`src/serve/`) remains but is no longer the plan.
+**The visual editor is n8n, not a agent-flows-built one** (evaluated live 2026-09-04; see `docs/research/2026-09-04-n8n-spike.md` and `docs/research/2026-09-04-n8n-and-alternatives.md`). Rebuilding a node editor — the canvas is only a library (n8n uses Vue Flow); the forms, modals, inspector and execution UI are years of work — is not worth it for a private tool. Instead the canon compiles to n8n via Binding C, and the typed coding-agent step ships as an installable n8n node. n8n gives the editor and runtime for free; agent-flows keeps the git-backed canon, the provider-neutral role→model registry, and the typed repo-access grounding (`permissions.contents`) that n8n has no concept of. The earlier direction — a agent-flows-served DAG editor (ADR-0013, spec 015) — is superseded by this hybrid; the level-band web editor built under it (`src/serve/`) remains but is no longer the plan.
 
-Current milestone: land the hybrid — Binding C (built), the `n8n-nodes-yoke` node package (built), and wiring the investigation pipeline to read the repo (`permissions: { contents: read }`). [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps.
+Current milestone: land the hybrid — Binding C (built), the `n8n-nodes-agent-flows` node package (built), and wiring the investigation pipeline to read the repo (`permissions: { contents: read }`). [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps.
 
 ### Architecture & Design Record
 

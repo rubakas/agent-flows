@@ -1,4 +1,4 @@
-// Tests for the yoke serve HTTP server.
+// Tests for the agent-flows serve HTTP server.
 //
 // Uses port 0 for ephemeral binding. Draft tests copy the real pipeline YAML
 // and its prompts into a tmp directory so saveDraft can write without touching
@@ -315,7 +315,7 @@ describe("draft open → update → save round trip", () => {
     // loadPipeline's containment check (which uses realpathSync on prompt paths)
     // passes — without it, the root computed from the yaml path won't match
     // the realpath of the prompt files.
-    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "yoke-serve-test-")));
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-serve-test-")));
     tmpPipelinesDir = join(tmpRoot, "pipelines");
     mkdirSync(tmpPipelinesDir);
 

@@ -40,7 +40,7 @@ steps:
 
 describe("loadCatalog — pipeline added after initial load", () => {
   it("new file becomes visible on next loadCatalog call", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "yoke-loader-add-"));
+    const dir = await mkdtemp(join(tmpdir(), "agent-flows-loader-add-"));
     try {
       const c1 = loadCatalog(dir);
       assert.equal(c1.loaded.length, 0, "directory starts empty");
@@ -58,7 +58,7 @@ describe("loadCatalog — pipeline added after initial load", () => {
 
 describe("loadCatalog — edited pipeline picked up in new form", () => {
   it("changed file content is reflected on next loadCatalog call", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "yoke-loader-edit-"));
+    const dir = await mkdtemp(join(tmpdir(), "agent-flows-loader-edit-"));
     try {
       await writeFile(join(dir, "alpha.yaml"), VALID_PIPELINE);
 
@@ -81,7 +81,7 @@ describe("loadCatalog — edited pipeline picked up in new form", () => {
 
 describe("loadCatalog — malformed pipeline does not take down valid ones", () => {
   it("valid pipeline loads and malformed one is reported as an error", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "yoke-loader-err-"));
+    const dir = await mkdtemp(join(tmpdir(), "agent-flows-loader-err-"));
     try {
       await writeFile(join(dir, "alpha.yaml"), VALID_PIPELINE);
       await writeFile(join(dir, "broken.yaml"), MALFORMED_PIPELINE);

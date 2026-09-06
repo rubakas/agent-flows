@@ -106,7 +106,7 @@ interface TestFixture {
 }
 
 function makeTestFixture(suffix: string): TestFixture {
-  const dbPath = join(tmpdir(), `yoke-mastra-test-${suffix}-${Date.now()}.db`);
+  const dbPath = join(tmpdir(), `agent-flows-mastra-test-${suffix}-${Date.now()}.db`);
   const storage = new LibSQLStore({ id: `test-${suffix}`, url: `file:${dbPath}` });
   const db = makeInMemoryDb();
   const store = new DrizzleTicketStore(db);
@@ -853,19 +853,22 @@ describe("buildPipelineWorkflow — per-step timeout wiring", () => {
 
 describe("mastraDbPath", () => {
   it("strips .sqlite and appends -mastra.db", () => {
-    assert.equal(mastraDbPath("/tmp/yoke.sqlite"), "/tmp/yoke-mastra.db");
+    assert.equal(mastraDbPath("/tmp/agent-flows.sqlite"), "/tmp/agent-flows-mastra.db");
   });
 
   it("strips .db and appends -mastra.db", () => {
-    assert.equal(mastraDbPath("/tmp/yoke.db"), "/tmp/yoke-mastra.db");
+    assert.equal(mastraDbPath("/tmp/agent-flows.db"), "/tmp/agent-flows-mastra.db");
   });
 
   it("appends -mastra.db when no recognised extension", () => {
-    assert.equal(mastraDbPath("/tmp/yoke"), "/tmp/yoke-mastra.db");
+    assert.equal(mastraDbPath("/tmp/agent-flows"), "/tmp/agent-flows-mastra.db");
   });
 
   it("does not strip a .db component in a directory name", () => {
-    assert.equal(mastraDbPath("/some/path/db.dir/yoke"), "/some/path/db.dir/yoke-mastra.db");
+    assert.equal(
+      mastraDbPath("/some/path/db.dir/agent-flows"),
+      "/some/path/db.dir/agent-flows-mastra.db"
+    );
   });
 });
 
@@ -1421,7 +1424,7 @@ function makeExportSpecPipeline(outDir: string): LoadedPipeline {
 
 describe("buildPipelineWorkflow — export-spec step writes spec.md", () => {
   it("approved run writes Spec Kit markdown to the given directory", async () => {
-    const tmp = await mkdtemp(join(tmpdir(), "yoke-exportspec-exec-"));
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-exec-"));
     const outDir = join(tmp, "spec-out");
     try {
       const pipeline = makeExportSpecPipeline(outDir);
@@ -1467,7 +1470,7 @@ describe("buildPipelineWorkflow — export-spec step writes spec.md", () => {
   });
 
   it("rejected run does not write spec.md", async () => {
-    const tmp = await mkdtemp(join(tmpdir(), "yoke-exportspec-reject-"));
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-reject-"));
     const outDir = join(tmp, "spec-out");
     try {
       const pipeline = makeExportSpecPipeline(outDir);
@@ -1502,7 +1505,7 @@ describe("buildPipelineWorkflow — export-spec step writes spec.md", () => {
 // instead of ctx["plan.spec"]) — which would give undefined and throw.
 describe("buildPipelineWorkflow — export-spec in nested namespace reads namespaced spec key", () => {
   it("plan.export reads plan.spec, not bare spec, and writes the file", async () => {
-    const tmp = await mkdtemp(join(tmpdir(), "yoke-exportspec-ns-"));
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-ns-"));
     const outDir = join(tmp, "spec-ns-out");
     try {
       const pipeline: LoadedPipeline = {

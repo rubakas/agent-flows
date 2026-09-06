@@ -104,7 +104,7 @@ export function _computeLevels(steps: readonly GraphStep[]): readonly (readonly 
     }
 
     // Defence-in-depth: if no step is ready, a cycle is present that
-    // validate() should have caught. A hang here takes down the yoke serve
+    // validate() should have caught. A hang here takes down the agent-flows serve
     // daemon (ADR-0014), so throw loudly rather than spin.
     if (level.length === 0) {
       const stuck = [...remaining].join(", ");

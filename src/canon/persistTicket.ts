@@ -1,4 +1,4 @@
-// FR-006: Persist a hardened spec into Yoke's SQLite ticket store.
+// FR-006: Persist a hardened spec into agent-flows's SQLite ticket store.
 
 import { randomUUID } from "node:crypto";
 import type { HardenedSpec } from "./types.js";
@@ -11,10 +11,10 @@ export async function persistTicket(
   spec: HardenedSpec
 ): Promise<{ ticketId: number }> {
   const ticket = await store.createTicket({
-    slug: `yoke-${randomUUID()}`,
+    slug: `agent-flows-${randomUUID()}`,
     title: spec.title,
     body: spec.description,
-    intent: "yoke:spec-creation",
+    intent: "agent-flows:spec-creation",
   });
 
   const ticketId = ticket.id;
@@ -57,8 +57,8 @@ export async function persistTicket(
   await store.addProvenance({
     ticketId,
     section: "spec-creation",
-    agent: "yoke",
-    model: "yoke:spec-creation",
+    agent: "agent-flows",
+    model: "agent-flows:spec-creation",
     runId: randomUUID(),
   });
 

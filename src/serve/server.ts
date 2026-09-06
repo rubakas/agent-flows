@@ -145,7 +145,7 @@ function findPipelineById(pipelinesDir: string, id: string): PipelineEntry | und
 export interface ServeOptions {
   /** TCP port; defaults to 7411. Pass 0 for an ephemeral port (tests). */
   port?: number;
-  /** Absolute path to the SQLite database; defaults to `<cwd>/yoke.sqlite`. */
+  /** Absolute path to the SQLite database; defaults to `<cwd>/agent-flows.sqlite`. */
   dbPath?: string;
   /** Directory containing pipeline YAML files; defaults to `<cwd>/pipelines`. */
   pipelinesDir?: string;
@@ -177,7 +177,7 @@ interface HandlerCtx {
  */
 export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle> {
   const pipelinesDir = opts.pipelinesDir ?? join(process.cwd(), "pipelines");
-  const dbPath = opts.dbPath ?? join(process.cwd(), "yoke.sqlite");
+  const dbPath = opts.dbPath ?? join(process.cwd(), "agent-flows.sqlite");
   const root = dirname(pipelinesDir); // launch root — one level above pipelines/
   const db = makeDb(dbPath);
   const runService = opts.runService ?? null;
@@ -294,7 +294,7 @@ async function handleRequest(
         });
       } catch {
         // Silently omit files that fail to parse; they are visible as errors
-        // on disk and will be flagged by `yoke canon:check`.
+        // on disk and will be flagged by `agent-flows canon:check`.
       }
     }
     json(res, 200, { pipelines });
@@ -538,7 +538,7 @@ if (process.argv[1] === __filename) {
   process.env.MASTRA_TELEMETRY_DISABLED = "1";
 
   const port = parseInt(getArgValue("--port", "7411"), 10);
-  const dbPath = getArgValue("--db", join(process.cwd(), "yoke.sqlite"));
+  const dbPath = getArgValue("--db", join(process.cwd(), "agent-flows.sqlite"));
   const pipelinesDir = join(process.cwd(), "pipelines");
 
   // Non-literal specifiers prevent import-x/no-cycle from traversing into
@@ -563,9 +563,9 @@ if (process.argv[1] === __filename) {
   const { RunService: RunServiceClass } = await import(runServiceSpec);
 
   const mastraDb = mastraDbPath(dbPath);
-  const mastraStorage = new LibSQLStore({ id: "yoke-mastra", url: `file:${mastraDb}` });
-  const yokeDb = makeDb(dbPath);
-  const store = new DrizzleTicketStore(yokeDb);
+  const mastraStorage = new LibSQLStore({ id: "agent-flows-mastra", url: `file:${mastraDb}` });
+  const db = makeDb(dbPath);
+  const store = new DrizzleTicketStore(db);
   const registry = defaultRegistry();
 
   const pipelineFiles = listPipelines(pipelinesDir);
@@ -580,5 +580,5 @@ if (process.argv[1] === __filename) {
 
   const handle = await startServer({ port, dbPath, pipelinesDir, runService });
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
-  console.log(`yoke serve listening on http://127.0.0.1:${handle.port}`);
+  console.log(`agent-flows serve listening on http://127.0.0.1:${handle.port}`);
 }

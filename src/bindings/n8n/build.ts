@@ -6,12 +6,12 @@ import type { LoadedPipeline, StepDef } from "../../canon/types.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-/** n8n node type for Yoke LLM steps. Change here when the node package finalises the type string. */
-export const YOKE_NODE_TYPE = "n8n-nodes-yoke.yokeAgent";
+/** n8n node type for agent-flows LLM steps. Change here when the node package finalises the type string. */
+export const AGENT_FLOWS_NODE_TYPE = "n8n-nodes-agent-flows.agentFlowsAgent";
 
 /**
  * Single-source expression for the project directory.
- * Every Yoke node emits this so the operator sets the directory once on the
+ * Every agent-flows node emits this so the operator sets the directory once on the
  * trigger and all steps inherit it automatically.
  */
 export const WORKSPACE_DIR_EXPR = "={{ $json.projectDir }}";
@@ -72,7 +72,7 @@ function makeNode(
 function buildStepNode(step: StepDef, position: [number, number], promptText: string): N8nNode {
   if (step.kind === "llm") {
     // TODO(binding-c): interpolate pipeline inputs via n8n expressions
-    return makeNode(step.id, YOKE_NODE_TYPE, position, {
+    return makeNode(step.id, AGENT_FLOWS_NODE_TYPE, position, {
       role: step.role ?? "",
       model: step.model ?? "",
       contentsAccess: step.permissions?.contents ?? "none",
@@ -105,7 +105,7 @@ function buildStepNode(step: StepDef, position: [number, number], promptText: st
   }
 
   if (step.kind === "export-spec") {
-    // TODO(binding-c): wire to a yoke node or file-write sub-workflow later
+    // TODO(binding-c): wire to an agent-flows node or file-write sub-workflow later
     return makeNode(
       step.id,
       NOOP_TYPE,
@@ -116,7 +116,7 @@ function buildStepNode(step: StepDef, position: [number, number], promptText: st
   }
 
   // assemble-spec | persist-ticket
-  // TODO(binding-c): these are yoke-runtime concerns; wire to a yoke node or sub-workflow later
+  // TODO(binding-c): these are agent-flows-runtime concerns; wire to an agent-flows node or sub-workflow later
   return makeNode(step.id, NOOP_TYPE, position, {});
 }
 

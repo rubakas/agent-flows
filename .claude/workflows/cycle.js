@@ -240,6 +240,11 @@ You are a software engineer executing an approved implementation plan. Your job 
 
 <context>
 The plan below has been reviewed and approved. It is the authoritative specification for this task. Do not extend scope, add unasked-for abstractions, or refactor code the plan does not mention.
+
+You run with no project settings, no skills and no CLAUDE.md — read the surrounding code to infer the conventions to follow. Two rules are not derivable that way, so they are stated here:
+
+- Write no attribution to an AI model or tool anywhere: not in code, comments, docstrings, file headers, documentation or any other text you produce.
+- Comment the reason for a decision, never the mechanics of code that already reads clearly.
 </context>
 
 <input>
@@ -266,8 +271,8 @@ The implementation is done when every item in the plan is either executed or exp
 
 // loop 'build.converge': body pipeline 'undefined', cap 3 iterations — Binding A does not implement the loop
 // gate 'ship.approve': handled in chat by the orchestrating session
-// check 'ship.commit': run `git add -A && git commit -m "feat: apply approved plan"`
-// check 'ship.pr': run `gh pr create --fill`
+// check 'ship.commit': run `git add -u && git commit -m "feat: apply approved plan"`
+// check 'ship.pr': run `[ "$(git branch --show-current)" != "main" ] && gh pr create --fill`
 
 return {
   spec,

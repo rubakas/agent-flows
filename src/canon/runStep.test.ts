@@ -618,7 +618,7 @@ describe('runLlmStep — workspace: "read"', () => {
       runLlmStep(entry, "hi", {
         spawn,
         contentsAccess: "read",
-        workspaceDir: "/definitely/does/not/exist/yoke-test-9482",
+        workspaceDir: "/definitely/does/not/exist/agent-flows-test-9482",
       }),
       /workspaceDir/
     );
@@ -794,7 +794,7 @@ describe("runLlmStep — skills", () => {
     assert.ok(!capturedArgs.includes("Bash"), "Bash must never be granted");
   });
 
-  it("skills dir resolved from YOKE_SKILLS_DIR env var when set", async () => {
+  it("skills dir resolved from AGENT_FLOWS_SKILLS_DIR env var when set", async () => {
     const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
@@ -805,7 +805,7 @@ describe("runLlmStep — skills", () => {
     await runLlmStep(entry, "use skill", {
       spawn,
       skills: ["git"],
-      env: { HOME: "/home/user", YOKE_SKILLS_DIR: "/opt/project/.claude" },
+      env: { HOME: "/home/user", AGENT_FLOWS_SKILLS_DIR: "/opt/project/.claude" },
     });
 
     const pluginDirIdx = capturedArgs.indexOf("--plugin-dir");
@@ -813,7 +813,7 @@ describe("runLlmStep — skills", () => {
     assert.equal(
       capturedArgs[pluginDirIdx + 1],
       "/opt/project/.claude",
-      "YOKE_SKILLS_DIR must override default"
+      "AGENT_FLOWS_SKILLS_DIR must override default"
     );
   });
 });

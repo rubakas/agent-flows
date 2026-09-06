@@ -314,7 +314,7 @@ describe("renderSpecKitSpec — SC ids and NEEDS CLARIFICATION", () => {
 
 describe("writeSpecKitSpec", () => {
   it("creates the directory and writes spec.md, returning the absolute path", async () => {
-    const tmp = await mkdtemp(join(tmpdir(), "yoke-exportspec-"));
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
     try {
       const outDir = join(tmp, "my-spec");
       const path = await writeSpecKitSpec(baseSpec, { branch: "001-test" }, outDir);
@@ -330,7 +330,7 @@ describe("writeSpecKitSpec", () => {
   });
 
   it("creates nested directories that do not yet exist", async () => {
-    const tmp = await mkdtemp(join(tmpdir(), "yoke-exportspec-"));
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
     try {
       const outDir = join(tmp, "nested", "deep", "dir");
       const path = await writeSpecKitSpec(baseSpec, {}, outDir);

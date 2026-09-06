@@ -80,7 +80,7 @@ The decision applies the principle from ADR-0011 (canon neutral, binding-specifi
   bindings, so regression is costly. (Charter rule 6 already requires this as a lean-spec discipline.)
 
 - **This is Charter rule 3 applied to prompts.** The neutral core stays in the canon, provider
-  divergence lives in thin bindings. Yoke can swap providers (edit `YOKE_PROVIDER`, restart) without
+  divergence lives in thin bindings. agent-flows can swap providers (edit `AGENT_FLOWS_PROVIDER`, restart) without
   touching a single prompt because prompts are truly neutral.
 
 ## Alternatives Rejected

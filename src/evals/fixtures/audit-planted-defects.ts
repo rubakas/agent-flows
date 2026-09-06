@@ -2,7 +2,7 @@
  * Fixture: adversarial audit of a proposed step-execution helper.
  *
  * The diff below introduces a plausible-looking `validateStep` + `runCheckStep`
- * module in the yoke runtime style.  Two real defects are deliberately planted;
+ * module in the agent-flows runtime style.  Two real defects are deliberately planted;
  * one piece of code LOOKS suspicious but is actually fine (the decoy).
  *
  * Planted defects
@@ -47,11 +47,11 @@ new file mode 100644
 --- /dev/null
 +++ b/src/runtime/validateStep.ts
 @@ -0,0 +1,44 @@
-+// Step validation and execution helper for the yoke runtime.
++// Step validation and execution helper for the agent-flows runtime.
 +import { execSync } from "node:child_process";
 +import type { StepDef } from "../canon/types.js";
 +
-+const LOG_FILE = "/tmp/yoke-run.log";
++const LOG_FILE = "/tmp/agent-flows-run.log";
 +
 +/**
 + * Validate that a step definition is complete enough to run.
