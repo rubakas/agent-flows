@@ -95,6 +95,19 @@ export function loadPipeline(
     }
   }
 
+  // Every name in optionalInputs must also be declared in inputs.
+  if (def.optionalInputs) {
+    const inputSet = new Set(def.inputs);
+    for (const name of def.optionalInputs) {
+      if (!inputSet.has(name)) {
+        throw new Error(
+          `optionalInputs entry "${name}" is not listed in inputs. ` +
+            `Declared inputs: ${def.inputs.join(", ") || "(none)"}`
+        );
+      }
+    }
+  }
+
   // When any step uses dependsOn, validate the full graph via the shared module.
   const hasDependsOn = def.steps.some((s) => s.dependsOn !== undefined);
   if (hasDependsOn) assertLevels(def.steps);

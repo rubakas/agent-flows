@@ -1752,3 +1752,53 @@ describe("buildPipelineWorkflow — two-gate key collision: first rejection not 
     }
   });
 });
+
+// ── D2 — export-spec path resolution (spec 017) ──────────────────────────────
+// This test MUST FAIL without the path-resolution fix in build.ts:
+// without the fix, a relative step.path resolves against process.cwd() (the
+// agent-flows checkout) rather than deps.cwd (the target project directory).
+
+describe("buildPipelineWorkflow — export-spec resolves relative path against deps.cwd", () => {
+  it("spec.md is written into deps.cwd, not process.cwd(), when step.path is relative", async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-cwd-"));
+    try {
+      // Use a relative step.path — this is what the canon YAML contains.
+      const relativePath = "spec-out";
+      const pipeline = makeExportSpecPipeline(relativePath);
+      const { storage, store, cleanup } = makeTestFixture("export-cwd");
+      try {
+        const wf = buildPipelineWorkflow(pipeline, {
+          registry: FAKE_REGISTRY,
+          store,
+          runner: makeFakeRunner(CANNED_RESPONSES),
+          cwd: projectDir,
+        });
+
+        const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+        const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+        const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+        assert.equal(r1.status, "suspended");
+
+        const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
+        assert.equal(r2.status, "success");
+
+        const expectedPath = join(projectDir, relativePath, "spec.md");
+        assert.ok(
+          existsSync(expectedPath),
+          `spec.md must be written to join(deps.cwd, step.path) = ${expectedPath}`
+        );
+
+        // Guard: it must NOT have landed in process.cwd()
+        const wrongPath = join(process.cwd(), relativePath, "spec.md");
+        assert.ok(
+          !existsSync(wrongPath),
+          `spec.md must NOT be written to join(process.cwd(), step.path) = ${wrongPath}`
+        );
+      } finally {
+        cleanup();
+      }
+    } finally {
+      await rm(projectDir, { recursive: true });
+    }
+  });
+});

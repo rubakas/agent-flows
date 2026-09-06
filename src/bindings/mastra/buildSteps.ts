@@ -364,6 +364,7 @@ export function buildCheckStep(
       const result = await runCheckStep(step.command!, {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
         cwd: deps.cwd,
+        ...(step.env?.length ? { envAllowlist: step.env } : {}),
       });
       return { ...rawCtx, [step.id]: result };
     },

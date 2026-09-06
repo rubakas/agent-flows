@@ -7,6 +7,7 @@
 //     combines them back into a single context after the parallel block.
 //   - The workflow input is the pipeline's declared inputs + optional models override map.
 
+import { isAbsolute, join } from "node:path";
 import { createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { pipelineAncestors, pipelineLevels } from "../../canon/graph.js";
@@ -145,7 +146,11 @@ function buildLevelsOntoBuilder(
             `Step "${step.id}": export-spec requires a preceding gate step in its dependency chain`
           );
         }
-        builder = builder.then(buildExportSpecStep(step.id, step.path!, gateId));
+        const rawPath = step.path!;
+        const resolvedPath = isAbsolute(rawPath)
+          ? rawPath
+          : join(deps.cwd ?? process.cwd(), rawPath);
+        builder = builder.then(buildExportSpecStep(step.id, resolvedPath, gateId));
       } else {
         // Without this, an unhandled kind contributes no Mastra step and the run
         // silently skips it. `pipeline` steps in particular must already be gone.
@@ -164,9 +169,10 @@ export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): 
   const { def, prompts } = loaded;
 
   // Workflow input schema: pipeline inputs as strings + optional models override.
+  const optionalSet = new Set(def.optionalInputs ?? []);
   const inputShape: Record<string, z.ZodTypeAny> = {};
   for (const inp of def.inputs) {
-    inputShape[inp] = z.string();
+    inputShape[inp] = optionalSet.has(inp) ? z.string().optional().default("") : z.string();
   }
   inputShape.models = z.record(z.string(), z.string()).optional();
 

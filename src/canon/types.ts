@@ -159,6 +159,13 @@ export interface PipelineDef {
   version: number;
   description: string;
   inputs: string[];
+  /**
+   * Subset of `inputs` that may be omitted when triggering the pipeline standalone.
+   * The Mastra workflow schema emits `z.string().optional().default("")` for each
+   * listed name instead of the usual `z.string()`. Every name here must also appear
+   * in `inputs`; violation is rejected at load time.
+   */
+  optionalInputs?: string[];
   steps: StepDef[];
   defaultTimeoutMs?: number;
 }
