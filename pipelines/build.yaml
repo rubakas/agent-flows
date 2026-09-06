@@ -17,3 +17,14 @@ steps:
     # is the authoritative pass signal (exit code 0 = passed: true).
     until: test.passed
     dependsOn: [develop]
+  # Adversarial review runs once, after the loop converges — not inside it.
+  # `test` is a cheap deterministic check and is the loop's termination signal;
+  # `audit` is three model calls, and inside the loop it would cost up to nine per
+  # build while reviewing intermediate, still-broken states. ADR-0015 asks for
+  # verification on the code in a fresh context; this is where that belongs.
+  - id: review
+    kind: pipeline
+    pipeline: audit
+    with:
+      plan: plan
+    dependsOn: [converge]

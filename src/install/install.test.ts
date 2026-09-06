@@ -41,6 +41,7 @@ describe("computeClosure — cycle", () => {
       "ship",
       "develop",
       "build-round",
+      "audit",
     ]);
     assert.deepEqual(pipelines, expectedPipelines);
   });
@@ -48,6 +49,9 @@ describe("computeClosure — cycle", () => {
   it("includes every prompt referenced by any pipeline in the closure", () => {
     const { prompts } = computeClosure("cycle", bundledPipelinesDir);
     const expectedPrompts = new Set([
+      "prompts/audit-correctness.md",
+      "prompts/audit-security.md",
+      "prompts/audit-synthesis.md",
       "prompts/investigate-survey.md",
       "prompts/investigate-findings.md",
       "prompts/intake.md",
@@ -60,26 +64,18 @@ describe("computeClosure — cycle", () => {
     assert.deepEqual(prompts, expectedPrompts);
   });
 
-  it("excludes pipelines not referenced by cycle (audit, test)", () => {
+  it("excludes pipelines nothing in the closure references", () => {
     const { pipelines } = computeClosure("cycle", bundledPipelinesDir);
-    assert.ok(!pipelines.has("audit"), "audit should not be in closure");
+    // `test` is a standalone workflow: build-round runs the suite with its own
+    // check step rather than nesting test.yaml, so nothing pulls it in.
     assert.ok(!pipelines.has("test"), "test should not be in closure");
   });
 
-  it("excludes prompts not used in cycle's closure", () => {
+  it("excludes prompts nothing in the closure references", () => {
     const { prompts } = computeClosure("cycle", bundledPipelinesDir);
-    assert.ok(
-      !prompts.has("prompts/audit-correctness.md"),
-      "audit-correctness.md should not be in closure"
-    );
-    assert.ok(
-      !prompts.has("prompts/audit-security.md"),
-      "audit-security.md should not be in closure"
-    );
-    assert.ok(
-      !prompts.has("prompts/audit-synthesis.md"),
-      "audit-synthesis.md should not be in closure"
-    );
+    assert.ok(!prompts.has("prompts/nonexistent.md"), "unreferenced prompt must be absent");
+    // audit IS referenced now — build nests it as the post-loop review step.
+    assert.ok(prompts.has("prompts/audit-synthesis.md"), "audit prompts are in the closure");
   });
 });
 
