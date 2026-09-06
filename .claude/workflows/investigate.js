@@ -13,7 +13,7 @@ if (!request) {
 }
 const models = (args && args.models) || {}
 const mSurvey = models['survey'] || 'haiku'
-const mFindings = models['findings'] || 'opus'
+const mFindings = models['findings'] || 'claude-fable-5'
 
 phase('Survey')
 log('Running survey steps…')

@@ -49,15 +49,21 @@ describe("ModelRegistry", () => {
 });
 
 describe("defaultRegistry", () => {
-  it("includes fable, opus, sonnet, haiku as cli transport aliases", () => {
+  it("includes fable, opus, sonnet, haiku as cli transport entries", () => {
     const reg = defaultRegistry({});
 
-    for (const alias of ["fable", "opus", "sonnet", "haiku"] as const) {
+    // opus, sonnet, haiku use bare aliases (always-latest); fable is pinned to claude-fable-5
+    for (const alias of ["opus", "sonnet", "haiku"] as const) {
       const entry = reg.resolve(alias);
       assert.equal(entry.transport, "cli", `${alias} transport`);
       assert.equal(entry.cli?.bin, "claude", `${alias} bin`);
       assert.equal(entry.cli?.model, alias, `${alias} model`);
     }
+
+    const fable = reg.resolve("fable");
+    assert.equal(fable.transport, "cli", "fable transport");
+    assert.equal(fable.cli?.bin, "claude", "fable bin");
+    assert.equal(fable.cli?.model, "claude-fable-5", "fable model pinned");
   });
 
   it("unknown id resolves to passthrough cli entry with model=id", () => {
@@ -125,7 +131,7 @@ describe("defaultRegistry", () => {
 describe("getProfile", () => {
   it("anthropic profile has correct role→model mappings", () => {
     const p = getProfile("anthropic");
-    assert.equal(p.roles.reasoner, "opus");
+    assert.equal(p.roles.reasoner, "fable");
     assert.equal(p.roles.worker, "sonnet");
     assert.equal(p.roles.scout, "haiku");
   });
@@ -184,10 +190,10 @@ describe("resolveStepModel", () => {
     return { id: "s", kind: "llm", ...overrides };
   }
 
-  it("role=reasoner on anthropic resolves to opus entry", () => {
+  it("role=reasoner on anthropic resolves to fable entry", () => {
     const entry = resolveStepModel(step({ role: "reasoner" }), anthropic, reg);
-    assert.equal(entry.id, "opus");
-    assert.equal(entry.cli?.model, "opus");
+    assert.equal(entry.id, "fable");
+    assert.equal(entry.cli?.model, "claude-fable-5");
   });
 
   it("role=worker on anthropic resolves to sonnet entry", () => {

@@ -28,7 +28,8 @@ export class ModelRegistry {
 
 export function defaultRegistry(env: NodeJS.ProcessEnv = process.env): ModelRegistry {
   return new ModelRegistry([
-    { id: "fable", transport: "cli", cli: { bin: "claude", model: "fable" } },
+    // fable: pinned to claude-fable-5 — bare alias would track newest/most-expensive; this role backs most cycle steps
+    { id: "fable", transport: "cli", cli: { bin: "claude", model: "claude-fable-5" } },
     { id: "opus", transport: "cli", cli: { bin: "claude", model: "opus" } },
     { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "sonnet" } },
     { id: "haiku", transport: "cli", cli: { bin: "claude", model: "haiku" } },
@@ -64,7 +65,7 @@ export interface ProviderProfile {
 const DEFAULT_PROFILES: ProviderProfile[] = [
   {
     id: "anthropic",
-    roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
+    roles: { reasoner: "fable", worker: "sonnet", scout: "haiku" },
   },
   {
     id: "openai",

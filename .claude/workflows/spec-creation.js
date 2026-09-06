@@ -22,12 +22,12 @@ if (!findings) {
 const models = (args && args.models) || {}
 const mIntake = models['intake'] || 'sonnet'
 const mEnrich = models['enrich'] || 'sonnet'
-const mCritic = models['critic'] || 'opus'
-const mSecurity = models['security'] || 'opus'
-const mVerifyCorrectness = models['verify.correctness'] || 'opus'
-const mVerifySecurity = models['verify.security'] || 'opus'
-const mVerifySynthesis = models['verify.synthesis'] || 'opus'
-const mCorrectRevise = models['correct.revise'] || 'opus'
+const mCritic = models['critic'] || 'claude-fable-5'
+const mSecurity = models['security'] || 'claude-fable-5'
+const mVerifyCorrectness = models['verify.correctness'] || 'claude-fable-5'
+const mVerifySecurity = models['verify.security'] || 'claude-fable-5'
+const mVerifySynthesis = models['verify.synthesis'] || 'claude-fable-5'
+const mCorrectRevise = models['correct.revise'] || 'claude-fable-5'
 
 const FINDING = {
   "type": "object",

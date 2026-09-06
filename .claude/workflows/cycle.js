@@ -22,19 +22,19 @@ if (!request) {
 }
 const models = (args && args.models) || {}
 const mInvestigateSurvey = models['investigate.survey'] || 'haiku'
-const mInvestigateFindings = models['investigate.findings'] || 'opus'
+const mInvestigateFindings = models['investigate.findings'] || 'claude-fable-5'
 const mPlanIntake = models['plan.intake'] || 'sonnet'
 const mPlanEnrich = models['plan.enrich'] || 'sonnet'
-const mPlanCritic = models['plan.critic'] || 'opus'
-const mPlanSecurity = models['plan.security'] || 'opus'
-const mPlanVerifyCorrectness = models['plan.verify.correctness'] || 'opus'
-const mPlanVerifySecurity = models['plan.verify.security'] || 'opus'
-const mPlanVerifySynthesis = models['plan.verify.synthesis'] || 'opus'
-const mPlanCorrectRevise = models['plan.correct.revise'] || 'opus'
+const mPlanCritic = models['plan.critic'] || 'claude-fable-5'
+const mPlanSecurity = models['plan.security'] || 'claude-fable-5'
+const mPlanVerifyCorrectness = models['plan.verify.correctness'] || 'claude-fable-5'
+const mPlanVerifySecurity = models['plan.verify.security'] || 'claude-fable-5'
+const mPlanVerifySynthesis = models['plan.verify.synthesis'] || 'claude-fable-5'
+const mPlanCorrectRevise = models['plan.correct.revise'] || 'claude-fable-5'
 const mBuildDevelopImplement = models['build.develop.implement'] || 'sonnet'
-const mBuildReviewCorrectness = models['build.review.correctness'] || 'opus'
-const mBuildReviewSecurity = models['build.review.security'] || 'opus'
-const mBuildReviewSynthesis = models['build.review.synthesis'] || 'opus'
+const mBuildReviewCorrectness = models['build.review.correctness'] || 'claude-fable-5'
+const mBuildReviewSecurity = models['build.review.security'] || 'claude-fable-5'
+const mBuildReviewSynthesis = models['build.review.synthesis'] || 'claude-fable-5'
 
 const FINDING = {
   "type": "object",

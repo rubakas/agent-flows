@@ -205,7 +205,7 @@ describe("runDoctor", () => {
     assert.ok(check, "Active provider check missing");
     assert.equal(check.status, "ok");
     assert.ok(check.detail.includes("anthropic"), `detail: ${check.detail}`);
-    assert.ok(check.detail.includes("reasoner=opus"), `detail: ${check.detail}`);
+    assert.ok(check.detail.includes("reasoner=fable"), `detail: ${check.detail}`);
   });
 
   it("anthropic profile: claude CLI present → transport ok", async () => {

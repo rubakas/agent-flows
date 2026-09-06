@@ -15,7 +15,7 @@ if (!findings) {
   throw new Error('args.findings is required and must be non-empty — refusing to run without it')
 }
 const models = (args && args.models) || {}
-const mRevise = models['revise'] || 'opus'
+const mRevise = models['revise'] || 'claude-fable-5'
 
 phase('Revise')
 log('Running revise steps…')

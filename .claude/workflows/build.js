@@ -14,9 +14,9 @@ if (!plan) {
 }
 const models = (args && args.models) || {}
 const mDevelopImplement = models['develop.implement'] || 'sonnet'
-const mReviewCorrectness = models['review.correctness'] || 'opus'
-const mReviewSecurity = models['review.security'] || 'opus'
-const mReviewSynthesis = models['review.synthesis'] || 'opus'
+const mReviewCorrectness = models['review.correctness'] || 'claude-fable-5'
+const mReviewSecurity = models['review.security'] || 'claude-fable-5'
+const mReviewSynthesis = models['review.synthesis'] || 'claude-fable-5'
 
 phase('Develop.implement')
 log('Running develop.implement steps…')
