@@ -66,6 +66,18 @@ function isSafeId(id: string): boolean {
 // Maximum bytes returned by the skill/agent content endpoint.
 export const CONTENT_CAP = 65_536;
 
+// Body size limits for readBody().
+const BODY_LIMIT_DEFAULT = 65_536; // 64 KB — all mutating routes except /api/import
+const BODY_LIMIT_IMPORT = 4 * 1024 * 1024; // 4 MB — /api/import carries a YAML bundle
+
+/** Thrown by readBody() when the accumulated request body exceeds the cap. */
+class RequestTooLargeError extends Error {
+  constructor(maxBytes: number) {
+    super(`Request body exceeds the ${maxBytes}-byte limit`);
+    this.name = "RequestTooLargeError";
+  }
+}
+
 /**
  * Pre-check for skill/agent names supplied by the client.
  * Blocks the most obvious traversal forms before the resolve-based containment check.
@@ -132,11 +144,27 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    let totalLength = 0;
+    let tooLarge = false;
+    req.on("data", (chunk: Buffer) => {
+      if (tooLarge) return; // drain remaining data without accumulating
+      totalLength += chunk.length;
+      if (maxBytes !== undefined && totalLength > maxBytes) {
+        tooLarge = true;
+        // Resume to drain the rest of the request body so the socket stays
+        // alive long enough for the caller to write a 413 response.
+        req.resume();
+        reject(new RequestTooLargeError(maxBytes));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (!tooLarge) resolve(Buffer.concat(chunks).toString("utf8"));
+    });
     req.on("error", reject);
   });
 }
@@ -293,6 +321,10 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
       skillsBase,
     }).catch((err: unknown) => {
       if (!res.headersSent) {
+        if (err instanceof RequestTooLargeError) {
+          json(res, 413, { error: err.message });
+          return;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         json(res, 500, { error: safePath(msg, root) });
       }
@@ -367,7 +399,16 @@ async function handleRequest(
       return;
     }
     const html = readFileSync(ctx.uiPath, "utf8");
-    res.writeHead(200, { "Content-Type": "text/html" });
+    res.writeHead(200, {
+      "Content-Type": "text/html",
+      // The UI uses inline <style> and <script>, so both style-src and script-src
+      // must permit 'unsafe-inline'. All other fetch directives fall through to
+      // default-src 'self', confining any future resource loads to the loopback origin.
+      "Content-Security-Policy":
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+    });
     res.end(html);
     return;
   }
@@ -400,7 +441,7 @@ async function handleRequest(
 
   // POST /api/pipelines — create a new pipeline in the project canon directory
   if (method === "POST" && pathname === "/api/pipelines") {
-    const raw = await readBody(req);
+    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
     const parsed = parseJsonBody(raw);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
@@ -487,7 +528,7 @@ async function handleRequest(
       });
       return;
     }
-    await readBody(req); // consume body
+    await readBody(req, BODY_LIMIT_DEFAULT); // consume body
     rmSync(entry.filePath);
     json(res, 200, { ok: true, id });
     return;
@@ -503,7 +544,7 @@ async function handleRequest(
       return;
     }
     // Consume the (empty) body to satisfy HTTP spec — no useful payload expected.
-    await readBody(req);
+    await readBody(req, BODY_LIMIT_DEFAULT);
     const body = readFileSync(entry.filePath, "utf8");
     const baseHash = createHash("sha256").update(body).digest("hex");
     const relPath = relative(root, entry.filePath);
@@ -522,7 +563,7 @@ async function handleRequest(
       json(res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
-    const raw = await readBody(req);
+    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
     const parsed = parseJsonBody(raw);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
@@ -547,7 +588,7 @@ async function handleRequest(
       json(res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
-    await readBody(req); // consume body
+    await readBody(req, BODY_LIMIT_DEFAULT); // consume body
     // TODO(serve): switch to saveDraftAndRegenerate once another agent adds that export
     const result: SaveResult & { regenerated?: string[] } = saveDraft(ctx.db, draftId);
     if (result.ok) {
@@ -573,7 +614,7 @@ async function handleRequest(
       json(res, 503, { error: "RunService not available in this instance" });
       return;
     }
-    const raw = await readBody(req);
+    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
     const parsed = parseJsonBody(raw);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
@@ -673,7 +714,7 @@ async function handleRequest(
       return;
     }
     const id = decodeURIComponent(approveMatch[1]);
-    const raw = await readBody(req);
+    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
     const parsed = parseJsonBody(raw);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
@@ -696,7 +737,7 @@ async function handleRequest(
 
   // POST /api/install — install bundled workflows into the project directory
   if (method === "POST" && pathname === "/api/install") {
-    const raw = await readBody(req);
+    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
     const parsed = parseJsonBody(raw);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
@@ -710,6 +751,14 @@ async function handleRequest(
     ) {
       json(res, 400, { error: 'Field "ids" must be a non-empty array of strings' });
       return;
+    }
+    for (const id of ids as string[]) {
+      if (!isSafeId(id)) {
+        json(res, 400, {
+          error: `Invalid pipeline id "${id}": must be lowercase alphanumeric and hyphens only`,
+        });
+        return;
+      }
     }
     const doOverwrite = overwrite === true;
     try {
@@ -858,7 +907,7 @@ async function handleRequest(
 
   // POST /api/import — import a workflow bundle into .agent-flows/
   if (method === "POST" && pathname === "/api/import") {
-    const raw = await readBody(req);
+    const raw = await readBody(req, BODY_LIMIT_IMPORT);
     const parsed = parseJsonBody(raw);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });

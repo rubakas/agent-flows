@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
 
+import { assertSafePath } from "./paths.js";
+
 // Minimal raw shape needed for closure computation. Full validation happens at load time.
 interface RawStep {
   kind?: string;
@@ -101,12 +103,16 @@ export function installWorkflow(
   }
 
   for (const id of [...allPipelines].sort()) {
+    assertSafePath(bundledPipelinesDir, `${id}.yaml`);
+    assertSafePath(destRoot, `pipelines/${id}.yaml`);
     const src = join(bundledPipelinesDir, `${id}.yaml`);
     const dest = join(destRoot, "pipelines", `${id}.yaml`);
     copyFile(src, dest, `pipelines/${id}.yaml`);
   }
 
   for (const promptPath of [...allPrompts].sort()) {
+    assertSafePath(bundledRoot, promptPath);
+    assertSafePath(destRoot, promptPath);
     const src = join(bundledRoot, promptPath);
     const dest = join(destRoot, promptPath);
     copyFile(src, dest, promptPath);

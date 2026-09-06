@@ -4,12 +4,6 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>agent-flows Editor</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
-    />
     <style>
       /* ── design tokens (prototype-verbatim) ── */
       :root {
@@ -29,9 +23,9 @@
         --persist: #9c5f3c;
         --ok: #2a7a3b;
         --err: #b52d2d;
-        --ui: "IBM Plex Sans", system-ui, sans-serif;
-        --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", sans-serif;
-        --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+        --ui: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        --cond: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        --mono: ui-monospace, "Cascadia Code", Menlo, "Liberation Mono", monospace;
       }
       @media (prefers-color-scheme: dark) {
         :root:not([data-theme="light"]) {

@@ -325,10 +325,12 @@ describe("draft open → update → save round trip", () => {
     //   <tmpRoot>/prompts/*.md
     // loadPipeline derives its root as dirname(dirname(yamlPath)) = tmpRoot,
     // so "prompts/intake.md" resolves correctly under that root.
-    writeFileSync(
-      join(tmpPipelinesDir, "spec-creation.yaml"),
-      readFileSync(join(REAL_REPO_ROOT, "pipelines", "spec-creation.yaml"), "utf8")
-    );
+    for (const yml of ["spec-creation.yaml", "audit.yaml", "correct-plan.yaml"]) {
+      writeFileSync(
+        join(tmpPipelinesDir, yml),
+        readFileSync(join(REAL_REPO_ROOT, "pipelines", yml), "utf8")
+      );
+    }
     cpSync(join(REAL_REPO_ROOT, "prompts"), join(tmpRoot, "prompts"), { recursive: true });
 
     srv = await startServer({
@@ -870,6 +872,53 @@ describe("POST /api/install — install from bundled catalog", () => {
       body: JSON.stringify({ ids: ["spec-creation"] }),
     });
     assert.equal(res.status, 403);
+  });
+
+  it("rejects a path-traversal id in ids with 400", async () => {
+    const res = await mutate(srv.port, "POST", "/api/install", {
+      ids: ["../../etc/passwd"],
+    });
+    assert.equal(res.status, 400, `expected 400, got ${res.status}`);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.length > 0, "error must explain the rejection");
+  });
+
+  it("rejects an oversized body with 413", async () => {
+    // Build a body that exceeds the 64 KB default limit for this route.
+    const oversizedBody = JSON.stringify({ ids: ["a".repeat(70_000)] });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/install`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversizedBody,
+    });
+    assert.equal(res.status, 413, `expected 413, got ${res.status}`);
+  });
+});
+
+// ── GET / security headers ────────────────────────────────────────────────────
+
+describe("GET / — security headers", () => {
+  let srv: ServeHandle;
+
+  before(async () => {
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => srv.close());
+
+  it("responds with Content-Security-Policy, X-Content-Type-Options, and Referrer-Policy", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/`);
+    assert.equal(res.status, 200);
+    const csp = res.headers.get("content-security-policy");
+    assert.ok(csp && csp.length > 0, "must have Content-Security-Policy header");
+    assert.ok(csp.includes("default-src"), "CSP must include default-src");
+    assert.ok(csp.includes("frame-ancestors"), "CSP must include frame-ancestors");
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(res.headers.get("referrer-policy"), "no-referrer");
   });
 });
 

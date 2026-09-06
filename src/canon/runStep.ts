@@ -40,12 +40,15 @@ export const CREDENTIAL_DENY_PATTERNS: readonly string[] = [
   // `.env.sample` and `.env.template` are deliberately absent — a template
   // holds placeholders, and a step needs it to understand configuration.
   "**/.env",
+  "**/.env.ci",
+  "**/.env.docker",
   "**/.env.production",
   "**/.env.staging",
   "**/.env.local",
   "**/.env.development",
   "**/.env.test",
 
+  "**/aws.json",
   "**/credentials",
   "**/credentials.production",
   "**/credentials.staging",
@@ -56,6 +59,10 @@ export const CREDENTIAL_DENY_PATTERNS: readonly string[] = [
   "**/secrets.yaml",
   "**/secrets.yml",
   "**/service-account*.json",
+  "**/terraform.tfvars",
+  "**/terraform.tfvars.json",
+  "**/*.tfstate",
+  "**/*.tfstate.backup",
 
   // Key material by extension.
   "**/*.key",

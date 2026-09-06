@@ -15,12 +15,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { parse, stringify } from "yaml";
 
 import { loadPipeline } from "../canon/load.js";
 import { computeClosure } from "./install.js";
+import { assertSafePath } from "./paths.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -135,45 +136,6 @@ export function parseBundle(text: string): WorkflowBundle {
     sourcePipeline: obj.sourcePipeline,
     files,
   };
-}
-
-// ── Containment check ─────────────────────────────────────────────────────────
-
-/** Returns true iff the resolved filePath is strictly inside dir. */
-function isContained(dir: string, filePath: string): boolean {
-  const base = resolve(dir);
-  const target = resolve(filePath);
-  return target === base || target.startsWith(base + sep);
-}
-
-/**
- * Validates that a bundle file path cannot escape destRoot.
- * Treats every path in the bundle as potentially hostile (it came from another machine).
- *
- * Rejects paths that:
- * - are empty or contain null bytes
- * - start with "/" or "\" (absolute paths — path.join strips the leading slash,
- *   so "/etc/passwd" would otherwise appear to be inside destRoot after joining)
- * - resolve to a location outside destRoot after join+resolve (catches "../" traversal)
- */
-function assertSafePath(destRoot: string, entryPath: string): void {
-  if (!entryPath || entryPath.includes("\0")) {
-    throw new Error(`Bundle contains invalid path: ${JSON.stringify(entryPath)}`);
-  }
-  // Absolute paths must be rejected before calling path.join, because join()
-  // strips the leading slash from non-first arguments, making "/etc/passwd"
-  // appear to resolve inside destRoot.
-  if (entryPath.startsWith("/") || entryPath.startsWith("\\")) {
-    throw new Error(
-      `Bundle path ${JSON.stringify(entryPath)} escapes the destination directory — import rejected`
-    );
-  }
-  const resolved = resolve(join(destRoot, entryPath));
-  if (!isContained(destRoot, resolved)) {
-    throw new Error(
-      `Bundle path ${JSON.stringify(entryPath)} escapes the destination directory — import rejected`
-    );
-  }
 }
 
 // ── Import ────────────────────────────────────────────────────────────────────

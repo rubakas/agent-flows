@@ -42,6 +42,7 @@ describe("computeClosure — cycle", () => {
       "develop",
       "build-round",
       "audit",
+      "correct-plan",
     ]);
     assert.deepEqual(pipelines, expectedPipelines);
   });
@@ -52,6 +53,7 @@ describe("computeClosure — cycle", () => {
       "prompts/audit-correctness.md",
       "prompts/audit-security.md",
       "prompts/audit-synthesis.md",
+      "prompts/correct-plan.md",
       "prompts/investigate-survey.md",
       "prompts/investigate-findings.md",
       "prompts/intake.md",
@@ -257,6 +259,50 @@ describe("resolveCanonDir — project copies take precedence", () => {
       assert.equal(result.source, "bundled");
     } finally {
       rmSync(projectDir, { recursive: true });
+    }
+  });
+});
+
+// ── 6. Path traversal rejection ────────────────────────────────────────────────
+
+describe("installWorkflow — path traversal rejection", () => {
+  it("rejects a prompt path that escapes the bundled root", () => {
+    const projectDir = makeTempDir("agent-flows-traversal-");
+    const fakeBundledRoot = makeTempDir("agent-flows-fake-catalog-");
+    try {
+      // Build a minimal fake bundled catalog with a pipeline whose prompt path
+      // points outside the catalog root via "..".
+      const pipelinesDir = join(fakeBundledRoot, "pipelines");
+      mkdirSync(pipelinesDir);
+      writeFileSync(
+        join(pipelinesDir, "evil.yaml"),
+        [
+          "id: evil",
+          "version: 1",
+          "description: evil",
+          "inputs: []",
+          "steps:",
+          "  - id: s",
+          "    kind: llm",
+          "    prompt: ../../etc/passwd",
+          "    role: worker",
+        ].join("\n") + "\n"
+      );
+
+      assert.throws(
+        () => installWorkflow(["evil"], pipelinesDir, projectDir, false),
+        (err: unknown) => {
+          assert.ok(err instanceof Error, "must throw an Error");
+          assert.ok(
+            err.message.includes("escapes") || err.message.includes("invalid"),
+            `error must describe the path problem; got: "${err.message}"`
+          );
+          return true;
+        }
+      );
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+      rmSync(fakeBundledRoot, { recursive: true, force: true });
     }
   });
 });
