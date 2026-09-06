@@ -16,6 +16,7 @@ import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
 import { mastraDbPath } from "./paths.js";
 import { loadCatalog } from "./pipelineLoader.js";
+import { resolveProjectDir } from "./projectDir.js";
 import type { PipelineCatalog } from "./pipelineLoader.js";
 import type { MastraLike } from "../../runtime/runService.js";
 
@@ -44,6 +45,12 @@ const db = makeDb(ticketDbPath);
 const store = new DrizzleTicketStore(db);
 const registry = defaultRegistry();
 
+// ── Project directory (step execution cwd) ────────────────────────────────────
+
+const projectDir = resolveProjectDir();
+// Log to stderr so the MCP stdio channel (stdout) is not polluted.
+console.error(`agent-flows MCP server: running steps in ${projectDir}`);
+
 // ── Load pipelines ────────────────────────────────────────────────────────────
 
 const pipelinesDir = join(repoRoot, "pipelines");
@@ -51,7 +58,7 @@ const pipelinesDir = join(repoRoot, "pipelines");
 function buildFreshMastra(catalog: PipelineCatalog): Mastra {
   const workflows: Record<string, unknown> = {};
   for (const loaded of catalog.loaded) {
-    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store });
+    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store, cwd: projectDir });
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return new Mastra({ storage: mastraStorage, workflows: workflows as Record<string, any> });

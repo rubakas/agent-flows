@@ -13,6 +13,7 @@ import {
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
 import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
@@ -538,6 +539,8 @@ if (process.argv[1] === __filename) {
   process.env.MASTRA_TELEMETRY_DISABLED = "1";
 
   const port = parseInt(getArgValue("--port", "7411"), 10);
+  const projectDir = resolveProjectDir();
+  console.log(`agent-flows serve: running steps in ${projectDir}`);
   const dbPath = getArgValue("--db", join(process.cwd(), "agent-flows.sqlite"));
   const pipelinesDir = join(process.cwd(), "pipelines");
 
@@ -572,7 +575,7 @@ if (process.argv[1] === __filename) {
   const loadedPipelines = pipelineFiles.map((f) => loadPipeline(f));
   const workflows: Record<string, unknown> = {};
   for (const loaded of loadedPipelines) {
-    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store });
+    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store, cwd: projectDir });
   }
 
   const mastra = new Mastra({ storage: mastraStorage, workflows });
