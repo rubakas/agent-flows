@@ -11,7 +11,7 @@ if (!plan) {
   throw new Error('args.plan is required and must be non-empty — refusing to run without it')
 }
 const models = (args && args.models) || {}
-const mImplement = models.implement || 'sonnet'
+const mImplement = models['implement'] || 'sonnet'
 
 phase('Implement')
 log('Running implement steps…')

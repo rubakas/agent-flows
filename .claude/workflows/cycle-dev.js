@@ -1,6 +1,6 @@
 export const meta = {
-  name: 'cycle',
-  description: 'Full development lifecycle — investigate, plan, build, and ship',
+  name: 'cycle-dev',
+  description: 'Full development lifecycle — investigate, plan, and build (stops before ship; no commit, no PR)',
   phases: [
     { title: 'Investigate.survey' },
     { title: 'Investigate.findings' },
@@ -579,9 +579,6 @@ End with a verdict line: "Plan is ready to develop" if there are no blocking fin
   { label: 'build.review.synthesis', phase: 'Build.review.synthesis', model: mBuildReviewSynthesis },
 )
 
-// gate 'ship.approve': handled in chat by the orchestrating session
-// check 'ship.commit': run `git add -u && git commit -m "feat: apply approved plan"`
-// check 'ship.pr': run `[ "$(git branch --show-current)" != "main" ] && gh pr create --fill`
 
 return {
   spec,

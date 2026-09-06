@@ -7,7 +7,7 @@ export const meta = {
 }
 
 const models = (args && args.models) || {}
-const mFix = models.fix || 'sonnet'
+const mFix = models['fix'] || 'sonnet'
 
 // check 'test': run `pnpm test`
 phase('Fix')

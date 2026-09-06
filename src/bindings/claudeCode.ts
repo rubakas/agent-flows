@@ -22,8 +22,13 @@ function sq(s: string): string {
   return "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
 }
 
+/** Convert a dotted step id (e.g. "verify.synthesis") to a valid JS identifier segment. */
+function safeId(id: string): string {
+  return id.replace(/\./g, "_");
+}
+
 function modelVar(id: string): string {
-  return "m" + capitalize(id);
+  return "m" + id.split(".").map(capitalize).join("");
 }
 
 /**
@@ -37,8 +42,8 @@ function modelVar(id: string): string {
 function convertPromptTemplate(template: string, inputVars: Set<string>): string {
   const escaped = template.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
 
-  return escaped.replace(/\{\{(\w+)\}\}/g, (_match, name: string) => {
-    return inputVars.has(name) ? `\${${name}}` : `\${r_${name}}`;
+  return escaped.replace(/\{\{([\w.]+)\}\}/g, (_match, name: string) => {
+    return inputVars.has(name) ? `\${${name}}` : `\${r_${safeId(name)}}`;
   });
 }
 
@@ -109,7 +114,7 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
   for (const step of llmSteps) {
     const entry = resolveStepModel(step, resolvedProfile, registry);
     const concreteModel = entry.cli?.model ?? entry.api?.model ?? entry.id;
-    out.push(`const ${modelVar(step.id)} = models.${step.id} || '${concreteModel}'`);
+    out.push(`const ${modelVar(step.id)} = models[${sq(step.id)}] || '${concreteModel}'`);
   }
   out.push("");
 
@@ -162,8 +167,8 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
 
         if (llmInLevel.length > 1) {
           // Parallel block — mirrors the existing phase-path parallel block exactly.
-          const resultVars = llmInLevel.map((gs) => `${gs.id}Res`);
-          for (const gs of llmInLevel) stepVarNames.set(gs.id, `${gs.id}Res`);
+          const resultVars = llmInLevel.map((gs) => `${safeId(gs.id)}Res`);
+          for (const gs of llmInLevel) stepVarNames.set(gs.id, `${safeId(gs.id)}Res`);
 
           out.push(`const [${resultVars.join(", ")}] = await parallel([`);
           for (const gs of llmInLevel) {
@@ -197,17 +202,18 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
         } else {
           // Sequential — single llm step in this level.
           const step = llmInLevel[0];
-          stepVarNames.set(step.id, `r_${step.id}`);
+          const stepVar = `r_${safeId(step.id)}`;
+          stepVarNames.set(step.id, stepVar);
           const converted = convertPromptTemplate(prompts[step.id], inputVars);
           const skillsArg = step.skills?.length ? `, skills: ${JSON.stringify(step.skills)}` : "";
-          out.push(`const r_${step.id} = await agent(`);
+          out.push(`const ${stepVar} = await agent(`);
           out.push("  `" + converted + "`,");
           out.push(
             `  { label: '${step.id}', phase: '${phaseTitle}', model: ${modelVar(step.id)}${skillsArg} },`
           );
           out.push(")");
           if (isFirstSingleLlm) {
-            out.push(`if (!r_${step.id}) throw new Error('${step.id} agent failed')`);
+            out.push(`if (!${stepVar}) throw new Error('${step.id} agent failed')`);
             isFirstSingleLlm = false;
           }
           out.push("");
@@ -220,8 +226,8 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
           const allLlm = def.steps.filter((s) => s.kind === "llm");
           out.push("const _assembleInput = {");
           for (const s of allLlm) {
-            const varName = stepVarNames.get(s.id) ?? `r_${s.id}`;
-            out.push(`  ${s.id}: ${varName},`);
+            const varName = stepVarNames.get(s.id) ?? `r_${safeId(s.id)}`;
+            out.push(`  ${sq(s.id)}: ${varName},`);
           }
           out.push("}");
           out.push("const spec = (function(input) {");

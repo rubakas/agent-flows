@@ -13,15 +13,15 @@ if (!plan) {
   throw new Error('args.plan is required and must be non-empty — refusing to run without it')
 }
 const models = (args && args.models) || {}
-const mDevelop.implement = models.develop.implement || 'sonnet'
-const mReview.correctness = models.review.correctness || 'opus'
-const mReview.security = models.review.security || 'opus'
-const mReview.synthesis = models.review.synthesis || 'opus'
+const mDevelopImplement = models['develop.implement'] || 'sonnet'
+const mReviewCorrectness = models['review.correctness'] || 'opus'
+const mReviewSecurity = models['review.security'] || 'opus'
+const mReviewSynthesis = models['review.synthesis'] || 'opus'
 
 phase('Develop.implement')
 log('Running develop.implement steps…')
 
-const r_develop.implement = await agent(
+const r_develop_implement = await agent(
   `<instructions>
 You are a software engineer executing an approved implementation plan. Your job is to make the plan real: edit the files it specifies, in the order it specifies, and verify the result compiles and passes the project's conventions.
 </instructions>
@@ -54,15 +54,15 @@ Execute the plan item by item:
 The implementation is done when every item in the plan is either executed or explicitly reported as blocked.
 </output_format>
 `,
-  { label: 'develop.implement', phase: 'Develop.implement', model: mDevelop.implement },
+  { label: 'develop.implement', phase: 'Develop.implement', model: mDevelopImplement },
 )
-if (!r_develop.implement) throw new Error('develop.implement agent failed')
+if (!r_develop_implement) throw new Error('develop.implement agent failed')
 
 // loop 'converge': body pipeline 'build-round', cap 3 iterations — Binding A does not implement the loop
 phase('Review.correctness')
 log('Running review.correctness steps…')
 
-const [review.correctnessRes, review.securityRes] = await parallel([
+const [review_correctnessRes, review_securityRes] = await parallel([
   () =>
     agent(
       `<instructions>
@@ -98,7 +98,7 @@ Include only real defects: requirements gaps, logic errors, missing cases, type 
 The review is done when every section of the plan has been checked against the relevant code.
 </output_format>
 `,
-      { label: 'review.correctness', phase: 'Review.correctness', model: mReview.correctness },
+      { label: 'review.correctness', phase: 'Review.correctness', model: mReviewCorrectness },
     ),
   () =>
     agent(
@@ -135,7 +135,7 @@ Include only findings grounded in the plan's scope and the existing codebase. Do
 The review is done when every part of the plan that touches authentication, input handling, data storage, or external interfaces has been assessed.
 </output_format>
 `,
-      { label: 'review.security', phase: 'Review.correctness', model: mReview.security },
+      { label: 'review.security', phase: 'Review.correctness', model: mReviewSecurity },
     ),
 ])
 
@@ -143,7 +143,7 @@ The review is done when every part of the plan that touches authentication, inpu
 phase('Review.synthesis')
 log('Running review.synthesis steps…')
 
-const r_review.synthesis = await agent(
+const r_review_synthesis = await agent(
   `<instructions>
 You are a senior reviewer synthesising two independent audits of the same plan. Your job is to merge the findings into a single, prioritised, deduplicated list that a developer can act on.
 </instructions>
@@ -151,11 +151,11 @@ You are a senior reviewer synthesising two independent audits of the same plan. 
 <context>
 Correctness audit:
 
-{{review.correctness}}
+${r_review_correctness}
 
 Security audit:
 
-{{review.security}}
+${r_review_security}
 </context>
 
 <input>
@@ -180,7 +180,7 @@ Then a "Dropped" section listing every finding you excluded, each with the reaso
 End with a verdict line: "Plan is ready to develop" if there are no blocking findings, or "Plan has N blocking finding(s) — resolve before development" if there are.
 </output_format>
 `,
-  { label: 'review.synthesis', phase: 'Review.synthesis', model: mReview.synthesis },
+  { label: 'review.synthesis', phase: 'Review.synthesis', model: mReviewSynthesis },
 )
 
 
