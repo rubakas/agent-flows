@@ -13,6 +13,7 @@ interface RunResult {
   suspended?: [string[], ...string[][]];
   steps?: Record<string, { suspendPayload?: Record<string, unknown> }>;
   result?: unknown;
+  error?: Error;
 }
 
 interface MastraRun {
@@ -59,6 +60,7 @@ export interface SettledResult {
   gateMessage?: string;
   spec?: unknown;
   result?: unknown;
+  error?: string;
 }
 
 export interface ApproveResult {
@@ -80,6 +82,8 @@ export interface GetResult {
   gateMessage?: string;
   /** Present only when status is "suspended" — the spec the human is being asked to approve. */
   spec?: unknown;
+  /** Present only when status is "failed" — a brief description of why the run failed. */
+  error?: string;
 }
 
 // ── Internal record ────────────────────────────────────────────────────────────
@@ -89,6 +93,7 @@ interface RunRecord {
   run: MastraRun;
   status: "running" | "suspended" | "success" | "failed";
   result?: unknown;
+  error?: string;
   suspendPayload?: unknown;
   /** The suspended step path returned by Mastra, needed for resume(). */
   suspendedStep?: string[];
@@ -138,9 +143,13 @@ export class RunService {
       .then((r1) => {
         record.settle(this.applyWorkflowResult(record, r1));
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        const name = err instanceof Error ? err.name : undefined;
+        const msg = err instanceof Error ? err.message : String(err);
+        const errStr = name ? `${name}: ${msg}` : msg;
         record.status = "failed";
-        record.settle({ status: "failed" });
+        record.error = errStr;
+        record.settle({ status: "failed", error: errStr });
       });
 
     return { runId, status: "running" };
@@ -170,6 +179,7 @@ export class RunService {
       pipelineId: record.pipelineId,
       status: record.status,
       result: record.result,
+      ...(record.error !== undefined ? { error: record.error } : {}),
     };
     if (record.status === "suspended") {
       const payload = record.suspendPayload as Record<string, unknown> | undefined;
@@ -221,7 +231,7 @@ export class RunService {
     if (settled.status === "success") {
       return { runId, status: "success", result: settled.result };
     }
-    return { runId, status: "failed" };
+    return { runId, status: "failed", error: settled.error };
   }
 
   /**
@@ -257,7 +267,11 @@ export class RunService {
       return { status: "success", result: r.result };
     }
     record.status = "failed";
-    return { status: "failed" };
+    const errStr = r.error
+      ? (r.error.name ? `${r.error.name}: ${r.error.message}` : r.error.message)
+      : "workflow failed";
+    record.error = errStr;
+    return { status: "failed", error: errStr };
   }
 
   /**

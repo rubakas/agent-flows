@@ -478,6 +478,86 @@ describe("RunService — missing step path fails loudly instead of falling back 
   });
 });
 
+// ── Tests: failed run surfaces an error reason ────────────────────────────────
+
+describe("RunService — failed run surfaces error reason in get()", () => {
+  it("get() on a run that failed via .catch returns a non-empty error string", async () => {
+    const throwingRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-throw",
+      watchers: [],
+      start: async () => {
+        throw new Error("network timeout");
+      },
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(throwingRun as unknown as MockRun));
+    const startResult = await service.start("test-pipeline", { request: "test" });
+
+    const settled = await service.waitForSettled(startResult.runId);
+    assert.ok(settled !== undefined, "waitForSettled must resolve");
+    assert.equal(settled.status, "failed");
+    assert.ok(
+      typeof settled.error === "string" && settled.error.length > 0,
+      `settled.error must be a non-empty string; got ${JSON.stringify(settled.error)}`
+    );
+    assert.ok(
+      settled.error.includes("network timeout"),
+      `settled.error must include the original message; got: ${settled.error}`
+    );
+
+    const got = service.get(startResult.runId);
+    assert.ok(got !== undefined, "get must find the run");
+    assert.equal(got.status, "failed");
+    assert.ok(
+      typeof got.error === "string" && got.error.length > 0,
+      `get().error must be a non-empty string — fails without error capture in .catch; got ${JSON.stringify(got.error)}`
+    );
+    assert.ok(
+      got.error.includes("network timeout"),
+      `get().error must include the original message; got: ${got.error}`
+    );
+  });
+
+  it("get() on a run that returned status:failed carries an error string", async () => {
+    const failedResult: Record<string, unknown> = {
+      status: "failed",
+      error: Object.assign(new Error("step exploded"), { name: "StepError" }),
+    };
+    const failedRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-failed-result",
+      watchers: [],
+      start: async () => failedResult,
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(failedRun as unknown as MockRun));
+    const startResult = await service.start("test-pipeline", { request: "test" });
+
+    const settled = await service.waitForSettled(startResult.runId);
+    assert.ok(settled !== undefined);
+    assert.equal(settled.status, "failed");
+    assert.ok(
+      typeof settled.error === "string" && settled.error.length > 0,
+      `settled.error must be a non-empty string; got ${JSON.stringify(settled.error)}`
+    );
+
+    const got = service.get(startResult.runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.status, "failed");
+    assert.ok(
+      typeof got.error === "string" && got.error.length > 0,
+      `get().error must be a non-empty string — fails without error capture in applyWorkflowResult; got ${JSON.stringify(got.error)}`
+    );
+    assert.ok(
+      got.error.includes("step exploded"),
+      `get().error must include the original message; got: ${got.error}`
+    );
+  });
+});
+
 // ── Tests: subscribe ──────────────────────────────────────────────────────────
 
 describe("RunService.subscribe — step events and gate suspension", () => {
