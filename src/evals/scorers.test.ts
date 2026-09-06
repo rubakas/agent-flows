@@ -97,13 +97,15 @@ describe("citedPathsExist", () => {
     assert.equal(result.total, 0);
   });
 
-  it("treats a directory as invented — only real files count as citations", () => {
+  it("scores a real directory neither way — not a file, but not a fabrication", () => {
     const result = citedPathsExist(
       "The logic lives in src/canon and src/canon/nest.ts.",
       REPO_ROOT
     );
-    assert.deepEqual(result.invented, ["src/canon"]);
+    assert.deepEqual(result.invented, []);
     assert.deepEqual(result.found, ["src/canon/nest.ts"]);
+    assert.equal(result.total, 1, "the directory is excluded from the total");
+    assert.equal(result.score, 1);
   });
 
   it("does not report a real path as invented when sentence punctuation follows it", () => {

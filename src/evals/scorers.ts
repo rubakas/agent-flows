@@ -102,16 +102,21 @@ export function citedPathsExist(output: string, repoRoot: string): PathCheckResu
   const invented: string[] = [];
 
   for (const p of candidates) {
-    // A directory is not a citation — counting it would let "src/" score a hit
-    // and inflate groundedness. Only a real file counts.
-    if (statSync(join(repoRoot, p), { throwIfNoEntry: false })?.isFile() === true) {
+    const st = statSync(join(repoRoot, p), { throwIfNoEntry: false });
+    if (st?.isFile() === true) {
       found.push(p);
+    } else if (st?.isDirectory() === true) {
+      // A real directory is neither evidence of reading a file nor a
+      // fabrication. Crediting it would let "src/" score a hit; penalising it
+      // would mark "the n8n binding lives in src/bindings/n8n" as a
+      // hallucination. It scores nothing either way.
+      continue;
     } else {
       invented.push(p);
     }
   }
 
-  const total = candidates.length;
+  const total = found.length + invented.length;
   const score = total === 0 ? 1 : found.length / total;
   return { score, found, invented, total };
 }

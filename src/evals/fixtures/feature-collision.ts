@@ -36,20 +36,15 @@ const fixture: EvalFixture = {
     },
   ],
 
-  // A planted gap must FOLLOW from the seed prompt. An earlier version of this
-  // fixture asked the investigation to report that Binding A does not execute
-  // loop steps — true, but unrelated to a request about nesting, so a correct
-  // investigation had no reason to find it and the eval failed on the fixture's
-  // fault rather than the workflow's.
-  expectedGaps: [
-    {
-      phrase:
-        "the standard workflow library is incomplete — ADR-0015 specifies verify-plan and correct-plan, neither of which exists in pipelines/",
-      // Composing workflows means knowing which ones exist. Both names are
-      // required: either alone could appear in unrelated prose.
-      keywords: ["verify-plan", "correct-plan"],
-    },
-  ],
+  // Deliberately empty. This fixture tests ONE thing: does the investigation
+  // notice that the requested feature already exists? It does — twice, at 100%.
+  // Two attempts to plant a gap here failed, and both failed the same way: the
+  // gap did not follow from the request, so a correct investigation had no
+  // reason to report it and the eval measured the fixture instead of the system.
+  // A request whose right answer is "this is already built" has no natural gap.
+  // Gap detection is exercised by the bug-missing-detail fixture, where the
+  // omissions are genuinely in the prompt.
+  expectedGaps: [],
 
   // All paths here must exist on disk today.  The test suite asserts this.
   expectedPaths: ["src/canon/nest.ts", "src/canon/types.ts"],
