@@ -986,10 +986,11 @@ describe("runLlmStep — credential deny list", () => {
     }
   });
 
-  it("step with no permissions does not emit --disallowedTools (regression guard)", async () => {
-    // A step without contentsAccess must not get --disallowedTools added to its
-    // argument list. Leaking the deny list into unrestricted steps would change
-    // behaviour for all pipelines that omit permissions.
+  it("step with no permissions emits --disallowedTools with credential Read-only denials", async () => {
+    // A step without contentsAccess still gets --tools Read,Glob (the safe hardened
+    // fallback). Without credential Read denials it could read .env, *.pem, id_rsa
+    // from the daemon's working directory. The deny list is now emitted unconditionally
+    // for the Read tool, and deliberately excludes Edit denials (no workspace declared).
     const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
@@ -1000,8 +1001,20 @@ describe("runLlmStep — credential deny list", () => {
     await runLlmStep(entry, "hello", { spawn });
 
     assert.ok(
-      !capturedArgs.includes("--disallowedTools"),
-      "must not emit --disallowedTools when no permissions are declared"
+      capturedArgs.includes("--disallowedTools"),
+      "no-permissions step must emit --disallowedTools with credential Read denials"
+    );
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1] ?? "";
+    // Credential Read denials must be present.
+    assert.ok(
+      disallowedValue.includes("Read(**/.env)"),
+      "must deny Read(**/.env) for no-permissions step"
+    );
+    // Edit denials must NOT be present — no workspace was declared.
+    assert.ok(
+      !disallowedValue.includes("Edit("),
+      "must not include Edit() denials when no workspace is declared"
     );
   });
 });
@@ -1202,5 +1215,90 @@ describe("runLlmStep — per-step allow/deny patterns", () => {
       !disallowed.includes(`Read(${pat})`),
       "allow should cancel a step-level deny added by denyPatterns"
     );
+  });
+
+  // Fix 2 regression: shorthand allow entry must reach --disallowedTools.
+  // Before the fix, allowPatterns uses exact string equality so ".env.local"
+  // does NOT remove "**/.env.local" — the entry validates at load time but is
+  // silently dropped at runtime. The test exercises the shorthand form all the
+  // way to --disallowedTools, which is exactly the assertion that was missing.
+  //
+  // This test MUST FAIL before the runStep.ts allowEntryRemoves() fix.
+  it("shorthand allow (.env.local) removes **/.env.local from --disallowedTools", async () => {
+    const disallowed = await captureDisallowed({ allowPatterns: [".env.local"] });
+
+    assert.ok(
+      !disallowed.includes("Read(**/.env.local)"),
+      "shorthand allow '.env.local' must remove Read(**/.env.local) from --disallowedTools — " +
+        "fails before fix because exact-equality allowSet does not match the trailing-segment shorthand"
+    );
+    assert.ok(
+      !disallowed.includes("Edit(**/.env.local)"),
+      "shorthand allow '.env.local' must remove Edit(**/.env.local) from --disallowedTools"
+    );
+    // Other credential patterns must remain.
+    assert.ok(
+      disallowed.includes("Read(**/.env)"),
+      "Read(**/.env) must remain — only **/.env.local was allowed"
+    );
+  });
+});
+
+// ── Fix 3 regression: credential denials must reach no-permissions steps ────────
+//
+// Before the fix, CREDENTIAL_DENY_PATTERNS are only emitted inside the
+// `if (resolvedWorkspaceDir !== undefined)` guard. A step with no permissions
+// still gets --tools Read,Glob (the --tools "" empirical workaround), so it
+// CAN read .env, *.pem, id_rsa with no deny list at all.
+// After the fix, credential Read denials are emitted whenever Read is in the
+// effective tool set — i.e., always for claude CLI steps.
+//
+// This test MUST FAIL before the runStep.ts no-workspace credential-deny fix.
+describe("runLlmStep — credential Read denials emitted for no-permissions steps", () => {
+  it("no-permissions step includes credential Read denials in --disallowedTools", async () => {
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "hello", { spawn }); // no contentsAccess
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(
+      disallowedIdx !== -1,
+      "--disallowedTools must be present for a no-permissions step — " +
+        "fails before fix because the deny list is only built inside the resolvedWorkspaceDir guard"
+    );
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+    assert.ok(typeof disallowedValue === "string", "--disallowedTools must have a value");
+
+    for (const pat of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        disallowedValue.includes(`Read(${pat})`),
+        `--disallowedTools must deny Read for credential pattern ${pat}`
+      );
+    }
+
+    // Edit denials must NOT be present — no workspace access was declared.
+    for (const pat of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        !disallowedValue.includes(`Edit(${pat})`),
+        `--disallowedTools must NOT include Edit(${pat}) for a no-permissions step (no workspace)`
+      );
+    }
+    // Build-config Edit denials must NOT be present either.
+    for (const pat of BUILD_CONFIG_DENY_PATTERNS) {
+      assert.ok(
+        !disallowedValue.includes(`Edit(${pat})`),
+        `--disallowedTools must NOT include Edit build-config for a no-permissions step`
+      );
+    }
   });
 });

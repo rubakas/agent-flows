@@ -441,6 +441,43 @@ describe("RunService.get — suspended run carries gate payload for reconnecting
   });
 });
 
+// ── Fix 4 regression: missing step path must fail loudly, not fall back to "approve" ─
+
+// Before the fix, applyWorkflowResult falls back to ["approve"] when Mastra
+// reports suspended but provides no step path. A gate named anything else would
+// then be resumed at the wrong step, silently causing undefined behaviour.
+// After the fix, the missing step path throws, the background .catch fires, and
+// the run is marked "failed" so the caller gets a loud error rather than a
+// silent wrong-step resume.
+//
+// This test MUST FAIL before the runService.ts applyWorkflowResult fix.
+describe("RunService — missing step path fails loudly instead of falling back to 'approve'", () => {
+  it("run is marked failed when Mastra reports suspended with no step path", async () => {
+    const noPathRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-no-step-path",
+      watchers: [],
+      start: async () => ({
+        status: "suspended",
+        // `suspended` field is absent — Mastra gave no step path.
+      }),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(noPathRun as unknown as MockRun));
+    const startResult = await service.start("test-pipeline", { request: "test" });
+
+    const settled = await service.waitForSettled(startResult.runId);
+    assert.ok(settled !== undefined, "waitForSettled must resolve");
+    assert.equal(
+      settled.status,
+      "failed",
+      "run must be marked failed when no step path is provided — " +
+        "fails before fix because the fallback ['approve'] silently marks the run as suspended"
+    );
+  });
+});
+
 // ── Tests: subscribe ──────────────────────────────────────────────────────────
 
 describe("RunService.subscribe — step events and gate suspension", () => {

@@ -204,7 +204,7 @@ export class RunService {
     record.status = "running";
 
     const r2 = await record.run.resume({
-      step: record.suspendedStep ?? ["approve"],
+      step: record.suspendedStep!,
       resumeData: { approved },
     });
 
@@ -232,8 +232,15 @@ export class RunService {
    */
   private applyWorkflowResult(record: RunRecord, r: RunResult): SettledResult {
     if (r.status === "suspended") {
+      const suspendedPath = r.suspended?.[0];
+      if (!suspendedPath || suspendedPath.length === 0) {
+        throw new Error(
+          `RunService: Mastra reported "suspended" but provided no step path — ` +
+            `cannot resume safely. A wrong-step resume is worse than a loud failure.`
+        );
+      }
       record.status = "suspended";
-      record.suspendedStep = r.suspended?.[0] ?? ["approve"];
+      record.suspendedStep = suspendedPath;
       const stepKey = record.suspendedStep.join(".");
       const gateStep = r.steps?.[stepKey];
       const suspendPayload = gateStep?.suspendPayload;

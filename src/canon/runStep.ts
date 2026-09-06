@@ -207,6 +207,22 @@ export function normalisePattern(p: string): string {
   return p.trim().replace(/\\/g, "/").replace(/^\.\//, "");
 }
 
+/**
+ * Returns true when an allow entry removes a given deny pattern.
+ * Mirrors the semantics of allowEntryMatches() in load.ts so that an entry
+ * accepted at load time is also effective at runtime:
+ *   - exact match: normalise(entry) === normalise(denied)
+ *   - shorthand:   normalise(entry) === last path segment of normalise(denied)
+ *     e.g. ".env.local" matches "**\/.env.local"
+ */
+function allowEntryRemoves(entry: string, deniedPattern: string): boolean {
+  const normEntry = normalisePattern(entry);
+  const normDenied = normalisePattern(deniedPattern);
+  if (normEntry === normDenied) return true;
+  const lastSegment = normDenied.split("/").pop() ?? normDenied;
+  return normEntry === lastSegment;
+}
+
 // ── Deadline helper ───────────────────────────────────────────────────────────
 
 interface DeadlineHandle {
@@ -605,42 +621,37 @@ export async function runLlmStep(
         extraArgs.push("--restricted", "--strict-mcp-config", "--tools", effectiveToolSet);
         extraArgs.push("--allowedTools", effectiveToolSet);
 
+        // Per-step exceptions:
+        //   effective deny = (CREDENTIAL_DENY_PATTERNS ∪ denyPatterns ∪ BUILD_CONFIG_DENY_PATTERNS) − allowPatterns
+        //
+        // Subtraction uses allowEntryRemoves() which accepts both exact matches and the
+        // convenient trailing-segment shorthand (e.g. ".env.local" removes "**/.env.local").
+        // This matches the semantics validated at load time in allowEntryMatches() so that
+        // an entry accepted by canon:check is also effective at runtime.
+        //
+        // CREDENTIAL_DENY_PATTERNS: deny both Read and Edit — credential files must never
+        // be visible to a step. Emitted unconditionally when Read is in the tool set (which
+        // it always is — even no-permissions steps get Read,Glob as the safe hardened
+        // fallback). Without this, a pure text step can read .env, *.pem, id_rsa from the
+        // daemon's working directory with no deny list at all.
+        //
+        // BUILD_CONFIG_DENY_PATTERNS: deny Edit only — Read stays allowed so steps can
+        // inspect the build configuration; editing these files would let an injected prompt
+        // rewrite the test script or CI pipeline and have it executed inside the same run.
+        // Only emitted when workspace access is declared (Edit requires a workspace).
+        const allowPatterns = deps.allowPatterns ?? [];
+
+        const effectiveCredentialPatterns = [
+          ...CREDENTIAL_DENY_PATTERNS,
+          ...(deps.denyPatterns ?? []),
+        ].filter((p) => !allowPatterns.some((a) => allowEntryRemoves(a, p)));
+
         if (resolvedWorkspaceDir !== undefined) {
           // "Edit(pattern)" rules cover all file-editing tools (including Write);
-          // "Write(pattern)" is not a valid file permission deny rule and produces
-          // CLI warnings. "Read(pattern)" also suppresses Glob listing for the same
-          // path — granular "deny Read but allow Glob" is not achievable with this
-          // mechanism; the deny list is intentionally stricter on the side of security.
-          //
-          // CREDENTIAL_DENY_PATTERNS: deny both Read and Edit — these files must never
-          // be visible to a step.
-          // BUILD_CONFIG_DENY_PATTERNS: deny Edit only — Read stays allowed so steps
-          // can inspect the build configuration (e.g. to understand dependencies);
-          // editing these files would let an injected prompt rewrite the test script
-          // or CI pipeline and have it executed inside the same run.
-          //
-          // Per-step exceptions:
-          //   effective deny = (CREDENTIAL_DENY_PATTERNS ∪ denyPatterns ∪ BUILD_CONFIG_DENY_PATTERNS) − allowPatterns
-          //
-          // Subtraction is exact string equality after normalisePattern(). An allow
-          // entry removes a deny pattern only when the two normalised strings are
-          // identical — NOT by glob-expanding the allow entry against actual files.
-          // This means "**/*.pem" removes the stored pattern "**/*.pem", but a
-          // specific path like "fixtures/sample.pem" does NOT remove "**/*.pem".
-          // The intent: if a broad glob covers more than the operator intends to
-          // allow, they must name the broad glob explicitly; silent partial allows
-          // are the worst failure mode for a security control.
-          const allowSet = new Set((deps.allowPatterns ?? []).map(normalisePattern));
-
-          const effectiveCredentialPatterns = [
-            ...CREDENTIAL_DENY_PATTERNS,
-            ...(deps.denyPatterns ?? []),
-          ].filter((p) => !allowSet.has(normalisePattern(p)));
-
+          // "Write(pattern)" is not a valid file permission deny rule and produces CLI warnings.
           const effectiveBuildConfigPatterns = BUILD_CONFIG_DENY_PATTERNS.filter(
-            (p) => !allowSet.has(normalisePattern(p))
+            (p) => !allowPatterns.some((a) => allowEntryRemoves(a, p))
           );
-
           const credentialDenyEntries = ["Read", "Edit"].flatMap((tool) =>
             effectiveCredentialPatterns.map((pat) => `${tool}(${pat})`)
           );
@@ -649,6 +660,11 @@ export async function runLlmStep(
             ","
           );
           extraArgs.push("--disallowedTools", disallowedToolsValue);
+        } else {
+          // No workspace declared: emit credential Read denials only. Edit denials and
+          // build-config denials are not needed without write access.
+          const credentialReadEntries = effectiveCredentialPatterns.map((pat) => `Read(${pat})`);
+          extraArgs.push("--disallowedTools", credentialReadEntries.join(","));
         }
 
         if (hasSkills) {

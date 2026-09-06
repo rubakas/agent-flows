@@ -263,6 +263,14 @@ export function buildAssembleStep(stepId: string) {
 }
 
 export function buildGateStep(step: StepDef) {
+  // Each gate writes its decision to a key derived from its own full step id
+  // (not from the namespace prefix). This prevents key collision when two
+  // gates share the same namespace prefix (or both have bare ids without dots):
+  //   gate1 → "gate1.approved"
+  //   gate2 → "gate2.approved"
+  //   plan.approve → "plan.approve.approved"
+  // Persist and export-spec steps read via the gateId passed at build time.
+  const approvedKey = `${step.id}.approved`;
   return createStep({
     id: step.id,
     inputSchema: ctx,
@@ -271,7 +279,6 @@ export function buildGateStep(step: StepDef) {
     suspendSchema: z.object({ message: z.string(), spec: z.unknown() }),
     execute: async ({ inputData, resumeData, suspend }) => {
       const ctxData = inputData as Ctx;
-      const approvedKey = nsKey(step.id, "approved");
       if (resumeData) {
         return { ...ctxData, [approvedKey]: resumeData.approved };
       }
@@ -285,14 +292,17 @@ export function buildGateStep(step: StepDef) {
   });
 }
 
-export function buildPersistStep(stepId: string, store: TicketStore) {
+export function buildPersistStep(stepId: string, store: TicketStore, gateId: string) {
+  // Reads the approval decision from the gate's own unique key (gateId + ".approved")
+  // rather than a namespace-derived key. This ensures that when two gates share the
+  // same namespace prefix the correct gate's decision is always read.
+  const approvedKey = `${gateId}.approved`;
   return createStep({
     id: stepId,
     inputSchema: ctx,
     outputSchema: ctx,
     execute: async ({ inputData }) => {
       const ctxData = inputData as Ctx;
-      const approvedKey = nsKey(stepId, "approved");
       const specKey = nsKey(stepId, "spec");
       if (ctxData[approvedKey] === false) {
         return { ...ctxData };
@@ -304,14 +314,15 @@ export function buildPersistStep(stepId: string, store: TicketStore) {
   });
 }
 
-export function buildExportSpecStep(stepId: string, outDir: string) {
+export function buildExportSpecStep(stepId: string, outDir: string, gateId: string) {
+  // Reads the approval decision from the gate's own unique key (gateId + ".approved").
+  const approvedKey = `${gateId}.approved`;
   return createStep({
     id: stepId,
     inputSchema: ctx,
     outputSchema: ctx,
     execute: async ({ inputData }) => {
       const ctxData = inputData as Ctx;
-      const approvedKey = nsKey(stepId, "approved");
       const specKey = nsKey(stepId, "spec");
       if (ctxData[approvedKey] === false) {
         return { ...ctxData };

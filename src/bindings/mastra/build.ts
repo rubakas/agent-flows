@@ -24,7 +24,7 @@ import {
   ctx,
 } from "./buildSteps.js";
 import type { ModelRegistry } from "../../canon/registry.js";
-import type { LoadedPipeline, PipelineDef } from "../../canon/types.js";
+import type { LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
 
 /**
  * Validates a caller-supplied models override map against known registry ids.
@@ -43,6 +43,28 @@ export function validateModelOverrides(
     }
   }
   return null;
+}
+
+/**
+ * Walks `stepId`'s dependency tree (breadth-first, preferring the order
+ * declared in `dependsOn`) and returns the nearest ancestor whose kind is
+ * "gate", or undefined when none is found.
+ *
+ * Used by buildLevelsOntoBuilder to wire persist-ticket and export-spec steps
+ * to the specific gate whose decision they must respect. Passing the gate id
+ * rather than deriving it from a shared namespace key prevents two gates that
+ * share a namespace prefix from overwriting each other's decision.
+ */
+function findGateAncestor(stepId: string, stepById: Map<string, StepDef>): string | undefined {
+  const step = stepById.get(stepId);
+  if (!step) return undefined;
+  for (const dep of step.dependsOn ?? []) {
+    const depStep = stepById.get(dep);
+    if (depStep?.kind === "gate") return dep;
+    const deeper = findGateAncestor(dep, stepById);
+    if (deeper !== undefined) return deeper;
+  }
+  return undefined;
 }
 
 // Applies the topological levels of `def` onto `builder`, dispatching each
@@ -92,7 +114,13 @@ function buildLevelsOntoBuilder(
       } else if (step.kind === "gate") {
         builder = builder.then(buildGateStep(step));
       } else if (step.kind === "persist-ticket") {
-        builder = builder.then(buildPersistStep(step.id, deps.store));
+        const gateId = findGateAncestor(step.id, stepById);
+        if (gateId === undefined) {
+          throw new Error(
+            `Step "${step.id}": persist-ticket requires a preceding gate step in its dependency chain`
+          );
+        }
+        builder = builder.then(buildPersistStep(step.id, deps.store, gateId));
       } else if (step.kind === "loop") {
         const body = bodies[step.id];
         if (!body) {
@@ -111,7 +139,13 @@ function buildLevelsOntoBuilder(
       } else if (step.kind === "check") {
         builder = builder.then(buildCheckStep(step, deps, def.defaultTimeoutMs));
       } else if (step.kind === "export-spec") {
-        builder = builder.then(buildExportSpecStep(step.id, step.path!));
+        const gateId = findGateAncestor(step.id, stepById);
+        if (gateId === undefined) {
+          throw new Error(
+            `Step "${step.id}": export-spec requires a preceding gate step in its dependency chain`
+          );
+        }
+        builder = builder.then(buildExportSpecStep(step.id, step.path!, gateId));
       } else {
         // Without this, an unhandled kind contributes no Mastra step and the run
         // silently skips it. `pipeline` steps in particular must already be gone.

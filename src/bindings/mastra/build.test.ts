@@ -201,9 +201,13 @@ describe("buildPipelineWorkflow — rejected gate", () => {
       const tickets = await store.listTickets();
       assert.equal(tickets.length, 0, "no ticket should be created on rejection");
 
-      // Result should carry approved:false
+      // Result should carry approve.approved:false (gate step id "approve" + ".approved").
       const result = r2.result as Record<string, unknown> | undefined;
-      assert.equal(result?.approved, false, "result should have approved:false");
+      assert.equal(
+        result?.["approve.approved"],
+        false,
+        "result should have approve.approved:false"
+      );
     } finally {
       cleanup();
     }
@@ -1640,6 +1644,108 @@ describe("buildPipelineWorkflow — skills forwarding", () => {
         capturedSkills,
         ["git", "chrome-test"],
         "skills must be forwarded to runner deps — fails without the binding change in buildSteps.ts"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ── Fix 1 regression: gate key collision ─────────────────────────────────────
+//
+// Pipeline with two bare-id gates (no dots → both wrote to the SAME "approved"
+// context key). gate1 rejects; gate2 approves. Before the fix, gate2's approval
+// overwrites gate1's rejection and persist sees approved=true, creating a ticket.
+// After the fix, each gate writes to its own unique key and persist reads gate1's
+// decision (gate1 is listed first in persist.dependsOn), correctly skipping.
+//
+// This test MUST FAIL before the buildSteps.ts + build.ts fix and pass after.
+
+const TWO_GATE_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "two-gate-collision",
+    version: 1,
+    description: "Regression: two bare-id gates must not share the approved context key",
+    inputs: ["request"],
+    steps: [
+      { id: "intake", kind: "llm", model: "intake", prompt: "prompts/intake.md" },
+      {
+        id: "enrich",
+        kind: "llm",
+        model: "enrich",
+        prompt: "prompts/enrich.md",
+        dependsOn: ["intake"],
+      },
+      {
+        id: "critic",
+        kind: "llm",
+        model: "critic",
+        prompt: "prompts/critic.md",
+        schema: "weaknesses",
+        dependsOn: ["enrich"],
+      },
+      {
+        id: "security",
+        kind: "llm",
+        model: "security",
+        prompt: "prompts/security.md",
+        schema: "securityFindings",
+        dependsOn: ["enrich"],
+      },
+      { id: "assemble", kind: "assemble-spec", dependsOn: ["critic", "security"] },
+      // gate1 is the spec-creation gate; it REJECTS.
+      { id: "gate1", kind: "gate", message: "Gate 1?", dependsOn: ["assemble"] },
+      // gate2 is a second gate (e.g., ship gate); it APPROVES.
+      { id: "gate2", kind: "gate", message: "Gate 2?", dependsOn: ["gate1"] },
+      // persist depends on both gates; gate1 is listed first so findGateAncestor picks it.
+      { id: "persist", kind: "persist-ticket", dependsOn: ["gate1", "gate2"] },
+    ],
+  },
+  prompts: {
+    intake: "Draft a spec for: {{request}}",
+    enrich: "Enrich the draft:\n{{intake}}",
+    critic: "Critique:\n{{intake}}\n{{enrich}}",
+    security: "Security review:\n{{intake}}\n{{enrich}}",
+  },
+};
+
+describe("buildPipelineWorkflow — two-gate key collision: first rejection not overwritten by second approval", () => {
+  it("gate1 rejects, gate2 approves: persist skips because it reads gate1's decision", async () => {
+    const { storage, store, cleanup } = makeTestFixture("two-gate-collision");
+    try {
+      const wf = buildPipelineWorkflow(TWO_GATE_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: makeFakeRunner(CANNED_RESPONSES),
+      });
+
+      const mastra = new Mastra({
+        storage,
+        workflows: { [TWO_GATE_PIPELINE.def.id]: wf },
+      });
+      const run = await mastra.getWorkflow(TWO_GATE_PIPELINE.def.id).createRun();
+
+      // Run until first gate (gate1) suspends.
+      const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+      assert.equal(r1.status, "suspended", "workflow must suspend at gate1");
+      assert.equal(r1.suspended?.[0]?.[0], "gate1", "must be suspended at gate1");
+
+      // gate1 REJECTS.
+      const r2 = await run.resume({ step: r1.suspended![0], resumeData: { approved: false } });
+      assert.equal(r2.status, "suspended", "workflow must re-suspend at gate2");
+      assert.equal(r2.suspended?.[0]?.[0], "gate2", "must be suspended at gate2");
+
+      // gate2 APPROVES — must NOT override gate1's rejection for persist.
+      const r3 = await run.resume({ step: r2.suspended![0], resumeData: { approved: true } });
+      assert.equal(r3.status, "success", "workflow must succeed after both gates");
+
+      // The key assertion: gate1 rejected, so persist must have skipped.
+      const tickets = await store.listTickets();
+      assert.equal(
+        tickets.length,
+        0,
+        "persist must skip when gate1 (its authoritative gate) rejected — " +
+          "fails before fix because gate2's approval overwrites gate1's rejection in the shared 'approved' key"
       );
     } finally {
       cleanup();

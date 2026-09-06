@@ -788,7 +788,7 @@
 
       // ── Application state ─────────────────────────────────────────────────────────
       const S = {
-        pipelines: [],
+        pipelines: null, // null until first fetch completes
         pipeline: null, // { def, prompts, levels, graph }
         editedSteps: [], // deep-copied, mutable
         selectedId: null,
@@ -834,6 +834,69 @@
       // Screen 1: Pipeline list
       // ══════════════════════════════════════════════════════════════════════════════
 
+      function renderPipelines() {
+        const items = el("list-items");
+        if (S.pipelines === null) return; // still fetching
+        if (!S.pipelines.length) {
+          items.innerHTML = '<p class="empty">No pipelines found.</p>';
+          return;
+        }
+        const isBundled = S.env?.pipelinesSource === "bundled";
+        const installedSet = new Set(S.env?.installed ?? []);
+        items.innerHTML = S.pipelines
+          .map((p) => {
+            const isInstalled = installedSet.has(p.id);
+            const result = S.installResults[p.id];
+            let actionHtml;
+            if (isBundled) {
+              if (isInstalled) {
+                actionHtml = `<span class="tag" style="color:var(--ok);border-color:var(--ok)">installed</span>`;
+              } else {
+                actionHtml = `<button class="btn btn-icon" data-install="${escH(p.id)}">Install</button>`;
+              }
+            } else {
+              actionHtml = `<button class="btn btn-icon" data-del="${escH(p.id)}" title="Delete ${escH(p.id)}" aria-label="Delete ${escH(p.id)}">✕</button>`;
+            }
+            const sourcePrefix = isBundled ? "bundled — " : "project — ";
+            const resultHtml =
+              result && isBundled ? `<div class="install-result">${result}</div>` : "";
+            return `<div class="pipeline-card" role="button" tabindex="0" data-pid="${escH(p.id)}">
+        <div class="card-top">
+          <span class="pid">${escH(p.id)}</span>
+          ${actionHtml}
+        </div>
+        <span class="pdesc">${escH(p.description || "")}</span>
+        <span class="ppath">${escH(sourcePrefix)}${escH(p.path)}</span>
+      </div>${resultHtml}`;
+          })
+          .join("");
+
+        items.querySelectorAll(".pipeline-card").forEach((card) => {
+          const pid = card.dataset.pid;
+          card.addEventListener("click", () => openPipeline(pid));
+          card.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              openPipeline(pid);
+            }
+          });
+        });
+
+        items.querySelectorAll("[data-del]").forEach((btn) => {
+          btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            showDeleteModal(btn.dataset.del);
+          });
+        });
+
+        items.querySelectorAll("[data-install]").forEach((btn) => {
+          btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            installSingle(btn.dataset.install);
+          });
+        });
+      }
+
       async function loadList() {
         const items = el("list-items");
         try {
@@ -841,42 +904,7 @@
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           S.pipelines = data.pipelines;
-
-          if (!S.pipelines.length) {
-            items.innerHTML = '<p class="empty">No pipelines found.</p>';
-            return;
-          }
-          items.innerHTML = S.pipelines
-            .map(
-              (p) => `
-      <div class="pipeline-card" role="button" tabindex="0" data-pid="${escH(p.id)}">
-        <div class="card-top">
-          <span class="pid">${escH(p.id)}</span>
-          <button class="btn btn-icon" data-del="${escH(p.id)}" title="Delete ${escH(p.id)}" aria-label="Delete ${escH(p.id)}">✕</button>
-        </div>
-        <span class="pdesc">${escH(p.description || "")}</span>
-        <span class="ppath">${escH(p.path)}</span>
-      </div>`
-            )
-            .join("");
-
-          items.querySelectorAll(".pipeline-card").forEach((card) => {
-            const pid = card.dataset.pid;
-            card.addEventListener("click", () => openPipeline(pid));
-            card.addEventListener("keydown", (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                openPipeline(pid);
-              }
-            });
-          });
-
-          items.querySelectorAll("[data-del]").forEach((btn) => {
-            btn.addEventListener("click", (e) => {
-              e.stopPropagation();
-              showDeleteModal(btn.dataset.del);
-            });
-          });
+          renderPipelines();
         } catch (err) {
           items.innerHTML = `<div class="error-box">Could not load pipelines: ${escH(err.message)}</div>`;
         }
@@ -1382,6 +1410,8 @@
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           S.env = await res.json();
           renderEnvPanel(S.env);
+          renderPipelines();
+          el("new-pipeline-btn").hidden = S.env.pipelinesSource === "bundled";
         } catch (err) {
           panel.innerHTML = `<div class="env-section"><div class="error-box">Could not load environment: ${escH(err.message)}</div></div>`;
         }
@@ -1412,8 +1442,8 @@
           </div>
         </div>`;
 
-        // ── Install ──
-        if (env.available.length > 0) {
+        // ── Install ── (project mode only; in bundled mode each card carries its own install action)
+        if (!isBundled && env.available.length > 0) {
           html += `<div class="env-section"><h2>Available to install</h2>`;
           if (uninstalled.length === 0) {
             html += `<p class="empty">All ${env.available.length} bundled workflow${env.available.length === 1 ? "" : "s"} already installed.</p>`;
@@ -1461,7 +1491,8 @@
 
       async function installSingle(wfId) {
         // Optimistically disable the button while request is in flight.
-        const btn = el("env-panel").querySelector(`[data-install="${CSS.escape(wfId)}"]`);
+        // The button may be in list-items (bundled mode) or env-panel (project mode).
+        const btn = document.querySelector(`[data-install="${CSS.escape(wfId)}"]`);
         if (btn) btn.disabled = true;
         try {
           const res = await fetch("/api/install", {
