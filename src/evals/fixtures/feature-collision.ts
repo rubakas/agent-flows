@@ -36,13 +36,18 @@ const fixture: EvalFixture = {
     },
   ],
 
+  // A planted gap must FOLLOW from the seed prompt. An earlier version of this
+  // fixture asked the investigation to report that Binding A does not execute
+  // loop steps — true, but unrelated to a request about nesting, so a correct
+  // investigation had no reason to find it and the eval failed on the fixture's
+  // fault rather than the workflow's.
   expectedGaps: [
     {
       phrase:
-        "Binding A (claudeCode.ts) does not execute loop steps — generateWorkflowScript emits a stub comment instead of running the body",
-      // The investigation must cite Binding A (claudeCode.ts) AND the loop step gap.
-      // These keywords require the specific claim, not just two common words.
-      keywords: ["Binding A", "loop"],
+        "the standard workflow library is incomplete — ADR-0015 specifies verify-plan and correct-plan, neither of which exists in pipelines/",
+      // Composing workflows means knowing which ones exist. Both names are
+      // required: either alone could appear in unrelated prose.
+      keywords: ["verify-plan", "correct-plan"],
     },
   ],
 

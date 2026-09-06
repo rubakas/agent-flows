@@ -237,7 +237,8 @@ describe("feature-collision fixture: correct investigation passes all scorers", 
     The codebase already implements nested pipeline support.
     \`src/canon/nest.ts\` exports \`expandNested\` which splices pipeline steps at load time.
     \`src/canon/types.ts\` defines StepKind which includes "pipeline".
-    Gap: Binding A (claudeCode.ts) does not execute loop steps — generateWorkflowScript emits a stub comment.
+    Gap: the standard library is incomplete — ADR-0015 specifies verify-plan and correct-plan,
+    and neither exists in pipelines/.
   `;
 
   it("citedPathsExist: no invented paths", () => {
