@@ -6,18 +6,18 @@ inputs:
 steps:
   - id: correctness
     kind: llm
-    role: reasoner
+    role: worker # adversarial review of one dimension; reviewer-class agents run on sonnet
     permissions:
       contents: read
     prompt: prompts/audit-correctness.md
   - id: security
     kind: llm
-    role: reasoner
+    role: worker # same reasoning as correctness — single-dimension adversarial review
     permissions:
       contents: read
     prompt: prompts/audit-security.md
   - id: synthesis
     kind: llm
-    role: reasoner
+    role: reasoner # reconciles two opposing reviews into a verdict; judgment across both reports
     dependsOn: [correctness, security]
     prompt: prompts/audit-synthesis.md

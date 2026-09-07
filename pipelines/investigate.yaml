@@ -12,6 +12,6 @@ steps:
     prompt: prompts/investigate-survey.md
   - id: findings
     kind: llm
-    role: reasoner
+    role: scout # condenses an existing survey into a brief; analyst-class step analogous to tech-writer
     dependsOn: [survey]
     prompt: prompts/investigate-findings.md

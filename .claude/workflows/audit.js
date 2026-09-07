@@ -18,9 +18,9 @@ if (!plan) {
   throw new Error('args.plan is required and must be non-empty — refusing to run without it')
 }
 const models = (args && args.models) || {}
-const mCorrectness = models['correctness'] || 'claude-fable-5'
-const mSecurity = models['security'] || 'claude-fable-5'
-const mSynthesis = models['synthesis'] || 'claude-fable-5'
+const mCorrectness = models['correctness'] || 'claude-sonnet-5'
+const mSecurity = models['security'] || 'claude-sonnet-5'
+const mSynthesis = models['synthesis'] || 'claude-opus-5'
 
 phase('Correctness')
 log('Running correctness steps…')

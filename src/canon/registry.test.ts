@@ -52,27 +52,30 @@ describe("defaultRegistry", () => {
   it("includes fable, opus, sonnet, haiku as cli transport entries", () => {
     const reg = defaultRegistry({});
 
-    // opus, sonnet, haiku use bare aliases (always-latest); fable is pinned to claude-fable-5
-    for (const alias of ["opus", "sonnet", "haiku"] as const) {
+    // All four are pinned to explicit versioned ids — bare aliases silently follow the newest
+    // (most expensive) model; explicit ids make cost predictable across CLI updates.
+    const expected: Record<string, string> = {
+      fable: "claude-fable-5-1",
+      opus: "claude-opus-5",
+      sonnet: "claude-sonnet-5",
+      haiku: "claude-haiku-4-5",
+    };
+
+    for (const [alias, expectedModel] of Object.entries(expected)) {
       const entry = reg.resolve(alias);
       assert.equal(entry.transport, "cli", `${alias} transport`);
       assert.equal(entry.cli?.bin, "claude", `${alias} bin`);
-      assert.equal(entry.cli?.model, alias, `${alias} model`);
+      assert.equal(entry.cli?.model, expectedModel, `${alias} model pinned to ${expectedModel}`);
     }
-
-    const fable = reg.resolve("fable");
-    assert.equal(fable.transport, "cli", "fable transport");
-    assert.equal(fable.cli?.bin, "claude", "fable bin");
-    assert.equal(fable.cli?.model, "claude-fable-5", "fable model pinned");
   });
 
   it("unknown id resolves to passthrough cli entry with model=id", () => {
     const reg = defaultRegistry({});
-    const entry = reg.resolve("claude-fable-5-1");
-    assert.equal(entry.id, "claude-fable-5-1");
+    const entry = reg.resolve("claude-unknown-future-model");
+    assert.equal(entry.id, "claude-unknown-future-model");
     assert.equal(entry.transport, "cli");
     assert.equal(entry.cli?.bin, "claude");
-    assert.equal(entry.cli?.model, "claude-fable-5-1");
+    assert.equal(entry.cli?.model, "claude-unknown-future-model");
   });
 
   it("ollama-qwen uses env.OLLAMA_BASE_URL when set", () => {
@@ -131,9 +134,26 @@ describe("defaultRegistry", () => {
 describe("getProfile", () => {
   it("anthropic profile has correct role→model mappings", () => {
     const p = getProfile("anthropic");
-    assert.equal(p.roles.reasoner, "fable");
+    assert.equal(p.roles.reasoner, "opus");
     assert.equal(p.roles.worker, "sonnet");
     assert.equal(p.roles.scout, "haiku");
+  });
+
+  it("no built-in role profile resolves to a fable entry", () => {
+    // Guard for owner instruction: fable is reserved for chat orchestration and must
+    // never be wired into any workflow role. This test fails if someone maps a role to fable.
+    const reg = defaultRegistry({});
+    for (const profileId of ["anthropic", "openai", "local"]) {
+      const profile = getProfile(profileId);
+      for (const role of ["reasoner", "worker", "scout"] as const) {
+        const entry = reg.resolve(profile.roles[role]);
+        assert.notEqual(
+          entry.id,
+          "fable",
+          `Profile "${profileId}" role "${role}" must not resolve to fable`
+        );
+      }
+    }
   });
 
   it("openai profile maps all roles to codex", () => {
@@ -190,22 +210,22 @@ describe("resolveStepModel", () => {
     return { id: "s", kind: "llm", ...overrides };
   }
 
-  it("role=reasoner on anthropic resolves to fable entry", () => {
+  it("role=reasoner on anthropic resolves to opus entry", () => {
     const entry = resolveStepModel(step({ role: "reasoner" }), anthropic, reg);
-    assert.equal(entry.id, "fable");
-    assert.equal(entry.cli?.model, "claude-fable-5");
+    assert.equal(entry.id, "opus");
+    assert.equal(entry.cli?.model, "claude-opus-5");
   });
 
   it("role=worker on anthropic resolves to sonnet entry", () => {
     const entry = resolveStepModel(step({ role: "worker" }), anthropic, reg);
     assert.equal(entry.id, "sonnet");
-    assert.equal(entry.cli?.model, "sonnet");
+    assert.equal(entry.cli?.model, "claude-sonnet-5");
   });
 
   it("role=scout on anthropic resolves to haiku entry", () => {
     const entry = resolveStepModel(step({ role: "scout" }), anthropic, reg);
     assert.equal(entry.id, "haiku");
-    assert.equal(entry.cli?.model, "haiku");
+    assert.equal(entry.cli?.model, "claude-haiku-4-5");
   });
 
   it("all roles on openai resolve to codex entry with no model field", () => {
@@ -307,7 +327,7 @@ describe("getProfile / getActiveProfile — extra profiles / config", () => {
   it("zero-arg-calls-unchanged: getProfile('anthropic') behaves as before", () => {
     const profile = getProfile("anthropic");
     assert.equal(profile.id, "anthropic");
-    assert.equal(profile.roles.reasoner, "fable");
+    assert.equal(profile.roles.reasoner, "opus");
   });
 
   it("active-profile-precedence: env beats config.defaultProvider; config beats 'anthropic'", () => {

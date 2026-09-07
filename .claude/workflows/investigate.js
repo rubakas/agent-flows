@@ -18,8 +18,8 @@ if (!request) {
   throw new Error('args.request is required and must be non-empty — refusing to run without it')
 }
 const models = (args && args.models) || {}
-const mSurvey = models['survey'] || 'haiku'
-const mFindings = models['findings'] || 'claude-fable-5'
+const mSurvey = models['survey'] || 'claude-haiku-4-5'
+const mFindings = models['findings'] || 'claude-haiku-4-5'
 
 phase('Survey')
 log('Running survey steps…')

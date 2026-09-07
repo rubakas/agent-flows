@@ -39,11 +39,16 @@ export function defaultRegistry(
 ): ModelRegistry {
   return new ModelRegistry([
     ...(extra ?? []),
-    // fable: pinned to claude-fable-5 — bare alias would track newest/most-expensive; this role backs most cycle steps
-    { id: "fable", transport: "cli", cli: { bin: "claude", model: "claude-fable-5" } },
-    { id: "opus", transport: "cli", cli: { bin: "claude", model: "opus" } },
-    { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "sonnet" } },
-    { id: "haiku", transport: "cli", cli: { bin: "claude", model: "haiku" } },
+    // fable: pinned to claude-fable-5-1 (fable-5 is legacy). Entry is kept so project overrides can
+    // reference it explicitly, but NO built-in role profile maps to this id — the owner reserves
+    // fable for chat orchestration and will not risk it inside automated workflows.
+    { id: "fable", transport: "cli", cli: { bin: "claude", model: "claude-fable-5-1" } },
+    // opus/sonnet/haiku: pinned to explicit versioned ids rather than bare CLI aliases.
+    // A bare alias silently follows the newest — and therefore most expensive — model;
+    // pinning makes cost predictable and prevents accidental tier upgrades on CLI updates.
+    { id: "opus", transport: "cli", cli: { bin: "claude", model: "claude-opus-5" } },
+    { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "claude-sonnet-5" } },
+    { id: "haiku", transport: "cli", cli: { bin: "claude", model: "claude-haiku-4-5" } },
     // codex: no model field — the CLI uses its own default when no -m flag is passed
     { id: "codex", transport: "cli", cli: { bin: "codex" } },
     {
@@ -89,7 +94,10 @@ export interface ProviderConfig {
 const DEFAULT_PROFILES: ProviderProfile[] = [
   {
     id: "anthropic",
-    roles: { reasoner: "fable", worker: "sonnet", scout: "haiku" },
+    // reasoner=opus: most complex judgment steps; worker=sonnet: implementation/review;
+    // scout=haiku: fast survey and condensing steps. fable is intentionally excluded from
+    // all role profiles — owner decision, see registry comment on the fable entry.
+    roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
   },
   {
     id: "openai",

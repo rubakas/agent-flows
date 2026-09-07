@@ -14,28 +14,34 @@ import { randomUUID } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
 // Provider registry: role -> concrete model alias (resolved by claude --model)
+//
+// IMPORTANT: this map must stay in sync with src/canon/registry.ts (the canon
+// declares the authoritative role→model assignments). A divergence here is the
+// same defect class this project has hit before: the canon declares one thing
+// and a binding does another. The cross-check test at
+// src/canon/n8nNodeRoleModelSync.test.ts guards against this drifting again.
 // ---------------------------------------------------------------------------
 
 type Role = 'reasoner' | 'worker' | 'scout';
 
 const ROLE_TO_MODEL: Record<Role, string> = {
-  reasoner: 'claude-opus-4-5',
-  worker: 'claude-sonnet-4-5',
+  reasoner: 'claude-opus-5',
+  worker: 'claude-sonnet-5',
   scout: 'claude-haiku-4-5',
 };
 
 const ALLOWED_MODELS: ReadonlySet<string> = new Set([
   ...Object.values(ROLE_TO_MODEL),
-  // Common aliases that claude accepts
-  'claude-opus-4-5',
-  'claude-sonnet-4-5',
-  'claude-haiku-4-5',
+  // Bare CLI aliases (claude resolves these to their current pinned version)
   'opus',
   'sonnet',
   'haiku',
-  'claude-opus-4-0',
-  'claude-sonnet-4-0',
-  'claude-haiku-3-5',
+  // Explicit versioned ids currently in use
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-4-5',
+  'claude-haiku-4-5-20251001',
+  'claude-fable-5-1',
 ]);
 
 const DEFAULT_MODEL = ROLE_TO_MODEL['scout'];
@@ -290,12 +296,12 @@ export class AgentFlowsAgent implements INodeType {
           {
             name: 'Reasoner (opus)',
             value: 'reasoner',
-            description: 'Deep reasoning tasks — maps to claude-opus-4-5',
+            description: 'Deep reasoning tasks — maps to claude-opus-5',
           },
           {
             name: 'Worker (sonnet)',
             value: 'worker',
-            description: 'General implementation tasks — maps to claude-sonnet-4-5',
+            description: 'General implementation tasks — maps to claude-sonnet-5',
           },
           {
             name: 'Scout (haiku)',
@@ -311,7 +317,7 @@ export class AgentFlowsAgent implements INodeType {
         name: 'model',
         type: 'string',
         default: '',
-        placeholder: 'e.g. claude-haiku-4-5',
+        placeholder: 'e.g. claude-haiku-4-5 or claude-opus-5',
         description:
           'Optional. Overrides the role-resolved model. Must be a value from the known registry; unknown strings are rejected.',
       },

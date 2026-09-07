@@ -18,13 +18,13 @@ steps:
     dependsOn: [intake]
   - id: critic
     kind: llm
-    role: reasoner
+    role: worker # reviewer-class step; same tier as the audit correctness/security reviewers
     prompt: prompts/critic.md
     schema: weaknesses
     dependsOn: [enrich]
   - id: security
     kind: llm
-    role: reasoner
+    role: worker # reviewer-class step; same tier as the audit correctness/security reviewers
     prompt: prompts/security.md
     schema: securityFindings
     dependsOn: [enrich]

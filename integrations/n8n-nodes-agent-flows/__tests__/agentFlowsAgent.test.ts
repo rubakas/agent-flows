@@ -23,22 +23,21 @@ import { randomUUID } from 'node:crypto';
 type Role = 'reasoner' | 'worker' | 'scout';
 
 const ROLE_TO_MODEL: Record<Role, string> = {
-  reasoner: 'claude-opus-4-5',
-  worker: 'claude-sonnet-4-5',
+  reasoner: 'claude-opus-5',
+  worker: 'claude-sonnet-5',
   scout: 'claude-haiku-4-5',
 };
 
 const ALLOWED_MODELS: ReadonlySet<string> = new Set([
   ...Object.values(ROLE_TO_MODEL),
-  'claude-opus-4-5',
-  'claude-sonnet-4-5',
-  'claude-haiku-4-5',
   'opus',
   'sonnet',
   'haiku',
-  'claude-opus-4-0',
-  'claude-sonnet-4-0',
-  'claude-haiku-3-5',
+  'claude-opus-5',
+  'claude-sonnet-5',
+  'claude-haiku-4-5',
+  'claude-haiku-4-5-20251001',
+  'claude-fable-5-1',
 ]);
 
 const DEFAULT_MODEL = ROLE_TO_MODEL['scout'];
@@ -119,11 +118,11 @@ function buildClaudeArgs(
 
 describe('resolveModel', () => {
   it('maps reasoner to opus', () => {
-    assert.equal(resolveModel('reasoner', undefined), 'claude-opus-4-5');
+    assert.equal(resolveModel('reasoner', undefined), 'claude-opus-5');
   });
 
   it('maps worker to sonnet', () => {
-    assert.equal(resolveModel('worker', undefined), 'claude-sonnet-4-5');
+    assert.equal(resolveModel('worker', undefined), 'claude-sonnet-5');
   });
 
   it('maps scout to haiku (default)', () => {
@@ -149,8 +148,8 @@ describe('resolveModel', () => {
   });
 
   it('ignores blank model override and falls back to role', () => {
-    assert.equal(resolveModel('reasoner', '  '), 'claude-opus-4-5');
-    assert.equal(resolveModel('reasoner', ''), 'claude-opus-4-5');
+    assert.equal(resolveModel('reasoner', '  '), 'claude-opus-5');
+    assert.equal(resolveModel('reasoner', ''), 'claude-opus-5');
   });
 });
 
