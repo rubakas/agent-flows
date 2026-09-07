@@ -249,7 +249,7 @@ And: **"Most use cases need multidimensional evaluation along several success cr
 | **Human grading**                     | human          | implicitly the fallback — the docs push hard away from it ("prioritize volume over quality")                                              |
 
 Crucial operational note for us, verbatim: **"Generally best practice to use a different model to
-evaluate than the model used to generate the evaluated output."** Yoke's `ModelRegistry` +
+evaluate than the model used to generate the evaluated output."** agent-flows' `ModelRegistry` +
 `ProviderProfile` roles (`reasoner`/`worker`/`scout`, `src/canon/registry.ts`) make this trivial —
 score with a different role/provider than the step under test.
 

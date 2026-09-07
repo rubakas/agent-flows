@@ -1,11 +1,11 @@
 # Rivet Spike Evaluation (011)
 
-| Field     | Value                                                                                                                                                                                                                                                                                    |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Spike     | 011-spike-rivet: Rivet visual engine                                                                                                                                                                                                                                                     |
-| Date      | 2026-09-01                                                                                                                                                                                                                                                                               |
-| Verdict   | ENGINE: PASS — adopt Rivet as workflow engine + authoring tool. OPERATOR UX: rough — approve/inputs flow needs Yoke-side polish (buttons page, terminal prompt, editor-answer delivery), and the primary operator surface should be chat-first (front-door decision tracked separately). |
-| Evaluator | automated orchestration (E1–E3, E5, E7–E8); human review (E4, E6)                                                                                                                                                                                                                        |
+| Field     | Value                                                                                                                                                                                                                                                                                           |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Spike     | 011-spike-rivet: Rivet visual engine                                                                                                                                                                                                                                                            |
+| Date      | 2026-09-01                                                                                                                                                                                                                                                                                      |
+| Verdict   | ENGINE: PASS — adopt Rivet as workflow engine + authoring tool. OPERATOR UX: rough — approve/inputs flow needs agent-flows-side polish (buttons page, terminal prompt, editor-answer delivery), and the primary operator surface should be chat-first (front-door decision tracked separately). |
+| Evaluator | automated orchestration (E1–E3, E5, E7–E8); human review (E4, E6)                                                                                                                                                                                                                               |
 
 ---
 
@@ -58,11 +58,11 @@
 
 - Approve step (step 5 of 6) is a User Input node that awaits stdin input.
 - Real headless run with `echo yes`:
-  - `echo yes | pnpm rivet:host -- --request "Add a CSV export button…" --db /tmp/yoke-spike.sqlite`
+  - `echo yes | pnpm rivet:host -- --request "Add a CSV export button…" --db /tmp/agent-flows-spike.sqlite`
   - Result: `approved=true`, `ticketId=1`, exit 0, pipeline completed in 66 seconds.
   - Downstream `create-ticket` step ran and wrote ticket to SQLite.
 - Real headless run with `echo no`:
-  - `echo no | pnpm rivet:host -- --request "…" --db /tmp/yoke-spike.sqlite`
+  - `echo no | pnpm rivet:host -- --request "…" --db /tmp/agent-flows-spike.sqlite`
   - Result: `approved=false`, `ticketId=control-flow-excluded`, exit 2 (exit code indicates denial).
   - Downstream `create-ticket` step was NOT run (control-flow-excluded propagation blocked it).
 - Gate blocks downstream via rivet-node's native control-flow exclusion (nodes connected after the denied User Input do not run).
@@ -88,7 +88,7 @@
 
 ---
 
-## E5: Yoke Integration (Persist to SQLite)
+## E5: agent-flows Integration (Persist to SQLite)
 
 **Status:** PASS
 
@@ -96,10 +96,10 @@
 
 - Create-ticket step invokes host function `persistTicket(spec)` (External Function in rivet-node).
 - `src/rivet/persistTicket.ts` (108 lines): thin adapter over `DrizzleTicketStore.createTicket()` and related methods.
-- Real run: ticket ID 1 written to `/tmp/yoke-spike.sqlite` with 15 weaknesses, 6 security findings, state = `ready`.
-- Only modification to existing Yoke code: `src/db/index.ts` — `makeDb()` now auto-applies schema on fresh SQLite file (idempotent).
+- Real run: ticket ID 1 written to `/tmp/agent-flows-spike.sqlite` with 15 weaknesses, 6 security findings, state = `ready`.
+- Only modification to existing agent-flows code: `src/db/index.ts` — `makeDb()` now auto-applies schema on fresh SQLite file (idempotent).
 - Coupling friction: low. No schema changes, no store interface changes, only self-initialization.
-- `HardenedSpec` type mirrors Yoke domain objects; JSON serialization handled by Rivet's node output.
+- `HardenedSpec` type mirrors agent-flows domain objects; JSON serialization handled by Rivet's node output.
 
 **Notes:**
 
@@ -149,7 +149,7 @@
 
 **Maintainability:**
 
-- All code is thin adapters over rivet-node and Yoke's existing domain logic.
+- All code is thin adapters over rivet-node and agent-flows' existing domain logic.
 - No engine-level changes; rivet-node is a dependency, not embedded.
 - Tests are comprehensive (1,189 lines) — build determinism, CLI arg parsing, HITL stdin, External Function wrapping.
 - Doctor is extensible (new probes added as env grows).
@@ -166,7 +166,7 @@
 **Open Source & Self-Hosted:**
 
 - Rivet engine: MIT license; `@ironclad/rivet-node` 1.1.7 from npm.
-- Yoke wrapper: adheres to Yoke's OSI policy.
+- agent-flows wrapper: adheres to agent-flows' OSI policy.
 - No paid tiers or closed-source deps in runtime path.
 
 **No Provider Key in-Process (Layer-0):**
@@ -195,7 +195,7 @@
    - `@gentrace/core`: underscore DoS via template injection — build-time only (schema validation), not exercised by execution.
    - `esbuild` dev-server CORS bypass — build tool only, not bundled into final artifacts.
    - `uuid`: buffer overflow via optional undocumented API — method not called in any runtime code.
-   - Drizzle-orm bumped to 0.45.2 for GHSA-gpj5-g38j-94v9 (SQL injection in relation names) — no risk in Yoke's schema.
+   - Drizzle-orm bumped to 0.45.2 for GHSA-gpj5-g38j-94v9 (SQL injection in relation names) — no risk in agent-flows' schema.
    - ~276 transitive packages total; only lifecycle script = esbuild (pnpm build).
 
 3. **Desktop Editor Required for Visual Authoring:**
@@ -209,7 +209,7 @@
 
 The 1,582 non-test lines in `src/rivet/` are split:
 
-- **Orchestration** (host.ts, main.ts, cli-args.ts): 265 lines — glue between rivet-node, Yoke's TicketStore, and CLI.
+- **Orchestration** (host.ts, main.ts, cli-args.ts): 265 lines — glue between rivet-node, agent-flows' TicketStore, and CLI.
 - **External Functions** (runClaudeCli.ts, persistTicket.ts, registry.ts): 292 lines — domain adapters (CLI invocation, ticketing, model mapping).
 - **Project Generation** (project/build.ts, project/write.ts, project/write-cli.ts): 444 lines — graph builder for deterministic `.rivet-project` YAML.
 - **HITL & I/O** (stdinQueue.ts, main.ts stdin wiring): 63 lines — approval gate for headless runs.
@@ -300,6 +300,6 @@ No engine code (graph execution, debugger, node types) was written — all is ri
 | E7        | **PASS** (1,582 LOC)    | ✓            |          |
 | E8        | **PASS + caveats**      | ✓            |          |
 
-**Final Verdict:** Rivet engine meets technical requirements (E1–E5, E7–E8). Live progress (E4) confirmed functional with known caveats (no streaming, output discoverability). Authoring UX (E6) functional but rough; requires Yoke-side polish on approval flow, terminal prompts, and editor integration. Recommend adoption with documented UX backlog (see Operator Checklist defects).
+**Final Verdict:** Rivet engine meets technical requirements (E1–E5, E7–E8). Live progress (E4) confirmed functional with known caveats (no streaming, output discoverability). Authoring UX (E6) functional but rough; requires agent-flows-side polish on approval flow, terminal prompts, and editor integration. Recommend adoption with documented UX backlog (see Operator Checklist defects).
 
 Proceed to ADR-0011 (Rivet adoption, supersede bespoke orchestrator specs 008/010).

@@ -1,7 +1,7 @@
-# Prompt engineering: Anthropic vs OpenAI — for provider-neutral yoke step prompts
+# Prompt engineering: Anthropic vs OpenAI — for provider-neutral agent-flows step prompts
 
 Date: 2026-09-04. Goal: gather the documented, current prompt-engineering guidance from
-**both** Anthropic and OpenAI so yoke can write `prompts/*.md` step prompts that run the same
+**both** Anthropic and OpenAI so agent-flows can write `prompts/*.md` step prompts that run the same
 text under either a Claude or a GPT model. **Facts only.** Every principle cites a primary
 vendor URL inline. Claims not confirmable against a live primary page are marked
 _unverified_.
@@ -48,7 +48,7 @@ Primary source for the whole table (single consolidated reference):
 | 11  | **Chain complex prompts**                    | With adaptive thinking + subagents, Claude handles most multi-step reasoning internally. Explicit chaining (sequential API calls) is "still useful when you need to inspect intermediate outputs or enforce a specific pipeline structure." Most common pattern is **self-correction**: draft → review against criteria → refine, each a separate call.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | 12  | **Agentic / long-horizon**                   | State tracking across context windows (git, `tests.json`, `progress.txt`); "emphasize incremental progress"; native subagent orchestration (watch for over-spawning); anti-over-engineering snippet ("Avoid over-engineering. Only make changes that are directly requested or clearly necessary."); anti-hallucination snippet ("Never speculate about code you have not opened … read the file before answering").                                                                                                                                                                                                                                                                                                                                                              |
 
-Prose notes worth carrying into yoke prompts: the **golden-rule / "new employee"** framing (row 1)
+Prose notes worth carrying into agent-flows prompts: the **golden-rule / "new employee"** framing (row 1)
 is Anthropic's single most load-bearing principle — specificity beats cleverness. The **XML-tag**
 discipline (rows 3, 4, 6, 7) recurs across every other technique: examples, documents, output
 format, and reasoning are all steered by tags. And the **prefill removal** (row 8) is a hard
@@ -184,7 +184,7 @@ Each row is a place where the _same_ prompt text can behave differently across t
 
 ---
 
-## E. Implications for yoke's provider-neutral prompts
+## E. Implications for agent-flows' provider-neutral prompts
 
 Concrete rules for authoring `prompts/*.md` step prompts that run well under **both** Claude and
 GPT. Each rule is justified by a cited technique from A/B/C/D.
@@ -228,7 +228,7 @@ GPT. Each rule is justified by a cited technique from A/B/C/D.
 
 **Places where a single prompt genuinely cannot be optimal for both — flag honestly:**
 
-- **Chain-of-thought wording (the big one).** If a yoke step can run on _either_ a reasoning model
+- **Chain-of-thought wording (the big one).** If an agent-flows step can run on _either_ a reasoning model
   or a non-reasoning model, you cannot bake "think step by step / explain your reasoning" into the
   shared text: it _helps_ non-reasoning GPT-4.1 but is _discouraged and may hurt_ reasoning models on
   **both** vendors (OpenAI reasoning "avoid CoT"; Anthropic "prefer general instructions", avoid the
@@ -243,12 +243,12 @@ GPT. Each rule is justified by a cited technique from A/B/C/D.
   redundant on reasoning models (and over-verifies on Opus 5). Prefer asking for a _verified result_
   over a mandated verification _procedure_. _(D row 6.)_
 
-**Net recommendation for yoke:** author the neutral canon as **XML-tagged blocks** (role/system,
+**Net recommendation for agent-flows:** author the neutral canon as **XML-tagged blocks** (role/system,
 instructions, context, input, examples, output-format), with **positive imperative instructions,
 explicit success criteria, reference-grounding, and boundary-anchored placement** — and treat
 **chain-of-thought instructions, few-shot examples, and reasoning-depth** as **binding-injected,
 model-conditional** rather than hard-coded in the shared prompt. That keeps the portable core in the
-`.md` and pushes the genuinely divergent knobs into the thin bindings, which is exactly where yoke's
+`.md` and pushes the genuinely divergent knobs into the thin bindings, which is exactly where agent-flows'
 architecture already puts provider differences.
 
 ---

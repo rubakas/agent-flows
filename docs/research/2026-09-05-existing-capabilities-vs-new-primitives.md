@@ -307,7 +307,7 @@ loop**, from a dependency the repo already has.
 Two caveats, stated honestly:
 
 - The docs present `Workspace` as something you attach to a Mastra **`Agent`** (which then gets an
-  `execute_command` tool). Yoke's Binding B does not use Mastra agents at all — `runLlmStep` spawns
+  `execute_command` tool). agent-flows' Binding B does not use Mastra agents at all — `runLlmStep` spawns
   the `claude`/`codex` CLI directly, because auth is the owner's subscription. Calling
   `sandbox.executeCommand()` directly from inside a plain `createStep` is the non-agent path and is
   what the interface supports, but **[unverified]** — not exercised locally in this audit.
@@ -330,7 +330,7 @@ the n8n container, not the host.
 **Does it change the picture?** Only mildly, and it argues _for_ a command step rather than against.
 Binding C today emits `n8n-nodes-base.noOp` for every non-`llm` kind (`src/bindings/n8n/build.ts`,
 `buildStepNode`). A canon `check` kind would map to a real, first-class n8n node instead of a no-op —
-whereas an `llm`-step-runs-the-tests approach maps onto the custom `n8n-nodes-yoke.yokeAgent` node
+whereas an `llm`-step-runs-the-tests approach maps onto the custom `n8n-nodes-agent-flows.agentFlowsAgent` node
 and keeps the fabrication risk. It does not make a new kind _necessary_; it makes one _cheap and
 well-supported_ on that binding.
 
@@ -343,7 +343,7 @@ well-supported_ on that binding.
 | Can fabricate a result                                     | **yes — observed in TEST C**             | no                                                 |
 | Cost per loop iteration                                    | a full model turn                        | ~0                                                 |
 | Handles "run the tests, then judge if the failures matter" | yes                                      | no — needs a following `llm` step                  |
-| Binding C mapping                                          | custom yoke node                         | `n8n-nodes-base.executeCommand` (self-hosted only) |
+| Binding C mapping                                          | custom agent-flows node                  | `n8n-nodes-base.executeCommand` (self-hosted only) |
 
 ### **Verdict: NOT NEEDED to unblock the loop — but a `check` kind is the right call for the termination signal specifically.**
 
@@ -366,7 +366,7 @@ to make deliberately later — not a blocker gating the whole library.
 `buildLoopStep` in `src/bindings/mastra/build.ts` is ~100 lines. Was there a lower-code path?
 
 **Mostly no, with one avoidable piece.** Mastra's `.dountil()` is precisely the construct for this,
-and Yoke is already using it correctly. Per the reference
+and agent-flows is already using it correctly. Per the reference
 (https://github.com/mastra-ai/mastra/blob/main/docs/src/content/en/reference/workflows/workflow-methods/dountil.mdx):
 
 ```typescript

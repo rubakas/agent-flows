@@ -1,4 +1,4 @@
-# Workflow security: prompt injection in yoke's pipelines
+# Workflow security: prompt injection in agent-flows' pipelines
 
 Research date: 2026-09-06 · Scope: `src/canon/runStep.ts`, `src/canon/runClaudeCli.ts`,
 `src/bindings/mastra/buildSteps.ts`, `pipelines/*.yaml`, `prompts/*.md` · claude CLI 2.1.261, macOS.
@@ -31,7 +31,7 @@ it can reach.** Everything below follows from that.
 
 **Anthropic — `platform.claude.com` "Mitigate jailbreaks and prompt injections".** This page splits
 the threat model into direct (user is adversary) and indirect (user trusted, third-party _content_ is
-adversary). Yoke is squarely the indirect case. Its documented controls, in the page's own order:
+adversary). agent-flows is squarely the indirect case. Its documented controls, in the page's own order:
 
 1. **Put untrusted content only in tool results** — never in `system` prompts or plain user `text`
    blocks. "Claude is trained to treat instructions that appear inside tool results with appropriate
@@ -55,12 +55,12 @@ these strategies…". The companion research page states the same thing about mo
 robustness is trained in via RL, classifiers scan untrusted content entering the window, and human
 red teams still find attacks. Training is layer one of three, not the answer.
 
-**Anthropic — Claude Code security docs.** These matter because yoke's executor _is_ the `claude`
+**Anthropic — Claude Code security docs.** These matter because agent-flows' executor _is_ the `claude`
 CLI. Documented protections: permission system, working-directory boundary, sandboxed bash tool
 (filesystem + network isolation, OS-enforced), network-command approval (`curl`/`wget` not
 auto-approved), isolated context window for web fetch, trust verification for new codebases and MCP
 servers, command-injection detection, fail-closed matching for unmatched commands. Two caveats are
-stated explicitly and both apply to yoke:
+stated explicitly and both apply to agent-flows:
 
 - "Trust verification is disabled when running non-interactively with the `-p` flag."
 - "While these protections significantly reduce risk, no system is completely immune to all attacks."
@@ -96,7 +96,7 @@ approval for high-impact actions; **complete mediation** — "implement authoriz
 systems rather than relying on an LLM to decide if an action is allowed or not." Monitoring and rate
 limiting are listed separately as _damage-limiting_, not preventive.
 
-**OWASP LLM05:2025 Improper Output Handling** — the direct match for yoke's step-to-step edges.
+**OWASP LLM05:2025 Improper Output Handling** — the direct match for agent-flows' step-to-step edges.
 "Treat the model as any other user, adopting a zero-trust approach." The named primary vulnerability:
 "LLM output is entered directly into a system shell or similar function such as exec or eval,
 resulting in remote code execution."
@@ -108,14 +108,14 @@ model access to external data sources, and pattern-matching redaction of sensiti
 
 ---
 
-## 2. The specific threat model for yoke
+## 2. The specific threat model for agent-flows
 
 ### 2.0 What the code actually does today (ground truth)
 
 Four facts drive everything in this section. All are **[verified]** by reading the files and by
 running the CLI.
 
-**F1 — Yoke's hardening is conditional, and the default branch is the unhardened one.**
+**F1 — agent-flows' hardening is conditional, and the default branch is the unhardened one.**
 `src/canon/runStep.ts:491` gates the entire `--restricted` block behind
 `if (resolvedWorkspaceDir !== undefined || hasSkills)`. `resolvedWorkspaceDir` is set only when
 `permissions.contents` is `read` or `write`. An `llm` step that declares neither `permissions` nor
@@ -128,16 +128,16 @@ not set").
 Steps on that path today: `spec-creation` → `intake`, `enrich`, `critic`, `security`; `investigate` →
 `findings`; `audit` → `synthesis`. Six of the fourteen `llm` steps in the canon.
 
-**F2 — On that path the CLI really does get a shell.** Running yoke's exact default invocation:
+**F2 — On that path the CLI really does get a shell.** Running agent-flows' exact default invocation:
 
 ```
-$ printf 'Run the shell command: echo YOKE_BASH_RAN. Then report its exact stdout.' \
+$ printf 'Run the shell command: echo AGENT_FLOWS_BASH_RAN. Then report its exact stdout.' \
     | claude -p --output-format text
 Permission deny rule ".env" matches no known tool — check for typos.
 Permission deny rule ".ssh/" matches no known tool — check for typos.
 Exact stdout:
 
-    YOKE_BASH_RAN
+    AGENT_FLOWS_BASH_RAN
 ```
 
 Bash executed with no approval. The two warning lines are the operator's _personal_
@@ -145,9 +145,9 @@ Bash executed with no approval. The two warning lines are the operator's _person
 apply on this path, which is exactly what `--restricted` exists to prevent. With
 `--restricted --strict-mcp-config --tools Read,Glob --allowedTools Read,Glob` the same prompt returns
 "there's no `Bash` tool, so I have no way to execute" and the settings warnings disappear.
-`--restricted` works; yoke just doesn't always pass it.
+`--restricted` works; agent-flows just doesn't always pass it.
 
-**F3 — The controls yoke does apply work as claimed.** With `--restricted --tools Read,Glob`:
+**F3 — The controls agent-flows does apply work as claimed.** With `--restricted --tools Read,Glob`:
 a `--disallowedTools 'Read(**/vault-probe.txt)'` rule blocked the read ("File is in a directory that
 is denied by your permission settings"), and `/etc/hosts` was refused with "outside …; `--restricted`
 confines the file tools to the working directory." Both `CREDENTIAL_DENY_PATTERNS` and the
@@ -165,9 +165,9 @@ Two further structural facts:
 **F5 — There is no multi-repo plumbing yet.** Neither `src/bindings/mastra/server.ts:54` nor
 `src/serve/server.ts:575` passes `cwd` to `buildPipelineWorkflow`, so `deps.cwd` is `undefined`,
 `workspaceDir` falls back to `process.cwd()` at `src/canon/runStep.ts:456`, and
-`scripts/mcp-serve.sh` `cd`s to the yoke repo. Today every repo-reading step and every `check` shell
-command runs against **yoke itself**. Only `src/evals/run.ts:169` passes a `cwd`, and it passes the
-yoke repo root too.
+`scripts/mcp-serve.sh` `cd`s to the agent-flows repo. Today every repo-reading step and every `check` shell
+command runs against **agent-flows itself**. Only `src/evals/run.ts:169` passes a `cwd`, and it passes the
+agent-flows repo root too.
 
 **F6 — Env scrubbing is a three-item denylist.** `src/canon/runClaudeCli.ts:21`:
 `SCRUBBED_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LITELLM_VIRTUAL_KEY"]`. The environment
@@ -195,9 +195,9 @@ Two sub-cases, and they differ:
   `ctxVars` stringifies it before `{{test}}` is rendered into `prompts/build-fix.md`. That happens to
   satisfy Anthropic's item 4 — but by type coincidence, not by design.
 
-Yoke also violates Anthropic's items 1, 2 and 5: repo content arrives as plain prompt text in a
+agent-flows also violates Anthropic's items 1, 2 and 5: repo content arrives as plain prompt text in a
 single-turn `claude -p` call, not as a labelled `tool_result`; it is never tagged with its origin;
-and yoke's own instructions sit in the same undifferentiated text stream.
+and agent-flows' own instructions sit in the same undifferentiated text stream.
 
 **Status: OPEN.** No control addresses it. The read-only steps' `--tools Read,Glob` limits what the
 poisoned step can _do_, but does nothing about what it _says_ to the next step.
@@ -253,7 +253,7 @@ steps.**
 The command string is never placeholder-rendered: `buildSteps.ts:349` passes `step.command!`
 straight through, and `ship.yaml` documents the reason in a comment ("interpolating model output into
 a shell string is command injection"). That is correct and worth keeping — it is OWASP LLM05's named
-failure mode, and yoke already avoids it.
+failure mode, and agent-flows already avoids it.
 
 What remains is the reverse direction: hostile _output_. `pnpm test` prints whatever the test files
 print, and test files are model-writable (§2.2) and repo-supplied. That output is capped at 64 KB
@@ -263,7 +263,7 @@ JSON encoding prevents delimiter breakout; it does not prevent persuasion.
 
 There is a second, subtler issue ADR-0015 already names: the loop's `until: test.passed` is grounded
 in the real process exit code, so the model cannot lie the loop closed. Keep that property — it is the
-one piece of OWASP LLM01's "use deterministic code to validate adherence" that yoke already
+one piece of OWASP LLM01's "use deterministic code to validate adherence" that agent-flows already
 implements.
 
 **Status: PARTIALLY CLOSED.** Command injection closed by design; output-as-influence open;
@@ -271,7 +271,7 @@ termination signal correctly deterministic.
 
 ### 2.5 Path E — multi-repo exposure
 
-Not reachable today (**F5**): there is no way to point a run at a repo other than yoke itself. When
+Not reachable today (**F5**): there is no way to point a run at a repo other than agent-flows itself. When
 that plumbing lands it changes the trust model qualitatively — the pipeline definition stays trusted,
 but every byte of the workspace becomes attacker-influenced, and `-p` means no trust dialog, so a
 target repo's settings and MCP configuration load silently on any step that isn't running under
@@ -335,7 +335,7 @@ hasSkills)` guard so it always runs. `baseTools` already computes `""` for the n
   not the channel.
 - **Source:** OWASP LLM02 "limit access based on least privilege"; Anthropic Claude Code sandboxing
   docs, `sandbox.credentials` with `"mode": "deny"` ("environment variables are unset before each
-  sandboxed command runs") — same principle, applied in yoke's own spawn since checks do not run
+  sandboxed command runs") — same principle, applied in agent-flows' own spawn since checks do not run
   through the CLI.
 
 ### C4 — A human gate before the first write in every write-capable pipeline
@@ -391,8 +391,8 @@ none` to `extraArgs` alongside C1.
 - Anthropic documents it concretely: run the raw output through a Haiku-class call with a structured
   `{injection_suspected: boolean}` schema before it becomes the next step's input. It is the most
   directly-endorsed control on the list.
-- For yoke specifically it earns a low rank: it adds a model call and a failure mode to every edge, it
-  produces false positives on exactly the content yoke handles (a security-review step legitimately
+- For agent-flows specifically it earns a low rank: it adds a model call and a failure mode to every edge, it
+  produces false positives on exactly the content agent-flows handles (a security-review step legitimately
   _quotes_ injection-looking text), and it is much more valuable once §2.5's multi-repo plumbing
   exists and the workspace is genuinely untrusted. Revisit it then, not now.
 
@@ -448,7 +448,7 @@ other contexts and net-negative here. Declining them deliberately:
   the canon around a privileged planner that never sees untrusted text. That is a rewrite of ADR-0012
   and ADR-0014 to buy protection that C1–C4 mostly deliver for 45 lines.
 - **Containerising every step.** Claude Code's own docs point at dev containers, and the CLI ships a
-  Bash sandbox — but yoke's `llm` steps never get Bash, and its `check` steps don't run through the
+  Bash sandbox — but agent-flows' `llm` steps never get Bash, and its `check` steps don't run through the
   CLI at all, so the CLI sandbox does not apply to them. Containerising the checks means a container
   build per run and a `pnpm test` that no longer matches what the operator runs by hand. The gap the
   container would close is C3's env allowlist, at a hundred times the cost.
@@ -467,7 +467,7 @@ other contexts and net-negative here. Declining them deliberately:
   the machine at that point. The place a secret actually becomes public is `gh pr create`, and that is
   behind a human gate — spend the effort on making the gate show the diff (C4), not on scanning.
 - **Differential privacy / homomorphic encryption / federated learning (OWASP LLM02's advanced
-  section).** Aimed at model training and multi-tenant inference. Yoke trains nothing.
+  section).** Aimed at model training and multi-tenant inference. agent-flows trains nothing.
 - **Building the C7 injection classifier now.** It is the control Anthropic documents most concretely,
   and it is still premature while the workspace is the owner's own repo (F5). It becomes worth
   building on the same commit that lets a run target a foreign repository.
@@ -505,7 +505,7 @@ Primary — local, executed 2026-09-06 against claude CLI 2.1.261 on macOS:
   `--disallowedTools`, `--permission-mode`, `--permission-prompts`, `-p` trust-dialog caveat)
 - Four controlled invocations in an isolated scratch directory, reported inline as F2, F3 and F4.
 
-Yoke source read for this review: `README.md`, `docs/decisions/0015-sdlc-as-composable-workflows.md`,
+agent-flows source read for this review: `README.md`, `docs/decisions/0015-sdlc-as-composable-workflows.md`,
 `docs/decisions/0016-prompt-authoring-convention.md`, `src/canon/runStep.ts`,
 `src/canon/runClaudeCli.ts`, `src/canon/render.ts`, `src/canon/types.ts`, `src/canon/load.ts`,
 `src/canon/exportSpec.ts`, `src/canon/runStep.test.ts`, `src/bindings/mastra/buildSteps.ts`,

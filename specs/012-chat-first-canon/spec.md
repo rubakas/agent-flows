@@ -15,13 +15,13 @@ Provider-portability acceptance criterion: switch T3Code to GPT and the pipeline
 
 ## Requirements
 
-| ID     | Requirement                                                                                                                                                                         | Status |
-| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| FR-001 | Canon loader: `pipelines/*.yaml` + `prompts/*.md` + loader in `src/canon/` (schema kinds: llm \| gate \| assemble-spec \| persist-ticket; parallel via `phase`)                     | DONE   |
-| FR-002 | Binding A generator: `pnpm bindings:claude` → `.claude/workflows/<id>.js` (generated; drift-guard)                                                                                  | DONE   |
-| FR-003 | Binding B Mastra interpreter + MCP server (stdio; tools run_<pipeline>, get_run, approve; durable suspend/resume HITL; MASTRA_TELEMETRY_DISABLED; LibSQL separate from yoke.sqlite) | DONE   |
-| FR-004 | Registry-driven step execution: steps execute via open model registry (claude CLI / codex CLI / ollama / litellm) (provider profiles added)                                         | DONE   |
-| FR-005 | Doctor gains checks for binding B prereqs (codex optional, ollama optional)                                                                                                         | DONE   |
+| ID     | Requirement                                                                                                                                                                                | Status |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| FR-001 | Canon loader: `pipelines/*.yaml` + `prompts/*.md` + loader in `src/canon/` (schema kinds: llm \| gate \| assemble-spec \| persist-ticket; parallel via `phase`)                            | DONE   |
+| FR-002 | Binding A generator: `pnpm bindings:claude` → `.claude/workflows/<id>.js` (generated; drift-guard)                                                                                         | DONE   |
+| FR-003 | Binding B Mastra interpreter + MCP server (stdio; tools run_<pipeline>, get_run, approve; durable suspend/resume HITL; MASTRA_TELEMETRY_DISABLED; LibSQL separate from agent-flows.sqlite) | DONE   |
+| FR-004 | Registry-driven step execution: steps execute via open model registry (claude CLI / codex CLI / ollama / litellm) (provider profiles added)                                                | DONE   |
+| FR-005 | Doctor gains checks for binding B prereqs (codex optional, ollama optional)                                                                                                                | DONE   |
 
 ---
 

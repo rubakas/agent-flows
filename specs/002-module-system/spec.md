@@ -34,19 +34,19 @@ Each seam's active module is declared in a config manifest; disabled modules are
 **Acceptance Scenarios:**
 
 - **Given** a manifest enabling one tracker,
-  **When** Yoke starts,
+  **When** agent-flows starts,
   **Then** only enabled modules load; disabled ones are inactive.
 
 ---
 
 ### US3 (P2) — Clear failure on a missing required seam
 
-Starting Yoke with a required seam unfilled produces an actionable error, not a runtime crash.
+Starting agent-flows with a required seam unfilled produces an actionable error, not a runtime crash.
 
 **Acceptance Scenarios:**
 
 - **Given** no provider registered for a required seam,
-  **When** Yoke starts,
+  **When** agent-flows starts,
   **Then** a clear error names the missing seam and exits.
 
 ---

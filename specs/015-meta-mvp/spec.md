@@ -1,13 +1,13 @@
 # 015. Meta-MVP: a DAG editor for the canon
 
-| Field        | Value                                                                                                                                                                                                                                                                                                                          |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Feature Name | Meta-MVP                                                                                                                                                                                                                                                                                                                       |
-| Branch       | `015-meta-mvp`                                                                                                                                                                                                                                                                                                                 |
-| Status       | Superseded (2026-09-04) — the agent-flows-served DAG editor direction was superseded by the n8n hybrid (Binding C). See ADR-0013 and `docs/research/2026-09-04-n8n-spike.md`. Body kept as historical record. Note: this spec uses `.yoke/` as the canon installation directory; the code installs to `.agent-flows/` instead. |
-| Created      | 2026-09-03                                                                                                                                                                                                                                                                                                                     |
+| Field        | Value                                                                                                                                                                                                                                                                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Feature Name | Meta-MVP                                                                                                                                                                                                                                                                                                                              |
+| Branch       | `015-meta-mvp`                                                                                                                                                                                                                                                                                                                        |
+| Status       | Superseded (2026-09-04) — the agent-flows-served DAG editor direction was superseded by the n8n hybrid (Binding C). See ADR-0013 and `docs/research/2026-09-04-n8n-spike.md`. Body kept as historical record. Note: this spec uses `.agent-flows/` as the canon installation directory; the code installs to `.agent-flows/` instead. |
+| Created      | 2026-09-03                                                                                                                                                                                                                                                                                                                            |
 
-**Context:** The Charter defines Yoke as a harness for "building, editing and running" dynamic
+**Context:** The Charter defines agent-flows as a harness for "building, editing and running" dynamic
 workflows; spec 014 records that only running is implemented. This spec closes the editing half.
 Two decisions taken on 2026-09-03 set its shape. First, the editor is a real DAG canvas — blocks
 with drawn connections — not a view over the current phase mechanism, which means the canon gains
@@ -31,7 +31,7 @@ pipeline. There is no multi-project machinery: the root is wherever the harness 
 | Binding             | A thin compiler from canon to one execution backend. Binding A emits Claude Code workflows; Binding B builds Mastra workflows.                            |
 | Step / phase / gate | A step is the leaf unit of work. `phase` is today's parallelism marker, replaced here by `dependsOn`. A gate is a step that suspends for a human answer.  |
 | Role / profile      | A step declares a role (`reasoner`, `worker`, `scout`); the active provider profile maps each role to a model id, so templates carry no vendor names.     |
-| MCP                 | Model Context Protocol — how a chat client calls tools. Yoke's server exposes `run_pipeline`, `approve` and friends over it.                              |
+| MCP                 | Model Context Protocol — how a chat client calls tools. agent-flows' server exposes `run_pipeline`, `approve` and friends over it.                        |
 | SSE                 | Server-Sent Events — a one-way HTTP stream from server to browser. How the run view updates live.                                                         |
 | YAML AST            | The `yaml` library's document tree. Editing through it preserves comments and key order that a parse-and-rewrite would destroy.                           |
 | Levelling           | Sorting a DAG into ordered layers so each layer can run in parallel. Lets an arbitrary graph compile onto a linear builder.                               |
@@ -41,7 +41,7 @@ pipeline. There is no multi-project machinery: the root is wherever the harness 
 
 1. **An edge model in the canon.** A step declares what it depends on. The graph becomes data, not
    an inference from array order.
-2. **`yoke serve`** — one local process: indexes the canon under a root, serves the editor, keeps
+2. **`agent-flows serve`** — one local process: indexes the canon under a root, serves the editor, keeps
    the MCP tool surface chat clients already use, and owns run state behind a transport-agnostic
    `RunService`. Loopback only.
 3. **A DAG editor** — draw blocks, connect them, edit each step inline, watch a run advance. An
@@ -105,14 +105,14 @@ canon. Canon inside `.claude/` would invert Charter rule 3, and since two of the
 no workflow format to reuse, it would mean duplicating the canon per vendor or electing one vendor
 as its home. Both defeat "one canonical definition, many execution backends".
 
-    <root>/.yoke/pipelines/*.yaml   canon, provider-neutral, git-tracked, one copy
-    <root>/.yoke/prompts/*.md       canon
+    <root>/.agent-flows/pipelines/*.yaml   canon, provider-neutral, git-tracked, one copy
+    <root>/.agent-flows/prompts/*.md       canon
     <root>/.claude/workflows/*.js   Binding A output, generated, disposable
     (Codex and LiteLLM)             reached through Binding B over MCP - no files to write
 
 `loadPipeline` supports this unchanged: it derives its root from the YAML's own path
-(`src/canon/load.ts:19`), so `<root>/.yoke/pipelines/x.yaml` resolves prompts under `<root>/.yoke/`.
-Moving the existing `pipelines/` and `prompts/` into `.yoke/` is a file move, not a code change.
+(`src/canon/load.ts:19`), so `<root>/.agent-flows/pipelines/x.yaml` resolves prompts under `<root>/.agent-flows/`.
+Moving the existing `pipelines/` and `prompts/` into `.agent-flows/` is a file move, not a code change.
 
 ## The database is a buffer, not the truth
 
@@ -154,7 +154,7 @@ Checkable rules, not preferences:
 | FR-012 | Saving a pipeline regenerates its Claude Code workflow output, resolving models from the active profile and recording that profile in the output. Without this, an edit made in the GUI leaves Claude Code running the previous version.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | TODO   |
 | FR-013 | A new `kind: export-spec` writes `spec.md` into the target repository in GitHub Spec Kit's format (github/spec-kit, `templates/spec-template.md`), which is what ADR-0003 means by Spec Kit style: User Scenarios with prioritised user stories and **Given**/**When**/**Then** acceptance scenarios, Functional Requirements as `FR-NNN: System MUST …`, Key Entities, measurable Success Criteria as `SC-NNN`, and `[NEEDS CLARIFICATION]` markers where the pipeline could not resolve something. Written fresh: the pre-pivot renderer emits `AC-` ids and a field table, and matches none of this.                                                                                                                                                                                                                                          | TODO   |
 | FR-014 | Legacy purge: delete `src/cli.ts`, `src/config.ts`, `src/manifest.ts`, `src/stages/`, `src/checks/`, `src/executor/`, `src/tracker/`, `src/spec/`, `src/model/`, `src/module/registry.ts` and the orphan barrel files, keeping `src/module/seams.ts`, `src/db/` and `src/store/`, which the canon path uses. LiteLLM support is unaffected — it lives in the canon registry's `api` transport, not in the deleted gateway.                                                                                                                                                                                                                                                                                                                                                                                                                       | DONE   |
-| FR-015 | The root is the directory the harness was launched in, not Yoke's install directory. The five call sites that hardcode `pipelines/` take that root, as does Binding A's output directory, and the draft database sits beside the canon under it. A scope flag selects a project-local pipeline (`<root>/.yoke/`) or a global one (user-level), with local shadowing global on an id collision. There is no project registry and no multi-project bookkeeping: Yoke never knows about more than the root it was started in.                                                                                                                                                                                                                                                                                                                       | TODO   |
+| FR-015 | The root is the directory the harness was launched in, not agent-flows' install directory. The five call sites that hardcode `pipelines/` take that root, as does Binding A's output directory, and the draft database sits beside the canon under it. A scope flag selects a project-local pipeline (`<root>/.agent-flows/`) or a global one (user-level), with local shadowing global on an id collision. There is no project registry and no multi-project bookkeeping: agent-flows never knows about more than the root it was started in.                                                                                                                                                                                                                                                                                                   | TODO   |
 | FR-016 | A second pipeline authored in the editor produces a spec for adopting spec-driven development, reusing at least one prompt or step from `spec-creation`. This is the reuse evidence ADR-0012 required before `agent` and `skill` become first-class templates.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | TODO   |
 | FR-017 | A configurable per-step deadline aborts a hung step through the existing `AbortSignal` path, surfacing as a failed step rather than an indefinite hang.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | TODO   |
 | FR-018 | Two live bugs fixed: prompt paths are contained within the pipeline root (`src/canon/load.ts:53`); caller-supplied `models` overrides are validated against registry ids, closing the passthrough in `ModelRegistry.resolve` that spawns an arbitrary `--model` string.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | TODO   |
@@ -164,17 +164,17 @@ Checkable rules, not preferences:
 
 Nineteen requirements is not one MVP. Three stages, each ending in something demonstrable.
 
-| Stage         | Requirements                     | Done when                                                                                                                                                                                                                                                              |
-| ------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A. Foundation | FR-001..005, FR-013..015, FR-018 | The decisions are recorded; the canon expresses edges and rejects a cycle; `spec-creation` runs unchanged from a `dependsOn` definition under both bindings; a run writes a Spec Kit `spec.md` into the launch root; the repo has no dead code. No UI yet.             |
-| B. The editor | FR-006..012, FR-017, FR-019      | `yoke serve` binds loopback; a pipeline is drawn, connected, edited and saved from the browser; the save regenerates Binding A output; a run is watched step by step with its model and prompt visible; a gate is answered from either surface and survives a restart. |
-| C. Reuse      | FR-016                           | A second pipeline, authored in the editor, produces an SDD adoption spec while reusing a step or prompt from the first — the evidence ADR-0012 requires before `agent` and `skill` become first-class.                                                                 |
+| Stage         | Requirements                     | Done when                                                                                                                                                                                                                                                                     |
+| ------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A. Foundation | FR-001..005, FR-013..015, FR-018 | The decisions are recorded; the canon expresses edges and rejects a cycle; `spec-creation` runs unchanged from a `dependsOn` definition under both bindings; a run writes a Spec Kit `spec.md` into the launch root; the repo has no dead code. No UI yet.                    |
+| B. The editor | FR-006..012, FR-017, FR-019      | `agent-flows serve` binds loopback; a pipeline is drawn, connected, edited and saved from the browser; the save regenerates Binding A output; a run is watched step by step with its model and prompt visible; a gate is answered from either surface and survives a restart. |
+| C. Reuse      | FR-016                           | A second pipeline, authored in the editor, produces an SDD adoption spec while reusing a step or prompt from the first — the evidence ADR-0012 requires before `agent` and `skill` become first-class.                                                                        |
 
 ## Acceptance
 
 Stage B's demonstration is the one that matters, and it is deliberately the same run seen twice:
 
-A pipeline is edited in the Yoke editor — opened once inside Claude Code's browser pane and once
+A pipeline is edited in the agent-flows editor — opened once inside Claude Code's browser pane and once
 inside T3 Code's desktop Browser panel — a connection is drawn between two blocks, the edit
 validates and lands in the working tree with comments intact, Binding A output regenerates, and the
 pipeline runs to a persisted ticket and an exported `spec.md` under the Anthropic profile, with the
@@ -204,7 +204,7 @@ the loader must reject it by name rather than hang the levelling pass.
   rules will always misfire on some input. The durable fix is upstream: the intake and enrich
   prompts should ask for Spec Kit-shaped capability phrases, after which the renderer needs no
   heuristic at all. That is a canon prompt change, not a renderer change.
-- Whether `.yoke/` is the right directory name for canon in a target project, or whether it should
+- Whether `.agent-flows/` is the right directory name for canon in a target project, or whether it should
   follow whatever neutral convention settles (`.agents/` is emerging in the wild).
 - Whether the repo's existing specs are migrated to the Spec Kit format. FR-013 makes the pipeline
   emit user stories, Given/When/Then scenarios and `SC-` success criteria, but specs 013, 014 and

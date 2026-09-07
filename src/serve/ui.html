@@ -922,7 +922,7 @@
           .map((p) => {
             const isInstalled = installedSet.has(p.id);
             const result = S.installResults[p.id];
-            const exportBtn = `<a class="btn btn-icon" href="/api/export/${encodeURIComponent(p.id)}" download="${escH(p.id)}.yoke-bundle.yaml" title="Export ${escH(p.id)} as bundle" aria-label="Export ${escH(p.id)}">Export</a>`;
+            const exportBtn = `<a class="btn btn-icon" href="/api/export/${encodeURIComponent(p.id)}" download="${escH(p.id)}.agent-flows-bundle.yaml" title="Export ${escH(p.id)} as bundle" aria-label="Export ${escH(p.id)}">Export</a>`;
             let actionHtml;
             if (isBundled) {
               if (isInstalled) {

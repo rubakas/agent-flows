@@ -22,7 +22,7 @@ sandbox.
 
 ---
 
-## Category 1 — full workflow-automation apps (could one replace yoke's core?)
+## Category 1 — full workflow-automation apps (could one replace agent-flows' core?)
 
 | Tool             | Licence (private self-host)                  | Host shell in a repo dir?                   | Native agent/LLM step         | Per-step model switch                          | Visual editor               | Maintenance            |
 | ---------------- | -------------------------------------------- | ------------------------------------------- | ----------------------------- | ---------------------------------------------- | --------------------------- | ---------------------- |
@@ -118,7 +118,7 @@ Key facts:
   and rejected it — see spec 011).
 
 **Category-2 verdict:** "coding-agent that edits your repo" is **not a native concept in any of
-them**. This is the empty niche that justifies yoke.
+them**. This is the empty niche that justifies agent-flows.
 
 ---
 
@@ -155,17 +155,17 @@ offers a UMD escape hatch if we ever want to drop the bundler.
 
 ## Decision
 
-### (a) Is there an off-the-shelf tool that fits — or does yoke's niche justify building?
+### (a) Is there an off-the-shelf tool that fits — or does agent-flows' niche justify building?
 
 **No single tool is built for "personal SDLC automation with coding agents grounded in a
 repo."** The visual AI orchestrators (Category 2) build LLM/RAG/chatbot flows, not
 repo-editing pipelines — Dify sandboxes the filesystem away outright, Flowise is EOL, and the
 rest offer only in-process code nodes. That specific niche is genuinely unserved, which is
-yoke's justification.
+agent-flows' justification.
 
 **But the research overturns one thing I said earlier and must correct: n8n is not the wrong
 core.** n8n (and Kestra, and Windmill) can run **host shell in a repo directory**, so they can
-shell out to `claude -p` / `codex exec` — the exact CLIs yoke already drives — while giving you
+shell out to `claude -p` / `codex exec` — the exact CLIs agent-flows already drives — while giving you
 a mature visual editor and per-step model switching **for free** on private self-host. The
 "heavy separate app" objection from ADR-0011 is real, but for a private self-hosted tool it is
 not disqualifying — the owner has confirmed a self-hosted internal tool is exactly the goal.
@@ -179,14 +179,14 @@ Command host-shell to run coding-agent CLIs in a repo dir, 25+ per-step model pr
 for private self-host. **Kestra** is the Apache-2.0 alternative (cleaner licence, per-task
 provider/model) at the cost of YAML-first authoring.
 
-What you lose versus yoke's design:
+What you lose versus agent-flows' design:
 
 - **Git-backed, reviewable definitions (ADR-0003).** n8n stores workflows in its own DB as
-  JSON; yoke keeps them as neutral YAML in the repo, diffable in a PR.
+  JSON; agent-flows keeps them as neutral YAML in the repo, diffable in a PR.
 - **Provider-neutral role→model indirection.** n8n switches models by swapping a model
-  sub-node per step; yoke's role/profile registry is a different, more portable model.
+  sub-node per step; agent-flows' role/profile registry is a different, more portable model.
 - **Native coding-agent orchestration.** In n8n you drive `claude`/`codex` through a generic
-  shell node; yoke treats the coding agent as a first-class step with declared, sandboxed repo
+  shell node; agent-flows treats the coding agent as a first-class step with declared, sandboxed repo
   access (just built: read-only investigation steps run `claude --allowedTools "Read,Glob"` in
   the project dir).
 - **Chat-first entry from the AI CLI you're already in.** n8n is GUI-first.
@@ -200,13 +200,13 @@ are dormant; jsPlumb's turnkey editor is paid. React Flow it is.
 
 ### Recommendation
 
-The niche is real and yoke's design (git-backed neutral definitions + first-class,
+The niche is real and agent-flows' design (git-backed neutral definitions + first-class,
 repo-grounded coding-agent steps + role-based provider portability) is not something any
-off-the-shelf tool gives. **Keep building yoke, with React Flow for the editor.** Before
+off-the-shelf tool gives. **Keep building agent-flows, with React Flow for the editor.** Before
 committing fully, the cheap sanity check worth doing is a spike: wire one n8n Execute Command
 node to run `claude -p` in a repo and see how close its editor + execution gets to the goal —
 if it gets 90% of the way for near-zero build cost, that reframes the effort. But on the
-evidence, the coding-agent-grounded-in-a-repo core is yoke's to build.
+evidence, the coding-agent-grounded-in-a-repo core is agent-flows' to build.
 
 ---
 

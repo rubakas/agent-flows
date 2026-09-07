@@ -1,12 +1,12 @@
 # Dogfood: running spec-creation on a real task (2026-09-04)
 
-We ran yoke's own `spec-creation` pipeline on a real upcoming task — "build a proper installable
-n8n community node package for the Yoke agent" — to evaluate the pipeline's quality on real work.
+We ran agent-flows' own `spec-creation` pipeline on a real upcoming task — "build a proper installable
+n8n community node package for the agent-flows agent" — to evaluate the pipeline's quality on real work.
 Verdict: **the content is strong; the plumbing has three real gaps.**
 
 ## Content quality — good
 
-The pipeline produced a genuinely useful hardened spec ("Yoke Agent n8n Node"): 7 requirements,
+The pipeline produced a genuinely useful hardened spec ("agent-flows Agent n8n Node"): 7 requirements,
 6 acceptance criteria, **30 weaknesses (7+ critical/blocking), 16 security findings**. The critic
 and security passes caught real, serious issues, not filler — e.g.:
 
@@ -33,7 +33,7 @@ These became hard guardrails for the actual build. The pipeline earns its keep o
    the gate payload so a reviewer can read the spec before approving.
 
 3. **No reviewable spec.md is written.** The pipeline's `persist` step writes the spec into
-   `yoke.sqlite` (tickets + related tables) but does not write a `spec.md` file. The Spec Kit
+   `agent-flows.sqlite` (tickets + related tables) but does not write a `spec.md` file. The Spec Kit
    exporter (`src/canon/exportSpec.ts`) exists but is not wired into the pipeline, so the git-backed
    spec artifact ADR-0003 calls for is never produced by a run. To read the spec here we had to
    query SQLite by hand. `export-spec` should be a step kind the pipeline runs.
