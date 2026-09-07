@@ -425,33 +425,49 @@ export class AgentFlowsAgent implements INodeType {
       const allowedTools =
         workspaceAccess === 'write' ? 'Read,Glob,Edit,Write' : 'Read,Glob';
 
+      // Separate the spawn try/catch from the exit-code check so that a
+      // NodeOperationError thrown for a non-zero exit is not re-caught and
+      // re-wrapped by the spawn error handler below.
+      let result: ClaudeRunResult;
       try {
-        const result = await runClaude({
+        result = await runClaude({
           prompt: prompt.trim(),
           model: resolvedModel,
           workspaceCwd,
           timeoutMs,
           allowedTools,
         });
-
-        outputItems.push({
-          json: {
-            role,
-            model: resolvedModel,
-            workspaceAccess,
-            output: result.output,
-            exitCode: result.exitCode,
-          },
-          pairedItem: { item: i },
-        });
       } catch (err) {
         throw new NodeOperationError(this.getNode(), (err as Error).message, { itemIndex: i });
       } finally {
-        // Clean up the temp directory for none-access mode
+        // Clean up the temp directory for none-access mode regardless of outcome.
         if (tempDir) {
           await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
         }
       }
+
+      // A non-zero exit code previously became a green step — the error text
+      // flowed downstream as if it were the agent's answer. Fail explicitly
+      // so the workflow surface shows red and the operator sees the cause.
+      if (result.exitCode !== 0) {
+        const excerpt = result.output.slice(0, 500);
+        throw new NodeOperationError(
+          this.getNode(),
+          `Agent process exited with code ${result.exitCode}: ${excerpt}`,
+          { itemIndex: i },
+        );
+      }
+
+      outputItems.push({
+        json: {
+          role,
+          model: resolvedModel,
+          workspaceAccess,
+          output: result.output,
+          exitCode: result.exitCode,
+        },
+        pairedItem: { item: i },
+      });
     }
 
     return [outputItems];
