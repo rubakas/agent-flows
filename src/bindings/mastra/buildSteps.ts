@@ -22,11 +22,14 @@ type Ctx = Record<string, unknown>;
 
 /**
  * Default convergence gate command, used when no checkCommand is configured in
- * .agent-flows/config.json. Excludes format:check: the fix step has no shell
- * access (Bash is never granted), so a prettier failure would waste an LLM
- * iteration on whitespace while real defects remain.
+ * .agent-flows/config.json. Must mirror the project's own `check` script in
+ * package.json exactly: a default weaker than the project's real gate can
+ * converge on code the project rejects. Confirmed by a live self-run
+ * (2026-09-07) that produced a refactor with passing tests and clean typecheck
+ * but failing format:check — the old default declared that run converged.
  */
-export const DEFAULT_CHECK_COMMAND = "pnpm lint && pnpm typecheck && pnpm test";
+export const DEFAULT_CHECK_COMMAND =
+  "pnpm lint && pnpm typecheck && pnpm format:check && pnpm test";
 
 /**
  * Runs `git status --porcelain` in cwd via spawnSync and returns a human-readable

@@ -5,9 +5,10 @@ import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { ModelRegistry } from "../../canon/registry.js";
 import { StepTimeoutError } from "../../canon/runStep.js";
 import { makeFakeChild } from "../../canon/testing/fakeSpawn.js";
@@ -223,6 +224,22 @@ describe("buildCheckStep — {{checkCommand}} substitution (FR-003/FR-004)", () 
       getCapturedCommand(),
       "pnpm lint && pnpm typecheck",
       "command without placeholders must reach the shell byte-identical"
+    );
+  });
+
+  it("DEFAULT_CHECK_COMMAND mirrors package.json check script — divergence goes red", () => {
+    // This test reads the project's real gate from package.json and asserts it
+    // equals DEFAULT_CHECK_COMMAND. If a step is added to one without the other
+    // this test goes red, catching the same defect class found on 2026-09-07:
+    // a self-run converged with passing tests + clean typecheck but failing
+    // format:check because the old default omitted pnpm format:check.
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { scripts: { check: string } };
+    assert.equal(
+      DEFAULT_CHECK_COMMAND,
+      pkg.scripts.check,
+      "DEFAULT_CHECK_COMMAND must be byte-identical to the check script in package.json. " +
+        "Add the missing step to whichever side diverged."
     );
   });
 });
