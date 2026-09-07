@@ -1,12 +1,12 @@
 version: "3.9"
 
-# ─── Yoke node stack (ADR-0007) ──────────────────────────────────────────────
+# ─── agent-flows node stack (ADR-0007) ──────────────────────────────────────────────
 # Start with: docker compose up -d
 # Secure remote access via Tailscale or SSH (ADR-0007).
 
 services:
   # ── LiteLLM proxy — Layer-0 key isolation (ADR-0004) ──────────────────────
-  # Real provider keys live here only. Yoke sees only LITELLM_VIRTUAL_KEY.
+  # Real provider keys live here only. agent-flows sees only LITELLM_VIRTUAL_KEY.
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     ports:
@@ -35,4 +35,4 @@ services:
 
 volumes:
   postgres_data:
-  # yoke_data:
+  # agent_flows_data:

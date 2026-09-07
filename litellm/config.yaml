@@ -1,6 +1,6 @@
 # LiteLLM proxy config — Layer-0 key isolation (ADR-0004)
 # Real provider keys are set as env vars in the LiteLLM container only.
-# Yoke holds only a revocable LITELLM_VIRTUAL_KEY, never OPENAI_API_KEY.
+# agent-flows holds only a revocable LITELLM_VIRTUAL_KEY, never OPENAI_API_KEY.
 
 model_list:
   - model_name: default
