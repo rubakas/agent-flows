@@ -37,8 +37,24 @@ import { makeDb, type DbInstance } from "../db/index.js";
 import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../install/bundle.js";
 import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
 import { assertSafePath } from "../install/paths.js";
+
+import {
+  isSafeId,
+  json,
+  parseJsonBody,
+  readAndDiscardBody,
+  readBody,
+  readJsonBody,
+  requireRunService,
+  RequestTooLargeError,
+  safePath,
+} from "./route-helpers.js";
+import { CONTENT_CAP, handleNamedContent } from "./routes/content.js";
+import { fetchN8n, readN8nConfig, requireN8nConfig } from "./routes/n8n.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
+
+export { CONTENT_CAP };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -70,88 +86,9 @@ const RE_TEMPLATE_DETAIL = /^\/api\/templates\/([^/]+)$/u;
 const RE_TEMPLATE_INSTALL = /^\/api\/templates\/([^/]+)\/install$/u;
 const RE_PIPELINE_N8N = /^\/api\/pipelines\/([^/]+)\/n8n$/u;
 
-// Safe pipeline id: lowercase alphanumeric and hyphens, must start with a letter or digit.
-// Prohibits dot, slash, backslash, space — blocks all path-traversal attempts.
-const RE_SAFE_ID = /^[a-z0-9][a-z0-9-]*$/u;
-
-function isSafeId(id: string): boolean {
-  return RE_SAFE_ID.test(id) && id.length <= 100;
-}
-
-// Maximum bytes returned by the skill/agent content endpoint.
-export const CONTENT_CAP = 65_536;
-
 // Body size limits for readBody().
 const BODY_LIMIT_DEFAULT = 65_536; // 64 KB — all mutating routes except /api/import
 const BODY_LIMIT_IMPORT = 4 * 1024 * 1024; // 4 MB — /api/import carries a YAML bundle
-
-/** Thrown by readBody() when the accumulated request body exceeds the cap. */
-class RequestTooLargeError extends Error {
-  constructor(maxBytes: number) {
-    super(`Request body exceeds the ${maxBytes}-byte limit`);
-    this.name = "RequestTooLargeError";
-  }
-}
-
-/**
- * Pre-check for skill/agent names supplied by the client.
- * Blocks the most obvious traversal forms before the resolve-based containment check.
- */
-function isSafeName(name: string): boolean {
-  return name.length > 0 && name.length <= 200 && !name.startsWith(".") && !/[/\\\0]/u.test(name);
-}
-
-/**
- * Verify that `filePath` (after path.resolve) is strictly inside `dir`.
- * This is the definitive containment check — isSafeName is a fast pre-filter only.
- */
-function isContained(dir: string, filePath: string): boolean {
-  const base = resolve(dir);
-  const target = resolve(filePath);
-  return target === base || target.startsWith(base + "/");
-}
-
-// ── n8n connection config (FR-004/FR-005) ─────────────────────────────────────
-
-/**
- * The n8n global config file path. Lives in `~/.agent-flows/n8n.json`.
- * Format: `{"baseUrl": "...", "apiKey": "..."}`.
- *
- * The file is outside every project directory so it cannot be committed with a project.
- * The apiKey must NEVER appear in any response, error message, or log line.
- */
-const N8N_GLOBAL_CONFIG_PATH = join(homedir(), ".agent-flows", "n8n.json");
-
-interface N8nConfig {
-  configured: true;
-  /** Base URL of the n8n instance (no trailing slash). */
-  baseUrl: string;
-  /** API key for n8n — daemon-side only; NEVER sent to clients. */
-  apiKey: string;
-}
-
-/**
- * Read the n8n connection config from env overrides first, then from disk.
- * Returns `null` when n8n is not configured. The returned `apiKey` must never
- * appear in any HTTP response, error message, or log line.
- */
-function readN8nConfig(): N8nConfig | null {
-  const envUrl = process.env.AGENT_FLOWS_N8N_URL;
-  const envKey = process.env.AGENT_FLOWS_N8N_API_KEY;
-  if (envUrl && envKey) {
-    return { configured: true, baseUrl: envUrl.replace(/\/+$/u, ""), apiKey: envKey };
-  }
-  if (!existsSync(N8N_GLOBAL_CONFIG_PATH)) return null;
-  try {
-    const raw = JSON.parse(readFileSync(N8N_GLOBAL_CONFIG_PATH, "utf8")) as Record<string, unknown>;
-    const baseUrl = typeof raw.baseUrl === "string" ? raw.baseUrl.replace(/\/+$/u, "") : undefined;
-    const apiKey = typeof raw.apiKey === "string" ? raw.apiKey : undefined;
-    if (!baseUrl || !apiKey) return null;
-    return { configured: true, baseUrl, apiKey };
-  } catch {
-    return null;
-  }
-}
 
 // ── Project-level n8n workflow ID map (FR-006) ────────────────────────────────
 // Stored at <projectDir>/.agent-flows/n8n.json (different from the global config).
@@ -206,60 +143,6 @@ function isAllowedOrigin(origin: string | undefined, port: number): boolean {
     if (origin === `http://${h}:${port}`) return true;
   }
   return false;
-}
-
-/**
- * Replace any occurrence of the launch root in an error message with the
- * literal string `<root>` so absolute filesystem paths never enter HTTP
- * or SSE payloads.
- */
-function safePath(message: string, root: string): string {
-  return message.split(root).join("<root>");
-}
-
-// ── HTTP helpers ───────────────────────────────────────────────────────────────
-
-function json(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(payload);
-}
-
-function readBody(req: IncomingMessage, maxBytes?: number): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let totalLength = 0;
-    let tooLarge = false;
-    req.on("data", (chunk: Buffer) => {
-      if (tooLarge) return; // drain remaining data without accumulating
-      totalLength += chunk.length;
-      if (maxBytes !== undefined && totalLength > maxBytes) {
-        tooLarge = true;
-        // Resume to drain the rest of the request body so the socket stays
-        // alive long enough for the caller to write a 413 response.
-        req.resume();
-        reject(new RequestTooLargeError(maxBytes));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      if (!tooLarge) resolve(Buffer.concat(chunks).toString("utf8"));
-    });
-    req.on("error", reject);
-  });
-}
-
-function parseJsonBody(raw: string): { ok: true; value: Record<string, unknown> } | { ok: false } {
-  try {
-    const v: unknown = JSON.parse(raw);
-    if (typeof v === "object" && v !== null && !Array.isArray(v)) {
-      return { ok: true, value: v as Record<string, unknown> };
-    }
-    return { ok: false };
-  } catch {
-    return { ok: false };
-  }
 }
 
 // ── Pipeline helpers ───────────────────────────────────────────────────────────
@@ -582,8 +465,7 @@ async function handleRequest(
 
   // POST /api/pipelines — create a new pipeline in the project canon directory
   if (method === "POST" && pathname === "/api/pipelines") {
-    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
-    const parsed = parseJsonBody(raw);
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
       return;
@@ -625,6 +507,11 @@ async function handleRequest(
   }
 
   // GET /api/pipelines/:id
+  // No isSafeId check here: findPipelineById scans loaded pipeline ids for an
+  // exact match and never joins `id` into a filesystem path, so an unsafe id
+  // simply fails to match and falls through to 404. Safe only because of that
+  // — a future rewrite that resolves the id into a path directly must add
+  // validation before doing so.
   const pipelineDetailMatch = RE_PIPELINE_DETAIL.exec(pathname);
   if (method === "GET" && pipelineDetailMatch) {
     const id = decodeURIComponent(pipelineDetailMatch[1]);
@@ -669,13 +556,15 @@ async function handleRequest(
       });
       return;
     }
-    await readBody(req, BODY_LIMIT_DEFAULT); // consume body
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
     rmSync(entry.filePath);
     json(res, 200, { ok: true, id });
     return;
   }
 
   // POST /api/pipelines/:id/drafts
+  // No isSafeId check here — see the rationale on GET /api/pipelines/:id above;
+  // the same findPipelineById lookup makes an unsafe id fail as a plain 404.
   const openDraftMatch = RE_PIPELINE_DRAFTS.exec(pathname);
   if (method === "POST" && openDraftMatch) {
     const id = decodeURIComponent(openDraftMatch[1]);
@@ -685,7 +574,7 @@ async function handleRequest(
       return;
     }
     // Consume the (empty) body to satisfy HTTP spec — no useful payload expected.
-    await readBody(req, BODY_LIMIT_DEFAULT);
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
     const body = readFileSync(entry.filePath, "utf8");
     const baseHash = createHash("sha256").update(body).digest("hex");
     const relPath = relative(root, entry.filePath);
@@ -704,8 +593,7 @@ async function handleRequest(
       json(res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
-    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
-    const parsed = parseJsonBody(raw);
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
       return;
@@ -729,7 +617,7 @@ async function handleRequest(
       json(res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
-    await readBody(req, BODY_LIMIT_DEFAULT); // consume body
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
     // TODO(serve): switch to saveDraftAndRegenerate once another agent adds that export
     const result: SaveResult & { regenerated?: string[] } = saveDraft(ctx.db, draftId);
     if (result.ok) {
@@ -751,12 +639,9 @@ async function handleRequest(
 
   // POST /api/runs
   if (method === "POST" && pathname === "/api/runs") {
-    if (!ctx.runService) {
-      json(res, 503, { error: "RunService not available in this instance" });
-      return;
-    }
-    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
-    const parsed = parseJsonBody(raw);
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
       return;
@@ -783,7 +668,7 @@ async function handleRequest(
       ...(inputs as Record<string, unknown>),
       ...(models !== undefined ? { models } : {}),
     };
-    const result = await ctx.runService.start(pipeline, wfInput, {
+    const result = await runService.start(pipeline, wfInput, {
       gateMode: gateMode ?? "manual",
     });
     json(res, 200, result);
@@ -792,23 +677,19 @@ async function handleRequest(
 
   // GET /api/runs — list all runs in creation order (FR-002)
   if (method === "GET" && pathname === "/api/runs") {
-    if (!ctx.runService) {
-      json(res, 503, { error: "RunService not available in this instance" });
-      return;
-    }
-    json(res, 200, { runs: ctx.runService.list() });
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
+    json(res, 200, { runs: runService.list() });
     return;
   }
 
   // GET /api/runs/:id/events  — SSE (must precede the bare GET /api/runs/:id check)
   const sseMatch = RE_RUN_EVENTS.exec(pathname);
   if (method === "GET" && sseMatch) {
-    if (!ctx.runService) {
-      json(res, 503, { error: "RunService not available in this instance" });
-      return;
-    }
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
     const id = decodeURIComponent(sseMatch[1]);
-    const snapshot = ctx.runService.get(id);
+    const snapshot = runService.get(id);
     if (!snapshot) {
       json(res, 404, { error: `Run "${id}" not found` });
       return;
@@ -829,7 +710,7 @@ async function handleRequest(
 
     // Relay step lifecycle events with normalised status strings.
     // step-finish additionally carries outputExcerpt/outputTruncated (FR-006).
-    const unsub = ctx.runService.subscribe(id, (event: StepEvent) => {
+    const unsub = runService.subscribe(id, (event: StepEvent) => {
       const status = STEP_STATUS[event.kind];
       const payload: Record<string, unknown> = { stepId: event.stepId, status };
       if (event.kind === "step-finish") {
@@ -856,12 +737,10 @@ async function handleRequest(
   // GET /api/runs/:id
   const runGetMatch = RE_RUN_BY_ID.exec(pathname);
   if (method === "GET" && runGetMatch) {
-    if (!ctx.runService) {
-      json(res, 503, { error: "RunService not available in this instance" });
-      return;
-    }
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
     const id = decodeURIComponent(runGetMatch[1]);
-    const state = ctx.runService.get(id);
+    const state = runService.get(id);
     if (!state) {
       json(res, 404, { error: `Run "${id}" not found` });
       return;
@@ -873,13 +752,10 @@ async function handleRequest(
   // POST /api/runs/:id/approve
   const approveMatch = RE_RUN_APPROVE.exec(pathname);
   if (method === "POST" && approveMatch) {
-    if (!ctx.runService) {
-      json(res, 503, { error: "RunService not available in this instance" });
-      return;
-    }
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
     const id = decodeURIComponent(approveMatch[1]);
-    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
-    const parsed = parseJsonBody(raw);
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
       return;
@@ -889,7 +765,7 @@ async function handleRequest(
       json(res, 400, { error: 'Field "approved" must be a boolean' });
       return;
     }
-    const result = await ctx.runService.approve(id, approved);
+    const result = await runService.approve(id, approved);
     if (result.status === undefined) {
       // The call could not be processed (no run, wrong status, etc.) — 409.
       json(res, 409, { error: result.error });
@@ -901,12 +777,9 @@ async function handleRequest(
 
   // POST /api/gate-judge — stateless judge-as-a-service for the n8n binding (FR-012)
   if (method === "POST" && pathname === "/api/gate-judge") {
-    if (!ctx.runService) {
-      json(res, 503, { error: "RunService not available in this instance" });
-      return;
-    }
-    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
-    const parsed = parseJsonBody(raw);
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
       return;
@@ -920,7 +793,7 @@ async function handleRequest(
       json(res, 400, { error: 'Field "gateMessage" must be a string' });
       return;
     }
-    const result = await ctx.runService.gateJudge({
+    const result = await runService.gateJudge({
       gateMessage,
       spec,
       pipelineId: typeof pipelineId === "string" ? pipelineId : undefined,
@@ -935,8 +808,7 @@ async function handleRequest(
 
   // POST /api/install — install bundled workflows into the project directory
   if (method === "POST" && pathname === "/api/install") {
-    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
-    const parsed = parseJsonBody(raw);
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
       return;
@@ -1024,60 +896,14 @@ async function handleRequest(
   // GET /api/skills/:name — return the content of one skill's SKILL.md
   const skillMatch = RE_SKILL_CONTENT.exec(pathname);
   if (method === "GET" && skillMatch) {
-    const name = decodeURIComponent(skillMatch[1]);
-    if (!isSafeName(name)) {
-      json(res, 400, { error: `Skill name contains invalid characters` });
-      return;
-    }
-    const skillsSubdir = join(ctx.skillsBase, "skills");
-    const skillFile = join(skillsSubdir, name, "SKILL.md");
-    if (!isContained(skillsSubdir, skillFile)) {
-      json(res, 400, { error: `Skill name contains invalid characters` });
-      return;
-    }
-    if (!existsSync(skillFile)) {
-      json(res, 404, { error: `Skill "${name}" not found` });
-      return;
-    }
-    const raw = readFileSync(skillFile, "utf8");
-    const truncated = raw.length > CONTENT_CAP;
-    json(res, 200, {
-      kind: "skill",
-      name,
-      filePath: skillFile,
-      content: truncated ? raw.slice(0, CONTENT_CAP) : raw,
-      truncated,
-    });
+    handleNamedContent(res, ctx.skillsBase, "skill", decodeURIComponent(skillMatch[1]));
     return;
   }
 
   // GET /api/agents/:name — return the content of one agent's .md file
   const agentMatch = RE_AGENT_CONTENT.exec(pathname);
   if (method === "GET" && agentMatch) {
-    const name = decodeURIComponent(agentMatch[1]);
-    if (!isSafeName(name)) {
-      json(res, 400, { error: `Agent name contains invalid characters` });
-      return;
-    }
-    const agentsSubdir = join(ctx.skillsBase, "agents");
-    const agentFile = join(agentsSubdir, `${name}.md`);
-    if (!isContained(agentsSubdir, agentFile)) {
-      json(res, 400, { error: `Agent name contains invalid characters` });
-      return;
-    }
-    if (!existsSync(agentFile)) {
-      json(res, 404, { error: `Agent "${name}" not found` });
-      return;
-    }
-    const raw = readFileSync(agentFile, "utf8");
-    const truncated = raw.length > CONTENT_CAP;
-    json(res, 200, {
-      kind: "agent",
-      name,
-      filePath: agentFile,
-      content: truncated ? raw.slice(0, CONTENT_CAP) : raw,
-      truncated,
-    });
+    handleNamedContent(res, ctx.skillsBase, "agent", decodeURIComponent(agentMatch[1]));
     return;
   }
 
@@ -1105,8 +931,7 @@ async function handleRequest(
 
   // POST /api/import — import a workflow bundle into .agent-flows/
   if (method === "POST" && pathname === "/api/import") {
-    const raw = await readBody(req, BODY_LIMIT_IMPORT);
-    const parsed = parseJsonBody(raw);
+    const parsed = await readJsonBody(req, BODY_LIMIT_IMPORT);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
       return;
@@ -1157,8 +982,7 @@ async function handleRequest(
   // POST /api/templates/from-n8n — save an n8n workflow as a template (FR-011)
   // Must be checked BEFORE the RE_TEMPLATE_DETAIL regex to avoid capturing "from-n8n" as an id.
   if (method === "POST" && pathname === "/api/templates/from-n8n") {
-    const raw = await readBody(req, BODY_LIMIT_IMPORT);
-    const parsed = parseJsonBody(raw);
+    const parsed = await readJsonBody(req, BODY_LIMIT_IMPORT);
     if (!parsed.ok) {
       json(res, 400, { error: "Malformed JSON body" });
       return;
@@ -1168,19 +992,12 @@ async function handleRequest(
       json(res, 400, { error: 'Field "workflowId" must be a non-empty string' });
       return;
     }
-    const n8nCfg = readN8nConfig();
-    if (!n8nCfg) {
-      json(res, 503, {
-        error: `n8n is not configured — add a baseUrl and apiKey to ${N8N_GLOBAL_CONFIG_PATH}`,
-      });
-      return;
-    }
+    const n8nCfg = requireN8nConfig(res);
+    if (!n8nCfg) return;
     // Fetch the workflow from n8n
     let wfJson: unknown;
     try {
-      const resp = await fetch(`${n8nCfg.baseUrl}/api/v1/workflows/${workflowId}`, {
-        headers: { "X-N8N-API-KEY": n8nCfg.apiKey },
-      });
+      const resp = await fetchN8n(n8nCfg, `/api/v1/workflows/${workflowId}`);
       if (!resp.ok) {
         // Do NOT include the API key in this error message
         json(res, resp.status === 404 ? 404 : 502, {
@@ -1286,7 +1103,7 @@ async function handleRequest(
       json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
       return;
     }
-    await readBody(req, BODY_LIMIT_DEFAULT); // consume body
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
     const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
     if (!existsSync(templatePath)) {
       json(res, 404, { error: `Template "${tId}" not found` });
@@ -1316,6 +1133,9 @@ async function handleRequest(
       json(res, 404, { error: `Template "${tId}" not found` });
       return;
     }
+    // Deliberately lenient: an unparseable body falls back to overwrite:false
+    // rather than 400 — this route only ever reads one optional boolean field,
+    // so readJsonBody's stricter "malformed body" rejection is not used here.
     const bodyRaw = await readBody(req, BODY_LIMIT_DEFAULT);
     const bodyParsed = parseJsonBody(bodyRaw);
     const doOverwrite = bodyParsed.ok && bodyParsed.value.overwrite === true;
@@ -1345,17 +1165,10 @@ async function handleRequest(
 
   // GET /api/n8n/workflows — proxy n8n's workflow list (FR-011)
   if (method === "GET" && pathname === "/api/n8n/workflows") {
-    const cfg = readN8nConfig();
-    if (!cfg) {
-      json(res, 503, {
-        error: `n8n is not configured — add a baseUrl and apiKey to ${N8N_GLOBAL_CONFIG_PATH}`,
-      });
-      return;
-    }
+    const cfg = requireN8nConfig(res);
+    if (!cfg) return;
     try {
-      const resp = await fetch(`${cfg.baseUrl}/api/v1/workflows`, {
-        headers: { "X-N8N-API-KEY": cfg.apiKey },
-      });
+      const resp = await fetchN8n(cfg, "/api/v1/workflows");
       if (!resp.ok) {
         json(res, resp.status === 401 ? 401 : 502, {
           error: `n8n list workflows returned HTTP ${resp.status}`,
@@ -1384,14 +1197,9 @@ async function handleRequest(
       json(res, 404, { error: `Pipeline "${id}" not found` });
       return;
     }
-    await readBody(req, BODY_LIMIT_DEFAULT); // consume body
-    const cfg = readN8nConfig();
-    if (!cfg) {
-      json(res, 503, {
-        error: `n8n is not configured — add a baseUrl and apiKey to ${N8N_GLOBAL_CONFIG_PATH}`,
-      });
-      return;
-    }
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
+    const cfg = requireN8nConfig(res);
+    if (!cfg) return;
     // Generate the n8n workflow JSON from the canon definition
     let wfJson: ReturnType<typeof generateN8nWorkflow>;
     try {
@@ -1406,9 +1214,7 @@ async function handleRequest(
     if (existingN8nId) {
       // Verify the workflow still exists in n8n; re-create if 404
       try {
-        const checkResp = await fetch(`${cfg.baseUrl}/api/v1/workflows/${existingN8nId}`, {
-          headers: { "X-N8N-API-KEY": cfg.apiKey },
-        });
+        const checkResp = await fetchN8n(cfg, `/api/v1/workflows/${existingN8nId}`);
         if (checkResp.ok) {
           json(res, 200, { url: `${cfg.baseUrl}/workflow/${existingN8nId}` });
           return;
@@ -1431,12 +1237,9 @@ async function handleRequest(
     // Remove `id` from the request body — it is readOnly and the server assigns it.
     const { id: _id, active: _active, ...wfBody } = wfJson;
     try {
-      const createResp = await fetch(`${cfg.baseUrl}/api/v1/workflows`, {
+      const createResp = await fetchN8n(cfg, "/api/v1/workflows", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-N8N-API-KEY": cfg.apiKey,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(wfBody),
       });
       if (!createResp.ok) {
