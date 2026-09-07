@@ -4,7 +4,7 @@ A community n8n node package that runs a read-only coding agent (the `claude` CL
 
 ## Node type
 
-`n8n-nodes-agent-flows.yokeAgent`
+`n8n-nodes-agent-flows.agentFlowsAgent`
 
 ## Requirements
 
@@ -116,4 +116,4 @@ cp -r dist "$DEST/"
 ln -sf /path/to/n8n/node_modules/n8n-workflow "$DEST/node_modules/n8n-workflow"
 ```
 
-Then import and execute a workflow referencing `n8n-nodes-agent-flows.yokeAgent`.
+Then import and execute a workflow referencing `n8n-nodes-agent-flows.agentFlowsAgent`.

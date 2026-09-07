@@ -12,7 +12,7 @@
   "n8n": {
     "n8nNodesApiVersion": 1,
     "nodes": [
-      "dist/nodes/YokeAgent/YokeAgent.node.js"
+      "dist/nodes/AgentFlowsAgent/AgentFlowsAgent.node.js"
     ]
   },
   "files": [

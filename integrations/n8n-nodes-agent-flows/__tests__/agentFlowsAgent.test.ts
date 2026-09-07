@@ -1,5 +1,5 @@
 /**
- * Unit tests for YokeAgent node internals.
+ * Unit tests for AgentFlowsAgent node internals.
  * Runnable without n8n: node --experimental-strip-types --test '__tests__/**\/*.test.ts'
  *
  * These tests cover the security-critical helpers extracted from the node:
@@ -155,7 +155,7 @@ describe('validateWorkspaceDirectory', () => {
   let existingFile: string;
 
   before(async () => {
-    existingDir = join(tmpdir(), `yoke-test-${randomUUID()}`);
+    existingDir = join(tmpdir(), `agent-flows-test-${randomUUID()}`);
     await fs.mkdir(existingDir, { recursive: true });
     existingFile = join(existingDir, 'file.txt');
     await fs.writeFile(existingFile, 'hello');

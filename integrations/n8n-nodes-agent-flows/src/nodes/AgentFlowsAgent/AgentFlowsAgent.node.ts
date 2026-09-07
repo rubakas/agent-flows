@@ -262,7 +262,7 @@ async function runClaude(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
 // Node class
 // ---------------------------------------------------------------------------
 
-export class YokeAgent implements INodeType {
+export class AgentFlowsAgent implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'Agent Flows Coding Agent',
     name: 'agentFlowsAgent',
