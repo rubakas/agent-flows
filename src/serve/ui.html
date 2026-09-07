@@ -395,6 +395,15 @@
     <main>
       <div id="flash-area"></div>
 
+      <!-- Active Runs -->
+      <div class="section">
+        <div class="section-header">
+          <h2>Active Runs</h2>
+          <button class="btn" id="btn-refresh-runs" style="margin-left: auto">Refresh</button>
+        </div>
+        <div id="runs-table-wrap">Loading…</div>
+      </div>
+
       <!-- Project tier -->
       <div class="section">
         <div class="section-header">
@@ -421,15 +430,6 @@
           <span class="tier-badge tier-bundled">bundled</span>
         </div>
         <div id="bundled-table-wrap">Loading…</div>
-      </div>
-
-      <!-- Active Runs -->
-      <div class="section">
-        <div class="section-header">
-          <h2>Active Runs</h2>
-          <button class="btn" id="btn-refresh-runs" style="margin-left: auto">Refresh</button>
-        </div>
-        <div id="runs-table-wrap">Loading…</div>
       </div>
     </main>
 
@@ -497,8 +497,13 @@
       // ── Detail panel ───────────────────────────────────────────────────────
 
       const detailPanel = document.getElementById("detail-panel");
-      document.getElementById("btn-close-detail").onclick = () =>
+      document.getElementById("btn-close-detail").onclick = () => {
+        if (activeRunEs) {
+          activeRunEs.close();
+          activeRunEs = null;
+        }
         detailPanel.classList.remove("open");
+      };
 
       function showDetail(title, steps, inputs, description) {
         document.getElementById("detail-title").textContent = title;
@@ -829,10 +834,24 @@
           const data = await api("GET", "/api/runs");
           const runs = data.runs || [];
           if (!runs.length) {
-            wrap.innerHTML = `<p class="empty">No runs recorded yet.</p>`;
+            wrap.innerHTML = `<p class="empty">No active runs.</p>`;
             return;
           }
-          let html = `<table><thead><tr>
+          const suspended = runs.filter((r) => r.status === "suspended");
+          let html = "";
+          if (suspended.length) {
+            const noun = suspended.length === 1 ? "run" : "runs";
+            html += `<div class="gate-box" style="margin-bottom:10px">
+              <p><strong>${escH(String(suspended.length))} suspended ${noun} — waiting for your approval.</strong></p>
+            </div>`;
+          }
+          const activeCount = runs.filter(
+            (r) => r.status === "running" || r.status === "started" || r.status === "suspended"
+          ).length;
+          if (activeCount > 0) {
+            html += `<p style="font-size:12px;color:var(--muted);margin-bottom:6px">${escH(String(activeCount))} active, ${escH(String(runs.length))} total</p>`;
+          }
+          html += `<table><thead><tr>
             <th>Run ID</th><th>Pipeline</th><th>Status</th><th>Started</th><th>Actions</th>
           </tr></thead><tbody>`;
           for (const r of runs) {
@@ -859,6 +878,24 @@
       }
 
       document.getElementById("btn-refresh-runs").onclick = () => loadRuns();
+
+      // ── Runs auto-refresh ──────────────────────────────────────────────────
+
+      let _runsPoller = null;
+
+      function startRunsPoller() {
+        if (_runsPoller !== null) return;
+        _runsPoller = setInterval(() => {
+          // Skip when tab is hidden or an SSE stream is delivering live updates.
+          if (document.hidden || activeRunEs !== null) return;
+          loadRuns();
+        }, 4000);
+      }
+
+      // Refresh immediately when the tab becomes visible again.
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && activeRunEs === null) loadRuns();
+      });
 
       /**
        * Open the detail panel for a run and follow it live via SSE.
@@ -1039,6 +1076,7 @@
       (async () => {
         await loadN8nStatus();
         await Promise.all([loadProjectTier(), loadTemplateTier(), loadBundledTier(), loadRuns()]);
+        startRunsPoller();
       })();
     </script>
   </body>

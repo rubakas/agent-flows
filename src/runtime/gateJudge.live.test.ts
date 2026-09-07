@@ -4,10 +4,10 @@
 // missing its test plan. The judge must reject. This gate is GATING: Groups
 // 1–3 are not done until this test passes.
 //
-// This file is included in `pnpm test` like all other *.test.ts files.
-// It calls a real LLM via the CLI transport; it will not run without credentials
-// and adds ~20–40 s to the suite. If the profile or credentials are absent the
-// test is skipped cleanly.
+// OPT-IN: this test makes a real, billable model call and must not run in the
+// default suite. Set AGENT_FLOWS_LIVE_TESTS=1 to enable it. Without that
+// variable the test is skipped unconditionally — a real model call must never
+// be part of the default `pnpm test` run.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -88,61 +88,80 @@ function parseVerdict(raw: string): { verdict: string; reason: string } | null {
 
 // ── Test ─────────────────────────────────────────────────────────────────────
 
+// Hard wall-clock bound: 120 s. Model calls are typically 20–40 s; 120 s gives
+// a 3× safety margin while still preventing an indefinite suite hang if the
+// transport stalls.
+const LIVE_TEST_TIMEOUT_MS = 120_000;
+
 describe("FR-010 — live gate judge probe: fixture with missing test plan must be rejected", () => {
-  it("reasoner model rejects a spec that has no test plan or acceptance criteria", async (t) => {
-    // Skip gracefully if no claude CLI or profile available.
-    let registry;
-    let profile;
-    try {
-      registry = defaultRegistry();
-      profile = getActiveProfile();
-    } catch {
-      t.skip("credentials/registry not available — skipping live probe");
-      return;
+  it(
+    "reasoner model rejects a spec that has no test plan or acceptance criteria",
+    { timeout: LIVE_TEST_TIMEOUT_MS },
+    async (t) => {
+      // Opt-in guard: skip unless AGENT_FLOWS_LIVE_TESTS=1.
+      // A real model call must not run in the default suite — it is billable,
+      // slow, and can hang the process indefinitely if the transport stalls.
+      if (!process.env.AGENT_FLOWS_LIVE_TESTS) {
+        t.skip(
+          "live probe skipped — set AGENT_FLOWS_LIVE_TESTS=1 to run (makes a real model call)"
+        );
+        return;
+      }
+
+      // Skip gracefully if no claude CLI or profile available.
+      let registry;
+      let profile;
+      try {
+        registry = defaultRegistry();
+        profile = getActiveProfile();
+      } catch {
+        t.skip("credentials/registry not available — skipping live probe");
+        return;
+      }
+
+      const reasonerModelId = profile.roles.reasoner;
+      let entry;
+      try {
+        entry = registry.resolve(reasonerModelId);
+      } catch {
+        t.skip(`Reasoner model "${reasonerModelId}" not in registry — skipping live probe`);
+        return;
+      }
+
+      const prompt = buildProbePrompt();
+      let raw: string;
+      try {
+        raw = await runLlmStep(entry, prompt, {});
+      } catch (err: unknown) {
+        // Transport error — CI/no-credentials environment; skip rather than fail.
+        const msg = err instanceof Error ? err.message : String(err);
+        t.skip(`LLM transport error (no credentials?): ${msg}`);
+        return;
+      }
+
+      const verdict = parseVerdict(raw);
+
+      // Log the raw output so the caller can paste it in the report.
+      console.log("\n── FR-010 live probe raw output ──────────────────────────");
+      console.log(raw.trim());
+      console.log("── end raw output ────────────────────────────────────────\n");
+
+      assert.ok(
+        verdict !== null,
+        `Judge response could not be parsed as a verdict JSON. Raw: ${raw}`
+      );
+
+      assert.equal(
+        verdict.verdict,
+        "reject",
+        `Judge must reject a spec with no test plan. Got verdict="${verdict.verdict}" reason="${verdict.reason}"`
+      );
+
+      assert.ok(verdict.reason.length > 0, "Judge must provide a non-empty reason");
+
+      // Log the parsed verdict for reporting.
+      console.log(`FR-010 verdict: ${verdict.verdict}`);
+      console.log(`FR-010 reason:  ${verdict.reason}`);
     }
-
-    const reasonerModelId = profile.roles.reasoner;
-    let entry;
-    try {
-      entry = registry.resolve(reasonerModelId);
-    } catch {
-      t.skip(`Reasoner model "${reasonerModelId}" not in registry — skipping live probe`);
-      return;
-    }
-
-    const prompt = buildProbePrompt();
-    let raw: string;
-    try {
-      raw = await runLlmStep(entry, prompt, {});
-    } catch (err: unknown) {
-      // Transport error — CI/no-credentials environment; skip rather than fail.
-      const msg = err instanceof Error ? err.message : String(err);
-      t.skip(`LLM transport error (no credentials?): ${msg}`);
-      return;
-    }
-
-    const verdict = parseVerdict(raw);
-
-    // Log the raw output so the caller can paste it in the report.
-    console.log("\n── FR-010 live probe raw output ──────────────────────────");
-    console.log(raw.trim());
-    console.log("── end raw output ────────────────────────────────────────\n");
-
-    assert.ok(
-      verdict !== null,
-      `Judge response could not be parsed as a verdict JSON. Raw: ${raw}`
-    );
-
-    assert.equal(
-      verdict.verdict,
-      "reject",
-      `Judge must reject a spec with no test plan. Got verdict="${verdict.verdict}" reason="${verdict.reason}"`
-    );
-
-    assert.ok(verdict.reason.length > 0, "Judge must provide a non-empty reason");
-
-    // Log the parsed verdict for reporting.
-    console.log(`FR-010 verdict: ${verdict.verdict}`);
-    console.log(`FR-010 reason:  ${verdict.reason}`);
-  });
+  );
 });

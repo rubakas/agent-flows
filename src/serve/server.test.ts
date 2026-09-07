@@ -779,40 +779,43 @@ describe("GET /api/runs/:id — steps field always present in GetResult (FR-006)
       const localRun = makeMockRun("sse-out-run-2", successResult(), successResult());
       const svc3 = new RunService(makeMastra(localRun));
       const s3 = await svc3.start("p", {});
+      await reader.cancel();
+      await srv2.close();
+
       const srv3 = await startServer({
         port: 0,
         dbPath: ":memory:",
         pipelinesDir: REAL_PIPELINES_DIR,
         runService: svc3,
       });
-      await reader.cancel();
-      await srv2.close();
+      try {
+        const sseRes3 = await fetch(`http://127.0.0.1:${srv3.port}/api/runs/${s3.runId}/events`);
+        const reader3 = sseRes3.body!.getReader();
+        const dec3 = new TextDecoder();
+        await reader3.read(); // snapshot
 
-      const sseRes3 = await fetch(`http://127.0.0.1:${srv3.port}/api/runs/${s3.runId}/events`);
-      const reader3 = sseRes3.body!.getReader();
-      const dec3 = new TextDecoder();
-      await reader3.read(); // snapshot
+        localRun.emit({
+          type: "workflow-step-result",
+          // Wrap under the step id key as Mastra does: output = { ...ctx, q: ownOutput }.
+          payload: {
+            id: "q",
+            stepCallId: "c",
+            status: "success",
+            output: { request: "r", q: { msg: "hello" } },
+          },
+        });
 
-      localRun.emit({
-        type: "workflow-step-result",
-        // Wrap under the step id key as Mastra does: output = { ...ctx, q: ownOutput }.
-        payload: {
-          id: "q",
-          stepCallId: "c",
-          status: "success",
-          output: { request: "r", q: { msg: "hello" } },
-        },
-      });
-
-      const { value: stepVal } = await reader3.read();
-      const chunk = dec3.decode(stepVal);
-      assert.ok(
-        chunk.includes("outputExcerpt"),
-        `SSE step event must carry outputExcerpt; got: ${chunk}`
-      );
-      assert.ok(chunk.includes("hello"), "outputExcerpt must contain step output text");
-      await reader3.cancel();
-      await srv3.close();
+        const { value: stepVal } = await reader3.read();
+        const chunk = dec3.decode(stepVal);
+        assert.ok(
+          chunk.includes("outputExcerpt"),
+          `SSE step event must carry outputExcerpt; got: ${chunk}`
+        );
+        assert.ok(chunk.includes("hello"), "outputExcerpt must contain step output text");
+        await reader3.cancel();
+      } finally {
+        await srv3.close();
+      }
     } catch (e) {
       await srv2.close();
       throw e;
