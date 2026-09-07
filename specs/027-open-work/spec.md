@@ -11,22 +11,22 @@ This is a handoff record, not a feature spec. It exists so the working context c
 
 ## Verified state
 
-| Fact          | Value                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| HEAD          | `5f7790d test(security): pin deny-list contents, traversal guards and gate rejection`      |
-| Unpushed      | 119 commits ahead of `origin/main` — **nothing has been pushed; that is the owner's call** |
-| Remote        | `git@github.com:rubakas/agent-flows.git`                                                   |
-| Tests         | 943 total, 942 pass, 0 fail, 1 skipped by design                                           |
-| `pnpm check`  | green (lint, typecheck, format:check, test)                                                |
-| Test duration | ~2.3 s                                                                                     |
-| Specs         | 23 directories under `specs/`                                                              |
+| Fact          | Value                                                                |
+| ------------- | -------------------------------------------------------------------- |
+| HEAD          | `d8baa27 docs(specs): record open work, decisions and session state` |
+| Synced        | `main` is in sync with `origin/main` at `d8baa27` (2026-09-07)       |
+| Remote        | `git@github.com:rubakas/agent-flows.git`                             |
+| Tests         | 943 total, 942 pass, 0 fail, 1 skipped by design                     |
+| `pnpm check`  | green (lint, typecheck, format:check, test)                          |
+| Test duration | ~2.3 s                                                               |
+| Specs         | 23 directories under `specs/`                                        |
 
-Session start was 612 tests. The local checkout directory is still named `yoke`; the project and its remote are `agent-flows`. Two spec files deliberately keep the literal path `/Users/en3e/code/rubakas/yoke` because it is real — `specs/017-investigation-wiring/spec.md:34` and `specs/019-dogfood-loop/spec.md:99`. **They must be updated when the directory is renamed.**
+Session start was 612 tests, now 943 total (942 pass, 1 skipped). The local checkout is `/Users/en3e/code/rubakas/agent-flows` and the dogfood sandbox is `/Users/en3e/code/rubakas/agent-flows-sandbox`, both renamed on 2026-09-07 from `yoke` and `newfolder`.
 
 ## Running environment
 
-- **Daemon**: pid 94777, port 7411. Runs **base code** from `/Users/en3e/code/rubakas/yoke` with `AGENT_FLOWS_PROJECT_DIR=/Users/en3e/code/rubakas/newfolder`. This separation is the owner's explicit instruction: the stable installation is the instrument, the sandbox is the target of development. Do not run the daemon from the sandbox's own code.
-- **Sandbox**: `/Users/en3e/code/rubakas/newfolder`, synced to base, clean.
+- **Daemon**: pid 21164 (tsx parent), 21171 (node child), port 7411. Runs **base code** from `/Users/en3e/code/rubakas/agent-flows` with `AGENT_FLOWS_PROJECT_DIR=/Users/en3e/code/rubakas/agent-flows-sandbox`. This separation is the owner's explicit instruction: the stable installation is the instrument, the sandbox is the target of development. Do not run the daemon from the sandbox's own code.
+- **Sandbox**: `/Users/en3e/code/rubakas/agent-flows-sandbox`, freshly cloned at d8baa27, `pnpm check` green (943 tests), remote `base` only, no `origin`.
 - **n8n**: the owner's instance on port 5678. Not configured in agent-flows — `~/.agent-flows/n8n.json` does not exist, so `GET /api/n8n/status` returns `{"configured":false}` and the redirect buttons are inert. Enabling it requires an API key **the owner enters themselves**; never read, log, or store its value.
 - **LiteLLM**: unreachable on port 4000 (`pnpm doctor` reports it as a warning, not a failure).
 - Browser tabs the owner watches: `localhost:7411` (our UI) and `localhost:5678` (n8n).
@@ -96,5 +96,3 @@ Questions 1, 2, 3 and 7 each found real defects today. Question 8 is what spec 0
 
 1. Implement spec 026, starting with cancellation (FR-001 … FR-007) — it is the largest control gap.
 2. Re-run the two audits listed above.
-3. Decide on pushing 119 commits to `origin/main`.
-4. Rename the local checkout to `agent-flows` and update the two spec files that cite the real path.

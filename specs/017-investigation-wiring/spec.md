@@ -30,8 +30,8 @@ against `process.cwd()` — the server process's working directory, which is the
 not the target project. `deps.cwd` (the project directory) is already available in `build.ts` and is
 already passed to `buildCheckStep` at line 140, but is not forwarded here.
 
-Observed live: with `AGENT_FLOWS_PROJECT_DIR=/Users/en3e/code/rubakas/newfolder`, the spec was
-written to `/Users/en3e/code/rubakas/yoke/specs/spec-creation/spec.md`. The target project has no
+Observed live: with `AGENT_FLOWS_PROJECT_DIR=/Users/en3e/code/rubakas/agent-flows-sandbox`, the spec was
+written to `/Users/en3e/code/rubakas/agent-flows/specs/spec-creation/spec.md`. The target project has no
 `specs/` directory at all.
 
 **persist-ticket check:** `buildPersistStep` (`src/bindings/mastra/buildSteps.ts:295`) calls
