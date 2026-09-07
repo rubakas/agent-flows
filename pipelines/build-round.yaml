@@ -16,9 +16,8 @@ steps:
   - id: fix
     kind: llm
     role: worker
-    # No deadline: repairing a failing gate is scope-bounded but may still need
-    # hours on a local model. Progress watchdog (spec-024) guards liveness.
-    timeoutMs: 0
+    # No hard deadline: the progress watchdog (spec-024) supervises liveness via
+    # the event stream. Scope-bounded repair may still need hours on a local model.
     permissions:
       contents: write
     dependsOn: [test]

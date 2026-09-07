@@ -152,6 +152,20 @@ export interface StepDef {
    * The loop stops as soon as `ctx[until]` is truthy or `maxIterations` is reached.
    */
   until?: string;
+  /**
+   * Per-step cost cap for claude-transport llm steps. Passed as `--max-budget-usd`
+   * to the CLI; the CLI trips it and emits a result event with subtype
+   * `error_max_budget_usd`, which the parser maps to `StepBudgetExceededError`.
+   *
+   * No default value — the field must be explicitly set. Absent → flag is not emitted.
+   * The value is a client-side estimate from the CLI's bundled price table and is not
+   * a billing limit. Must be a positive number. Only valid on llm steps; rejected on
+   * check steps and other non-llm kinds at load time. Rejected at runtime on
+   * api/codex transports (no equivalent flag exists for those transports).
+   *
+   * Overrides `PipelineDef.defaultMaxBudgetUsd` when both are set.
+   */
+  maxBudgetUsd?: number;
 }
 
 export interface PipelineDef {
@@ -168,6 +182,12 @@ export interface PipelineDef {
   optionalInputs?: string[];
   steps: StepDef[];
   defaultTimeoutMs?: number;
+  /**
+   * Pipeline-level cost cap fallback for claude-transport llm steps. Applied when
+   * a step does not declare its own `maxBudgetUsd`. Step-level value overrides this.
+   * No default; absent → no budget limit unless set on the step. Positive number only.
+   */
+  defaultMaxBudgetUsd?: number;
 }
 
 export interface LoadedPipeline {

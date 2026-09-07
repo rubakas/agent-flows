@@ -95,6 +95,16 @@ export function loadPipeline(
     }
   }
 
+  // Validate defaultMaxBudgetUsd if present
+  const defBudget = (def as unknown as Record<string, unknown>).defaultMaxBudgetUsd;
+  if (defBudget !== undefined) {
+    if (typeof defBudget !== "number" || defBudget <= 0) {
+      throw new Error(
+        `Pipeline "${def.id}": defaultMaxBudgetUsd must be a positive number; got ${JSON.stringify(defBudget)}`
+      );
+    }
+  }
+
   // Every name in optionalInputs must also be declared in inputs.
   if (def.optionalInputs) {
     const inputSet = new Set(def.inputs);
@@ -128,6 +138,10 @@ export function loadPipeline(
         if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
           throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
         }
+      }
+      // maxBudgetUsd is llm-only; reject on all other step kinds
+      if ((step as unknown as Record<string, unknown>).maxBudgetUsd !== undefined) {
+        throw new Error(`Step "${step.id}": maxBudgetUsd is only allowed on llm steps`);
       }
       // env is only valid on check steps; reject it on all other non-llm kinds.
       if (step.kind !== "check") {
@@ -224,6 +238,17 @@ export function loadPipeline(
           throw new Error(`Step "${step.id}": llm step cannot set ${field}`);
         }
       }
+
+      // Validate maxBudgetUsd if present
+      const budgetField = (step as unknown as Record<string, unknown>).maxBudgetUsd;
+      if (budgetField !== undefined) {
+        if (typeof budgetField !== "number" || budgetField <= 0) {
+          throw new Error(
+            `Step "${step.id}": maxBudgetUsd must be a positive number; got ${JSON.stringify(budgetField)}`
+          );
+        }
+      }
+
       if (!step.role && !step.model) {
         throw new Error(`Step "${step.id}": llm step requires role or model`);
       }

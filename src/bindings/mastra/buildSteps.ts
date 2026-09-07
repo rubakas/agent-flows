@@ -65,6 +65,12 @@ export interface BuildDeps {
    * When absent, defaults to DEFAULT_CHECK_COMMAND.
    */
   checkCommand?: string;
+  /**
+   * Pipeline-level cost cap fallback for claude-transport llm steps (FR-007).
+   * Applied when the step does not declare its own maxBudgetUsd. Step-level
+   * value overrides this. Typically set from PipelineDef.defaultMaxBudgetUsd.
+   */
+  defaultMaxBudgetUsd?: number;
 }
 
 /** Callback type for compiling a nested pipeline body onto a Mastra builder. */
@@ -143,16 +149,19 @@ function tryParseSchemaOutput(
   return { ok: true, value: parsed };
 }
 
-/** Builds the runner-deps base shared by every step kind (timeout fields). */
+/** Builds the runner-deps base shared by every step kind (timeout and budget fields). */
 function baseRunnerDeps(
   step: StepDef,
   deps: BuildDeps,
   defaultTimeoutMs: number | undefined
 ): StepRunnerDeps {
+  // Step-level budget overrides pipeline-level budget (FR-007)
+  const effectiveBudget = step.maxBudgetUsd ?? deps.defaultMaxBudgetUsd;
   return {
     ...(deps.runnerDeps ?? {}),
     ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
     ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+    ...(effectiveBudget !== undefined ? { maxBudgetUsd: effectiveBudget } : {}),
   };
 }
 

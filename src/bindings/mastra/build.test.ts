@@ -2009,40 +2009,24 @@ describe("buildPipelineWorkflow — convergence signal: {{checkCommand}} vs hard
 
 // ─── CHUNK A: bundled pipeline timeoutMs regression guard ────────────────────
 //
-// develop.yaml/implement and build-round.yaml/fix must carry timeoutMs: 0.
-// No other bundled pipeline step may declare a timeout — prevents accidental
-// reintroduction of a deadline on steps that legitimately need hours.
+// The spec-024 progress watchdog supervises claude-transport llm steps via their
+// event stream. The two steps that previously carried timeoutMs: 0 as a stopgap
+// (develop.yaml/implement and build-round.yaml/fix) no longer need it — the
+// watchdog is their liveness guard, not a hard deadline. Removing timeoutMs: 0
+// means those steps now fall through to the claude-transport fallback of 0 (no
+// built-in deadline) exactly as before, but without the explicit declaration.
+//
+// This test now asserts that NO bundled pipeline step declares a timeoutMs at all.
+// Any future author who explicitly needs a hard cap must declare one and will see
+// this test fail as a prompt for deliberate review.
 
 describe("bundled pipelines — timeoutMs regression guard (CHUNK A)", () => {
-  it("develop.yaml/implement carries timeoutMs: 0 and build-round.yaml/fix carries timeoutMs: 0", () => {
-    const developLoaded = loadPipeline(join(BUNDLED_PIPELINES_DIR, "develop.yaml"));
-    const implementStep = developLoaded.def.steps.find((s) => s.id === "implement");
-    assert.ok(implementStep !== undefined, "develop.yaml must have an implement step");
-    assert.equal(
-      implementStep.timeoutMs,
-      0,
-      "develop.yaml/implement must carry timeoutMs: 0 — a write step that may need hours"
-    );
-
-    const buildRoundLoaded = loadPipeline(join(BUNDLED_PIPELINES_DIR, "build-round.yaml"));
-    const fixStep = buildRoundLoaded.def.steps.find((s) => s.id === "fix");
-    assert.ok(fixStep !== undefined, "build-round.yaml must have a fix step");
-    assert.equal(
-      fixStep.timeoutMs,
-      0,
-      "build-round.yaml/fix must carry timeoutMs: 0 — scope-bounded repair may still need hours"
-    );
-  });
-
-  it("no other bundled pipeline step declares a timeoutMs (regression guard)", () => {
-    // Only implement (develop.yaml) and fix (build-round.yaml) may carry timeoutMs: 0.
-    // Every other step inherits the built-in 10-minute default.
-    //
-    // loadPipeline expands nested pipelines: build.yaml inlines develop.yaml steps as
-    // develop.implement, and build-round.yaml steps as converge.fix. The exemption covers
-    // both bare ids and their namespaced variants by checking the final id segment.
-    //
-    // If a future edit adds timeoutMs to a new step this test fails, prompting review.
+  it("no bundled pipeline step declares a timeoutMs (watchdog replaced the stopgap)", () => {
+    // Previously develop.yaml/implement and build-round.yaml/fix carried timeoutMs: 0
+    // as a stopgap because the 10-min built-in default was killing legitimate long runs.
+    // spec-024 removes that stopgap: claude-transport steps now have no built-in deadline
+    // and the watchdog supervises them instead. The timeoutMs: 0 lines were redundant and
+    // have been removed. This test ensures they are gone and none reappear.
     const pipelineFiles = [
       "audit.yaml",
       "build.yaml",
@@ -2059,14 +2043,10 @@ describe("bundled pipelines — timeoutMs regression guard (CHUNK A)", () => {
     for (const file of pipelineFiles) {
       const loaded = loadPipeline(join(BUNDLED_PIPELINES_DIR, file));
       for (const step of loaded.def.steps) {
-        // Exempt the two write steps and their namespaced expansions in parent pipelines.
-        // "implement" only appears in develop.yaml; "fix" only in build-round.yaml.
-        const baseName = step.id.split(".").pop();
-        if (baseName === "implement" || baseName === "fix") continue;
         assert.equal(
           step.timeoutMs,
           undefined,
-          `${file}/${step.id} must NOT declare timeoutMs — only implement and fix are exempted`
+          `${file}/${step.id} must NOT declare timeoutMs — the watchdog handles liveness for claude steps`
         );
       }
     }

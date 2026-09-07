@@ -2,16 +2,25 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
+import { StepBudgetExceededError } from "./runClaudeCli.js";
 import {
   BUILD_CONFIG_DENY_PATTERNS,
   CREDENTIAL_DENY_PATTERNS,
   DEFAULT_STEP_TIMEOUT_MS,
   StepTimeoutError,
+  StepWatchdogError,
+  WATCHDOG_DIGEST_OPEN,
+  WATCHDOG_DIGEST_CLOSE,
   normalisePattern,
   runCheckStep,
   runLlmStep,
 } from "./runStep.js";
-import { makeFakeChild, makeFakeSpawn } from "./testing/fakeSpawn.js";
+import {
+  makeFakeChild,
+  makeFakeSpawn,
+  makeStreamJsonStdout,
+  makeStreamJsonChild,
+} from "./testing/fakeSpawn.js";
 import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
 import type { StepRunnerDeps } from "./runStep.js";
@@ -25,17 +34,24 @@ describe("runLlmStep — claude CLI", () => {
     cli: { bin: "claude", model: "haiku" },
   };
 
-  it("passes --model and --output-format text to claude", async () => {
-    const { spawn, capturedArgs } = makeFakeSpawn({ stdoutChunks: ["answer"] });
+  it("passes --model and --output-format stream-json to claude (FR-001)", async () => {
+    const { spawn, capturedArgs } = makeFakeSpawn({
+      stdoutChunks: [makeStreamJsonStdout("answer")],
+    });
     await runLlmStep(entry, "hello", { spawn });
     assert.ok(capturedArgs[0].includes("--model"), "should pass --model");
     assert.ok(capturedArgs[0].includes("haiku"), "should pass model name");
     assert.ok(capturedArgs[0].includes("--output-format"), "should pass --output-format");
-    assert.ok(capturedArgs[0].includes("text"), "should pass text format");
+    assert.ok(capturedArgs[0].includes("stream-json"), "should pass stream-json format (not text)");
+    assert.ok(capturedArgs[0].includes("--verbose"), "should pass --verbose");
+    assert.ok(
+      capturedArgs[0].includes("--include-partial-messages"),
+      "should pass --include-partial-messages"
+    );
   });
 
-  it("returns trimmed stdout", async () => {
-    const { spawn } = makeFakeSpawn({ stdoutChunks: ["  PONG  "] });
+  it("returns trimmed result text from stream-json result event", async () => {
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("  PONG  ")] });
     const result = await runLlmStep(entry, "say PONG", { spawn });
     assert.equal(result, "PONG");
   });
@@ -269,7 +285,7 @@ describe("runLlmStep — deadline enforcement", () => {
   });
 
   it("resolves normally when step finishes before the deadline", async () => {
-    const { spawn } = makeFakeSpawn({ stdoutChunks: ["done"] });
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("done")] });
     const result = await runLlmStep(entry, "ping", { spawn, timeoutMs: 5000 });
     assert.equal(result, "done");
   });
@@ -303,25 +319,29 @@ describe("runLlmStep — deadline enforcement", () => {
     // A very long timeout that would block process exit if not cleared.
     // The step completes immediately (fast spawn). The test suite exits promptly,
     // proving the timer was removed by clearTimeout in the finally block.
-    const { spawn } = makeFakeSpawn({ stdoutChunks: ["quick"] });
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("quick")] });
     const result = await runLlmStep(entry, "hi", { spawn, timeoutMs: 300_000 });
     assert.equal(result, "quick");
     // If clearTimeout were not called, the 300-second timer would hold the process
     // alive. The test suite completing promptly proves it was cleared.
   });
 
-  it("applies the built-in DEFAULT_STEP_TIMEOUT_MS when no timeout is declared anywhere", async () => {
-    // When deps has no timeoutMs or defaultTimeoutMs, the built-in constant fires.
-    // DEFAULT_STEP_TIMEOUT_MS is 10 minutes — far too long to await in a test.
-    // _builtInTimeoutMs overrides the constant so the built-in path is observable.
-    assert.equal(DEFAULT_STEP_TIMEOUT_MS, 600_000, "built-in should be 10 minutes");
+  it("_builtInTimeoutMs override fires on hanging claude step when explicitly set", async () => {
+    // FR-008: claude-transport steps have no built-in duration fallback by default
+    // (watchdog supervises them). But _builtInTimeoutMs can still be used to inject
+    // a test-only fallback. This tests the _builtInTimeoutMs path is still wired.
+    assert.equal(
+      DEFAULT_STEP_TIMEOUT_MS,
+      600_000,
+      "built-in constant value must remain 10 minutes"
+    );
     const { spawn } = makeHangingSpawn();
     await assert.rejects(
       runLlmStep(entry, "hang", { spawn, _builtInTimeoutMs: 50 }),
       (err: unknown) => {
         assert.ok(
           err instanceof StepTimeoutError,
-          "built-in path must surface StepTimeoutError, not a generic hang"
+          "_builtInTimeoutMs path must surface StepTimeoutError"
         );
         assert.equal(err.timeoutMs, 50);
         return true;
@@ -332,9 +352,408 @@ describe("runLlmStep — deadline enforcement", () => {
   it("timeoutMs: 0 is an explicit escape hatch that disables the deadline", async () => {
     // Without the escape hatch, a 0ms timeout would fire immediately, aborting
     // even a fast step before it completes. timeoutMs: 0 must mean "no deadline".
-    const { spawn } = makeFakeSpawn({ stdoutChunks: ["done"] });
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("done")] });
     const result = await runLlmStep(entry, "hi", { spawn, timeoutMs: 0 });
     assert.equal(result, "done", "step with timeoutMs:0 must complete without being aborted");
+  });
+});
+
+// ── FR-008: claude transport has no built-in deadline ────────────────────────
+
+describe("runLlmStep — FR-008 timeout matrix", () => {
+  const claudeEntry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+  const apiEntry: ModelEntry = {
+    id: "ollama",
+    transport: "api",
+    api: { endpoint: "http://localhost:11434/v1/chat/completions", model: "qwen" },
+  };
+
+  it("claude step with explicit timeoutMs: 50 still fires StepTimeoutError", async () => {
+    const { spawn } = makeHangingSpawn();
+    await assert.rejects(
+      runLlmStep(claudeEntry, "hang", { spawn, timeoutMs: 50 }),
+      (err: unknown) => {
+        assert.ok(err instanceof StepTimeoutError);
+        assert.equal(err.timeoutMs, 50);
+        return true;
+      }
+    );
+  });
+
+  it("claude step with no timeout fields: fast step resolves (no built-in deadline)", async () => {
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("done")] });
+    const result = await runLlmStep(claudeEntry, "hi", { spawn });
+    assert.equal(result, "done");
+  });
+
+  it("api step with _builtInTimeoutMs still fires StepTimeoutError (api keeps built-in)", async () => {
+    // fetchFn must honour the AbortSignal so the deadline can interrupt it
+    const fetchFn: typeof fetch = async (_url, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        const sig = init?.signal;
+        const abort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+        if (sig?.aborted) {
+          abort();
+          return;
+        }
+        sig?.addEventListener("abort", abort, { once: true });
+      });
+    await assert.rejects(
+      runLlmStep(apiEntry, "hang", { fetchFn, _builtInTimeoutMs: 50 }),
+      (err: unknown) => {
+        assert.ok(err instanceof StepTimeoutError, `expected StepTimeoutError, got ${String(err)}`);
+        return true;
+      }
+    );
+  });
+});
+
+// ── Watchdog: retry and failure (FR-005, FR-006) ──────────────────────────────
+
+describe("runLlmStep — watchdog retry (FR-005/FR-006)", () => {
+  const entry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+
+  it("T-4 loop: 4 identical tool_use blocks trip loop detector → WatchdogTrip → retry resolves", async () => {
+    // Build a fake attempt-1 stream with 4 identical Read tool_use blocks
+    // followed by a result event. The loop detector trips on the 4th pair,
+    // kills the child, and runClaudeCli rejects with WatchdogTrip.
+    // Then runLlmStep retries with attempt 2 which returns clean output.
+    const assistantWithLoopEvent = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", id: "t1", name: "Read", input: { path: "/same.ts" } },
+          { type: "tool_use", id: "t2", name: "Read", input: { path: "/same.ts" } },
+          { type: "tool_use", id: "t3", name: "Read", input: { path: "/same.ts" } },
+          { type: "tool_use", id: "t4", name: "Read", input: { path: "/same.ts" } },
+        ],
+      },
+    });
+
+    let callCount = 0;
+    let secondStdin = "";
+
+    const spawn = ((_cmd: string, _args: string[]) => {
+      callCount++;
+      const emitter = new EventEmitter();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const stdin = new PassThrough();
+      stdin.on("data", (d: Buffer) => (secondStdin += d.toString()));
+
+      const child = Object.assign(emitter, {
+        stdout,
+        stderr,
+        stdin,
+        kill(_sig?: string) {
+          setImmediate(() => {
+            if (!stdout.destroyed) stdout.push(null);
+            if (!stderr.destroyed) stderr.push(null);
+            emitter.emit("close", null);
+          });
+        },
+      });
+
+      if (callCount === 1) {
+        // Attempt 1: emit assistant event with 4 identical tool_use → loop trips
+        setImmediate(() => {
+          stdout.push(assistantWithLoopEvent + "\n");
+          // The loop detector fires synchronously in the data handler and kills the child.
+          // Close happens via kill above. Don't close stdout here; kill() handles it.
+        });
+      } else {
+        // Attempt 2: clean result
+        setImmediate(() => {
+          stdout.push(makeStreamJsonStdout("attempt 2 clean result"));
+          stdout.push(null);
+          stderr.push(null);
+          emitter.emit("close", 0);
+        });
+      }
+
+      return child;
+    }) as unknown as SpawnFn;
+
+    const result = await runLlmStep(entry, "do something", { spawn, _stallSilenceMs: 30_000 });
+    assert.equal(result, "attempt 2 clean result");
+    assert.equal(callCount, 2, "must have made exactly 2 spawn calls");
+  });
+
+  it("T-5: loop trip on both attempts → StepWatchdogError naming both pathologies", async () => {
+    // Both attempts emit 4 identical tool_use blocks → loop trips on both
+    const assistantWithLoopEvent = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: Array.from({ length: 4 }, (_, i) => ({
+          type: "tool_use",
+          id: `t${i}`,
+          name: "Read",
+          input: { path: "/stuck.ts" },
+        })),
+      },
+    });
+
+    let callCount = 0;
+    const spawn = ((_cmd: string, _args: string[]) => {
+      callCount++;
+      const emitter = new EventEmitter();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const stdin = new PassThrough();
+      const child = Object.assign(emitter, {
+        stdout,
+        stderr,
+        stdin,
+        kill() {
+          setImmediate(() => {
+            if (!stdout.destroyed) stdout.push(null);
+            if (!stderr.destroyed) stderr.push(null);
+            emitter.emit("close", null);
+          });
+        },
+      });
+      setImmediate(() => {
+        stdout.push(assistantWithLoopEvent + "\n");
+      });
+      return child;
+    }) as unknown as SpawnFn;
+
+    await assert.rejects(
+      runLlmStep(entry, "stuck", { spawn, _stallSilenceMs: 30_000 }),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof StepWatchdogError,
+          `expected StepWatchdogError, got ${String(err)}`
+        );
+        assert.ok(err.message.includes("2 attempts"), `message: ${err.message}`);
+        assert.ok(err.message.includes("loop"), `message: ${err.message}`);
+        assert.equal(callCount, 2, "must have made exactly 2 spawn calls");
+        return true;
+      }
+    );
+  });
+
+  it("T-7: BLOCKED report on attempt 2 → step fails (never returned as output)", async () => {
+    // Attempt 1: loop trips (same as above)
+    // Attempt 2: returns "BLOCKED: cannot read that file"
+    const assistantWithLoopEvent = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: Array.from({ length: 4 }, (_, i) => ({
+          type: "tool_use",
+          id: `t${i}`,
+          name: "Read",
+          input: { path: "/b.ts" },
+        })),
+      },
+    });
+
+    let callCount = 0;
+    const spawn = ((_cmd: string, _args: string[]) => {
+      callCount++;
+      const emitter = new EventEmitter();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const stdin = new PassThrough();
+      const child = Object.assign(emitter, {
+        stdout,
+        stderr,
+        stdin,
+        kill() {
+          setImmediate(() => {
+            if (!stdout.destroyed) stdout.push(null);
+            if (!stderr.destroyed) stderr.push(null);
+            emitter.emit("close", null);
+          });
+        },
+      });
+      if (callCount === 1) {
+        setImmediate(() => {
+          stdout.push(assistantWithLoopEvent + "\n");
+        });
+      } else {
+        setImmediate(() => {
+          stdout.push(makeStreamJsonStdout("BLOCKED: cannot read restricted file"));
+          stdout.push(null);
+          stderr.push(null);
+          emitter.emit("close", 0);
+        });
+      }
+      return child;
+    }) as unknown as SpawnFn;
+
+    await assert.rejects(
+      runLlmStep(entry, "blocked task", { spawn, _stallSilenceMs: 30_000 }),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof StepWatchdogError,
+          `expected StepWatchdogError, got ${String(err)}`
+        );
+        // The BLOCKED text must be in the error, not returned as step output
+        assert.ok(
+          err.message.includes("BLOCKED:") ||
+            err.trips?.some((t: unknown) =>
+              String((t as { detail?: string }).detail ?? "").includes("BLOCKED:")
+            ),
+          `expected BLOCKED in error: ${err.message}`
+        );
+        return true;
+      }
+    );
+  });
+
+  it("T-3: reformulated prompt on retry contains original prompt, 'attempt 2 of 2', and digest delimiters", async () => {
+    // Trip attempt 1 with loop, capture what was sent to attempt 2's stdin
+    const assistantWithLoopEvent = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: Array.from({ length: 4 }, (_, i) => ({
+          type: "tool_use",
+          id: `t${i}`,
+          name: "Glob",
+          input: { pattern: "*.ts" },
+        })),
+      },
+    });
+
+    let callCount = 0;
+    let capturedStdin = "";
+    const spawn = ((_cmd: string, _args: string[]) => {
+      callCount++;
+      const emitter = new EventEmitter();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const stdin = new PassThrough();
+      if (callCount === 2) {
+        stdin.on("data", (d: Buffer) => (capturedStdin += d.toString()));
+      }
+      const child = Object.assign(emitter, {
+        stdout,
+        stderr,
+        stdin,
+        kill() {
+          setImmediate(() => {
+            if (!stdout.destroyed) stdout.push(null);
+            if (!stderr.destroyed) stderr.push(null);
+            emitter.emit("close", null);
+          });
+        },
+      });
+      if (callCount === 1) {
+        setImmediate(() => {
+          stdout.push(assistantWithLoopEvent + "\n");
+        });
+      } else {
+        setImmediate(() => {
+          stdout.push(makeStreamJsonStdout("retry succeeded"));
+          stdout.push(null);
+          stderr.push(null);
+          emitter.emit("close", 0);
+        });
+      }
+      return child;
+    }) as unknown as SpawnFn;
+
+    const result = await runLlmStep(entry, "my original prompt", {
+      spawn,
+      _stallSilenceMs: 30_000,
+    });
+    assert.equal(result, "retry succeeded");
+
+    // Verify reformulated prompt structure
+    assert.ok(
+      capturedStdin.includes("my original prompt"),
+      "reformulated prompt must include original prompt verbatim"
+    );
+    assert.ok(
+      capturedStdin.includes("attempt 2 of 2"),
+      `reformulated prompt must include 'attempt 2 of 2', got: ${capturedStdin.slice(0, 200)}`
+    );
+    assert.ok(
+      capturedStdin.includes(WATCHDOG_DIGEST_OPEN),
+      "reformulated prompt must include digest open sentinel"
+    );
+    assert.ok(
+      capturedStdin.includes(WATCHDOG_DIGEST_CLOSE),
+      "reformulated prompt must include digest close sentinel"
+    );
+  });
+});
+
+// ── FR-007: budget wiring in runLlmStep ──────────────────────────────────────
+
+describe("runLlmStep — FR-007 budget wiring", () => {
+  const entry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+
+  it("maxBudgetUsd: 2 on deps yields --max-budget-usd 2 in argv", async () => {
+    const { spawn, capturedArgs } = makeFakeSpawn({
+      stdoutChunks: [makeStreamJsonStdout("ok")],
+    });
+    await runLlmStep(entry, "hi", { spawn, maxBudgetUsd: 2 });
+    const budgetIdx = capturedArgs[0].indexOf("--max-budget-usd");
+    assert.ok(budgetIdx !== -1, "--max-budget-usd must be in argv");
+    assert.equal(capturedArgs[0][budgetIdx + 1], "2");
+  });
+
+  it("absent maxBudgetUsd: --max-budget-usd flag absent", async () => {
+    const { spawn, capturedArgs } = makeFakeSpawn({
+      stdoutChunks: [makeStreamJsonStdout("ok")],
+    });
+    await runLlmStep(entry, "hi", { spawn });
+    assert.ok(!capturedArgs[0].includes("--max-budget-usd"), "flag must be absent");
+  });
+
+  it("api transport rejects if maxBudgetUsd is set (runtime error)", async () => {
+    const apiEntry: ModelEntry = {
+      id: "api-test",
+      transport: "api",
+      api: { endpoint: "http://localhost/v1/chat", model: "gpt" },
+    };
+    const fetchFn = async () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content: "ok" } }] }),
+        text: async () => "{}",
+      }) as Response;
+    await assert.rejects(
+      runLlmStep(apiEntry, "hi", { fetchFn, maxBudgetUsd: 1 }),
+      /maxBudgetUsd.*not supported.*api/i
+    );
+  });
+
+  it("StepBudgetExceededError propagates from runClaudeCli to runLlmStep caller", async () => {
+    const budgetLine = JSON.stringify({
+      type: "result",
+      subtype: "error_max_budget_usd",
+      is_error: true,
+      result: "Budget exceeded",
+      total_cost_usd: 3.0,
+      num_turns: 5,
+    });
+    const stdout = JSON.stringify({ type: "system", subtype: "init" }) + "\n" + budgetLine + "\n";
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [stdout] });
+    await assert.rejects(runLlmStep(entry, "hi", { spawn, maxBudgetUsd: 2 }), (err: unknown) => {
+      assert.ok(
+        err instanceof StepBudgetExceededError,
+        `expected StepBudgetExceededError, got ${String(err)}`
+      );
+      assert.equal(err.limitUsd, 2);
+      assert.equal(err.estimatedUsd, 3.0);
+      return true;
+    });
   });
 });
 
@@ -350,7 +769,7 @@ describe('runLlmStep — workspace: "read"', () => {
       transport: "cli",
       cli: { bin: "claude", model: "haiku" },
     };
-    const { child } = makeFakeChild({ stdoutChunks: ["analysis result"] });
+    const { child } = makeStreamJsonChild("analysis result");
     let capturedArgs: string[] = [];
     let capturedCwd: string | undefined;
     const spawn = ((_cmd: string, args: string[], opts: { cwd?: string }) => {
@@ -386,7 +805,7 @@ describe('runLlmStep — workspace: "read"', () => {
       transport: "cli",
       cli: { bin: "claude", model: "haiku" },
     };
-    const { child } = makeFakeChild({ stdoutChunks: ["wrote file"] });
+    const { child } = makeStreamJsonChild("wrote file");
     let capturedArgs: string[] = [];
     let capturedCwd: string | undefined;
     const spawn = ((_cmd: string, args: string[], opts: { cwd?: string }) => {
@@ -431,7 +850,7 @@ describe('runLlmStep — workspace: "read"', () => {
       transport: "cli",
       cli: { bin: "claude", model: "haiku" },
     };
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -461,7 +880,7 @@ describe('runLlmStep — workspace: "read"', () => {
       transport: "cli",
       cli: { bin: "claude", model: "haiku" },
     };
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -498,7 +917,7 @@ describe('runLlmStep — workspace: "read"', () => {
       transport: "cli",
       cli: { bin: "claude", model: "haiku" },
     };
-    const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
+    const { child } = makeStreamJsonChild("answer");
     let capturedArgs: string[] = [];
     let capturedCwd: string | undefined;
     const spawn = ((_cmd: string, args: string[], opts: { cwd?: string }) => {
@@ -611,7 +1030,7 @@ describe('runLlmStep — workspace: "read"', () => {
       transport: "cli",
       cli: { bin: "claude", model: "haiku" },
     };
-    const { spawn } = makeFakeSpawn({ stdoutChunks: ["irrelevant"] });
+    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("irrelevant")] });
 
     await assert.rejects(
       runLlmStep(entry, "hi", {
@@ -674,7 +1093,7 @@ describe("runLlmStep — skills", () => {
   it("step with no skills emits exactly today's arg list (no --plugin-dir, Skill absent)", async () => {
     // Regression guard: without skills declared, the argument list must be identical
     // to what the code produced before the skills feature was added.
-    const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
+    const { child } = makeStreamJsonChild("answer");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -697,7 +1116,7 @@ describe("runLlmStep — skills", () => {
   });
 
   it("step with skills adds Skill to --tools and --allowedTools and --plugin-dir, no Bash", async () => {
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -736,7 +1155,7 @@ describe("runLlmStep — skills", () => {
   });
 
   it("step with skills and permissions: read appends Skill to Read,Glob", async () => {
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -763,7 +1182,7 @@ describe("runLlmStep — skills", () => {
   });
 
   it("step with skills and permissions: write appends Skill to Read,Glob,Edit,Write", async () => {
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -794,7 +1213,7 @@ describe("runLlmStep — skills", () => {
   });
 
   it("skills dir resolved from AGENT_FLOWS_SKILLS_DIR env var when set", async () => {
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -829,7 +1248,7 @@ describe("runLlmStep — credential deny list", () => {
   it("read mode: --disallowedTools is present and covers Read and Edit for every deny pattern", async () => {
     // Edit rules cover all file-editing tools including Write; Write(pattern) is not
     // a valid file permission deny rule. Write must not appear in --disallowedTools.
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -864,7 +1283,7 @@ describe("runLlmStep — credential deny list", () => {
   });
 
   it("write mode: --disallowedTools is present and covers Read and Edit for every deny pattern", async () => {
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -902,7 +1321,7 @@ describe("runLlmStep — credential deny list", () => {
     // Glob is not in the deny list. Note: empirically, Read(pattern) in --disallowedTools
     // also suppresses Glob listing for that path — granular "deny Read but allow Glob"
     // is not achievable with the current CLI mechanism.
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -926,7 +1345,7 @@ describe("runLlmStep — credential deny list", () => {
     // etc. — editing these would let an injected prompt rewrite the test script
     // or pipeline and have it executed inside the same run (the build-round loop
     // is the concrete threat model). Read must stay allowed.
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -956,7 +1375,7 @@ describe("runLlmStep — credential deny list", () => {
   });
 
   it("read mode: --disallowedTools denies Edit for every build-config pattern (defence in depth)", async () => {
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -989,7 +1408,7 @@ describe("runLlmStep — credential deny list", () => {
     // FR-006: .agent-flows/** is in BUILD_CONFIG_DENY_PATTERNS. A write step
     // must not be able to edit config.json mid-run (closing the gate-rewrite attack).
     // Read must stay allowed: steps may legitimately inspect project config.
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -1034,7 +1453,7 @@ describe("runLlmStep — credential deny list", () => {
     );
 
     // Read must NOT be denied for either spelling.
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -1073,7 +1492,7 @@ describe("runLlmStep — credential deny list", () => {
     // fallback). Without credential Read denials it could read .env, *.pem, id_rsa
     // from the daemon's working directory. The deny list is now emitted unconditionally
     // for the Read tool, and deliberately excludes Edit denials (no workspace declared).
-    const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
+    const { child } = makeStreamJsonChild("answer");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -1243,7 +1662,7 @@ describe("runLlmStep — per-step allow/deny patterns", () => {
 
   // Captures the --disallowedTools value emitted for a read-mode step.
   async function captureDisallowed(extraDeps: Partial<StepRunnerDeps>): Promise<string> {
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let disallowed = "";
     const spawn = ((_cmd: string, args: string[]) => {
       const idx = args.indexOf("--disallowedTools");
@@ -1334,7 +1753,7 @@ describe("runLlmStep — per-step allow/deny patterns", () => {
   });
 
   it("allow cannot widen contentsAccess: read step with allowPatterns still gets only Read,Glob tools", async () => {
-    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
@@ -1420,7 +1839,7 @@ describe("runLlmStep — credential Read denials emitted for no-permissions step
       transport: "cli",
       cli: { bin: "claude", model: "haiku" },
     };
-    const { child } = makeFakeChild({ stdoutChunks: ["answer"] });
+    const { child } = makeStreamJsonChild("answer");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
       capturedArgs = args;
