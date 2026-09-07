@@ -324,6 +324,61 @@
       #flash.show {
         opacity: 1;
       }
+      /* Run observability */
+      .run-status {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 7px;
+        border-radius: 10px;
+        background: var(--sunk);
+        color: var(--muted);
+      }
+      .run-status.running {
+        background: color-mix(in srgb, var(--accent) 15%, transparent);
+        color: var(--accent);
+      }
+      .run-status.suspended {
+        background: color-mix(in srgb, #9a7318 15%, transparent);
+        color: #9a7318;
+      }
+      @media (prefers-color-scheme: dark) {
+        .run-status.suspended {
+          color: #d9a441;
+        }
+      }
+      .run-status.success {
+        background: color-mix(in srgb, var(--ok) 15%, transparent);
+        color: var(--ok);
+      }
+      .run-status.failed {
+        background: color-mix(in srgb, var(--err) 15%, transparent);
+        color: var(--err);
+      }
+      .step-output {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 4px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .gate-box {
+        background: color-mix(in srgb, #9a7318 8%, transparent);
+        border: 1px solid #9a7318;
+        border-radius: 6px;
+        padding: 10px 14px;
+        margin: 10px 0;
+        font-size: 13px;
+      }
+      .gate-box p {
+        margin-bottom: 8px;
+        color: var(--ink);
+      }
+      .gate-actions {
+        display: flex;
+        gap: 8px;
+      }
     </style>
   </head>
   <body>
@@ -366,6 +421,15 @@
           <span class="tier-badge tier-bundled">bundled</span>
         </div>
         <div id="bundled-table-wrap">Loading…</div>
+      </div>
+
+      <!-- Active Runs -->
+      <div class="section">
+        <div class="section-header">
+          <h2>Active Runs</h2>
+          <button class="btn" id="btn-refresh-runs" style="margin-left: auto">Refresh</button>
+        </div>
+        <div id="runs-table-wrap">Loading…</div>
       </div>
     </main>
 
@@ -736,11 +800,245 @@
         }
       };
 
+      // ── Run observability ──────────────────────────────────────────────────
+
+      /** Active SSE connection for the currently-watched run, if any. */
+      let activeRunEs = null;
+
+      /** Format a UTC ISO string as a short local time string. */
+      function fmtTime(iso) {
+        try {
+          return new Date(iso).toLocaleString();
+        } catch {
+          return iso;
+        }
+      }
+
+      /** Return a CSS class name for a run/step status string. */
+      function statusClass(s) {
+        if (s === "running" || s === "started") return "running";
+        if (s === "suspended") return "suspended";
+        if (s === "success" || s === "completed") return "success";
+        if (s === "failed" || s === "cancelled" || s === "terminated") return "failed";
+        return "";
+      }
+
+      async function loadRuns() {
+        const wrap = document.getElementById("runs-table-wrap");
+        try {
+          const data = await api("GET", "/api/runs");
+          const runs = data.runs || [];
+          if (!runs.length) {
+            wrap.innerHTML = `<p class="empty">No runs recorded yet.</p>`;
+            return;
+          }
+          let html = `<table><thead><tr>
+            <th>Run ID</th><th>Pipeline</th><th>Status</th><th>Started</th><th>Actions</th>
+          </tr></thead><tbody>`;
+          for (const r of runs) {
+            const sc = statusClass(r.status);
+            html += `<tr>
+              <td class="pipeline-id">${escH(r.runId)}</td>
+              <td class="pipeline-desc">${escH(r.pipelineId)}</td>
+              <td><span class="run-status ${escH(sc)}">${escH(r.status)}</span></td>
+              <td style="font-size:12px;color:var(--muted)">${escH(fmtTime(r.createdAt))}</td>
+              <td class="actions">
+                <button class="btn" data-attach-run="${escH(r.runId)}">Attach</button>
+              </td>
+            </tr>`;
+          }
+          html += "</tbody></table>";
+          wrap.innerHTML = html;
+
+          wrap.querySelectorAll("[data-attach-run]").forEach((btn) => {
+            btn.onclick = () => attachToRun(btn.dataset.attachRun);
+          });
+        } catch (e) {
+          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      document.getElementById("btn-refresh-runs").onclick = () => loadRuns();
+
+      /**
+       * Open the detail panel for a run and follow it live via SSE.
+       * Closes any previously-open SSE connection first.
+       */
+      async function attachToRun(runId) {
+        // Close any existing SSE connection for a previously watched run.
+        if (activeRunEs) {
+          activeRunEs.close();
+          activeRunEs = null;
+        }
+
+        const panel = document.getElementById("detail-panel");
+        const titleEl = document.getElementById("detail-title");
+        const body = document.getElementById("detail-body");
+
+        // Show the panel with a loading state.
+        titleEl.textContent = runId; // plain text assignment — safe
+        body.innerHTML = `<p style="color:var(--muted);font-size:13px">Connecting…</p>`;
+        panel.classList.add("open");
+
+        // Fetch the current snapshot synchronously so we have a starting state.
+        let snapshot;
+        try {
+          snapshot = await api("GET", `/api/runs/${encodeURIComponent(runId)}`);
+        } catch (e) {
+          body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+          return;
+        }
+
+        // Render the snapshot and wire the gate actions if suspended.
+        renderRunDetail(runId, snapshot, body);
+
+        // Subscribe to live SSE events for subsequent updates.
+        const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
+        activeRunEs = es;
+
+        es.addEventListener("snapshot", (ev) => {
+          let data;
+          try {
+            data = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          renderRunDetail(runId, data, body);
+        });
+
+        es.addEventListener("step", (ev) => {
+          let data;
+          try {
+            data = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          updateStepRow(data);
+        });
+
+        es.onerror = () => {
+          // Silently stop — the panel still shows last-known state.
+          es.close();
+          if (activeRunEs === es) activeRunEs = null;
+        };
+      }
+
+      /**
+       * Render (or re-render) the run detail panel body from a snapshot object.
+       * All server data is escaped or written via textContent.
+       */
+      function renderRunDetail(runId, snapshot, body) {
+        const status = snapshot.status || "unknown";
+        const sc = statusClass(status);
+        let html = `<div style="margin-bottom:10px">
+          <span class="run-status ${escH(sc)}">${escH(status)}</span>
+        </div>`;
+
+        // Gate controls — shown only when the run is suspended.
+        if (status === "suspended" && snapshot.gateMessage) {
+          html += `<div class="gate-box">
+            <p>${escH(snapshot.gateMessage)}</p>
+            <div class="gate-actions">
+              <button class="btn primary" id="btn-approve-run">Approve</button>
+              <button class="btn danger" id="btn-reject-run">Reject (terminates run)</button>
+            </div>
+          </div>`;
+        }
+
+        // Steps table.
+        const steps = snapshot.steps || {};
+        const stepIds = Object.keys(steps);
+        if (stepIds.length) {
+          html += `<div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px">STEPS</div>`;
+          for (const sid of stepIds) {
+            const st = steps[sid];
+            const stClass = statusClass(st.status || "");
+            html += `<div class="step-row" data-step-id="${escH(sid)}">
+              <span class="step-id">${escH(sid)}</span>
+              <span class="run-status ${escH(stClass)}" style="margin-left:6px">${escH(st.status || "pending")}</span>`;
+            if (st.outputExcerpt) {
+              // step output is untrusted model-produced text — use escH
+              html += `<div class="step-output">${escH(st.outputExcerpt)}</div>`;
+            }
+            html += `</div>`;
+          }
+        } else {
+          html += `<p style="color:var(--muted);font-size:13px;margin-top:8px">No steps recorded yet.</p>`;
+        }
+
+        body.innerHTML = html;
+
+        // Wire approve/reject after setting innerHTML.
+        const approveBtn = body.querySelector("#btn-approve-run");
+        const rejectBtn = body.querySelector("#btn-reject-run");
+        if (approveBtn) {
+          approveBtn.onclick = async () => {
+            try {
+              await api("POST", `/api/runs/${encodeURIComponent(runId)}/approve`, {
+                approved: true,
+              });
+              flash("Run approved");
+              loadRuns();
+            } catch (e) {
+              flash(e.message, true);
+            }
+          };
+        }
+        if (rejectBtn) {
+          rejectBtn.onclick = async () => {
+            if (!confirm("Reject this run? The run will be terminated.")) return;
+            try {
+              await api("POST", `/api/runs/${encodeURIComponent(runId)}/approve`, {
+                approved: false,
+              });
+              flash("Run rejected — run terminated");
+              loadRuns();
+            } catch (e) {
+              flash(e.message, true);
+            }
+          };
+        }
+      }
+
+      /**
+       * Update a single step row in-place when a live SSE step event arrives.
+       * Falls back to a full re-render if the step is new (not yet in the DOM).
+       */
+      function updateStepRow(data) {
+        const { stepId, status, outputExcerpt } = data;
+        if (!stepId) return;
+
+        const row = document.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
+        if (!row) {
+          // Step not yet in panel — trigger a full re-fetch to pick it up.
+          return;
+        }
+
+        // Update status badge.
+        const badge = row.querySelector(".run-status");
+        if (badge) {
+          const sc = statusClass(status || "");
+          badge.className = `run-status ${sc}`;
+          badge.textContent = status || ""; // .textContent — safe
+        }
+
+        // Update or add output excerpt.
+        if (outputExcerpt !== undefined) {
+          let outEl = row.querySelector(".step-output");
+          if (!outEl) {
+            outEl = document.createElement("div");
+            outEl.className = "step-output";
+            row.appendChild(outEl);
+          }
+          outEl.textContent = outputExcerpt; // .textContent — safe, untrusted model output
+        }
+      }
+
       // ── Boot ───────────────────────────────────────────────────────────────
 
       (async () => {
         await loadN8nStatus();
-        await Promise.all([loadProjectTier(), loadTemplateTier(), loadBundledTier()]);
+        await Promise.all([loadProjectTier(), loadTemplateTier(), loadBundledTier(), loadRuns()]);
       })();
     </script>
   </body>

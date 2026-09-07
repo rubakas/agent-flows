@@ -1857,3 +1857,65 @@ describe("POST /api/pipelines/:id/n8n redirect mapping (FR-006, test plan §9)",
     assert.equal(res.status, 404);
   });
 });
+
+// ── FR-003/FR-004/FR-006: run observability wired in served UI ────────────────
+// This test fails if the Active Runs UI is removed from ui.html, preventing a
+// repeat of the spec-022 regression where the rewrite silently dropped the
+// run-observability feature added in spec-020.
+
+describe("GET / — run observability wired in served HTML (FR-003/FR-004/FR-006)", () => {
+  let srv: ServeHandle;
+
+  before(async () => {
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => srv.close());
+
+  it("served HTML references /api/runs for the run list (loadRuns)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.ok(
+      html.includes("/api/runs"),
+      'served HTML must contain "/api/runs" — run list fetch wiring is missing'
+    );
+    assert.ok(
+      html.includes("loadRuns"),
+      'served HTML must contain "loadRuns" — run list function is missing'
+    );
+    assert.ok(
+      html.includes("Active Runs"),
+      'served HTML must contain "Active Runs" — run observability section heading is missing'
+    );
+  });
+
+  it("served HTML references /events SSE endpoint for live run attachment (FR-004)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/`);
+    const html = await res.text();
+    assert.ok(
+      html.includes("/events"),
+      'served HTML must reference the SSE "/events" path — live run attachment is missing'
+    );
+    assert.ok(
+      html.includes("attachToRun"),
+      'served HTML must contain "attachToRun" — live attachment function is missing'
+    );
+  });
+
+  it("served HTML wires approve/reject for suspended runs (FR-006)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/`);
+    const html = await res.text();
+    assert.ok(
+      html.includes("/approve"),
+      'served HTML must reference "/approve" endpoint — gate approval wiring is missing'
+    );
+    assert.ok(
+      html.includes("gateMessage"),
+      'served HTML must reference "gateMessage" — suspended gate display is missing'
+    );
+  });
+});
