@@ -606,8 +606,15 @@ describe("RunService.subscribe — step events and gate suspension", () => {
       "gate suspension must never be reported as step-failed"
     );
 
+    // start() attaches one record-level watch; subscribe() adds a second.
+    // After unsubscribe(), only the record-level watch remains (FR-006).
+    const countBeforeUnsub = run.watchers.length;
     unsubscribe();
-    assert.equal(run.watchers.length, 0, "unsubscribe must remove the listener");
+    assert.equal(
+      run.watchers.length,
+      countBeforeUnsub - 1,
+      "unsubscribe must remove exactly the subscriber's listener"
+    );
   });
 
   it("genuine step failure is delivered as step-failed, not step-suspended", async () => {
@@ -651,5 +658,203 @@ describe("RunService.subscribe — step events and gate suspension", () => {
     assert.equal(events[1].stepId, "intake");
 
     unsubscribe();
+  });
+});
+
+// ── Tests: FR-001 — list() and createdAt ─────────────────────────────────────
+
+describe("RunService.list — FR-001: returns summaries in creation order with createdAt", () => {
+  it("empty registry returns []", () => {
+    const run = makeMockRun("r", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    assert.deepEqual(service.list(), []);
+  });
+
+  it("returns two runs in creation order with exactly {runId, pipelineId, status, createdAt}", async () => {
+    const runA = makeMockRun("run-a", successResult(), successResult());
+    const runB = makeMockRun("run-b", successResult(), successResult());
+    let callCount = 0;
+    const mastra: MastraLike = {
+      getWorkflow: (_id) => ({
+        createRun: async () => {
+          callCount++;
+          return (callCount === 1 ? runA : runB) as unknown as Awaited<
+            ReturnType<ReturnType<MastraLike["getWorkflow"]>["createRun"]>
+          >;
+        },
+      }),
+    };
+
+    const service = new RunService(mastra);
+    const r1 = await service.start("pipeline-a", {});
+    const r2 = await service.start("pipeline-b", {});
+
+    const list = service.list();
+    assert.equal(list.length, 2, "list must have 2 runs");
+    assert.equal(list[0].runId, r1.runId, "first entry must be first run");
+    assert.equal(list[1].runId, r2.runId, "second entry must be second run");
+    assert.equal(list[0].pipelineId, "pipeline-a");
+    assert.equal(list[1].pipelineId, "pipeline-b");
+    assert.ok(typeof list[0].createdAt === "string", "createdAt must be a string (ISO)");
+    assert.ok(!isNaN(Date.parse(list[0].createdAt)), "createdAt must be a valid ISO date");
+
+    // No extra fields — list must not expose result, spec, gateMessage, or steps.
+    const keys0 = Object.keys(list[0]);
+    assert.ok(keys0.includes("runId"), "must have runId");
+    assert.ok(keys0.includes("pipelineId"), "must have pipelineId");
+    assert.ok(keys0.includes("status"), "must have status");
+    assert.ok(keys0.includes("createdAt"), "must have createdAt");
+    assert.ok(!keys0.includes("result"), "must NOT have result");
+    assert.ok(!keys0.includes("spec"), "must NOT have spec");
+    assert.ok(!keys0.includes("gateMessage"), "must NOT have gateMessage");
+    assert.ok(!keys0.includes("steps"), "must NOT have steps");
+  });
+
+  it("status in list reflects current state after settlement", async () => {
+    const run = makeMockRun("run-settled", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    const list = service.list();
+    assert.equal(list[0].status, "success", "list status must reflect post-settlement state");
+  });
+});
+
+// ── Tests: FR-006 — per-step output accumulation ─────────────────────────────
+
+describe("RunService FR-006 — per-step output accumulated on record; GetResult.steps present", () => {
+  it("GetResult.steps is empty before any events", async () => {
+    let resolveStart!: (r: Record<string, unknown>) => void;
+    const pendingRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-steps-empty",
+      watchers: [],
+      start: () =>
+        new Promise<Record<string, unknown>>((r) => {
+          resolveStart = r;
+        }),
+      resume: async () => successResult(),
+      watch: (cb) => {
+        pendingRun.watchers.push(cb);
+        return () => {
+          const i = pendingRun.watchers.indexOf(cb);
+          if (i !== -1) pendingRun.watchers.splice(i, 1);
+        };
+      },
+    };
+    const service = new RunService(makeMastra(pendingRun as unknown as MockRun));
+    const { runId } = await service.start("p", {});
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.deepEqual(got.steps, {}, "steps must be empty object before any events");
+    resolveStart(successResult());
+  });
+
+  it("step-start accumulates status=started; step-result accumulates status=succeeded with excerpt", async () => {
+    const run = makeMockRun("run-steps-acc", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+
+    run.emit({ type: "workflow-step-start", payload: { id: "s1" } });
+
+    let got = service.get(runId)!;
+    assert.equal(got.steps.s1?.status, "started", "status must be 'started' after step-start");
+
+    run.emit({
+      type: "workflow-step-result",
+      payload: { id: "s1", stepCallId: "c", status: "success", output: { answer: "hello" } },
+    });
+
+    got = service.get(runId)!;
+    assert.equal(got.steps.s1?.status, "succeeded");
+    assert.ok(
+      typeof got.steps.s1?.outputExcerpt === "string",
+      "outputExcerpt must be present after step-result with output"
+    );
+    // Non-null because we just asserted it is a string above.
+    const s1excerpt = got.steps.s1?.outputExcerpt;
+    assert.ok(
+      typeof s1excerpt === "string" && s1excerpt.includes("hello"),
+      "excerpt must contain output text"
+    );
+  });
+
+  it("outputExcerpt is truncated at 2048 chars and outputTruncated is true", async () => {
+    const run = makeMockRun("run-truncate", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+
+    // Emit a large output — serialized > 2048 chars.
+    const bigOutput = { text: "x".repeat(3000) };
+    run.emit({
+      type: "workflow-step-result",
+      payload: { id: "big", stepCallId: "c", status: "success", output: bigOutput },
+    });
+
+    const got = service.get(runId)!;
+    assert.equal(
+      got.steps.big?.outputExcerpt?.length,
+      2048,
+      "outputExcerpt must be exactly 2048 chars when truncated"
+    );
+    assert.equal(got.steps.big?.outputTruncated, true, "outputTruncated must be true");
+  });
+
+  it("step output that fits within 2048 chars has outputTruncated absent or false", async () => {
+    const run = makeMockRun("run-small", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+
+    run.emit({
+      type: "workflow-step-result",
+      payload: { id: "s", stepCallId: "c", status: "success", output: { ok: true } },
+    });
+
+    const got = service.get(runId)!;
+    assert.ok(!got.steps.s?.outputTruncated, "outputTruncated must be absent or false");
+    assert.ok(typeof got.steps.s?.outputExcerpt === "string", "outputExcerpt must be present");
+  });
+
+  it("subscribe step-finish event carries outputExcerpt from the accumulator", async () => {
+    const run = makeMockRun("run-sub-out", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+    const events: StepEvent[] = [];
+    service.subscribe(runId, (e) => events.push(e));
+
+    run.emit({
+      type: "workflow-step-result",
+      payload: { id: "q", stepCallId: "c", status: "success", output: { data: "world" } },
+    });
+
+    const finish = events.find((e) => e.kind === "step-finish" && e.stepId === "q");
+    assert.ok(finish !== undefined, "step-finish event must be emitted");
+    assert.ok(
+      typeof finish.outputExcerpt === "string" && finish.outputExcerpt.includes("world"),
+      "step-finish must carry outputExcerpt from the accumulator"
+    );
+  });
+
+  it("step without output has no outputExcerpt in GetResult.steps", async () => {
+    const run = makeMockRun("run-no-out", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+
+    run.emit({
+      type: "workflow-step-result",
+      payload: { id: "empty-step", stepCallId: "c", status: "success" },
+    });
+
+    const got = service.get(runId)!;
+    assert.equal(
+      got.steps["empty-step"]?.outputExcerpt,
+      undefined,
+      "no excerpt when output absent"
+    );
   });
 });

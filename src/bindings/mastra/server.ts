@@ -2,48 +2,40 @@
 // MUST be the very first line: disable Mastra telemetry before any @mastra import.
 process.env.MASTRA_TELEMETRY_DISABLED = "1";
 
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Mastra } from "@mastra/core/mastra";
 import { createTool } from "@mastra/core/tools";
-import { LibSQLStore } from "@mastra/libsql";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
-import { defaultRegistry } from "../../canon/registry.js";
-import { makeDb } from "../../db/index.js";
-import { RunService } from "../../runtime/runService.js";
-import { DrizzleTicketStore } from "../../store/sqlite.js";
-import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
-import { mastraDbPath } from "./paths.js";
 import { loadCatalog, resolveCanonDir } from "./pipelineLoader.js";
 import { resolveProjectDir } from "./projectDir.js";
-import type { PipelineCatalog } from "./pipelineLoader.js";
-import type { MastraLike } from "../../runtime/runService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const repoRoot = join(__dirname, "..", "..", "..");
 
-// ── Parse --db flag ──────────────────────────────────────────────────────────
+// ── Daemon URL (FR-005) ───────────────────────────────────────────────────────
+// The MCP tools proxy to the HTTP daemon so all three surfaces (MCP stdio, HTTP,
+// and the web editor) share the same RunService registry. Default port matches
+// server.ts. Override with AGENT_FLOWS_PORT.
 
-const dbFlagIdx = process.argv.indexOf("--db");
-const ticketDbPath =
-  dbFlagIdx !== -1 && process.argv[dbFlagIdx + 1]
-    ? process.argv[dbFlagIdx + 1]
-    : join(repoRoot, "agent-flows.sqlite");
+const DAEMON_PORT = process.env.AGENT_FLOWS_PORT ?? "7411";
+const DAEMON_BASE = `http://127.0.0.1:${DAEMON_PORT}`;
 
-const mastraDb = mastraDbPath(ticketDbPath);
-
-// ── Storage ──────────────────────────────────────────────────────────────────
-
-const mastraStorage = new LibSQLStore({
-  id: "agent-flows-mastra",
-  url: `file:${mastraDb}`,
-});
-
-const db = makeDb(ticketDbPath);
-const store = new DrizzleTicketStore(db);
-const registry = defaultRegistry();
+async function daemonFetch(path: string, init?: RequestInit): Promise<Response> {
+  const url = `${DAEMON_BASE}${path}`;
+  let res: Response;
+  try {
+    res = await fetch(url, init);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `agent-flows MCP: cannot reach daemon at ${DAEMON_BASE} — start it with ` +
+        `"agent-flows serve" before using run tools. (${msg})`,
+      { cause: err }
+    );
+  }
+  return res;
+}
 
 // ── Project directory (step execution cwd) ────────────────────────────────────
 
@@ -56,32 +48,6 @@ console.error(`agent-flows MCP server: running steps in ${projectDir}`);
 const { pipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
 console.error(`agent-flows MCP server: pipelines from ${pipelinesSource} (${pipelinesDir})`);
 
-function buildFreshMastra(catalog: PipelineCatalog): Mastra {
-  const workflows: Record<string, unknown> = {};
-  for (const loaded of catalog.loaded) {
-    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store, cwd: projectDir });
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return new Mastra({ storage: mastraStorage, workflows: workflows as Record<string, any> });
-}
-
-// Mutable reference to the current Mastra instance; rebuilt on each tool call
-// so newly added or edited pipelines are visible without restarting the server.
-let activeMastra = buildFreshMastra(loadCatalog(pipelinesDir));
-
-// Proxy so RunService always delegates to the latest activeMastra.
-// Suspended runs keep their original run objects tied to the Mastra that
-// created them; only new starts use the refreshed instance.
-const mastraProxy = {
-  getWorkflow: (id: string) => activeMastra.getWorkflow(id),
-} as unknown as MastraLike;
-
-// ── Run ownership ──────────────────────────────────────────────────────────────
-// RunService owns run state so that MCP, HTTP and the web editor all share
-// the same runs. The public run id is Mastra's own run id (FR-011).
-
-const runService = new RunService(mastraProxy);
-
 // ── MCP custom tools ──────────────────────────────────────────────────────────
 
 const listPipelinesTool = createTool({
@@ -89,8 +55,8 @@ const listPipelinesTool = createTool({
   description: "List all loaded pipelines with their IDs and descriptions.",
   inputSchema: z.object({}),
   execute: async () => {
+    // Still reads from disk so newly added pipelines are visible without restart.
     const catalog = loadCatalog(pipelinesDir);
-    activeMastra = buildFreshMastra(catalog);
     return {
       pipelines: catalog.loaded.map((p) => ({
         id: p.def.id,
@@ -115,34 +81,48 @@ const runPipelineTool = createTool({
       .describe("Optional per-step model overrides (step id → registry model id)"),
   }),
   execute: async (inputData) => {
-    // Reload pipelines from disk before starting the run so newly added
-    // or edited pipelines are visible without restarting the server.
-    activeMastra = buildFreshMastra(loadCatalog(pipelinesDir));
-
     const { pipeline, inputs, models } = inputData;
-    if (models) {
-      const err = validateModelOverrides(models, registry);
-      if (err) return { error: err };
+    const body = { pipeline, inputs, ...(models ? { models } : {}) };
+
+    // POST to the daemon — fails loudly if the daemon is not running.
+    const startRes = await daemonFetch("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!startRes.ok) {
+      const e = (await startRes.json().catch(() => ({}))) as { error?: string };
+      return { error: e.error ?? `daemon POST /api/runs returned HTTP ${startRes.status}` };
     }
-    const wfInput = { ...inputs, ...(models ? { models } : {}) };
-    // start() is non-blocking — fires the run in the background and returns a runId.
-    // waitForSettled() blocks here so the MCP tool remains blocking from the chat
-    // client's perspective, preserving the existing contract.
-    const { runId } = await runService.start(pipeline, wfInput);
-    const settled = await runService.waitForSettled(runId);
-    if (!settled) return { error: `Run ${runId} lost before settling` };
-    if (settled.status === "awaiting_approval") {
-      return {
-        runId,
-        status: "awaiting_approval",
-        gateMessage: settled.gateMessage,
-        spec: settled.spec,
+    const { runId } = (await startRes.json()) as { runId: string };
+
+    // Poll until the run leaves "running" — preserves the blocking contract (FR-005).
+    for (;;) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+      const getRes = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}`);
+      if (!getRes.ok) {
+        return { error: `daemon GET /api/runs/${runId} returned HTTP ${getRes.status}` };
+      }
+      const state = (await getRes.json()) as {
+        status: string;
+        gateMessage?: string;
+        spec?: unknown;
+        result?: unknown;
       };
+      if (state.status === "running") continue;
+      if (state.status === "awaiting_approval" || state.status === "suspended") {
+        return {
+          runId,
+          status: "awaiting_approval",
+          gateMessage: state.gateMessage,
+          spec: state.spec,
+        };
+      }
+      if (state.status === "success") {
+        return { runId, status: "success", result: state.result };
+      }
+      return { runId, status: "failed" };
     }
-    if (settled.status === "success") {
-      return { runId, status: "success", result: settled.result };
-    }
-    return { runId, status: "failed" };
   },
 });
 
@@ -156,12 +136,23 @@ const approveTool = createTool({
   }),
   execute: async (inputData) => {
     const { runId, approved } = inputData;
-    const result = await runService.approve(runId, approved);
-    if (result.error) return { error: result.error };
-    if (result.status === "success") {
-      return { runId: result.runId, status: "success", result: result.result };
+    const res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}/approve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approved }),
+    });
+    const data = (await res.json()) as {
+      error?: string;
+      status?: string;
+      result?: unknown;
+    };
+    if (!res.ok || data.error) {
+      return { error: data.error ?? `HTTP ${res.status}` };
     }
-    return { runId: result.runId, status: "failed" };
+    if (data.status === "success") {
+      return { runId, status: "success", result: data.result };
+    }
+    return { runId, status: "failed" };
   },
 });
 
@@ -173,8 +164,21 @@ const getRunTool = createTool({
     runId: z.string().describe("Run ID returned by run_pipeline"),
   }),
   execute: async (inputData) => {
-    const got = runService.get(inputData.runId);
-    if (!got) return { error: `No run found for runId "${inputData.runId}"` };
+    const res = await daemonFetch(`/api/runs/${encodeURIComponent(inputData.runId)}`);
+    if (res.status === 404) {
+      return { error: `No run found for runId "${inputData.runId}"` };
+    }
+    if (!res.ok) {
+      return { error: `daemon GET /api/runs/${inputData.runId} returned HTTP ${res.status}` };
+    }
+    const got = (await res.json()) as {
+      runId: string;
+      pipelineId: string;
+      status: string;
+      result?: unknown;
+      gateMessage?: string;
+      spec?: unknown;
+    };
     return {
       runId: got.runId,
       pipelineId: got.pipelineId,

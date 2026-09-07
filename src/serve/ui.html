@@ -186,7 +186,7 @@
       }
       .list-body {
         padding: 1.5rem;
-        max-width: 36rem;
+        max-width: 56rem;
       }
       .list-body h2 {
         font-family: var(--mono);
@@ -227,6 +227,60 @@
         font-family: var(--mono);
         font-size: 0.65rem;
         color: var(--muted);
+      }
+
+      /* ── run list cards (FR-003) ── */
+      .run-card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        padding: 0.55rem 1rem;
+        margin-bottom: 0.4rem;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .run-card:hover {
+        border-color: var(--accent);
+      }
+      .run-card:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .run-card .rc-id {
+        font-family: var(--mono);
+        font-size: 0.75rem;
+        color: var(--muted);
+        flex: 0 0 auto;
+      }
+      .run-card .rc-pid {
+        font-family: var(--mono);
+        font-size: 0.85rem;
+        font-weight: 500;
+        flex: 1 1 auto;
+      }
+      .run-card .rc-badge {
+        font-size: 0.7rem;
+        padding: 0.15rem 0.5rem;
+        border-radius: 10px;
+        flex: 0 0 auto;
+      }
+      .rc-badge.running {
+        background: var(--accent-bg);
+        color: var(--accent);
+      }
+      .rc-badge.suspended {
+        background: #2a2205;
+        color: #f5c518;
+      }
+      .rc-badge.success {
+        background: #0a2a0a;
+        color: var(--ok);
+      }
+      .rc-badge.failed {
+        background: #2a0a0a;
+        color: var(--err);
       }
 
       /* ── editor view ── */
@@ -307,6 +361,8 @@
         border-radius: 3px;
         padding: 0.5rem 0.6rem;
         min-width: 9.5rem;
+        flex: 1 1 12rem;
+        max-width: 24rem;
         cursor: pointer;
         display: flex;
         flex-direction: column;
@@ -352,6 +408,17 @@
       }
       .k-persist-ticket {
         --kind: var(--persist);
+      }
+
+      /* step output excerpt shown below meta (FR-006/FR-007) */
+      .node .nout {
+        font-family: var(--mono);
+        font-size: 0.6rem;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
       }
 
       /* run status indicators on nodes */
@@ -735,6 +802,17 @@
       <div class="list-body">
         <h2>Pipelines</h2>
         <div id="list-items">Loading…</div>
+        <div id="runs-section" style="margin-top: 1.5rem">
+          <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem">
+            <h2 style="margin: 0">Active runs</h2>
+            <button class="btn btn-icon" id="refresh-runs-btn" title="Refresh run list">
+              ↺ Refresh
+            </button>
+          </div>
+          <div id="run-list-items">
+            <span style="color: var(--muted); font-size: 0.8rem">Loading…</span>
+          </div>
+        </div>
         <div id="env-panel"></div>
       </div>
     </section>
@@ -872,7 +950,9 @@
         runId: null,
         runStatus: null, // 'running' | 'suspended' | 'success' | 'failed'
         stepStatuses: {}, // stepId → status string
+        stepOutputs: {}, // stepId → { excerpt, truncated } (FR-006)
         suspendedStepId: null,
+        gateMessage: null, // gate message from snapshot (FR-004)
         sseSource: null,
         // manage
         deleteTarget: null, // id of pipeline awaiting delete confirmation
@@ -986,6 +1066,64 @@
         }
       }
 
+      // ── Run list (FR-003) ─────────────────────────────────────────────────────────
+
+      async function loadRuns() {
+        const list = el("run-list-items");
+        try {
+          const res = await fetch("/api/runs");
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const runs = data.runs;
+          if (!runs || runs.length === 0) {
+            list.innerHTML = `<span style="color:var(--muted);font-size:0.8rem">No active runs.</span>`;
+            return;
+          }
+          list.innerHTML = runs
+            .map(
+              (r) =>
+                `<div class="run-card" role="button" tabindex="0"
+                  data-run-id="${escH(r.runId)}" data-pipeline-id="${escH(r.pipelineId)}">
+                  <span class="rc-id">${escH(r.runId.slice(0, 8))}…</span>
+                  <span class="rc-pid">${escH(r.pipelineId)}</span>
+                  <span class="rc-badge ${escH(r.status)}">${escH(r.status)}</span>
+                </div>`
+            )
+            .join("");
+          list.querySelectorAll(".run-card").forEach((card) => {
+            const runId = card.dataset.runId;
+            const pipelineId = card.dataset.pipelineId;
+            card.addEventListener("click", () => attachToRun(runId, pipelineId));
+            card.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                attachToRun(runId, pipelineId);
+              }
+            });
+          });
+        } catch (err) {
+          list.innerHTML = `<div class="error-box">Could not load runs: ${escH(err.message)}</div>`;
+        }
+      }
+
+      /**
+       * Attach the UI to an existing run (FR-003/FR-004).
+       * Opens the pipeline editor if it is not already open, then connects to the SSE stream.
+       * The snapshot event will correct S.runStatus and hydrate step states immediately.
+       */
+      async function attachToRun(runId, pipelineId) {
+        if (!S.pipeline || S.pipeline.def.id !== pipelineId) {
+          await openPipeline(pipelineId);
+          // openPipeline() calls resetRun() internally
+        } else {
+          resetRun();
+        }
+        S.runId = runId;
+        S.runStatus = "running"; // snapshot will correct this
+        renderRunPanel();
+        openSse(runId);
+      }
+
       // ══════════════════════════════════════════════════════════════════════════════
       // Screen 2: Editor
       // ══════════════════════════════════════════════════════════════════════════════
@@ -1064,11 +1202,15 @@
       function nodeHtml(s) {
         const status = S.stepStatuses[s.id] || "";
         const meta = [s.role, s.schema ? "schema:" + s.schema : null].filter(Boolean).join(" · ");
+        // Step output excerpt — untrusted model output, always escaped (FR-006/FR-007).
+        const out = S.stepOutputs[s.id];
+        const outHtml = out?.excerpt ? `<span class="nout">${escH(out.excerpt)}</span>` : "";
         return `<div class="node k-${escH(s.kind)}${status ? " ns-" + status : ""}"
     data-nid="${escH(s.id)}" role="button" tabindex="0"
     aria-selected="${s.id === S.selectedId}">
     <span class="nid">${escH(s.id)}</span>
     <span class="meta"><span class="kindtag">${escH(s.kind)}</span>${meta ? " " + escH(meta) : ""}</span>
+    ${outHtml}
     <span class="sdot" aria-hidden="true"></span>
   </div>`;
       }
@@ -1333,13 +1475,32 @@
           // GetResult: status 'running' | 'suspended' | 'success' | 'failed'
           if (snap.status) {
             S.runStatus = snap.status;
+            // Hydrate per-step states for mid-run attach (FR-004/FR-006).
+            if (snap.steps && typeof snap.steps === "object") {
+              for (const [sid, st] of Object.entries(snap.steps)) {
+                S.stepStatuses[sid] = st.status;
+                if (st.outputExcerpt !== undefined) {
+                  S.stepOutputs[sid] = { excerpt: st.outputExcerpt, truncated: st.outputTruncated };
+                }
+                if (st.status === "suspended") S.suspendedStepId = sid;
+              }
+              renderBands();
+            }
+            // Gate message from snapshot when attaching to a suspended run (FR-004).
+            if (snap.status === "suspended" && snap.gateMessage) {
+              S.gateMessage = snap.gateMessage;
+            }
             renderRunPanel();
           }
         });
 
         es.addEventListener("step", (e) => {
-          const { stepId, status } = JSON.parse(e.data);
+          const { stepId, status, outputExcerpt, outputTruncated } = JSON.parse(e.data);
           S.stepStatuses[stepId] = status;
+          // Accumulate step output for display (FR-006/FR-007 — consumed via escH in nodeHtml).
+          if (outputExcerpt !== undefined) {
+            S.stepOutputs[stepId] = { excerpt: outputExcerpt, truncated: outputTruncated };
+          }
 
           if (status === "suspended") {
             S.suspendedStepId = stepId;
@@ -1348,11 +1509,22 @@
             if (S.suspendedStepId === stepId) S.suspendedStepId = null;
           }
 
-          // Update just the one node's status class in-place (avoids full re-render)
+          // Update just the one node's status class in-place (avoids full re-render).
+          // Also refresh the output excerpt span when a step finishes (FR-006/FR-007).
           const node = el("canvas").querySelector(`[data-nid="${CSS.escape(stepId)}"]`);
           if (node) {
             node.classList.remove("ns-started", "ns-succeeded", "ns-failed", "ns-suspended");
             if (status) node.classList.add("ns-" + status);
+            // Update output excerpt via textContent — never innerHTML (FR-007).
+            let nout = node.querySelector(".nout");
+            if (outputExcerpt !== undefined) {
+              if (!nout) {
+                nout = document.createElement("span");
+                nout.className = "nout";
+                node.querySelector(".sdot")?.before(nout);
+              }
+              nout.textContent = outputExcerpt;
+            }
           }
 
           // Infer terminal state from all step statuses
@@ -1388,7 +1560,9 @@
         S.runId = null;
         S.runStatus = null;
         S.stepStatuses = {};
+        S.stepOutputs = {};
         S.suspendedStepId = null;
+        S.gateMessage = null;
       }
 
       async function approve(approved) {
@@ -1436,9 +1610,12 @@
         const label = labels[S.runStatus] || S.runStatus || "";
 
         let gateHtml = "";
-        if (S.runStatus === "suspended" && S.suspendedStepId) {
-          const gs = S.editedSteps.find((s) => s.id === S.suspendedStepId);
-          const msg = gs?.message || "Gate awaiting approval.";
+        if (S.runStatus === "suspended") {
+          // Gate message priority: snapshot (FR-004) > step definition > fallback.
+          const gs = S.suspendedStepId
+            ? S.editedSteps.find((s) => s.id === S.suspendedStepId)
+            : null;
+          const msg = S.gateMessage || gs?.message || "Gate awaiting approval.";
           gateHtml = `
       <div class="gate-msg">${escH(msg)}</div>
       <div class="gate-actions">
@@ -1711,6 +1888,7 @@
       el("back-btn").addEventListener("click", () => {
         closeSse();
         showView("list");
+        loadRuns(); // refresh run list on return to list view (FR-003)
       });
 
       el("save-btn").addEventListener("click", saveFlow);
@@ -1887,9 +2065,12 @@
         }
       });
 
+      el("refresh-runs-btn").addEventListener("click", loadRuns);
+
       // ── Boot ──────────────────────────────────────────────────────────────────────
       showView("list");
       loadList();
+      loadRuns();
       loadEnvironment();
     </script>
   </body>

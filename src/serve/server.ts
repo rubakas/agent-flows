@@ -689,6 +689,16 @@ async function handleRequest(
     return;
   }
 
+  // GET /api/runs — list all runs in creation order (FR-002)
+  if (method === "GET" && pathname === "/api/runs") {
+    if (!ctx.runService) {
+      json(res, 503, { error: "RunService not available in this instance" });
+      return;
+    }
+    json(res, 200, { runs: ctx.runService.list() });
+    return;
+  }
+
   // GET /api/runs/:id/events  — SSE (must precede the bare GET /api/runs/:id check)
   const sseMatch = RE_RUN_EVENTS.exec(pathname);
   if (method === "GET" && sseMatch) {
@@ -717,9 +727,15 @@ async function handleRequest(
     };
 
     // Relay step lifecycle events with normalised status strings.
+    // step-finish additionally carries outputExcerpt/outputTruncated (FR-006).
     const unsub = ctx.runService.subscribe(id, (event: StepEvent) => {
       const status = STEP_STATUS[event.kind];
-      safeWrite(`event: step\ndata: ${JSON.stringify({ stepId: event.stepId, status })}\n\n`);
+      const payload: Record<string, unknown> = { stepId: event.stepId, status };
+      if (event.kind === "step-finish") {
+        if (event.outputExcerpt !== undefined) payload.outputExcerpt = event.outputExcerpt;
+        if (event.outputTruncated !== undefined) payload.outputTruncated = event.outputTruncated;
+      }
+      safeWrite(`event: step\ndata: ${JSON.stringify(payload)}\n\n`);
     });
 
     // Heartbeat comment every 15 s to keep proxies alive.

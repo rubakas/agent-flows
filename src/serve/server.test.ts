@@ -644,6 +644,174 @@ describe("SSE /api/runs/:id/events — snapshot carries gate payload for late-co
   });
 });
 
+// ── GET /api/runs — FR-002 list route ────────────────────────────────────────
+
+describe("GET /api/runs — FR-002: list route returns summaries in creation order", () => {
+  let srv: ServeHandle;
+  let service: ReturnType<typeof makeRunService>;
+
+  function makeRunService() {
+    const runA = makeMockRun("list-run-a", successResult(), successResult());
+    const runB = makeMockRun("list-run-b", successResult(), successResult());
+    let callCount = 0;
+    const mastra: MastraLike = {
+      getWorkflow: (_id) => ({
+        createRun: async () => {
+          callCount++;
+          return (callCount === 1 ? runA : runB) as unknown as Awaited<
+            ReturnType<ReturnType<MastraLike["getWorkflow"]>["createRun"]>
+          >;
+        },
+      }),
+    };
+    return new RunService(mastra);
+  }
+
+  before(async () => {
+    service = makeRunService();
+    await service.start("pipeline-a", {});
+    await service.start("pipeline-b", {});
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => srv.close());
+
+  it("returns { runs: [...] } with two summaries in creation order", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      runs: { runId: string; pipelineId: string; status: string; createdAt: string }[];
+    };
+    assert.ok(Array.isArray(body.runs), "body.runs must be an array");
+    assert.equal(body.runs.length, 2, "must return exactly two runs");
+    assert.equal(body.runs[0].pipelineId, "pipeline-a", "first run must be pipeline-a");
+    assert.equal(body.runs[1].pipelineId, "pipeline-b", "second run must be pipeline-b");
+  });
+
+  it("each summary has exactly {runId, pipelineId, status, createdAt} and no extra fields", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs`);
+    const body = (await res.json()) as { runs: Record<string, unknown>[] };
+    const summary = body.runs[0];
+    assert.ok("runId" in summary, "must have runId");
+    assert.ok("pipelineId" in summary, "must have pipelineId");
+    assert.ok("status" in summary, "must have status");
+    assert.ok("createdAt" in summary, "must have createdAt");
+    assert.ok(!("result" in summary), "must NOT have result");
+    assert.ok(!("spec" in summary), "must NOT have spec");
+    assert.ok(!("gateMessage" in summary), "must NOT have gateMessage");
+    assert.ok(!("steps" in summary), "must NOT have steps");
+    const cat = summary.createdAt;
+    assert.ok(
+      typeof cat === "string" && !isNaN(Date.parse(cat)),
+      "createdAt must be a valid ISO date string"
+    );
+  });
+
+  it("GET /api/runs → 503 when no RunService", async () => {
+    const noSvcSrv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${noSvcSrv.port}/api/runs`);
+      assert.equal(res.status, 503);
+    } finally {
+      await noSvcSrv.close();
+    }
+  });
+});
+
+// ── GET /api/runs/:id — steps field present (FR-006) ─────────────────────────
+
+describe("GET /api/runs/:id — steps field always present in GetResult (FR-006)", () => {
+  let srv: ServeHandle;
+  let runId: string;
+  let mockRun: MockRun;
+
+  before(async () => {
+    mockRun = makeMockRun("steps-test-run", successResult(), successResult());
+    const svc = new RunService(makeMastra(mockRun));
+    const start = await svc.start("test-pipeline", {});
+    runId = start.runId;
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: svc,
+    });
+  });
+  after(async () => srv.close());
+
+  it("GET /api/runs/:id includes steps:{} before any events", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { steps: unknown };
+    assert.ok(typeof body.steps === "object" && body.steps !== null, "steps must be an object");
+  });
+
+  it("SSE step event carries outputExcerpt when step has output", async () => {
+    const svc2 = new RunService(
+      makeMastra(makeMockRun("sse-out-run", successResult(), successResult()))
+    );
+    const s = await svc2.start("p", {});
+    const srv2 = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: svc2,
+    });
+    try {
+      const sseRes = await fetch(`http://127.0.0.1:${srv2.port}/api/runs/${s.runId}/events`);
+      const reader = sseRes.body!.getReader();
+      // consume snapshot
+      await reader.read();
+
+      // Emit a step-result with output via the raw run mock.
+      // The run registered by svc2.start() is under the hood; find it via subscribe watcher.
+      // We need a handle to the mock run — use a local reference.
+      const localRun = makeMockRun("sse-out-run-2", successResult(), successResult());
+      const svc3 = new RunService(makeMastra(localRun));
+      const s3 = await svc3.start("p", {});
+      const srv3 = await startServer({
+        port: 0,
+        dbPath: ":memory:",
+        pipelinesDir: REAL_PIPELINES_DIR,
+        runService: svc3,
+      });
+      await reader.cancel();
+      await srv2.close();
+
+      const sseRes3 = await fetch(`http://127.0.0.1:${srv3.port}/api/runs/${s3.runId}/events`);
+      const reader3 = sseRes3.body!.getReader();
+      const dec3 = new TextDecoder();
+      await reader3.read(); // snapshot
+
+      localRun.emit({
+        type: "workflow-step-result",
+        payload: { id: "q", stepCallId: "c", status: "success", output: { msg: "hello" } },
+      });
+
+      const { value: stepVal } = await reader3.read();
+      const chunk = dec3.decode(stepVal);
+      assert.ok(
+        chunk.includes("outputExcerpt"),
+        `SSE step event must carry outputExcerpt; got: ${chunk}`
+      );
+      assert.ok(chunk.includes("hello"), "outputExcerpt must contain step output text");
+      await reader3.cancel();
+      await srv3.close();
+    } catch (e) {
+      await srv2.close();
+      throw e;
+    }
+  });
+});
+
 // ── POST /api/pipelines — create ─────────────────────────────────────────────
 
 describe("POST /api/pipelines — create new pipeline", () => {

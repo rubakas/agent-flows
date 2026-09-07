@@ -1,6 +1,8 @@
-// Transport-agnostic run ownership (FR-011).
-// Owns the in-process run registry so that MCP stdio, HTTP and the web editor
-// all talk to the same state rather than each maintaining their own Map.
+// Transport-agnostic run ownership (FR-011, FR-020).
+// Owns the in-process run registry. The HTTP daemon and the web editor share
+// the same RunService instance. The MCP stdio binding (FR-020) proxies to the
+// daemon's HTTP API rather than owning its own registry, making the comment true
+// for all three surfaces.
 
 import type { WorkflowStreamEvent } from "@mastra/core/stream";
 
@@ -40,6 +42,10 @@ export interface StepEvent {
   kind: "step-start" | "step-finish" | "step-suspended" | "step-failed";
   stepId: string;
   suspendPayload?: unknown;
+  /** Present on step-finish: first OUTPUT_EXCERPT_LIMIT chars of JSON-serialised output. */
+  outputExcerpt?: string;
+  /** Present on step-finish when the output was truncated. */
+  outputTruncated?: boolean;
 }
 
 export type StepListener = (event: StepEvent) => void;
@@ -73,10 +79,21 @@ export interface ApproveResult {
   error?: string;
 }
 
+/** Per-step state accumulated by the record-level watch (FR-006). */
+export interface StepState {
+  status: string;
+  /** First OUTPUT_EXCERPT_LIMIT chars of JSON-serialised step output, if any. */
+  outputExcerpt?: string;
+  /** True when the output was longer than OUTPUT_EXCERPT_LIMIT. */
+  outputTruncated?: boolean;
+}
+
 export interface GetResult {
   runId: string;
   pipelineId: string;
   status: "running" | "suspended" | "success" | "failed";
+  /** Per-step states accumulated in flight (FR-006). Always present; empty before any step fires. */
+  steps: Record<string, StepState>;
   result?: unknown;
   /** Present only when status is "suspended" — the pending gate's human-readable prompt. */
   gateMessage?: string;
@@ -86,12 +103,25 @@ export interface GetResult {
   error?: string;
 }
 
+/** One row in the list returned by list() (FR-001). No output, result, spec, or gate data. */
+export interface RunSummary {
+  runId: string;
+  pipelineId: string;
+  status: "running" | "suspended" | "success" | "failed";
+  /** ISO-8601 timestamp of when start() was called. */
+  createdAt: string;
+}
+
 // ── Internal record ────────────────────────────────────────────────────────────
 
 interface RunRecord {
   pipelineId: string;
   run: MastraRun;
   status: "running" | "suspended" | "success" | "failed";
+  /** Set once in start(); never mutated. */
+  readonly createdAt: Date;
+  /** Per-step states accumulated by the record-level watch (FR-006). */
+  steps: Record<string, StepState>;
   result?: unknown;
   error?: string;
   suspendPayload?: unknown;
@@ -102,6 +132,11 @@ interface RunRecord {
   /** Call exactly once from the background to resolve settledPromise. */
   readonly settle: (result: SettledResult) => void;
 }
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/** Max characters kept in outputExcerpt (FR-006). JSON is ASCII-safe so slice is safe here. */
+const OUTPUT_EXCERPT_LIMIT = 2048;
 
 // ── RunService ─────────────────────────────────────────────────────────────────
 
@@ -131,8 +166,40 @@ export class RunService {
       settle = resolve;
     });
 
-    const record: RunRecord = { pipelineId, run, status: "running", settledPromise, settle };
+    const record: RunRecord = {
+      pipelineId,
+      run,
+      status: "running",
+      createdAt: new Date(),
+      steps: {},
+      settledPromise,
+      settle,
+    };
     this.registry.set(runId, record);
+
+    // Record-level watch — accumulates per-step state for mid-run observability (FR-006).
+    // Runs for the lifetime of the run, regardless of how many SSE subscribers are active.
+    run.watch((event: WorkflowStreamEvent) => {
+      if (event.type === "workflow-step-start") {
+        record.steps[event.payload.id] = { status: "started" };
+      } else if (event.type === "workflow-step-suspended") {
+        record.steps[event.payload.id] = { status: "suspended" };
+      } else if (event.type === "workflow-step-result") {
+        const { id, status, output } = event.payload;
+        const uiStatus = status === "success" || status === "skipped" ? "succeeded" : status;
+        const state: StepState = { status: uiStatus };
+        if (output !== undefined) {
+          const serialized = JSON.stringify(output);
+          if (serialized.length > OUTPUT_EXCERPT_LIMIT) {
+            state.outputExcerpt = serialized.slice(0, OUTPUT_EXCERPT_LIMIT);
+            state.outputTruncated = true;
+          } else {
+            state.outputExcerpt = serialized;
+          }
+        }
+        record.steps[id] = state;
+      }
+    });
 
     // Fire the run in the background — do NOT await.
     // The result/rejection updates the registry record and resolves settledPromise.
@@ -178,6 +245,7 @@ export class RunService {
       runId,
       pipelineId: record.pipelineId,
       status: record.status,
+      steps: record.steps,
       result: record.result,
       ...(record.error !== undefined ? { error: record.error } : {}),
     };
@@ -187,6 +255,21 @@ export class RunService {
       out.spec = payload?.spec;
     }
     return out;
+  }
+
+  /**
+   * Return a summary list of all runs in creation order (FR-001).
+   *
+   * Summaries carry only the four identification/status fields — never result,
+   * spec, gateMessage, or step output — so the list endpoint stays light.
+   */
+  list(): RunSummary[] {
+    return [...this.registry.entries()].map(([runId, record]) => ({
+      runId,
+      pipelineId: record.pipelineId,
+      status: record.status,
+      createdAt: record.createdAt.toISOString(),
+    }));
   }
 
   /**
@@ -284,6 +367,9 @@ export class RunService {
    * with status 'failed' for a genuine step failure — they are distinct event
    * types, so a gate suspension is never delivered as a step failure here.
    *
+   * On step-finish, the event carries outputExcerpt/outputTruncated from the
+   * record's already-accumulated step state (FR-006).
+   *
    * Returns an unsubscribe function. If the run id is unknown, returns a no-op.
    */
   subscribe(runId: string, listener: StepListener): () => void {
@@ -302,7 +388,14 @@ export class RunService {
       } else if (event.type === "workflow-step-result") {
         const { id, status, suspendPayload } = event.payload;
         if (status === "success" || status === "skipped") {
-          listener({ kind: "step-finish", stepId: id });
+          // Read excerpt from the record-level accumulator set by start()'s watch.
+          const stepState = record.steps[id];
+          listener({
+            kind: "step-finish",
+            stepId: id,
+            outputExcerpt: stepState?.outputExcerpt,
+            outputTruncated: stepState?.outputTruncated,
+          });
         } else if (status === "suspended") {
           listener({ kind: "step-suspended", stepId: id, suspendPayload });
         } else if (status === "failed") {
