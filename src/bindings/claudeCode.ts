@@ -4,6 +4,7 @@ import {
   defaultRegistry,
   getActiveProfile,
   resolveStepModel,
+  type ModelRegistry,
   type ProviderProfile,
 } from "../canon/registry.js";
 import { FINDING } from "../canon/schemas.js";
@@ -73,11 +74,15 @@ function computePhasesForDependsOn(
 // Main export
 // ---------------------------------------------------------------------------
 
-export function generateWorkflowScript(loaded: LoadedPipeline, profile?: ProviderProfile): string {
-  // Profile is resolved at generation time and baked into the script — correct for
-  // Binding A which always runs under Claude Code with the active provider profile.
+export function generateWorkflowScript(
+  loaded: LoadedPipeline,
+  profile?: ProviderProfile,
+  registry?: ModelRegistry
+): string {
+  // Profile and registry are resolved at generation time and baked into the script —
+  // correct for Binding A which always runs under Claude Code with the active provider profile.
   const resolvedProfile = profile ?? getActiveProfile();
-  const registry = defaultRegistry();
+  const resolvedRegistry = registry ?? defaultRegistry();
   const { def, prompts } = loaded;
   const inputVars = new Set<string>(def.inputs);
   const llmSteps = def.steps.filter((s) => s.kind === "llm");
@@ -112,7 +117,7 @@ export function generateWorkflowScript(loaded: LoadedPipeline, profile?: Provide
 
   // ── model variable per llm step ───────────────────────────────────────────
   for (const step of llmSteps) {
-    const entry = resolveStepModel(step, resolvedProfile, registry);
+    const entry = resolveStepModel(step, resolvedProfile, resolvedRegistry);
     const concreteModel = entry.cli?.model ?? entry.api?.model ?? entry.id;
     out.push(`const ${modelVar(step.id)} = models[${sq(step.id)}] || '${concreteModel}'`);
   }

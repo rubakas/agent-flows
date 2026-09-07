@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
 import { listPipelines, loadPipeline } from "../../canon/load.js";
+import { loadProviders } from "../../canon/loadProviders.js";
 import { defaultRegistry, getProfile, resolveStepModel } from "../../canon/registry.js";
 import { makeDb } from "../../db/index.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
@@ -34,20 +35,24 @@ function hasFlag(flag: string): boolean {
   return args.includes(flag);
 }
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const repoRoot = join(__dirname, "..", "..", "..");
+
 const dbPath = getFlag("--db", "/tmp/agent-flows-mastra-smoke.sqlite");
 const mastraDb = mastraDbPath(dbPath);
-const providerId = getFlag("--provider", process.env.AGENT_FLOWS_PROVIDER ?? "anthropic");
-const profile = getProfile(providerId);
+const providers = loadProviders(repoRoot);
+const providerId = getFlag(
+  "--provider",
+  process.env.AGENT_FLOWS_PROVIDER ?? providers.defaultProvider ?? "anthropic"
+);
+const profile = getProfile(providerId, providers.profiles);
 
 // --intake-model: explicit override for the intake step only, opt-in (no default)
 const intakeModelOverride = getOptFlag("--intake-model");
 
 // --cheap: pin every step to the profile's scout entry for quick iteration
 const cheap = hasFlag("--cheap");
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const repoRoot = join(__dirname, "..", "..", "..");
 
 console.log(`Smoke: provider=${providerId} db=${dbPath}`);
 
@@ -56,7 +61,7 @@ console.log(`Smoke: provider=${providerId} db=${dbPath}`);
 const mastraStorage = new LibSQLStore({ id: "agent-flows-smoke", url: `file:${mastraDb}` });
 const db = makeDb(dbPath);
 const store = new DrizzleTicketStore(db);
-const registry = defaultRegistry();
+const registry = defaultRegistry(process.env, providers.models);
 
 const pipelinesDir = join(repoRoot, "pipelines");
 const [pipelineFile] = listPipelines(pipelinesDir).filter((f) => f.includes("spec-creation"));

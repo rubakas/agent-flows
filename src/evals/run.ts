@@ -24,6 +24,7 @@ import { LibSQLStore } from "@mastra/libsql";
 import { buildPipelineWorkflow } from "../bindings/mastra/build.js";
 import { mastraDbPath } from "../bindings/mastra/paths.js";
 import { loadPipeline } from "../canon/load.js";
+import { loadProviders } from "../canon/loadProviders.js";
 import { defaultRegistry, getProfile } from "../canon/registry.js";
 import { makeDb } from "../db/index.js";
 import { DrizzleTicketStore } from "../store/sqlite.js";
@@ -127,9 +128,10 @@ function extractRunError(runResult: unknown): string {
 
 const dbPath = `/tmp/agent-flows-eval-${fixtureName}.sqlite`;
 const mastraDb = mastraDbPath(dbPath);
-const providerId = process.env.AGENT_FLOWS_PROVIDER ?? "anthropic";
-const profile = getProfile(providerId);
-const registry = defaultRegistry();
+const providers = loadProviders(repoRoot);
+const providerId = process.env.AGENT_FLOWS_PROVIDER ?? providers.defaultProvider ?? "anthropic";
+const profile = getProfile(providerId, providers.profiles);
+const registry = defaultRegistry(process.env, providers.models);
 
 console.log(`\nEval: fixture=${fixtureName} provider=${providerId}`);
 

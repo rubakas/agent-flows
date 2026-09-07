@@ -8,7 +8,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { listPipelines, loadPipeline } from "./canon/load.js";
+import { loadProviders } from "./canon/loadProviders.js";
 import { defaultRegistry, getActiveProfile } from "./canon/registry.js";
+import type { ProviderConfig } from "./canon/registry.js";
 
 const execFileAsync = promisify(execFile);
 const _require = createRequire(import.meta.url);
@@ -38,6 +40,8 @@ export interface DoctorProbes {
   /** Loads every pipeline in the pipelines/ directory; returns ids and any errors. */
   loadCanon: () => { loaded: string[]; failed: { file: string; error: string }[] };
   env: NodeJS.ProcessEnv;
+  /** Project-level provider configuration; empty arrays when no providers.yaml is present. */
+  providers: ProviderConfig;
 }
 
 export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
@@ -93,8 +97,8 @@ export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
     let profileOk = false;
     let profileId = "unknown";
     try {
-      const profile = getActiveProfile(probes.env);
-      const registry = defaultRegistry(probes.env);
+      const profile = getActiveProfile(probes.env, probes.providers);
+      const registry = defaultRegistry(probes.env, probes.providers.models);
       profileId = profile.id;
 
       const roles = (["reasoner", "worker", "scout"] as const).map((role) => ({
@@ -465,6 +469,7 @@ export function defaultProbes(): DoctorProbes {
     },
 
     env: process.env,
+    providers: loadProviders(_repoRoot),
   };
 }
 

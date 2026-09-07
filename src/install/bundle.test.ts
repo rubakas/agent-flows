@@ -3,7 +3,15 @@
 // invalid-bundle rejection, and skip-by-default semantics.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -303,6 +311,160 @@ describe("importBundle — skip-by-default semantics", () => {
       assert.ok(
         !report.skipped.some((s) => s.startsWith("pipelines/investigate.yaml")),
         "investigate.yaml must not be in skipped when overwrite=true"
+      );
+    } finally {
+      rmSync(projectDir, { recursive: true });
+    }
+  });
+});
+
+// ── FR-016: providers.yaml round-trip ─────────────────────────────────────────
+
+const VALID_PROVIDERS_YAML = `version: 1
+models:
+  - id: my-model
+    transport: cli
+    cli: { bin: claude, model: claude-my-model }
+profiles:
+  - id: my-profile
+    roles: { reasoner: my-model, worker: my-model, scout: my-model }
+defaultProvider: my-profile
+`;
+
+const INVALID_PROVIDERS_YAML = `version: 2\n`; // version must be 1
+
+describe("exportBundle — providers.yaml", () => {
+  it("export-includes-providers-yaml-when-present", () => {
+    // Use a minimal gate-only pipeline (no prompt file references) so
+    // exportBundle's computeClosure produces no prompt entries and no
+    // readFileSync calls fail on a synthetic project dir.
+    const MINIMAL_PIPELINE = `version: 3
+id: minimal-export-test
+description: minimal pipeline for FR-016 export test
+inputs: [request]
+steps:
+  - id: approve
+    kind: gate
+    message: "approve?"
+`;
+
+    const projectDir = makeTempDir("agent-flows-export-providers-");
+    try {
+      const agentFlowsDir = join(projectDir, ".agent-flows");
+      mkdirSync(join(agentFlowsDir, "pipelines"), { recursive: true });
+      writeFileSync(join(agentFlowsDir, "providers.yaml"), VALID_PROVIDERS_YAML);
+      writeFileSync(join(agentFlowsDir, "pipelines", "minimal-export-test.yaml"), MINIMAL_PIPELINE);
+
+      const pipelinesDir = join(agentFlowsDir, "pipelines");
+      const bundle = exportBundle("minimal-export-test", pipelinesDir);
+
+      const providersFile = bundle.files.find((f) => f.path === "providers.yaml");
+      assert.ok(providersFile, "bundle must include providers.yaml");
+      assert.equal(providersFile.content, VALID_PROVIDERS_YAML);
+    } finally {
+      rmSync(projectDir, { recursive: true });
+    }
+  });
+
+  it("export-omits-when-absent: no providers.yaml when file does not exist", () => {
+    // bundledPipelinesDir's parent has no providers.yaml.
+    const bundle = exportBundle("investigate", bundledPipelinesDir);
+    const providersFile = bundle.files.find((f) => f.path === "providers.yaml");
+    assert.equal(providersFile, undefined, "bundle must not include providers.yaml when absent");
+  });
+});
+
+describe("importBundle — providers.yaml", () => {
+  it("import-skips-existing-providers-yaml: existing project file wins by default", () => {
+    const projectDir = makeTempDir("agent-flows-import-prov-skip-");
+    try {
+      const agentFlowsDir = join(projectDir, ".agent-flows");
+      mkdirSync(agentFlowsDir, { recursive: true });
+      writeFileSync(join(agentFlowsDir, "providers.yaml"), "version: 1\n# existing\n");
+
+      const bundle = exportBundle("investigate", bundledPipelinesDir);
+      // Inject a providers.yaml into the bundle.
+      bundle.files.push({ path: "providers.yaml", content: VALID_PROVIDERS_YAML });
+
+      const report = importBundle(bundle, projectDir, false);
+      assert.ok(
+        report.skipped.some((s) => s.startsWith("providers.yaml")),
+        `providers.yaml must be in skipped; skipped: ${report.skipped.join(", ")}`
+      );
+      // Verify the existing file was not replaced.
+      const content = readFileSync(join(agentFlowsDir, "providers.yaml"), "utf8");
+      assert.ok(
+        content.includes("# existing"),
+        "existing providers.yaml content must be preserved"
+      );
+    } finally {
+      rmSync(projectDir, { recursive: true });
+    }
+  });
+
+  it("import-overwrites-with-flag: overwrite=true replaces existing providers.yaml", () => {
+    const projectDir = makeTempDir("agent-flows-import-prov-overwrite-");
+    try {
+      const agentFlowsDir = join(projectDir, ".agent-flows");
+      mkdirSync(agentFlowsDir, { recursive: true });
+      writeFileSync(join(agentFlowsDir, "providers.yaml"), "version: 1\n# existing\n");
+
+      const bundle = exportBundle("investigate", bundledPipelinesDir);
+      bundle.files.push({ path: "providers.yaml", content: VALID_PROVIDERS_YAML });
+
+      const report = importBundle(bundle, projectDir, true);
+      assert.ok(
+        report.written.some((w) => w === "providers.yaml"),
+        `providers.yaml must be in written; written: ${report.written.join(", ")}`
+      );
+      const content = readFileSync(join(agentFlowsDir, "providers.yaml"), "utf8");
+      assert.equal(content, VALID_PROVIDERS_YAML);
+    } finally {
+      rmSync(projectDir, { recursive: true });
+    }
+  });
+
+  it("import-rejects-malformed-bundled-providers: nothing written to project on invalid providers.yaml", () => {
+    const projectDir = makeTempDir("agent-flows-import-prov-invalid-");
+    try {
+      const bundle = exportBundle("investigate", bundledPipelinesDir);
+      bundle.files.push({ path: "providers.yaml", content: INVALID_PROVIDERS_YAML });
+
+      assert.throws(
+        () => importBundle(bundle, projectDir, false),
+        (err: unknown) => {
+          assert.ok(err instanceof Error, "must throw an Error");
+          assert.ok(
+            err.message.includes("providers.yaml"),
+            `error must mention providers.yaml: ${err.message}`
+          );
+          return true;
+        }
+      );
+
+      // Nothing must have been written to the project.
+      const agentFlowsDir = join(projectDir, ".agent-flows");
+      assert.ok(!existsSync(agentFlowsDir), "project must not have any written files on failure");
+    } finally {
+      rmSync(projectDir, { recursive: true });
+    }
+  });
+
+  it("old-bundle-without-providers-imports-unchanged", () => {
+    const projectDir = makeTempDir("agent-flows-import-no-prov-");
+    try {
+      // Bundle without providers.yaml — current behaviour must be unchanged.
+      const bundle = exportBundle("investigate", bundledPipelinesDir);
+      assert.ok(
+        !bundle.files.some((f) => f.path === "providers.yaml"),
+        "bundled pipelines dir has no providers.yaml"
+      );
+
+      const report = importBundle(bundle, projectDir, false);
+      assert.ok(report.written.length > 0, "must have written pipeline files");
+      assert.ok(
+        !report.written.includes("providers.yaml"),
+        "providers.yaml must not appear in written"
       );
     } finally {
       rmSync(projectDir, { recursive: true });

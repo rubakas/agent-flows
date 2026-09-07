@@ -237,3 +237,97 @@ describe("resolveStepModel", () => {
     assert.equal(entry.cli?.model, "claude-opus-5");
   });
 });
+
+// ── FR-016: extended signatures (extra entries / extraProfiles / config) ──────
+
+describe("defaultRegistry — extra entries", () => {
+  it("extra-entry-overrides-builtin-by-id: project sonnet wins over built-in sonnet", () => {
+    const override: ModelEntry = {
+      id: "sonnet",
+      transport: "api",
+      api: { endpoint: "https://example.com/v1/chat/completions", model: "project-sonnet" },
+    };
+    const reg = defaultRegistry({}, [override]);
+    const entry = reg.resolve("sonnet");
+    assert.equal(entry.transport, "api");
+    assert.equal(entry.api?.model, "project-sonnet");
+  });
+
+  it("builtin-survives-extra: haiku still resolves when extras are present", () => {
+    const extra: ModelEntry = { id: "deepseek", transport: "cli", cli: { bin: "codex" } };
+    const reg = defaultRegistry({}, [extra]);
+    const entry = reg.resolve("haiku");
+    assert.equal(entry.transport, "cli");
+    assert.equal(entry.cli?.bin, "claude");
+  });
+
+  it("zero-arg-calls-unchanged: defaultRegistry() behaves as before extras feature", () => {
+    const reg = defaultRegistry();
+    const haiku = reg.resolve("haiku");
+    assert.equal(haiku.id, "haiku");
+    assert.equal(haiku.transport, "cli");
+  });
+});
+
+describe("getProfile / getActiveProfile — extra profiles / config", () => {
+  const projectProfile = {
+    id: "project-custom",
+    roles: { reasoner: "mymodel", worker: "mymodel", scout: "mymodel" } as const,
+  };
+
+  it("project-profile-overrides-builtin: project 'anthropic' shadows the built-in", () => {
+    const customAnthropic = {
+      id: "anthropic",
+      roles: { reasoner: "deepseek", worker: "deepseek", scout: "deepseek" } as const,
+    };
+    const profile = getProfile("anthropic", [customAnthropic]);
+    assert.equal(profile.roles.reasoner, "deepseek");
+  });
+
+  it("new-profile-resolvable: a project-declared profile id is found", () => {
+    const profile = getProfile("project-custom", [projectProfile]);
+    assert.equal(profile.id, "project-custom");
+    assert.equal(profile.roles.reasoner, "mymodel");
+  });
+
+  it("unknown-profile-error-lists-union: error message names project + built-in ids", () => {
+    assert.throws(
+      () => getProfile("nonexistent", [projectProfile]),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.ok(err.message.includes("nonexistent"), `must name the bad id: ${err.message}`);
+        // Error must list both project and built-in ids.
+        assert.ok(err.message.includes("project-custom"), `must list project id: ${err.message}`);
+        assert.ok(err.message.includes("anthropic"), `must list built-in id: ${err.message}`);
+        return true;
+      }
+    );
+  });
+
+  it("zero-arg-calls-unchanged: getProfile('anthropic') behaves as before", () => {
+    const profile = getProfile("anthropic");
+    assert.equal(profile.id, "anthropic");
+    assert.equal(profile.roles.reasoner, "fable");
+  });
+
+  it("active-profile-precedence: env beats config.defaultProvider; config beats 'anthropic'", () => {
+    const config = { models: [], profiles: [projectProfile], defaultProvider: "project-custom" };
+
+    // env var wins over config.defaultProvider
+    const fromEnv = getActiveProfile({ AGENT_FLOWS_PROVIDER: "openai" }, config);
+    assert.equal(fromEnv.id, "openai");
+
+    // config.defaultProvider wins when env is absent
+    const fromConfig = getActiveProfile({}, config);
+    assert.equal(fromConfig.id, "project-custom");
+
+    // falls back to 'anthropic' when both are absent
+    const fallback = getActiveProfile({}, { models: [], profiles: [] });
+    assert.equal(fallback.id, "anthropic");
+  });
+
+  it("zero-arg-calls-unchanged: getActiveProfile({}) returns anthropic by default", () => {
+    const profile = getActiveProfile({});
+    assert.equal(profile.id, "anthropic");
+  });
+});

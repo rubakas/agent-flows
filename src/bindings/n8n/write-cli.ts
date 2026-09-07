@@ -3,11 +3,17 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listPipelines, loadPipeline } from "../../canon/load.js";
+import { loadProviders } from "../../canon/loadProviders.js";
 import { generateN8nWorkflow } from "./build.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = join(__dirname, "..", "..", "..");
+
+// Validate providers.yaml at startup (FR-003: malformed file must fail loudly here too).
+// The n8n binding does not use provider profiles for workflow generation, but a
+// malformed providers.yaml must never be silently ignored on any entry point.
+loadProviders(repoRoot);
 
 const pipelinesDir = join(repoRoot, "pipelines");
 const outDir = join(repoRoot, ".n8n-workflows");

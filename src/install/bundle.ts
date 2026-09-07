@@ -20,6 +20,7 @@ import { dirname, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
 
 import { loadPipeline } from "../canon/load.js";
+import { parseProviders } from "../canon/loadProviders.js";
 import { computeClosure } from "./install.js";
 import { assertSafePath } from "./paths.js";
 
@@ -65,6 +66,13 @@ export function exportBundle(pipelineId: string, pipelinesDir: string): Workflow
   for (const promptPath of [...prompts].sort()) {
     const filePath = join(root, promptPath);
     files.push({ path: promptPath, content: readFileSync(filePath, "utf8") });
+  }
+
+  // Include providers.yaml when it exists — a pipeline using a custom profile is
+  // unrunnable on import without the profile definition, so it travels with the bundle.
+  const providersPath = join(root, "providers.yaml");
+  if (existsSync(providersPath)) {
+    files.push({ path: "providers.yaml", content: readFileSync(providersPath, "utf8") });
   }
 
   return {
@@ -195,6 +203,20 @@ export function importBundle(
         throw new Error(`Bundle validation failed for "${f.path}": ${(err as Error).message}`, {
           cause: err,
         });
+      }
+    }
+
+    // Validate a bundled providers.yaml before any project file is touched.
+    // parseProviders throws on schema violations; a bad bundled file aborts the import.
+    const providersEntry = bundle.files.find((f) => f.path === "providers.yaml");
+    if (providersEntry) {
+      try {
+        parseProviders(providersEntry.content, "providers.yaml");
+      } catch (err) {
+        throw new Error(
+          `Bundle validation failed for "providers.yaml": ${(err as Error).message}`,
+          { cause: err }
+        );
       }
     }
 

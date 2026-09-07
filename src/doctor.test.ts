@@ -38,6 +38,7 @@ function makeOkProbes(overrides: Partial<DoctorProbes> = {}): DoctorProbes {
     reachable: async (_url) => true,
     loadCanon: () => ({ loaded: ["spec-creation"], failed: [] }),
     env: {},
+    providers: { models: [], profiles: [] },
     ...overrides,
   };
 }

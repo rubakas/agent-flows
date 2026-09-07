@@ -22,6 +22,7 @@ import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
 import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import { listPipelines, loadPipeline } from "../canon/load.js";
+import { loadProviders } from "../canon/loadProviders.js";
 import { makeDb, type DbInstance } from "../db/index.js";
 import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../install/bundle.js";
 import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
@@ -1073,7 +1074,7 @@ if (process.argv[1] === __filename) {
   const { LibSQLStore } = await import(mastraLibsqlSpec);
   const { buildPipelineWorkflow } = await import(bindingsBuildSpec);
   const { mastraDbPath } = await import(bindingsPathsSpec);
-  const { defaultRegistry } = await import(registrySpec);
+  const { defaultRegistry, getActiveProfile } = await import(registrySpec);
   const { DrizzleTicketStore } = await import(sqliteSpec);
   const { RunService: RunServiceClass } = await import(runServiceSpec);
 
@@ -1081,7 +1082,9 @@ if (process.argv[1] === __filename) {
   const mastraStorage = new LibSQLStore({ id: "agent-flows-mastra", url: `file:${mastraDb}` });
   const db = makeDb(dbPath);
   const store = new DrizzleTicketStore(db);
-  const registry = defaultRegistry();
+  const providers = loadProviders(projectDir);
+  const registry = defaultRegistry(process.env, providers.models);
+  const profile = getActiveProfile(process.env, providers);
 
   // FR-003: read once at startup; the resolved value is baked into each workflow
   // at build time. readAgentFlowsConfig throws loudly on malformed config so a
@@ -1095,6 +1098,7 @@ if (process.argv[1] === __filename) {
     workflows[loaded.def.id] = buildPipelineWorkflow(loaded, {
       registry,
       store,
+      profile,
       cwd: projectDir,
       ...(checkCommand !== undefined ? { checkCommand } : {}),
     });

@@ -26,8 +26,19 @@ export class ModelRegistry {
   }
 }
 
-export function defaultRegistry(env: NodeJS.ProcessEnv = process.env): ModelRegistry {
+/**
+ * Constructs the default model registry.
+ *
+ * @param extra Project-supplied entries prepended before the built-ins.
+ *   Find-first semantics mean any entry whose id matches a built-in id
+ *   is resolved in favour of the project entry — no merge logic needed.
+ */
+export function defaultRegistry(
+  env: NodeJS.ProcessEnv = process.env,
+  extra?: ModelEntry[]
+): ModelRegistry {
   return new ModelRegistry([
+    ...(extra ?? []),
     // fable: pinned to claude-fable-5 — bare alias would track newest/most-expensive; this role backs most cycle steps
     { id: "fable", transport: "cli", cli: { bin: "claude", model: "claude-fable-5" } },
     { id: "opus", transport: "cli", cli: { bin: "claude", model: "opus" } },
@@ -62,6 +73,19 @@ export interface ProviderProfile {
   roles: Record<Role, string>;
 }
 
+/**
+ * Project-level provider configuration loaded from .agent-flows/providers.yaml.
+ * Empty arrays mean the file is absent — behaviour identical to today.
+ */
+export interface ProviderConfig {
+  /** Project-declared model entries; prepended before built-ins in the registry. */
+  models: ModelEntry[];
+  /** Project-declared profiles; searched before DEFAULT_PROFILES by getProfile. */
+  profiles: ProviderProfile[];
+  /** Optional default profile id; honoured by getActiveProfile when env var is absent. */
+  defaultProvider?: string;
+}
+
 const DEFAULT_PROFILES: ProviderProfile[] = [
   {
     id: "anthropic",
@@ -77,19 +101,38 @@ const DEFAULT_PROFILES: ProviderProfile[] = [
   },
 ];
 
-/** Returns the profile for the given id; throws a clear error naming available ids. */
-export function getProfile(id: string): ProviderProfile {
-  const profile = DEFAULT_PROFILES.find((p) => p.id === id);
+/** Returns the ids of the built-in provider profiles. Used by loadProviders for validation. */
+export function builtInProfileIds(): string[] {
+  return DEFAULT_PROFILES.map((p) => p.id);
+}
+
+/**
+ * Returns the profile for the given id.
+ * Searches extraProfiles first so project profiles override built-ins by id.
+ * Throws a clear error naming all available ids (union of project + built-ins).
+ */
+export function getProfile(id: string, extraProfiles?: ProviderProfile[]): ProviderProfile {
+  const allProfiles = [...(extraProfiles ?? []), ...DEFAULT_PROFILES];
+  const profile = allProfiles.find((p) => p.id === id);
   if (!profile) {
-    const available = DEFAULT_PROFILES.map((p) => p.id).join(", ");
+    const available = allProfiles.map((p) => p.id).join(", ");
     throw new Error(`Unknown provider "${id}". Available: ${available}`);
   }
   return profile;
 }
 
-/** Returns the active profile from AGENT_FLOWS_PROVIDER env, defaulting to "anthropic". */
-export function getActiveProfile(env: NodeJS.ProcessEnv = process.env): ProviderProfile {
-  return getProfile(env.AGENT_FLOWS_PROVIDER ?? "anthropic");
+/**
+ * Returns the active profile using the resolution order:
+ *   1. AGENT_FLOWS_PROVIDER env var (explicit operator override)
+ *   2. config.defaultProvider from providers.yaml
+ *   3. "anthropic" (hardcoded fallback — unchanged from today)
+ */
+export function getActiveProfile(
+  env: NodeJS.ProcessEnv = process.env,
+  config?: ProviderConfig
+): ProviderProfile {
+  const id = env.AGENT_FLOWS_PROVIDER ?? config?.defaultProvider ?? "anthropic";
+  return getProfile(id, config?.profiles);
 }
 
 /**

@@ -21,7 +21,8 @@ import {
   updateSourceHash,
 } from "./draftStore.js";
 import { loadPipeline } from "./load.js";
-import { getActiveProfile } from "./registry.js";
+import { loadProviders } from "./loadProviders.js";
+import { defaultRegistry, getActiveProfile } from "./registry.js";
 import type { DbInstance } from "../db/index.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -132,8 +133,10 @@ export function saveDraftAndRegenerate(db: DbInstance, draftId: number): SaveAnd
 
     const filePath = join(source.root, source.relPath);
     const loaded = loadPipeline(filePath);
-    const profile = getActiveProfile();
-    const script = generateWorkflowScript(loaded, profile);
+    const providers = loadProviders(source.root);
+    const profile = getActiveProfile(process.env, providers);
+    const registry = defaultRegistry(process.env, providers.models);
+    const script = generateWorkflowScript(loaded, profile, registry);
 
     const outDir = join(source.root, ".claude", "workflows");
     mkdirSync(outDir, { recursive: true });
