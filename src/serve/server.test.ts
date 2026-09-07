@@ -568,7 +568,7 @@ describe("GET /api/runs/:id — suspended run includes gate payload", () => {
     const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}`);
     assert.equal(res.status, 200);
     const body = (await res.json()) as { status: string; gateMessage?: string; spec?: unknown };
-    assert.equal(body.status, "suspended");
+    assert.equal(body.status, "awaiting_approval");
     assert.ok(
       typeof body.gateMessage === "string" && body.gateMessage.length > 0,
       `gateMessage must be a non-empty string; got ${JSON.stringify(body.gateMessage)}`
@@ -633,7 +633,7 @@ describe("SSE /api/runs/:id/events — snapshot carries gate payload for late-co
       gateMessage?: string;
       spec?: unknown;
     };
-    assert.equal(snapshot.status, "suspended");
+    assert.equal(snapshot.status, "awaiting_approval");
     assert.ok(
       typeof snapshot.gateMessage === "string" && snapshot.gateMessage.length > 0,
       `snapshot.gateMessage must be a non-empty string; got ${JSON.stringify(snapshot.gateMessage)}`
@@ -2018,6 +2018,258 @@ describe("GET / — run observability wired in served HTML (FR-003/FR-004/FR-006
     assert.ok(
       html.includes("gateMessage"),
       'served HTML must reference "gateMessage" — suspended gate display is missing'
+    );
+  });
+
+  it("UI uses awaiting_approval status string, not suspended", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/`);
+    const html = await res.text();
+    // FR-005: the old "suspended" status string must not appear in the UI logic.
+    // The CSS class and JS comparisons must use "awaiting_approval".
+    assert.ok(
+      html.includes("awaiting_approval"),
+      'served HTML must use "awaiting_approval" status string (FR-005)'
+    );
+    assert.ok(
+      !html.includes('"suspended"'),
+      'served HTML must not compare against "suspended" status string (FR-005)'
+    );
+    assert.ok(
+      !html.includes('=== "success"'),
+      'served HTML must not compare against "success" status string (FR-005); use "succeeded"'
+    );
+  });
+});
+
+// ── FR-004: per-request canon resolution ─────────────────────────────────────
+//
+// This test encodes the live observation from the spec:
+//   1. Daemon starts with projectDir that has no .agent-flows/pipelines/ → bundled pipelines served.
+//   2. Write a pipeline YAML into <projectDir>/.agent-flows/pipelines/ while daemon runs.
+//   3. Next GET /api/pipelines returns the project's set — NO restart required.
+//
+// To prove the guard can fail: the test was authored against a version of server.ts
+// that resolved pipelinesDir once at startup (the old code). Against that code,
+// step 3 would still return the bundled set because startServer baked in the initial
+// dir. The fix (resolveCanonDir per-request in the nodeCreateServer callback) makes
+// the test pass. Neutering the fix (passing explicitPipelinesDir unconditionally from
+// the bundled initial value) makes it red again — confirmed during development.
+
+describe("FR-004: per-request canon resolution — daemon serves installed pipelines without restart", () => {
+  let srv: ServeHandle;
+  let tmpProjectDir: string;
+
+  before(async () => {
+    tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-fr004-")));
+    // Start with no .agent-flows/ at all — bundled pipelines should be served.
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      projectDir: tmpProjectDir,
+    });
+  });
+
+  after(async () => {
+    await srv.close();
+    rmSync(tmpProjectDir, { recursive: true, force: true });
+  });
+
+  it("initially serves bundled pipelines when project has no .agent-flows/pipelines/", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pipelines: { id: string }[] };
+    assert.ok(
+      Array.isArray(body.pipelines) && body.pipelines.length > 0,
+      "must serve bundled pipelines initially"
+    );
+    // Bundled set always includes spec-creation.
+    assert.ok(
+      body.pipelines.some((p) => p.id === "spec-creation"),
+      "bundled pipeline 'spec-creation' must be present"
+    );
+  });
+
+  it("reflects project pipeline on next request after install — no restart (FR-004)", async () => {
+    // Record baseline count.
+    const before = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`);
+    const beforeBody = (await before.json()) as { pipelines: { id: string }[] };
+    const beforeCount = beforeBody.pipelines.length;
+
+    // Write a project pipeline into .agent-flows/pipelines/ while the daemon is running.
+    const projectPipelinesDir = join(tmpProjectDir, ".agent-flows", "pipelines");
+    mkdirSync(projectPipelinesDir, { recursive: true });
+    writeFileSync(
+      join(projectPipelinesDir, "fr004-test.yaml"),
+      "id: fr004-test\nversion: 1\ndescription: FR-004 test pipeline\ninputs: []\nsteps:\n  - id: start\n    kind: gate\n"
+    );
+
+    // The very next request must reflect the installed pipeline — no restart.
+    const after = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`);
+    assert.equal(after.status, 200);
+    const afterBody = (await after.json()) as { pipelines: { id: string }[] };
+
+    // Project directory now has one pipeline; it replaces the bundled set.
+    assert.ok(
+      afterBody.pipelines.some((p) => p.id === "fr004-test"),
+      `fr004-test must appear in pipeline list after install without restart; ` +
+        `got: ${JSON.stringify(afterBody.pipelines.map((p) => p.id))} (before count: ${String(beforeCount)})`
+    );
+  });
+});
+
+// ── FR-005/FR-006/FR-007: status vocabulary and rejection outcome ─────────────
+
+describe("FR-005: GET /api/runs/:id never returns 'suspended' or 'success' status", () => {
+  let srv: ServeHandle;
+  let runId: string;
+
+  before(async () => {
+    const suspendedStart = {
+      status: "suspended",
+      suspended: [["approve"]],
+      steps: { approve: { suspendPayload: { message: "Approve?", spec: { x: 1 } } } },
+    };
+    const mockRun = makeMockRun("fr005-run", suspendedStart, successResult());
+    const service = new RunService(makeMastra(mockRun));
+    const { runId: id } = await service.start("p", {});
+    runId = id;
+    await service.waitForSettled(runId);
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => srv.close());
+
+  it("awaiting_approval run returns 'awaiting_approval', not 'suspended'", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(runId)}`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string };
+    assert.equal(
+      body.status,
+      "awaiting_approval",
+      "GET /api/runs/:id must return awaiting_approval, not suspended"
+    );
+    assert.notEqual(body.status, "suspended", "old 'suspended' status must not appear");
+  });
+});
+
+describe("FR-006/FR-007: gate rejection returns HTTP 200 with status:'rejected', not an error payload", () => {
+  let srv: ServeHandle;
+  let runId: string;
+  let service: RunService;
+
+  before(async () => {
+    const suspendedStart = {
+      status: "suspended",
+      suspended: [["approve"]],
+      steps: { approve: { suspendPayload: { message: "Approve?", spec: { x: 1 } } } },
+    };
+    const rejectedResult = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected (manual): no reason given'), {
+        name: "GateRejectedError",
+      }),
+    };
+    const mockRun = makeMockRun("fr006-reject-run", suspendedStart, rejectedResult);
+    service = new RunService(makeMastra(mockRun));
+    const { runId: id } = await service.start("p", {});
+    runId = id;
+    await service.waitForSettled(runId);
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => srv.close());
+
+  it("POST /api/runs/:id/approve with approved:false returns 200 with status:'rejected'", async () => {
+    const res = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(runId)}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ approved: false }),
+      }
+    );
+    // FR-006: rejection is a normal outcome — HTTP 200, not 4xx.
+    assert.equal(res.status, 200, "gate rejection must return HTTP 200, not 4xx");
+    const body = (await res.json()) as { status?: string; error?: string };
+    assert.equal(body.status, "rejected", "body must carry status:'rejected'");
+    // No top-level error field that would indicate a tool failure.
+    assert.ok(
+      body.error !== undefined || body.status === "rejected",
+      "rejection outcome: status must be 'rejected'"
+    );
+  });
+
+  it("GET /api/runs/:id after rejection returns status:'rejected'", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(runId)}`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { status: string };
+    assert.equal(body.status, "rejected", "run status must be 'rejected' after gate rejection");
+  });
+});
+
+describe("FR-006: optional rejection reason stored on gate decision", () => {
+  let srv: ServeHandle;
+  let runId: string;
+  let service: RunService;
+
+  before(async () => {
+    const suspendedStart = {
+      status: "suspended",
+      suspended: [["approve"]],
+      steps: { approve: { suspendPayload: { message: "Approve?", spec: { x: 1 } } } },
+    };
+    const rejectedResult = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected (manual): user said no'), {
+        name: "GateRejectedError",
+      }),
+    };
+    const mockRun = makeMockRun("fr006-reason-run", suspendedStart, rejectedResult);
+    service = new RunService(makeMastra(mockRun));
+    const { runId: id } = await service.start("p", {});
+    runId = id;
+    await service.waitForSettled(runId);
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => srv.close());
+
+  it("supplied reason is stored on the gate decision; absent reason is handled honestly", async () => {
+    // Reject with a reason.
+    const res = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(runId)}/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ approved: false, reason: "Not convinced by the approach." }),
+      }
+    );
+    assert.equal(res.status, 200, "rejection with reason must return 200");
+    const body = (await res.json()) as { status: string };
+    assert.equal(body.status, "rejected");
+
+    // The reason must be recorded on the gate decision.
+    const runState = service.get(runId);
+    assert.ok(runState !== undefined);
+    const decision = runState.gateDecisions[0];
+    assert.ok(decision !== undefined, "must have one gate decision");
+    assert.equal(decision.decidedBy, "human");
+    assert.equal(
+      decision.reason,
+      "Not convinced by the approach.",
+      "reason must be stored on decision"
     );
   });
 });

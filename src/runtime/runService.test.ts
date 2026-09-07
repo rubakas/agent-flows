@@ -116,10 +116,14 @@ describe("RunService.start — non-blocking: returns immediately, background set
     assert.ok(settled.gateMessage, "gateMessage must be set");
     assert.ok(settled.spec, "spec must be set");
 
-    // Registry now reflects suspended.
+    // Registry now reflects awaiting_approval.
     const after = service.get(startResult.runId);
     assert.ok(after !== undefined);
-    assert.equal(after.status, "suspended", "get must show 'suspended' after background settles");
+    assert.equal(
+      after.status,
+      "awaiting_approval",
+      "get must show 'awaiting_approval' after background settles"
+    );
   });
 
   it("waitForSettled returns undefined for an unknown runId", async () => {
@@ -132,8 +136,8 @@ describe("RunService.start — non-blocking: returns immediately, background set
 
 // ── Tests: start / get ────────────────────────────────────────────────────────
 
-describe("RunService.start — run reaches gate, get reports suspended", () => {
-  it("start returns running with runId; waitForSettled returns awaiting_approval; get returns suspended", async () => {
+describe("RunService.start — run reaches gate, get reports awaiting_approval", () => {
+  it("start returns running with runId; waitForSettled returns awaiting_approval; get returns awaiting_approval", async () => {
     const mockRunId = "mastra-run-abc123";
     const run = makeMockRun(mockRunId, suspendedResult(mockRunId), successResult());
     const service = new RunService(makeMastra(run));
@@ -153,11 +157,11 @@ describe("RunService.start — run reaches gate, get reports suspended", () => {
 
     const got = service.get(startResult.runId);
     assert.ok(got !== undefined, "get should find the run");
-    assert.equal(got.status, "suspended");
+    assert.equal(got.status, "awaiting_approval");
     assert.equal(got.pipelineId, "test-pipeline");
   });
 
-  it("start returns running; waitForSettled returns success when workflow completes without a gate", async () => {
+  it("start returns running; waitForSettled returns succeeded when workflow completes without a gate", async () => {
     const run = makeMockRun("run-direct", successResult(), successResult());
     const service = new RunService(makeMastra(run));
 
@@ -168,11 +172,11 @@ describe("RunService.start — run reaches gate, get reports suspended", () => {
 
     const settled = await service.waitForSettled(startResult.runId);
     assert.ok(settled !== undefined);
-    assert.equal(settled.status, "success");
+    assert.equal(settled.status, "succeeded");
 
     const got = service.get(startResult.runId);
     assert.ok(got !== undefined);
-    assert.equal(got.status, "success");
+    assert.equal(got.status, "succeeded");
   });
 
   it("get returns undefined for an unknown run id", async () => {
@@ -186,21 +190,21 @@ describe("RunService.start — run reaches gate, get reports suspended", () => {
 // ── Tests: approve ────────────────────────────────────────────────────────────
 
 describe("RunService.approve — resumes suspended run", () => {
-  it("approve returns success and get reflects success", async () => {
+  it("approve returns succeeded and get reflects succeeded", async () => {
     const run = makeMockRun("run-ok", suspendedResult("run-ok"), successResult());
     const service = new RunService(makeMastra(run));
 
     const startResult = await service.start("test-pipeline", { request: "test" });
-    // Wait for background to reach suspended before approving.
+    // Wait for background to reach awaiting_approval before approving.
     await service.waitForSettled(startResult.runId);
 
     const approval = await service.approve(startResult.runId, true);
     assert.equal(approval.error, undefined, "approve should not return an error");
-    assert.equal(approval.status, "success");
+    assert.equal(approval.status, "succeeded");
 
     const got = service.get(startResult.runId);
     assert.ok(got !== undefined);
-    assert.equal(got.status, "success");
+    assert.equal(got.status, "succeeded");
   });
 });
 
@@ -216,14 +220,14 @@ describe("RunService.approve — second approve returns defined error", () => {
 
     const first = await service.approve(startResult.runId, true);
     assert.equal(first.error, undefined, "first approve must succeed");
-    assert.equal(first.status, "success");
+    assert.equal(first.status, "succeeded");
 
     // Second approve on an already-resolved run must return a defined error.
     const second = await service.approve(startResult.runId, true);
     assert.ok(typeof second.error === "string", "second approve must return an error string");
     assert.ok(second.error.includes(startResult.runId), "error should name the run id");
-    // Must not return status "success" — it must be an error, not a silent no-op.
-    assert.equal(second.status, undefined, "second approve must not report status success");
+    // Must not return status "succeeded" — it must be an error, not a silent no-op.
+    assert.equal(second.status, undefined, "second approve must not report status succeeded");
   });
 
   it("returns error when run is unknown", async () => {
@@ -266,7 +270,7 @@ describe("RunService.approve — single-flight: two concurrent approvals resolve
       service.approve(startResult.runId, true),
     ]);
 
-    const successes = [r1, r2].filter((r) => r.status === "success" && r.error === undefined);
+    const successes = [r1, r2].filter((r) => r.status === "succeeded" && r.error === undefined);
     const errors = [r1, r2].filter((r) => typeof r.error === "string");
 
     assert.equal(successes.length, 1, "exactly one approve must succeed");
@@ -317,7 +321,7 @@ describe("RunService — two sequential gates: approve re-suspends at second gat
     assert.equal(settled.status, "awaiting_approval");
     assert.equal(settled.gateMessage, "Approve gate A?");
     assert.deepEqual(settled.spec, { title: "A" });
-    assert.equal(service.get(startResult.runId)?.status, "suspended");
+    assert.equal(service.get(startResult.runId)?.status, "awaiting_approval");
 
     // approve gate A → re-suspends at gate B
     const approvalA = await service.approve(startResult.runId, true);
@@ -325,13 +329,13 @@ describe("RunService — two sequential gates: approve re-suspends at second gat
     assert.equal(approvalA.status, "awaiting_approval");
     assert.equal(approvalA.gateMessage, "Approve gate B?");
     assert.deepEqual(approvalA.spec, { title: "B" });
-    assert.equal(service.get(startResult.runId)?.status, "suspended");
+    assert.equal(service.get(startResult.runId)?.status, "awaiting_approval");
 
-    // approve gate B → success
+    // approve gate B → succeeded
     const approvalB = await service.approve(startResult.runId, true);
     assert.equal(approvalB.error, undefined, "approving gate B must not error");
-    assert.equal(approvalB.status, "success");
-    assert.equal(service.get(startResult.runId)?.status, "success");
+    assert.equal(approvalB.status, "succeeded");
+    assert.equal(service.get(startResult.runId)?.status, "succeeded");
     assert.equal(resumeCount, 2, "resume must be called exactly twice");
   });
 });
@@ -373,14 +377,14 @@ describe("RunService — payload is read from actual suspended step id, not hard
 
     const approval = await service.approve(startResult.runId, true);
     assert.equal(approval.error, undefined);
-    assert.equal(approval.status, "success");
+    assert.equal(approval.status, "succeeded");
   });
 });
 
 // ── Tests: get — gate payload (pending gate retrievable from state) ───────────
 
-describe("RunService.get — suspended run carries gate payload for reconnecting clients", () => {
-  it("get() on a suspended run returns gateMessage and spec from the pending gate", async () => {
+describe("RunService.get — awaiting_approval run carries gate payload for reconnecting clients", () => {
+  it("get() on an awaiting_approval run returns gateMessage and spec from the pending gate", async () => {
     const mockRunId = "gate-payload-run-001";
     const run = makeMockRun(mockRunId, suspendedResult(mockRunId), successResult());
     const service = new RunService(makeMastra(run));
@@ -389,8 +393,8 @@ describe("RunService.get — suspended run carries gate payload for reconnecting
     await service.waitForSettled(startResult.runId);
 
     const got = service.get(startResult.runId);
-    assert.ok(got !== undefined, "get must find the suspended run");
-    assert.equal(got.status, "suspended");
+    assert.ok(got !== undefined, "get must find the awaiting_approval run");
+    assert.equal(got.status, "awaiting_approval");
     assert.ok(
       typeof got.gateMessage === "string" && got.gateMessage.length > 0,
       `gateMessage must be a non-empty string; got ${JSON.stringify(got.gateMessage)}`
@@ -437,7 +441,7 @@ describe("RunService.get — suspended run carries gate payload for reconnecting
 
     const got = service.get(startResult.runId);
     assert.ok(got !== undefined);
-    assert.equal(got.status, "success");
+    assert.equal(got.status, "succeeded");
     assert.equal(got.gateMessage, undefined, "completed run must not carry gateMessage");
     assert.equal(got.spec, undefined, "completed run must not carry spec");
   });
@@ -720,7 +724,7 @@ describe("RunService.list — FR-001: returns summaries in creation order with c
     await service.waitForSettled(runId);
 
     const list = service.list();
-    assert.equal(list[0].status, "success", "list status must reflect post-settlement state");
+    assert.equal(list[0].status, "succeeded", "list status must reflect post-settlement state");
   });
 });
 
@@ -973,7 +977,8 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
 //
 // Test plan item 4: prove that downstream steps (commit/pr) never execute when
 // a gate is rejected. The mock simulates what happens when GateRejectedError is
-// thrown inside buildGateStep: Mastra marks the workflow failed.
+// thrown inside buildGateStep: Mastra marks the workflow failed with that error.
+// RunService detects GateRejectedError by name and translates it to status:"rejected".
 //
 // Companion pin: the old semantics (pre-FR-006) would write approved:false into
 // context and return status:"success", allowing downstream steps to execute.
@@ -981,8 +986,9 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
 // would create a real commit and a real public PR.
 
 describe("FR-006 — gate rejection terminates the run; downstream steps never execute", () => {
-  it("approve(runId, false) fails the run: status is 'failed', resume called once", async () => {
-    // Mock a run where rejection yields status:"failed" (what GateRejectedError produces).
+  it("approve(runId, false) rejects the run: status is 'rejected', resume called once", async () => {
+    // Mock a run where rejection yields status:"failed" with a GateRejectedError.
+    // RunService maps this to status:"rejected" (FR-005/FR-006 status vocabulary).
     const rejectedResult = {
       status: "failed",
       error: Object.assign(new Error('Gate "approve" rejected (manual): no reason given'), {
@@ -1012,10 +1018,10 @@ describe("FR-006 — gate rejection terminates the run; downstream steps never e
 
     // The call was processed (status is defined) — not a 409 scenario.
     assert.ok(result.status !== undefined, "status must be defined (call was processed)");
-    assert.equal(result.status, "failed", "reject must fail the run");
+    assert.equal(result.status, "rejected", "reject must set status to 'rejected'");
     assert.ok(
-      typeof result.error === "string" && result.error.includes("GateRejectedError"),
-      `error must include GateRejectedError; got: ${result.error}`
+      typeof result.error === "string" && result.error.length > 0,
+      `error must be a non-empty string; got: ${result.error}`
     );
 
     // resume was called exactly once — no downstream step invocations.
@@ -1029,7 +1035,7 @@ describe("FR-006 — gate rejection terminates the run; downstream steps never e
     // (would create a real commit and public PR).
   });
 
-  it("run status is 'failed' and get() reflects it after rejection", async () => {
+  it("run status is 'rejected' and get() reflects it after rejection", async () => {
     const rejectedResult = {
       status: "failed",
       error: Object.assign(new Error('Gate "approve" rejected (manual): no reason given'), {
@@ -1047,7 +1053,7 @@ describe("FR-006 — gate rejection terminates the run; downstream steps never e
 
     const got = service.get(runId);
     assert.ok(got !== undefined);
-    assert.equal(got.status, "failed", "get() must show failed after rejection");
+    assert.equal(got.status, "rejected", "get() must show 'rejected' after gate rejection");
     assert.ok(
       typeof got.error === "string" && got.error.length > 0,
       "get().error must be a non-empty string after rejection"
@@ -1057,21 +1063,24 @@ describe("FR-006 — gate rejection terminates the run; downstream steps never e
 
 // ── Tests: FR-007 — approve route HTTP status fix ─────────────────────────────
 //
-// Test plan item 5: a processed approval whose run fails (e.g. rejection) must
-// return HTTP 200 with {status:"failed"}, not 409. A 409 is reserved for when
-// the approval itself could not be processed (non-suspended run, unknown id).
+// Test plan item 5: a processed approval whose run is rejected (GateRejectedError)
+// must return HTTP 200 with {status:"rejected"}, not 409. A 409 is reserved for
+// when the approval itself could not be processed (non-suspended run, unknown id).
 
-describe("FR-007 — approve on non-suspended run returns defined error, no status", () => {
+describe("FR-007 — approve on non-awaiting_approval run returns defined error, no status", () => {
   it("approve on an already-resolved run returns error with status undefined (409 in server)", async () => {
     const run = makeMockRun("run-fr007", successResult(), successResult());
     const service = new RunService(makeMastra(run));
 
     const { runId } = await service.start("p", {});
-    await service.waitForSettled(runId); // settles as success
+    await service.waitForSettled(runId); // settles as succeeded
 
     const result = await service.approve(runId, true);
-    // Non-suspended run: error is defined, status is undefined (caller returns 409).
-    assert.ok(typeof result.error === "string", "error must be defined for non-suspended run");
+    // Non-awaiting_approval run: error is defined, status is undefined (caller returns 409).
+    assert.ok(
+      typeof result.error === "string",
+      "error must be defined for non-awaiting_approval run"
+    );
     assert.equal(
       result.status,
       undefined,
@@ -1079,7 +1088,7 @@ describe("FR-007 — approve on non-suspended run returns defined error, no stat
     );
   });
 
-  it("approve on a rejected run returns status:'failed' with defined error (200 in server)", async () => {
+  it("approve on a rejected run returns status:'rejected' with defined error (200 in server)", async () => {
     const rejectedResult = {
       status: "failed",
       error: Object.assign(new Error('Gate "approve" rejected (manual): no reason given'), {
@@ -1098,10 +1107,14 @@ describe("FR-007 — approve on non-suspended run returns defined error, no stat
     await service.waitForSettled(runId);
 
     const result = await service.approve(runId, false);
-    // Processed approval that led to failure: status is defined (caller returns 200).
-    assert.equal(result.status, "failed", "status must be 'failed' (not undefined)");
+    // Processed rejection: status is "rejected" and defined (caller returns 200, not 409).
+    assert.equal(
+      result.status,
+      "rejected",
+      "status must be 'rejected' (not undefined, not 'failed')"
+    );
     assert.ok(typeof result.error === "string", "error must carry the rejection reason");
-    // This is the key FR-007 fix: status is defined → server returns 200, not 409.
+    // Status defined → server returns 200, not 409.
     assert.notEqual(result.status, undefined, "status must be defined to trigger 200 (not 409)");
   });
 });
@@ -1371,7 +1384,7 @@ describe("FR-003/FR-009 — auto run: judge dispatched; waitForSettled does not 
 
     const result = await waitPromise;
     assert.ok(result !== undefined, "waitForSettled must eventually resolve");
-    assert.equal(result.status, "success", "run must succeed after judge approves");
+    assert.equal(result.status, "succeeded", "run must succeed after judge approves");
     assert.equal(settled, true, "settled must be true after judge fires");
   });
 
@@ -1391,11 +1404,11 @@ describe("FR-003/FR-009 — auto run: judge dispatched; waitForSettled does not 
 
     const settled = await service.waitForSettled(runId);
     assert.ok(settled !== undefined);
-    assert.equal(settled.status, "success", "run must succeed when judge approves");
+    assert.equal(settled.status, "succeeded", "run must succeed when judge approves");
 
     const got = service.get(runId);
     assert.ok(got !== undefined);
-    assert.equal(got.status, "success");
+    assert.equal(got.status, "succeeded");
     assert.equal(got.gateDecisions.length, 1, "must record one GateDecision");
 
     const d = got.gateDecisions[0];
@@ -1430,7 +1443,7 @@ describe("FR-003/FR-009 — auto run: judge dispatched; waitForSettled does not 
 
     const settled = await service.waitForSettled(runId);
     assert.ok(settled !== undefined);
-    assert.equal(settled.status, "failed", "run must fail when judge rejects");
+    assert.equal(settled.status, "rejected", "run must be rejected when judge rejects");
 
     const got = service.get(runId);
     assert.ok(got !== undefined);
@@ -1516,7 +1529,11 @@ describe("FR-005 — malformed judge verdict degrades to manual after two attemp
 
     const got = service.get(runId);
     assert.ok(got !== undefined);
-    assert.equal(got.status, "suspended", "registry status must be suspended after degradation");
+    assert.equal(
+      got.status,
+      "awaiting_approval",
+      "registry status must be awaiting_approval after degradation"
+    );
     assert.ok(
       typeof got.judgeError === "string" && got.judgeError.length > 0,
       `judgeError must be set; got: ${JSON.stringify(got.judgeError)}`
@@ -1559,7 +1576,7 @@ describe("FR-005 — malformed judge verdict degrades to manual after two attemp
     assert.ok(settled !== undefined);
     assert.equal(
       settled.status,
-      "success",
+      "succeeded",
       "run must succeed when second attempt produces valid verdict"
     );
     assert.equal(callCount, 2, "runner called twice: malformed then valid");
@@ -1605,10 +1622,10 @@ describe("FR-003 — race guard: human approval while judge in flight supersedes
     // The run is suspended and the judge is in flight.
     // Human approves now — before the judge resolves.
     const humanApproval = await service.approve(runId, true);
-    assert.equal(humanApproval.status, "success", "human approval must succeed");
+    assert.equal(humanApproval.status, "succeeded", "human approval must succeed");
     assert.equal(resumeCount, 1, "resume must be called once (by human, not judge)");
 
-    // Now release the judge — it should see status !== "suspended" and mark as superseded.
+    // Now release the judge — it should see status !== "awaiting_approval" and mark as superseded.
     releaseJudge('{"verdict":"reject","reason":"Too slow."}');
 
     // Give the event loop a tick to process the judge's resolveGate call.
@@ -1616,7 +1633,11 @@ describe("FR-003 — race guard: human approval while judge in flight supersedes
 
     const got = service.get(runId);
     assert.ok(got !== undefined);
-    assert.equal(got.status, "success", "run status must remain success after superseded judge");
+    assert.equal(
+      got.status,
+      "succeeded",
+      "run status must remain succeeded after superseded judge"
+    );
     assert.equal(resumeCount, 1, "resume must still be called exactly once");
 
     // The judge's decision must be recorded as superseded.

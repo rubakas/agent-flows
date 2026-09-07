@@ -338,18 +338,23 @@
         background: color-mix(in srgb, var(--accent) 15%, transparent);
         color: var(--accent);
       }
-      .run-status.suspended {
+      .run-status.awaiting_approval {
         background: color-mix(in srgb, #9a7318 15%, transparent);
         color: #9a7318;
       }
       @media (prefers-color-scheme: dark) {
-        .run-status.suspended {
+        .run-status.awaiting_approval {
           color: #d9a441;
         }
       }
-      .run-status.success {
+      .run-status.succeeded {
         background: color-mix(in srgb, var(--ok) 15%, transparent);
         color: var(--ok);
+      }
+      .run-status.rejected {
+        background: color-mix(in srgb, var(--err) 15%, transparent);
+        color: var(--err);
+        opacity: 0.8;
       }
       .run-status.failed {
         background: color-mix(in srgb, var(--err) 15%, transparent);
@@ -822,8 +827,9 @@
       /** Return a CSS class name for a run/step status string. */
       function statusClass(s) {
         if (s === "running" || s === "started") return "running";
-        if (s === "suspended") return "suspended";
-        if (s === "success" || s === "completed") return "success";
+        if (s === "awaiting_approval") return "awaiting_approval";
+        if (s === "succeeded" || s === "completed") return "succeeded";
+        if (s === "rejected") return "rejected";
         if (s === "failed" || s === "cancelled" || s === "terminated") return "failed";
         return "";
       }
@@ -837,16 +843,17 @@
             wrap.innerHTML = `<p class="empty">No active runs.</p>`;
             return;
           }
-          const suspended = runs.filter((r) => r.status === "suspended");
+          const awaitingApproval = runs.filter((r) => r.status === "awaiting_approval");
           let html = "";
-          if (suspended.length) {
-            const noun = suspended.length === 1 ? "run" : "runs";
+          if (awaitingApproval.length) {
+            const noun = awaitingApproval.length === 1 ? "run" : "runs";
             html += `<div class="gate-box" style="margin-bottom:10px">
-              <p><strong>${escH(String(suspended.length))} suspended ${noun} — waiting for your approval.</strong></p>
+              <p><strong>${escH(String(awaitingApproval.length))} ${noun} awaiting your approval.</strong></p>
             </div>`;
           }
           const activeCount = runs.filter(
-            (r) => r.status === "running" || r.status === "started" || r.status === "suspended"
+            (r) =>
+              r.status === "running" || r.status === "started" || r.status === "awaiting_approval"
           ).length;
           if (activeCount > 0) {
             html += `<p style="font-size:12px;color:var(--muted);margin-bottom:6px">${escH(String(activeCount))} active, ${escH(String(runs.length))} total</p>`;
@@ -971,8 +978,8 @@
           <span class="run-status ${escH(sc)}">${escH(status)}</span>
         </div>`;
 
-        // Gate controls — shown only when the run is suspended.
-        if (status === "suspended" && snapshot.gateMessage) {
+        // Gate controls — shown only when the run is awaiting approval.
+        if (status === "awaiting_approval" && snapshot.gateMessage) {
           html += `<div class="gate-box">
             <p>${escH(snapshot.gateMessage)}</p>
             <div class="gate-actions">

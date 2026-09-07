@@ -71,7 +71,7 @@ const listPipelinesTool = createTool({
 const runPipelineTool = createTool({
   id: "run_pipeline",
   description:
-    "Start a pipeline run. Returns immediately. If the pipeline suspends at a gate, returns status='awaiting_approval' with the spec for review. If it completes, returns the final result.",
+    "Start a pipeline run. Returns immediately. Terminal statuses: 'awaiting_approval' (suspended at a gate, includes spec for review), 'succeeded' (completed successfully), 'rejected' (gate declined by human or judge), 'failed' (unexpected error).",
   inputSchema: z.object({
     pipeline: z.string().describe("Pipeline id (e.g. 'spec-creation')"),
     inputs: z.record(z.string(), z.string()).describe("Pipeline input values"),
@@ -107,7 +107,7 @@ const runPipelineTool = createTool({
     }
     const { runId } = (await startRes.json()) as { runId: string };
 
-    // Poll until the run leaves "running" — preserves the blocking contract (FR-005).
+    // Poll until the run leaves "running" — preserves the blocking contract.
     for (;;) {
       await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
       const getRes = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}`);
@@ -121,7 +121,7 @@ const runPipelineTool = createTool({
         result?: unknown;
       };
       if (state.status === "running") continue;
-      if (state.status === "awaiting_approval" || state.status === "suspended") {
+      if (state.status === "awaiting_approval") {
         return {
           runId,
           status: "awaiting_approval",
@@ -129,8 +129,11 @@ const runPipelineTool = createTool({
           spec: state.spec,
         };
       }
-      if (state.status === "success") {
-        return { runId, status: "success", result: state.result };
+      if (state.status === "succeeded") {
+        return { runId, status: "succeeded", result: state.result };
+      }
+      if (state.status === "rejected") {
+        return { runId, status: "rejected" };
       }
       return { runId, status: "failed" };
     }
@@ -140,28 +143,40 @@ const runPipelineTool = createTool({
 const approveTool = createTool({
   id: "approve",
   description:
-    "Resume a suspended pipeline run with an approval decision. approved=true persists the ticket; approved=false discards it.",
+    "Resume a suspended pipeline run with an approval decision. approved=true persists the ticket and continues the run; approved=false terminates it with status='rejected'. An optional free-text reason is stored with the gate decision.",
   inputSchema: z.object({
     runId: z.string().describe("Run ID returned by run_pipeline"),
-    approved: z.boolean().describe("true to approve and persist, false to discard"),
+    approved: z.boolean().describe("true to approve and persist, false to reject and terminate"),
+    reason: z
+      .string()
+      .optional()
+      .describe("Optional free-text reason for the decision, stored with the gate decision"),
   }),
   execute: async (inputData) => {
-    const { runId, approved } = inputData;
+    const { runId, approved, reason } = inputData;
     const res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}/approve`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ approved }),
+      body: JSON.stringify({ approved, ...(reason !== undefined ? { reason } : {}) }),
     });
     const data = (await res.json()) as {
       error?: string;
       status?: string;
       result?: unknown;
     };
-    if (!res.ok || data.error) {
+    // Only a 4xx/5xx response with no status field is a tool failure.
+    // A rejection (status:"rejected") is a normal lifecycle outcome — no error.
+    if (!res.ok && data.status === undefined) {
       return { error: data.error ?? `HTTP ${res.status}` };
     }
-    if (data.status === "success") {
-      return { runId, status: "success", result: data.result };
+    if (data.status === "succeeded") {
+      return { runId, status: "succeeded", result: data.result };
+    }
+    if (data.status === "rejected") {
+      return { runId, status: "rejected" };
+    }
+    if (data.status === "awaiting_approval") {
+      return { runId, status: "awaiting_approval" };
     }
     return { runId, status: "failed" };
   },

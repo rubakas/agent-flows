@@ -97,7 +97,7 @@ export interface StartResult {
  * it resolves when the run completes, fails, or the judge fails (degrading to manual).
  */
 export interface SettledResult {
-  status: "awaiting_approval" | "success" | "failed";
+  status: "awaiting_approval" | "succeeded" | "rejected" | "failed";
   gateMessage?: string;
   spec?: unknown;
   result?: unknown;
@@ -106,7 +106,7 @@ export interface SettledResult {
 
 export interface ApproveResult {
   runId: string;
-  status?: "awaiting_approval" | "success" | "failed";
+  status?: "awaiting_approval" | "succeeded" | "rejected" | "failed";
   gateMessage?: string;
   spec?: unknown;
   result?: unknown;
@@ -126,7 +126,7 @@ export interface StepState {
 export interface GetResult {
   runId: string;
   pipelineId: string;
-  status: "running" | "suspended" | "success" | "failed";
+  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed";
   /** Run-level gate mode (FR-001). */
   gateMode: GateMode;
   /** Per-step states accumulated in flight (FR-006). Always present; empty before any step fires. */
@@ -134,15 +134,15 @@ export interface GetResult {
   /** All gate decisions recorded so far (FR-008). Empty until a gate is decided. */
   gateDecisions: GateDecision[];
   result?: unknown;
-  /** Present only when status is "suspended" — the pending gate's human-readable prompt. */
+  /** Present only when status is "awaiting_approval" — the pending gate's human-readable prompt. */
   gateMessage?: string;
-  /** Present only when status is "suspended" — the spec the human is being asked to approve. */
+  /** Present only when status is "awaiting_approval" — the spec the human is being asked to approve. */
   spec?: unknown;
-  /** Present only when status is "failed" — a brief description of why the run failed. */
+  /** Present only when status is "failed" or "rejected" — a brief description of why the run ended. */
   error?: string;
   /**
    * Set when the judge produced a malformed verdict after two attempts or encountered a
-   * transport error (FR-005). The run degrades to manual: it remains suspended so a human
+   * transport error (FR-005). The run degrades to manual: it remains awaiting_approval so a human
    * can answer instead. Cleared when a new suspension is recorded.
    */
   judgeError?: string;
@@ -152,7 +152,7 @@ export interface GetResult {
 export interface RunSummary {
   runId: string;
   pipelineId: string;
-  status: "running" | "suspended" | "success" | "failed";
+  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed";
   /** ISO-8601 timestamp of when start() was called. */
   createdAt: string;
 }
@@ -184,7 +184,7 @@ export interface JudgeDeps {
 interface RunRecord {
   pipelineId: string;
   run: MastraRun;
-  status: "running" | "suspended" | "success" | "failed";
+  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed";
   /** Set once in start(); never mutated. */
   readonly createdAt: Date;
   /** Run-level gate mode (FR-001). */
@@ -355,7 +355,7 @@ export class RunService {
       ...(record.error !== undefined ? { error: record.error } : {}),
       ...(record.judgeError !== undefined ? { judgeError: record.judgeError } : {}),
     };
-    if (record.status === "suspended") {
+    if (record.status === "awaiting_approval") {
       const payload = record.suspendPayload as Record<string, unknown> | undefined;
       out.gateMessage = (payload?.message as string | undefined) ?? "Approve this spec?";
       out.spec = payload?.spec;
@@ -392,11 +392,11 @@ export class RunService {
    *
    * Records a GateDecision with decidedBy:"human" (FR-008).
    */
-  async approve(runId: string, approved: boolean): Promise<ApproveResult> {
+  async approve(runId: string, approved: boolean, reason?: string): Promise<ApproveResult> {
     const record = this.registry.get(runId);
     if (!record) return { runId, error: `No run found for runId "${runId}"` };
-    if (record.status !== "suspended") {
-      return { runId, error: `Run ${runId} is not suspended (status: ${record.status})` };
+    if (record.status !== "awaiting_approval") {
+      return { runId, error: `Run ${runId} is not awaiting approval (status: ${record.status})` };
     }
 
     // Take the state transition synchronously — before the first await.
@@ -410,13 +410,16 @@ export class RunService {
       mode: record.gateMode,
       decidedBy: "human",
       approved,
+      // Store the human-supplied reason when present; omit when absent so the
+      // field remains undefined rather than holding an empty string (FR-006).
+      ...(reason !== undefined ? { reason } : {}),
       decidedAt: new Date().toISOString(),
     };
     record.gateDecisions.push(decision);
 
     const r2 = await record.run.resume({
       step: record.suspendedStep!,
-      resumeData: { approved, mode: record.gateMode },
+      resumeData: { approved, mode: record.gateMode, reason },
     });
 
     const settled = this.applyWorkflowResult(record, r2);
@@ -439,8 +442,11 @@ export class RunService {
         spec: settled.spec,
       };
     }
-    if (settled.status === "success") {
-      return { runId, status: "success", result: settled.result };
+    if (settled.status === "succeeded") {
+      return { runId, status: "succeeded", result: settled.result };
+    }
+    if (settled.status === "rejected") {
+      return { runId, status: "rejected", error: settled.error };
     }
     return { runId, status: "failed", error: settled.error };
   }
@@ -460,7 +466,7 @@ export class RunService {
             `cannot resume safely. A wrong-step resume is worse than a loud failure.`
         );
       }
-      record.status = "suspended";
+      record.status = "awaiting_approval";
       record.suspendedStep = suspendedPath;
       // Clear any previous judge error when a new gate appears.
       record.judgeError = undefined;
@@ -475,9 +481,17 @@ export class RunService {
       };
     }
     if (r.status === "success") {
-      record.status = "success";
+      record.status = "succeeded";
       record.result = r.result;
-      return { status: "success", result: r.result };
+      return { status: "succeeded", result: r.result };
+    }
+    // A GateRejectedError is a deliberate human/agent "no" — distinct from an unexpected
+    // failure. Map it to "rejected" so callers can tell rejection apart from real errors.
+    if (r.error?.name === "GateRejectedError") {
+      record.status = "rejected";
+      const errStr = r.error.message;
+      record.error = errStr;
+      return { status: "rejected", error: errStr };
     }
     record.status = "failed";
     const errStr = r.error
@@ -511,7 +525,7 @@ export class RunService {
   /**
    * Resume the gate with an agent decision, honouring the single-flight guard.
    *
-   * If the run has already left "suspended" (human approved while judge was in flight),
+   * If the run has already left "awaiting_approval" (human approved while judge was in flight),
    * the verdict is recorded as superseded without applying (FR-003 race).
    */
   private async resolveGate(
@@ -519,7 +533,7 @@ export class RunService {
     approved: boolean,
     decision: GateDecision
   ): Promise<void> {
-    if (record.status !== "suspended") {
+    if (record.status !== "awaiting_approval") {
       // Race: human beat the judge. Record as superseded, do not apply.
       decision.superseded = true;
       record.gateDecisions.push(decision);

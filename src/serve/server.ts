@@ -311,9 +311,10 @@ export function readAgentFlowsConfig(projectDir: string): string | undefined {
  * (useful when port 0 was requested) and a close function.
  */
 export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle> {
-  const pipelinesDir = opts.pipelinesDir ?? join(process.cwd(), "pipelines");
+  // opts.pipelinesDir is an explicit override (used by tests to pin a specific dir).
+  // When absent, the canon directory is resolved per-request from projectDir (FR-004).
+  const explicitPipelinesDir: string | undefined = opts.pipelinesDir;
   const dbPath = opts.dbPath ?? join(process.cwd(), "agent-flows.sqlite");
-  const root = dirname(pipelinesDir); // launch root — one level above pipelines/
   const db = makeDb(dbPath);
   const runService = opts.runService ?? null;
   const uiPath = join(__dirname, "ui.html");
@@ -331,7 +332,30 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
   // boundPort is updated once the OS assigns a port (important when port: 0).
   let boundPort = opts.port ?? 7411;
 
+  // FR-004: tracks the last-logged source so we emit one log line per transition,
+  // not one per request. null means no line has been emitted yet.
+  let lastCanonSource: "bundled" | "project" | null = null;
+
   const server = nodeCreateServer((req, res) => {
+    // FR-004: resolve the pipelines directory per-request so that a workflow
+    // installed while the daemon is running is reflected on the very next request,
+    // with no restart required. When an explicit pipelinesDir was passed (test/legacy
+    // path), skip resolution and use it directly.
+    let pipelinesDir: string;
+    if (explicitPipelinesDir !== undefined) {
+      pipelinesDir = explicitPipelinesDir;
+    } else {
+      const resolved = resolveCanonDir(projectDir);
+      if (resolved.source !== lastCanonSource) {
+        console.log(
+          `agent-flows serve: pipelines from ${resolved.source} (${resolved.pipelinesDir})`
+        );
+        lastCanonSource = resolved.source;
+      }
+      pipelinesDir = resolved.pipelinesDir;
+    }
+    const root = dirname(pipelinesDir);
+
     void handleRequest(req, res, {
       pipelinesDir,
       root,
@@ -760,12 +784,14 @@ async function handleRequest(
       json(res, 400, { error: "Malformed JSON body" });
       return;
     }
-    const { approved } = parsed.value;
+    const { approved, reason } = parsed.value;
     if (typeof approved !== "boolean") {
       json(res, 400, { error: 'Field "approved" must be a boolean' });
       return;
     }
-    const result = await runService.approve(id, approved);
+    // reason is optional free-text; ignore anything that is not a string (FR-006).
+    const reasonStr = typeof reason === "string" ? reason : undefined;
+    const result = await runService.approve(id, approved, reasonStr);
     if (result.status === undefined) {
       // The call could not be processed (no run, wrong status, etc.) — 409.
       json(res, 409, { error: result.error });
@@ -1331,7 +1357,11 @@ if (process.argv[1] === __filename) {
   const mastra = new Mastra({ storage: mastraStorage, workflows });
   const runService = new RunServiceClass(mastra);
 
-  const handle = await startServer({ port, dbPath, pipelinesDir, runService, projectDir });
+  // FR-004: pipelinesDir is NOT passed to startServer so the HTTP layer resolves
+  // the canon directory per-request. Mastra workflows are already built above from
+  // the startup snapshot; newly-installed pipelines appear in GET /api/pipelines
+  // immediately but require a restart to become executable (hot-reload is out of scope).
+  const handle = await startServer({ port, dbPath, runService, projectDir });
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
   console.log(`agent-flows serve listening on http://127.0.0.1:${handle.port}`);
 }
