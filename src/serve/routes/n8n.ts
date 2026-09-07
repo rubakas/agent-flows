@@ -2,21 +2,26 @@
 // A per-resource module: only ever invoked from server.ts's handleRequest,
 // after the Host/content-type/Origin preamble has already run.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { json } from "../route-helpers.js";
 import type { ServerResponse } from "node:http";
 
 /**
- * The n8n global config file path. Lives in `~/.agent-flows/n8n.json`.
- * Format: `{"baseUrl": "...", "apiKey": "..."}`.
- *
- * The file is outside every project directory so it cannot be committed with a project.
- * The apiKey must NEVER appear in any response, error message, or log line.
+ * Returns the path to the n8n global config file (`~/.agent-flows/n8n.json`).
+ * Evaluated lazily on every call so tests can redirect HOME to a temporary
+ * directory without the path being fixed at module import time.
+ * The apiKey stored in this file must NEVER appear in any response, error
+ * message, or log line.
  */
-export const N8N_GLOBAL_CONFIG_PATH = join(homedir(), ".agent-flows", "n8n.json");
+export function getN8nGlobalConfigPath(): string {
+  // Prefer process.env.HOME so tests can isolate file writes without touching
+  // the owner's real ~/.agent-flows/n8n.json.
+  const home = process.env.HOME ?? homedir();
+  return join(home, ".agent-flows", "n8n.json");
+}
 
 export interface N8nConfig {
   configured: true;
@@ -24,6 +29,8 @@ export interface N8nConfig {
   baseUrl: string;
   /** API key for n8n — daemon-side only; NEVER sent to clients. */
   apiKey: string;
+  /** Where the configuration came from — drives UI copy and form-disabled state. */
+  source: "environment" | "file";
 }
 
 /**
@@ -37,15 +44,21 @@ export function readN8nConfig(): N8nConfig | null {
   const envUrl = process.env.AGENT_FLOWS_N8N_URL;
   const envKey = process.env.AGENT_FLOWS_N8N_API_KEY;
   if (envUrl && envKey) {
-    return { configured: true, baseUrl: envUrl.replace(/\/+$/u, ""), apiKey: envKey };
+    return {
+      configured: true,
+      baseUrl: envUrl.replace(/\/+$/u, ""),
+      apiKey: envKey,
+      source: "environment",
+    };
   }
-  if (!existsSync(N8N_GLOBAL_CONFIG_PATH)) return null;
+  const configPath = getN8nGlobalConfigPath();
+  if (!existsSync(configPath)) return null;
   try {
-    const raw = JSON.parse(readFileSync(N8N_GLOBAL_CONFIG_PATH, "utf8")) as Record<string, unknown>;
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
     const baseUrl = typeof raw.baseUrl === "string" ? raw.baseUrl.replace(/\/+$/u, "") : undefined;
     const apiKey = typeof raw.apiKey === "string" ? raw.apiKey : undefined;
     if (!baseUrl || !apiKey) return null;
-    return { configured: true, baseUrl, apiKey };
+    return { configured: true, baseUrl, apiKey, source: "file" };
   } catch {
     return null;
   }
@@ -62,11 +75,49 @@ export function requireN8nConfig(res: ServerResponse): N8nConfig | undefined {
   const cfg = readN8nConfig();
   if (!cfg) {
     json(res, 503, {
-      error: `n8n is not configured — add a baseUrl and apiKey to ${N8N_GLOBAL_CONFIG_PATH}`,
+      error: `n8n is not configured — add a baseUrl and apiKey to ${getN8nGlobalConfigPath()}`,
     });
     return undefined;
   }
   return cfg;
+}
+
+/** Validate and normalise a candidate n8n base URL. */
+export type UrlValidationResult = { ok: true; normalized: string } | { ok: false; error: string };
+
+export function validateN8nBaseUrl(raw: string): UrlValidationResult {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { ok: false, error: "baseUrl must be a valid URL (http or https)" };
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { ok: false, error: "baseUrl must use http or https" };
+  }
+  return { ok: true, normalized: raw.replace(/\/+$/u, "") };
+}
+
+/**
+ * Write `{ baseUrl, apiKey }` to `~/.agent-flows/n8n.json` with mode 0600.
+ * The directory is created (mode 0700) if absent. The apiKey must never appear
+ * in any response or log line — this function only writes it to disk.
+ */
+export function writeN8nConfig(baseUrl: string, apiKey: string): void {
+  const configPath = getN8nGlobalConfigPath();
+  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
+  writeFileSync(configPath, JSON.stringify({ baseUrl, apiKey }), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+/** Remove `~/.agent-flows/n8n.json` if it exists. */
+export function deleteN8nConfig(): void {
+  const configPath = getN8nGlobalConfigPath();
+  if (existsSync(configPath)) {
+    unlinkSync(configPath);
+  }
 }
 
 export interface FetchN8nInit {

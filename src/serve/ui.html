@@ -289,7 +289,10 @@
         color: var(--ink-2);
       }
       #dialog select,
-      #dialog input[type="text"] {
+      #dialog input[type="text"],
+      #dialog input[type="password"],
+      #n8n-cfg-dialog input[type="text"],
+      #n8n-cfg-dialog input[type="password"] {
         width: 100%;
         font: inherit;
         font-size: 13px;
@@ -300,11 +303,49 @@
         color: var(--ink);
         margin-bottom: 12px;
       }
-      #dialog .dialog-actions {
+      #dialog .dialog-actions,
+      #n8n-cfg-dialog .dialog-actions {
         display: flex;
         gap: 8px;
         justify-content: flex-end;
         margin-top: 4px;
+      }
+      #n8n-cfg-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.35);
+        z-index: 200;
+        align-items: center;
+        justify-content: center;
+      }
+      #n8n-cfg-backdrop.open {
+        display: flex;
+      }
+      #n8n-cfg-dialog {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 20px;
+        width: 420px;
+        max-width: 96vw;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+      }
+      #n8n-cfg-dialog h3 {
+        font-size: 15px;
+        margin-bottom: 14px;
+      }
+      #n8n-cfg-dialog label {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 4px;
+        color: var(--ink-2);
+      }
+      /* "Edit in n8n" buttons that are visually disabled but still clickable
+         so the user can reach the configure dialog rather than a dead button. */
+      .btn.btn-unconfigured {
+        opacity: 0.45;
+        cursor: pointer;
       }
       #flash {
         position: fixed;
@@ -391,6 +432,12 @@
       <h1>agent-flows</h1>
       <span class="spacer"></span>
       <span id="n8n-status-badge" style="font-size: 12px; color: var(--muted)">n8n: checking…</span>
+      <button class="btn" id="btn-n8n-connect" style="display: none; font-size: 12px">
+        Connect n8n
+      </button>
+      <button class="btn danger" id="btn-n8n-disconnect" style="display: none; font-size: 12px">
+        Disconnect n8n
+      </button>
       <button class="btn" id="btn-new-in-n8n" style="display: none">New in n8n</button>
       <button class="btn primary" id="btn-save-from-n8n" style="display: none">
         Save from n8n…
@@ -445,6 +492,27 @@
         <button class="btn" id="btn-close-detail">✕</button>
       </div>
       <div id="detail-body"></div>
+    </div>
+
+    <!-- Configure n8n dialog (FR-008) -->
+    <div id="n8n-cfg-backdrop">
+      <div id="n8n-cfg-dialog">
+        <h3>Connect n8n</h3>
+        <label for="cfg-base-url">Base URL</label>
+        <input
+          type="text"
+          id="cfg-base-url"
+          placeholder="https://your-n8n.example.com"
+          autocomplete="off"
+        />
+        <label for="cfg-api-key">API key</label>
+        <input type="password" id="cfg-api-key" placeholder="n8n API key" autocomplete="off" />
+        <div class="dialog-actions">
+          <button class="btn" id="btn-cfg-cancel">Cancel</button>
+          <button class="btn primary" id="btn-cfg-connect">Connect</button>
+        </div>
+        <div id="cfg-error" class="error-box" style="display: none; margin-top: 10px"></div>
+      </div>
     </div>
 
     <!-- Save-from-n8n dialog -->
@@ -545,23 +613,59 @@
       // ── n8n state ──────────────────────────────────────────────────────────
 
       let n8nBaseUrl = null;
+      // true when the connection comes from env vars — no file write possible
+      let n8nFromEnv = false;
 
       async function loadN8nStatus() {
+        const badge = document.getElementById("n8n-status-badge");
+        const btnConnect = document.getElementById("btn-n8n-connect");
+        const btnDisconnect = document.getElementById("btn-n8n-disconnect");
         try {
           const s = await api("GET", "/api/n8n/status");
           if (s.configured) {
             n8nBaseUrl = s.baseUrl;
-            document.getElementById("n8n-status-badge").textContent = "n8n: connected";
-            document.getElementById("n8n-status-badge").style.color = "var(--ok)";
+            n8nFromEnv = s.source === "environment";
+            badge.textContent = n8nFromEnv ? "n8n: via environment" : "n8n: connected";
+            badge.style.color = "var(--ok)";
+            // When env vars supply the config, writing a file would be ignored —
+            // hide the disconnect action so the user doesn't expect it to work.
+            btnConnect.style.display = "none";
+            btnDisconnect.style.display = n8nFromEnv ? "none" : "";
             document.getElementById("btn-new-in-n8n").style.display = "";
             document.getElementById("btn-save-from-n8n").style.display = "";
           } else {
-            document.getElementById("n8n-status-badge").textContent = "n8n: not configured";
+            n8nBaseUrl = null;
+            n8nFromEnv = false;
+            badge.textContent = "n8n: not configured";
+            badge.style.color = "";
+            btnConnect.style.display = "";
+            btnDisconnect.style.display = "none";
+            document.getElementById("btn-new-in-n8n").style.display = "none";
+            document.getElementById("btn-save-from-n8n").style.display = "none";
           }
         } catch {
-          document.getElementById("n8n-status-badge").textContent = "n8n: error";
+          badge.textContent = "n8n: error";
         }
       }
+
+      function openN8nConfigDialog() {
+        document.getElementById("cfg-error").style.display = "none";
+        document.getElementById("n8n-cfg-backdrop").classList.add("open");
+        document.getElementById("cfg-base-url").focus();
+      }
+
+      document.getElementById("btn-n8n-connect").onclick = openN8nConfigDialog;
+      document.getElementById("btn-n8n-disconnect").onclick = async () => {
+        if (!confirm("Disconnect n8n? The stored config file will be removed.")) return;
+        try {
+          await api("DELETE", "/api/n8n/configure", {});
+          flash("n8n disconnected");
+          await loadN8nStatus();
+          loadProjectTier();
+        } catch (e) {
+          flash(e.message, true);
+        }
+      };
 
       document.getElementById("btn-new-in-n8n").onclick = () => {
         if (n8nBaseUrl) window.open(`${n8nBaseUrl}/workflow/new`, "_blank");
@@ -587,7 +691,7 @@
               <td><span class="tier-badge tier-project">project</span></td>
               <td class="actions">
                 <button class="btn" data-view-project="${escH(id)}">View</button>
-                <button class="btn" data-edit-n8n="${escH(id)}" ${n8nBaseUrl ? "" : 'disabled title="n8n not configured"'}>Edit in n8n</button>
+                <button class="btn${n8nBaseUrl ? "" : " btn-unconfigured"}" data-edit-n8n="${escH(id)}" title="${n8nBaseUrl ? "Push to n8n and open editor" : "Connect n8n to enable — click to configure"}">Edit in n8n</button>
                 <button class="btn danger" data-del-project="${escH(id)}">Delete</button>
               </td>
             </tr>`;
@@ -610,9 +714,14 @@
             };
           });
 
-          // Wire edit-in-n8n buttons
+          // Wire edit-in-n8n buttons. When n8n is not configured, redirect to
+          // the configure dialog instead of being silently inert (FR-008).
           wrap.querySelectorAll("[data-edit-n8n]").forEach((btn) => {
             btn.onclick = async () => {
+              if (!n8nBaseUrl) {
+                openN8nConfigDialog();
+                return;
+              }
               try {
                 const r = await api(
                   "POST",
@@ -807,6 +916,45 @@
         } catch (e) {
           dlgError.textContent = escH(e.message);
           dlgError.style.display = "";
+        }
+      };
+
+      // ── Configure n8n dialog (FR-008) ─────────────────────────────────────
+
+      const n8nCfgBackdrop = document.getElementById("n8n-cfg-backdrop");
+      document.getElementById("btn-cfg-cancel").onclick = () =>
+        n8nCfgBackdrop.classList.remove("open");
+      n8nCfgBackdrop.onclick = (e) => {
+        if (e.target === n8nCfgBackdrop) n8nCfgBackdrop.classList.remove("open");
+      };
+
+      document.getElementById("btn-cfg-connect").onclick = async () => {
+        const baseUrl = document.getElementById("cfg-base-url").value.trim();
+        const apiKey = document.getElementById("cfg-api-key").value;
+        const cfgError = document.getElementById("cfg-error");
+        cfgError.style.display = "none";
+
+        if (!baseUrl) {
+          cfgError.textContent = "Base URL is required";
+          cfgError.style.display = "";
+          return;
+        }
+        if (!apiKey) {
+          cfgError.textContent = "API key is required";
+          cfgError.style.display = "";
+          return;
+        }
+        try {
+          await api("POST", "/api/n8n/configure", { baseUrl, apiKey });
+          n8nCfgBackdrop.classList.remove("open");
+          document.getElementById("cfg-base-url").value = "";
+          document.getElementById("cfg-api-key").value = "";
+          flash("n8n connected");
+          await loadN8nStatus();
+          loadProjectTier();
+        } catch (e) {
+          cfgError.textContent = escH(e.message);
+          cfgError.style.display = "";
         }
       };
 

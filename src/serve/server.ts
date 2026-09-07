@@ -50,7 +50,14 @@ import {
   safePath,
 } from "./route-helpers.js";
 import { CONTENT_CAP, handleNamedContent } from "./routes/content.js";
-import { fetchN8n, readN8nConfig, requireN8nConfig } from "./routes/n8n.js";
+import {
+  deleteN8nConfig,
+  fetchN8n,
+  readN8nConfig,
+  requireN8nConfig,
+  validateN8nBaseUrl,
+  writeN8nConfig,
+} from "./routes/n8n.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -1177,15 +1184,52 @@ async function handleRequest(
 
   // ── n8n status and proxy routes (FR-005/FR-006/FR-011) ────────────────────
 
-  // GET /api/n8n/status — return whether n8n is configured and the base URL (FR-005)
-  // The API key NEVER appears in this response.
+  // GET /api/n8n/status — return whether n8n is configured and the base URL (FR-005/FR-008)
+  // The API key NEVER appears in this response. The `source` field tells the
+  // UI whether to disable the configure form (env vars cannot be overridden by writing a file).
   if (method === "GET" && pathname === "/api/n8n/status") {
     const cfg = readN8nConfig();
     if (!cfg) {
       json(res, 200, { configured: false });
     } else {
-      json(res, 200, { configured: true, baseUrl: cfg.baseUrl });
+      json(res, 200, { configured: true, baseUrl: cfg.baseUrl, source: cfg.source });
     }
+    return;
+  }
+
+  // POST /api/n8n/configure — store n8n connection config (FR-008)
+  // The API key is written to disk only; it NEVER appears in any response,
+  // error message, or log line, including validation errors.
+  if (method === "POST" && pathname === "/api/n8n/configure") {
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { baseUrl, apiKey } = parsed.value;
+    if (typeof baseUrl !== "string" || !baseUrl) {
+      json(res, 400, { error: 'Field "baseUrl" is required' });
+      return;
+    }
+    const validated = validateN8nBaseUrl(baseUrl);
+    if (!validated.ok) {
+      json(res, 400, { error: validated.error });
+      return;
+    }
+    if (typeof apiKey !== "string" || !apiKey) {
+      json(res, 400, { error: 'Field "apiKey" is required' });
+      return;
+    }
+    writeN8nConfig(validated.normalized, apiKey);
+    json(res, 200, { configured: true, baseUrl: validated.normalized });
+    return;
+  }
+
+  // DELETE /api/n8n/configure — remove stored n8n config (FR-008)
+  if (method === "DELETE" && pathname === "/api/n8n/configure") {
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+    deleteN8nConfig();
+    json(res, 200, { configured: false });
     return;
   }
 
