@@ -79,10 +79,21 @@ const runPipelineTool = createTool({
       .record(z.string(), z.string())
       .optional()
       .describe("Optional per-step model overrides (step id → registry model id)"),
+    gateMode: z
+      .enum(["manual", "auto"])
+      .optional()
+      .describe(
+        'Gate evaluation mode. "manual" (default): gates wait for human approval. "auto": a judge model evaluates each gate; falls back to manual on judge failure.'
+      ),
   }),
   execute: async (inputData) => {
-    const { pipeline, inputs, models } = inputData;
-    const body = { pipeline, inputs, ...(models ? { models } : {}) };
+    const { pipeline, inputs, models, gateMode } = inputData;
+    const body = {
+      pipeline,
+      inputs,
+      ...(models ? { models } : {}),
+      ...(gateMode ? { gateMode } : {}),
+    };
 
     // POST to the daemon — fails loudly if the daemon is not running.
     const startRes = await daemonFetch("/api/runs", {

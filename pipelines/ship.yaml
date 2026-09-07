@@ -9,6 +9,7 @@ steps:
   - id: approve
     kind: gate
     message: Commit all staged changes and open a pull request?
+    manualOnly: true
   # Runs real git commands. The gate above must pass before these steps execute.
   # `git add -u` stages only files git already tracks: `-A` would sweep in local,
   # untracked files such as .claude/launch.json that were never meant to be committed.

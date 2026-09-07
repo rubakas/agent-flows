@@ -667,10 +667,11 @@ async function handleRequest(
       json(res, 400, { error: "Malformed JSON body" });
       return;
     }
-    const { pipeline, inputs, models } = parsed.value as {
+    const { pipeline, inputs, models, gateMode } = parsed.value as {
       pipeline?: unknown;
       inputs?: unknown;
       models?: unknown;
+      gateMode?: unknown;
     };
     if (typeof pipeline !== "string") {
       json(res, 400, { error: 'Field "pipeline" must be a string' });
@@ -680,11 +681,17 @@ async function handleRequest(
       json(res, 400, { error: 'Field "inputs" must be an object' });
       return;
     }
+    if (gateMode !== undefined && gateMode !== "manual" && gateMode !== "auto") {
+      json(res, 400, { error: 'Field "gateMode" must be "manual" or "auto"' });
+      return;
+    }
     const wfInput: Record<string, unknown> = {
       ...(inputs as Record<string, unknown>),
       ...(models !== undefined ? { models } : {}),
     };
-    const result = await ctx.runService.start(pipeline, wfInput);
+    const result = await ctx.runService.start(pipeline, wfInput, {
+      gateMode: gateMode ?? "manual",
+    });
     json(res, 200, result);
     return;
   }
@@ -789,8 +796,8 @@ async function handleRequest(
       return;
     }
     const result = await ctx.runService.approve(id, approved);
-    if (result.error) {
-      // A non-suspended run (already resolved, still running, or unknown) is a 409.
+    if (result.status === undefined) {
+      // The call could not be processed (no run, wrong status, etc.) — 409.
       json(res, 409, { error: result.error });
       return;
     }

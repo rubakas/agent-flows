@@ -198,18 +198,17 @@ describe("buildPipelineWorkflow — rejected gate", () => {
         resumeData: { approved: false },
       });
 
-      assert.equal(r2.status, "success", "workflow should succeed");
-      // approved:false → persist-ticket step skips → no ticket
+      // FR-006: rejection throws GateRejectedError; workflow fails immediately.
+      // Downstream persist-ticket never runs, so no ticket is created.
+      assert.equal(r2.status, "failed", "workflow must fail on rejection (FR-006)");
+      const err = r2.error as Error | undefined;
+      assert.equal(err?.name, "GateRejectedError", "error must be GateRejectedError");
+      assert.ok(
+        err?.message.includes('"approve"'),
+        `error message must name the gate; got: ${err?.message}`
+      );
       const tickets = await store.listTickets();
       assert.equal(tickets.length, 0, "no ticket should be created on rejection");
-
-      // Result should carry approve.approved:false (gate step id "approve" + ".approved").
-      const result = r2.result as Record<string, unknown> | undefined;
-      assert.equal(
-        result?.["approve.approved"],
-        false,
-        "result should have approve.approved:false"
-      );
     } finally {
       cleanup();
     }
@@ -1494,7 +1493,8 @@ describe("buildPipelineWorkflow — export-spec step writes spec.md", () => {
         assert.equal(r1.status, "suspended");
 
         const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: false } });
-        assert.equal(r2.status, "success");
+        // FR-006: rejection fails the workflow immediately; export-spec never runs.
+        assert.equal(r2.status, "failed", "workflow must fail on rejection (FR-006)");
 
         assert.ok(!existsSync(join(outDir, "spec.md")), "spec.md must NOT be written on rejection");
       } finally {
@@ -1711,8 +1711,8 @@ const TWO_GATE_PIPELINE: LoadedPipeline = {
   },
 };
 
-describe("buildPipelineWorkflow — two-gate key collision: first rejection not overwritten by second approval", () => {
-  it("gate1 rejects, gate2 approves: persist skips because it reads gate1's decision", async () => {
+describe("buildPipelineWorkflow — gate rejection terminates run, downstream gates unreachable", () => {
+  it("gate1 rejects: run fails immediately, gate2 never executes, no ticket created (FR-006)", async () => {
     const { storage, store, cleanup } = makeTestFixture("two-gate-collision");
     try {
       const wf = buildPipelineWorkflow(TWO_GATE_PIPELINE, {
@@ -1732,23 +1732,19 @@ describe("buildPipelineWorkflow — two-gate key collision: first rejection not 
       assert.equal(r1.status, "suspended", "workflow must suspend at gate1");
       assert.equal(r1.suspended?.[0]?.[0], "gate1", "must be suspended at gate1");
 
-      // gate1 REJECTS.
+      // gate1 REJECTS — FR-006: GateRejectedError terminates the run.
       const r2 = await run.resume({ step: r1.suspended![0], resumeData: { approved: false } });
-      assert.equal(r2.status, "suspended", "workflow must re-suspend at gate2");
-      assert.equal(r2.suspended?.[0]?.[0], "gate2", "must be suspended at gate2");
-
-      // gate2 APPROVES — must NOT override gate1's rejection for persist.
-      const r3 = await run.resume({ step: r2.suspended![0], resumeData: { approved: true } });
-      assert.equal(r3.status, "success", "workflow must succeed after both gates");
-
-      // The key assertion: gate1 rejected, so persist must have skipped.
-      const tickets = await store.listTickets();
-      assert.equal(
-        tickets.length,
-        0,
-        "persist must skip when gate1 (its authoritative gate) rejected — " +
-          "fails before fix because gate2's approval overwrites gate1's rejection in the shared 'approved' key"
+      assert.equal(r2.status, "failed", "workflow must fail when gate1 is rejected (FR-006)");
+      const err = r2.error as Error | undefined;
+      assert.equal(err?.name, "GateRejectedError", "error must be GateRejectedError");
+      assert.ok(
+        err?.message.includes('"gate1"'),
+        `error message must name gate1; got: ${err?.message}`
       );
+
+      // gate2 was never reached — no ticket created.
+      const tickets = await store.listTickets();
+      assert.equal(tickets.length, 0, "no ticket must be created when gate1 rejects");
     } finally {
       cleanup();
     }

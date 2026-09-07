@@ -7,8 +7,10 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { ModelRegistry } from "../canon/registry.js";
 import { RunService } from "./runService.js";
-import type { MastraLike, StepEvent } from "./runService.js";
+import type { JudgeDeps, MastraLike, StepEvent } from "./runService.js";
+import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -856,5 +858,627 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
       undefined,
       "no excerpt when output absent"
     );
+  });
+});
+
+// ── Tests: FR-006 — rejection terminates the run ──────────────────────────────
+//
+// Test plan item 4: prove that downstream steps (commit/pr) never execute when
+// a gate is rejected. The mock simulates what happens when GateRejectedError is
+// thrown inside buildGateStep: Mastra marks the workflow failed.
+//
+// Companion pin: the old semantics (pre-FR-006) would write approved:false into
+// context and return status:"success", allowing downstream steps to execute.
+// That inversion is documented as a comment because reproducing it at runtime
+// would create a real commit and a real public PR.
+
+describe("FR-006 — gate rejection terminates the run; downstream steps never execute", () => {
+  it("approve(runId, false) fails the run: status is 'failed', resume called once", async () => {
+    // Mock a run where rejection yields status:"failed" (what GateRejectedError produces).
+    const rejectedResult = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected (manual): no reason given'), {
+        name: "GateRejectedError",
+      }),
+    };
+
+    let resumeCount = 0;
+    const checkExecuted: string[] = [];
+
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-fr006",
+      watchers: [],
+      start: async () => suspendedResult("run-fr006"),
+      resume: async () => {
+        resumeCount++;
+        return rejectedResult;
+      },
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun));
+    const { runId } = await service.start("ship", { plan: "" });
+    await service.waitForSettled(runId);
+
+    const result = await service.approve(runId, false);
+
+    // The call was processed (status is defined) — not a 409 scenario.
+    assert.ok(result.status !== undefined, "status must be defined (call was processed)");
+    assert.equal(result.status, "failed", "reject must fail the run");
+    assert.ok(
+      typeof result.error === "string" && result.error.includes("GateRejectedError"),
+      `error must include GateRejectedError; got: ${result.error}`
+    );
+
+    // resume was called exactly once — no downstream step invocations.
+    assert.equal(resumeCount, 1, "resume must be called exactly once");
+    assert.equal(checkExecuted.length, 0, "no downstream check steps must execute");
+
+    // Companion pin: OLD SEMANTICS would return status:"success" and allow downstream steps.
+    // The inversion was: buildGateStep wrote approved:false into context and returned,
+    // so Mastra continued to commit/pr steps (dependsOn: [approve] passed with approved:false).
+    // Verified by code reading on 2026-09-07; runtime reproduction deliberately not executed
+    // (would create a real commit and public PR).
+  });
+
+  it("run status is 'failed' and get() reflects it after rejection", async () => {
+    const rejectedResult = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected (manual): no reason given'), {
+        name: "GateRejectedError",
+      }),
+    };
+
+    const mockRun = makeMockRun("run-fr006-get", suspendedResult("run-fr006-get"), rejectedResult);
+    const service = new RunService(makeMastra(mockRun));
+
+    const { runId } = await service.start("ship", { plan: "" });
+    await service.waitForSettled(runId);
+
+    await service.approve(runId, false);
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.status, "failed", "get() must show failed after rejection");
+    assert.ok(
+      typeof got.error === "string" && got.error.length > 0,
+      "get().error must be a non-empty string after rejection"
+    );
+  });
+});
+
+// ── Tests: FR-007 — approve route HTTP status fix ─────────────────────────────
+//
+// Test plan item 5: a processed approval whose run fails (e.g. rejection) must
+// return HTTP 200 with {status:"failed"}, not 409. A 409 is reserved for when
+// the approval itself could not be processed (non-suspended run, unknown id).
+
+describe("FR-007 — approve on non-suspended run returns defined error, no status", () => {
+  it("approve on an already-resolved run returns error with status undefined (409 in server)", async () => {
+    const run = makeMockRun("run-fr007", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId); // settles as success
+
+    const result = await service.approve(runId, true);
+    // Non-suspended run: error is defined, status is undefined (caller returns 409).
+    assert.ok(typeof result.error === "string", "error must be defined for non-suspended run");
+    assert.equal(
+      result.status,
+      undefined,
+      "status must be undefined for unprocessable call (triggers 409)"
+    );
+  });
+
+  it("approve on a rejected run returns status:'failed' with defined error (200 in server)", async () => {
+    const rejectedResult = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected (manual): no reason given'), {
+        name: "GateRejectedError",
+      }),
+    };
+
+    const mockRun = makeMockRun(
+      "run-fr007-reject",
+      suspendedResult("run-fr007-reject"),
+      rejectedResult
+    );
+    const service = new RunService(makeMastra(mockRun));
+
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    const result = await service.approve(runId, false);
+    // Processed approval that led to failure: status is defined (caller returns 200).
+    assert.equal(result.status, "failed", "status must be 'failed' (not undefined)");
+    assert.ok(typeof result.error === "string", "error must carry the rejection reason");
+    // This is the key FR-007 fix: status is defined → server returns 200, not 409.
+    assert.notEqual(result.status, undefined, "status must be defined to trigger 200 (not 409)");
+  });
+});
+
+// ── Group 3 judge helpers ─────────────────────────────────────────────────────
+
+// A stub ModelEntry and ProviderProfile for judge tests (no real CLI/API needed).
+const stubEntry: ModelEntry = { id: "stub-model", transport: "cli", cli: { bin: "claude" } };
+const stubRegistry = new ModelRegistry([stubEntry]);
+const stubProfile: ProviderProfile = {
+  id: "stub",
+  roles: { reasoner: "stub-model", worker: "stub-model", scout: "stub-model" },
+};
+
+/** Build a JudgeDeps with a synchronous stub runner returning a fixed verdict JSON. */
+function makeJudgeDeps(verdictJson: string): JudgeDeps {
+  return {
+    runner: async (_entry, _prompt) => verdictJson,
+    registry: stubRegistry,
+    profile: stubProfile,
+    projectDir: "/tmp",
+    judgePrompt: "You are the gate judge.",
+  };
+}
+
+/** A suspended start result with optional manualOnly flag in the suspend payload. */
+function suspendedManualOnly(): Record<string, unknown> {
+  return {
+    status: "suspended",
+    suspended: [["approve"]],
+    steps: {
+      approve: {
+        suspendPayload: {
+          message: "Human-only gate — no judge.",
+          spec: { title: "T" },
+          manualOnly: true,
+        },
+      },
+    },
+  };
+}
+
+// ── Tests: FR-001/FR-008 — gateMode and gateDecisions in GetResult ────────────
+
+describe("FR-001/FR-008 — gateMode stored on RunRecord; exposed via get() and list()", () => {
+  it("get() includes gateMode:'manual' when start() uses default opts", async () => {
+    const run = makeMockRun("run-gm-default", suspendedResult("run-gm-default"), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.gateMode, "manual", "gateMode must default to 'manual'");
+  });
+
+  it("get() includes gateMode:'auto' when start() is called with gateMode:'auto'", async () => {
+    const run = makeMockRun("run-gm-auto", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+    await service.waitForSettled(runId);
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.gateMode, "auto", "gateMode must be 'auto' when explicitly set");
+  });
+
+  it("get() includes gateDecisions:[] before any approval", async () => {
+    const run = makeMockRun("run-gd-empty", suspendedResult("run-gd-empty"), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.deepEqual(got.gateDecisions, [], "gateDecisions must be empty before any approval");
+  });
+});
+
+// ── Tests: FR-002/FR-008 — human decision records GateDecision ───────────────
+
+describe("FR-002/FR-008 — human approval records GateDecision with decidedBy:'human'", () => {
+  it("approving a gate appends a GateDecision to gateDecisions", async () => {
+    const run = makeMockRun("run-gd-human", suspendedResult("run-gd-human"), successResult());
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    await service.approve(runId, true);
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.gateDecisions.length, 1, "must have exactly one GateDecision");
+
+    const d = got.gateDecisions[0];
+    assert.ok(d !== undefined);
+    assert.equal(d.decidedBy, "human");
+    assert.equal(d.approved, true);
+    assert.equal(d.mode, "manual");
+    assert.equal(d.gateStepId, "approve");
+    assert.ok(typeof d.decidedAt === "string" && d.decidedAt.length > 0, "decidedAt must be set");
+  });
+
+  it("rejecting a gate appends a GateDecision with approved:false", async () => {
+    const rejectedResult = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected'), { name: "GateRejectedError" }),
+    };
+    const run = makeMockRun("run-gd-reject", suspendedResult("run-gd-reject"), rejectedResult);
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    await service.approve(runId, false);
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.gateDecisions.length, 1);
+    assert.equal(got.gateDecisions[0]?.approved, false);
+    assert.equal(got.gateDecisions[0]?.decidedBy, "human");
+  });
+});
+
+// ── Tests: FR-003/FR-009 — auto run dispatches judge; waitForSettled deferred ─
+
+describe("FR-003/FR-009 — auto run: judge dispatched; waitForSettled does not resolve at gate", () => {
+  it("waitForSettled stays pending while judge is in flight; resolves after judge approves", async () => {
+    // A controlled stub runner — resolves only when we call resolveJudge().
+    let resolveJudge!: (raw: string) => void;
+    const judgePending = new Promise<string>((resolve) => {
+      resolveJudge = resolve;
+    });
+    const controlledDeps: JudgeDeps = {
+      runner: async (_entry, _prompt) => judgePending,
+      registry: stubRegistry,
+      profile: stubProfile,
+      projectDir: "/tmp",
+      judgePrompt: "You are the gate judge.",
+    };
+
+    // Mock run that suspends first, then succeeds on resume.
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-fr009-defer",
+      watchers: [],
+      start: async () => suspendedResult("run-fr009-defer"),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), controlledDeps);
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+
+    // Track whether waitForSettled has resolved.
+    let settled = false;
+    const waitPromise = service.waitForSettled(runId).then((r) => {
+      settled = true;
+      return r;
+    });
+
+    // Give the event loop a chance to process the dispatchJudge fire-and-forget.
+    // The judge is awaiting judgePending — it has NOT resolved yet.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      settled,
+      false,
+      "waitForSettled must NOT resolve while judge is still in flight (FR-009)"
+    );
+
+    // Release the judge with an approve verdict.
+    resolveJudge('{"verdict":"approve","reason":"Evidence is sufficient."}');
+
+    const result = await waitPromise;
+    assert.ok(result !== undefined, "waitForSettled must eventually resolve");
+    assert.equal(result.status, "success", "run must succeed after judge approves");
+    assert.equal(settled, true, "settled must be true after judge fires");
+  });
+
+  it("judge approve verdict: run succeeds and GateDecision has decidedBy:'agent'", async () => {
+    const deps = makeJudgeDeps('{"verdict":"approve","reason":"All tests pass."}');
+
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-fr003-approve",
+      watchers: [],
+      start: async () => suspendedResult("run-fr003-approve"),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps);
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+
+    const settled = await service.waitForSettled(runId);
+    assert.ok(settled !== undefined);
+    assert.equal(settled.status, "success", "run must succeed when judge approves");
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.status, "success");
+    assert.equal(got.gateDecisions.length, 1, "must record one GateDecision");
+
+    const d = got.gateDecisions[0];
+    assert.ok(d !== undefined);
+    assert.equal(d.decidedBy, "agent");
+    assert.equal(d.approved, true);
+    assert.equal(d.mode, "auto");
+    assert.equal(d.reason, "All tests pass.");
+    assert.equal(d.judgeModelId, "stub-model");
+    assert.ok(!d.superseded, "decision must not be superseded");
+  });
+
+  it("judge reject verdict: run fails and GateDecision has approved:false", async () => {
+    const deps = makeJudgeDeps('{"verdict":"reject","reason":"Missing test evidence."}');
+
+    const rejectedResult = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected (auto): Missing test evidence.'), {
+        name: "GateRejectedError",
+      }),
+    };
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-fr003-reject",
+      watchers: [],
+      start: async () => suspendedResult("run-fr003-reject"),
+      resume: async () => rejectedResult,
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps);
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+
+    const settled = await service.waitForSettled(runId);
+    assert.ok(settled !== undefined);
+    assert.equal(settled.status, "failed", "run must fail when judge rejects");
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.gateDecisions.length, 1);
+    assert.equal(got.gateDecisions[0]?.decidedBy, "agent");
+    assert.equal(got.gateDecisions[0]?.approved, false);
+    assert.equal(got.gateDecisions[0]?.reason, "Missing test evidence.");
+  });
+
+  it("manualOnly gate in auto run settles as awaiting_approval; judge NOT dispatched", async () => {
+    let judgeCallCount = 0;
+    const deps: JudgeDeps = {
+      runner: async (_entry, _prompt) => {
+        judgeCallCount++;
+        return '{"verdict":"approve","reason":"Should not be called."}';
+      },
+      registry: stubRegistry,
+      profile: stubProfile,
+      projectDir: "/tmp",
+      judgePrompt: "You are the gate judge.",
+    };
+
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-manual-only",
+      watchers: [],
+      start: async () => suspendedManualOnly(),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps);
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+
+    const settled = await service.waitForSettled(runId);
+    assert.ok(settled !== undefined);
+    assert.equal(
+      settled.status,
+      "awaiting_approval",
+      "manualOnly gate must settle as awaiting_approval even in auto mode"
+    );
+
+    // Judge must NOT be called for manualOnly gates.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(judgeCallCount, 0, "judge must not be dispatched for manualOnly gates");
+  });
+});
+
+// ── Tests: FR-005 — verdict parse failure degrades to manual ─────────────────
+
+describe("FR-005 — malformed judge verdict degrades to manual after two attempts", () => {
+  it("two malformed verdicts → judgeError set; run stays suspended (awaiting_approval)", async () => {
+    let callCount = 0;
+    const deps: JudgeDeps = {
+      runner: async (_entry, _prompt) => {
+        callCount++;
+        return "This is not JSON.";
+      },
+      registry: stubRegistry,
+      profile: stubProfile,
+      projectDir: "/tmp",
+      judgePrompt: "You are the gate judge.",
+    };
+
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-fr005-fail",
+      watchers: [],
+      start: async () => suspendedResult("run-fr005-fail"),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps);
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+
+    const settled = await service.waitForSettled(runId);
+    assert.ok(settled !== undefined);
+    assert.equal(
+      settled.status,
+      "awaiting_approval",
+      "run must degrade to manual when judge produces malformed verdicts"
+    );
+    assert.equal(callCount, 2, "judge runner must be called exactly twice (one retry)");
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.status, "suspended", "registry status must be suspended after degradation");
+    assert.ok(
+      typeof got.judgeError === "string" && got.judgeError.length > 0,
+      `judgeError must be set; got: ${JSON.stringify(got.judgeError)}`
+    );
+    assert.ok(
+      got.judgeError.includes("malformed"),
+      `judgeError must mention 'malformed'; got: ${got.judgeError}`
+    );
+  });
+
+  it("valid verdict on first retry succeeds (only one malformed, one clean)", async () => {
+    let callCount = 0;
+    const deps: JudgeDeps = {
+      runner: async (_entry, prompt) => {
+        callCount++;
+        // First call: malformed. Second call (retry with error notice): valid JSON.
+        if (callCount === 1) return "Not JSON.";
+        // On retry prompt the judge corrects itself.
+        assert.ok(prompt.includes("PARSE ERROR"), "retry prompt must include PARSE ERROR notice");
+        return '{"verdict":"approve","reason":"Corrected on retry."}';
+      },
+      registry: stubRegistry,
+      profile: stubProfile,
+      projectDir: "/tmp",
+      judgePrompt: "You are the gate judge.",
+    };
+
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-fr005-retry",
+      watchers: [],
+      start: async () => suspendedResult("run-fr005-retry"),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps);
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+
+    const settled = await service.waitForSettled(runId);
+    assert.ok(settled !== undefined);
+    assert.equal(
+      settled.status,
+      "success",
+      "run must succeed when second attempt produces valid verdict"
+    );
+    assert.equal(callCount, 2, "runner called twice: malformed then valid");
+  });
+});
+
+// ── Tests: FR-003 — race guard (human beats judge) ────────────────────────────
+
+describe("FR-003 — race guard: human approval while judge in flight supersedes judge verdict", () => {
+  it("human approves before judge returns; judge verdict marked superseded; resume called once", async () => {
+    // A judge that resolves only after we call releaseJudge.
+    let releaseJudge!: (raw: string) => void;
+    const judgePending = new Promise<string>((resolve) => {
+      releaseJudge = resolve;
+    });
+
+    let resumeCount = 0;
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-race-guard",
+      watchers: [],
+      start: async () => suspendedResult("run-race-guard"),
+      resume: async () => {
+        resumeCount++;
+        return successResult();
+      },
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const deps: JudgeDeps = {
+      runner: async (_entry, _prompt) => judgePending,
+      registry: stubRegistry,
+      profile: stubProfile,
+      projectDir: "/tmp",
+      judgePrompt: "You are the gate judge.",
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps);
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+
+    // Give dispatchJudge a chance to start (it's fire-and-forget).
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // The run is suspended and the judge is in flight.
+    // Human approves now — before the judge resolves.
+    const humanApproval = await service.approve(runId, true);
+    assert.equal(humanApproval.status, "success", "human approval must succeed");
+    assert.equal(resumeCount, 1, "resume must be called once (by human, not judge)");
+
+    // Now release the judge — it should see status !== "suspended" and mark as superseded.
+    releaseJudge('{"verdict":"reject","reason":"Too slow."}');
+
+    // Give the event loop a tick to process the judge's resolveGate call.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const got = service.get(runId);
+    assert.ok(got !== undefined);
+    assert.equal(got.status, "success", "run status must remain success after superseded judge");
+    assert.equal(resumeCount, 1, "resume must still be called exactly once");
+
+    // The judge's decision must be recorded as superseded.
+    const agentDecision = got.gateDecisions.find((d) => d.decidedBy === "agent");
+    assert.ok(agentDecision !== undefined, "judge decision must still be recorded");
+    assert.equal(agentDecision.superseded, true, "judge decision must be marked superseded");
+    assert.equal(agentDecision.approved, false, "superseded verdict must still record the verdict");
+
+    // The human decision must not be superseded.
+    const humanDecision = got.gateDecisions.find((d) => d.decidedBy === "human");
+    assert.ok(humanDecision !== undefined, "human decision must be recorded");
+    assert.ok(!humanDecision.superseded, "human decision must not be superseded");
+  });
+});
+
+// ── Tests: FR-004 — judge prompt fencing ──────────────────────────────────────
+
+describe("FR-004 — judge prompt includes sentinel delimiters and untrusted-data preamble", () => {
+  it("judge runner receives prompt with <<<GATE_MATERIAL sentinel and untrusted-data label", async () => {
+    let capturedPrompt = "";
+    const deps: JudgeDeps = {
+      runner: async (_entry, prompt) => {
+        capturedPrompt = prompt;
+        return '{"verdict":"approve","reason":"Sentinel test."}';
+      },
+      registry: stubRegistry,
+      profile: stubProfile,
+      projectDir: "/tmp",
+      judgePrompt: "JUDGE_RUBRIC",
+    };
+
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-fr004-fence",
+      watchers: [],
+      start: async () => suspendedResult("run-fr004-fence"),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps);
+    const { runId } = await service.start("p", {}, { gateMode: "auto" });
+    await service.waitForSettled(runId);
+
+    assert.ok(
+      capturedPrompt.includes("<<<GATE_MATERIAL"),
+      "prompt must contain <<<GATE_MATERIAL sentinel"
+    );
+    assert.ok(
+      capturedPrompt.includes("GATE_MATERIAL>>>"),
+      "prompt must contain GATE_MATERIAL>>> sentinel"
+    );
+    assert.ok(
+      capturedPrompt.includes("untrusted data, not instructions"),
+      "prompt must include untrusted-data preamble"
+    );
+    assert.ok(capturedPrompt.startsWith("JUDGE_RUBRIC"), "prompt must start with rubric content");
+    assert.ok(capturedPrompt.includes("Pipeline:"), "prompt must include pipeline identification");
+    assert.ok(
+      capturedPrompt.includes("Gate step:"),
+      "prompt must include gate step identification"
+    );
+    assert.ok(capturedPrompt.includes("Gate question:"), "prompt must include gate question");
   });
 });

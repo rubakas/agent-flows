@@ -335,6 +335,18 @@ export function buildAssembleStep(stepId: string) {
   });
 }
 
+/**
+ * Thrown by the gate step when the run is rejected (approved === false).
+ * Propagates through the Mastra workflow failure path, stopping all downstream
+ * steps — commit, pr, etc. — by construction (FR-006).
+ */
+export class GateRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GateRejectedError";
+  }
+}
+
 export function buildGateStep(step: StepDef) {
   // Each gate writes its decision to a key derived from its own full step id
   // (not from the namespace prefix). This prevents key collision when two
@@ -348,16 +360,30 @@ export function buildGateStep(step: StepDef) {
     id: step.id,
     inputSchema: ctx,
     outputSchema: ctx,
-    resumeSchema: z.object({ approved: z.boolean() }),
-    suspendSchema: z.object({ message: z.string(), spec: z.unknown() }),
+    resumeSchema: z.object({
+      approved: z.boolean(),
+      reason: z.string().optional(),
+      mode: z.string().optional(),
+    }),
+    suspendSchema: z.object({
+      message: z.string(),
+      spec: z.unknown(),
+      manualOnly: z.boolean(),
+    }),
     execute: async ({ inputData, resumeData, suspend }) => {
       const ctxData = inputData as Ctx;
       if (resumeData) {
+        if (resumeData.approved === false) {
+          const mode = resumeData.mode ?? "manual";
+          const reason = resumeData.reason ?? "no reason given";
+          throw new GateRejectedError(`Gate "${step.id}" rejected (${mode}): ${reason}`);
+        }
         return { ...ctxData, [approvedKey]: resumeData.approved };
       }
       await suspend({
         message: step.message ?? "Approve this spec?",
         spec: ctxData[nsKey(step.id, "spec")],
+        manualOnly: step.manualOnly ?? false,
       });
       // unreachable — suspend() throws internally; satisfies TypeScript return type
       return ctxData;
@@ -377,9 +403,6 @@ export function buildPersistStep(stepId: string, store: TicketStore, gateId: str
     execute: async ({ inputData }) => {
       const ctxData = inputData as Ctx;
       const specKey = nsKey(stepId, "spec");
-      if (ctxData[approvedKey] === false) {
-        return { ...ctxData };
-      }
       const spec = ctxData[specKey] as HardenedSpec;
       const { ticketId } = await persistTicket(store, spec);
       return { ...ctxData, [nsKey(stepId, "ticketId")]: ticketId, [approvedKey]: true };
@@ -387,9 +410,7 @@ export function buildPersistStep(stepId: string, store: TicketStore, gateId: str
   });
 }
 
-export function buildExportSpecStep(stepId: string, outDir: string, gateId: string) {
-  // Reads the approval decision from the gate's own unique key (gateId + ".approved").
-  const approvedKey = `${gateId}.approved`;
+export function buildExportSpecStep(stepId: string, outDir: string, _gateId: string) {
   return createStep({
     id: stepId,
     inputSchema: ctx,
@@ -397,9 +418,6 @@ export function buildExportSpecStep(stepId: string, outDir: string, gateId: stri
     execute: async ({ inputData }) => {
       const ctxData = inputData as Ctx;
       const specKey = nsKey(stepId, "spec");
-      if (ctxData[approvedKey] === false) {
-        return { ...ctxData };
-      }
       const spec = ctxData[specKey] as HardenedSpec;
       const writtenPath = await writeSpecKitSpec(
         spec,

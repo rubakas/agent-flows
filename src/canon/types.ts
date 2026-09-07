@@ -35,6 +35,12 @@ export interface StepDef {
   dependsOn?: readonly string[];
   message?: string;
   /**
+   * For `kind: "gate"` steps only: when true, the gate is always answered by a human
+   * regardless of the run-level `gateMode`. The judge is never dispatched for this gate.
+   * Validated at load time: must be a boolean; rejected on non-gate steps (FR-013).
+   */
+  manualOnly?: boolean;
+  /**
    * Named Agent Skills this step may invoke. The field name `skills` is adopted from
    * Anthropic's documented Agent Skills spec, not invented here. Only allowed on `llm`
    * steps; the runtime resolves names to installed skills via `--plugin-dir`. Must be a

@@ -154,6 +154,13 @@ export function loadPipeline(
       if (step.role !== undefined) {
         throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
       }
+      // manualOnly is only valid on gate steps (FR-013).
+      if (
+        step.kind !== "gate" &&
+        (step as unknown as Record<string, unknown>).manualOnly !== undefined
+      ) {
+        throw new Error(`Step "${step.id}": manualOnly is only allowed on gate steps`);
+      }
 
       if (step.kind === "pipeline") {
         if (!step.pipeline) {
@@ -227,11 +234,25 @@ export function loadPipeline(
         continue;
       }
 
-      // gate / assemble-spec / persist-ticket: validated above; skip llm checks.
+      if (step.kind === "gate") {
+        const manualOnlyField = (step as unknown as Record<string, unknown>).manualOnly;
+        if (manualOnlyField !== undefined && typeof manualOnlyField !== "boolean") {
+          throw new Error(
+            `Step "${step.id}": manualOnly must be a boolean; got ${JSON.stringify(manualOnlyField)}`
+          );
+        }
+        continue;
+      }
+
+      // assemble-spec / persist-ticket: validated above; skip llm checks.
       continue;
     }
 
     if (step.kind === "llm") {
+      // manualOnly is only valid on gate steps (FR-013).
+      if ((step as unknown as Record<string, unknown>).manualOnly !== undefined) {
+        throw new Error(`Step "${step.id}": manualOnly is only allowed on gate steps`);
+      }
       // env is only valid on check steps; reject it on llm steps too.
       for (const field of NON_CHECK_FORBIDDEN) {
         if ((step as unknown as Record<string, unknown>)[field] !== undefined) {

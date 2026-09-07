@@ -2149,3 +2149,151 @@ steps:
     );
   });
 });
+
+// ── FR-013: manualOnly field validation ───────────────────────────────────────
+
+describe("FR-013: manualOnly field validation in loadPipeline", () => {
+  function makeGateYaml(overrides: string) {
+    return `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: approve
+    kind: gate
+    message: "Approve?"
+    ${overrides}
+`;
+  }
+
+  it("manualOnly: true on a gate step loads successfully", () => {
+    const yaml = makeGateYaml("manualOnly: true");
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+    });
+    const step = def.steps[0];
+    assert.equal(
+      (step as unknown as Record<string, unknown>).manualOnly,
+      true,
+      "manualOnly: true must be preserved on gate step"
+    );
+  });
+
+  it("manualOnly: false on a gate step loads successfully", () => {
+    const yaml = makeGateYaml("manualOnly: false");
+    assert.doesNotThrow(() =>
+      loadPipeline("/fake/pipelines/test.yaml", {
+        readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+      })
+    );
+  });
+
+  it("manualOnly: 'yes' (non-boolean) on a gate step throws at load time", () => {
+    const yaml = makeGateYaml("manualOnly: 'yes'");
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      /manualOnly.*boolean|boolean.*manualOnly/
+    );
+  });
+
+  it("manualOnly on a check step throws at load time", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: build
+    kind: check
+    command: "exit 0"
+    manualOnly: true
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      /manualOnly.*gate|gate.*manualOnly/
+    );
+  });
+
+  it("manualOnly on a pipeline step throws at load time", () => {
+    const innerYaml = `
+id: inner
+version: 1
+description: inner
+inputs: []
+steps:
+  - id: s1
+    kind: gate
+    message: ok?
+`;
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: nested
+    kind: pipeline
+    pipeline: inner
+    manualOnly: true
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => {
+            if (p.endsWith("test.yaml")) return yaml;
+            if (p.endsWith("inner.yaml")) return innerYaml;
+            return "";
+          },
+        }),
+      /manualOnly.*gate|gate.*manualOnly/
+    );
+  });
+
+  it("manualOnly on an llm step throws at load time", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: intake
+    kind: llm
+    role: worker
+    prompt: prompts/intake.md
+    manualOnly: true
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "LLM prompt"),
+        }),
+      /manualOnly.*gate|gate.*manualOnly/
+    );
+  });
+});
+
+// ── FR-014: ship.yaml declares manualOnly: true on the approve step ───────────
+
+describe("FR-014: ship.yaml approve step declares manualOnly: true", () => {
+  it("ship.yaml loads successfully and approve step has manualOnly: true", () => {
+    const { def } = loadPipeline(new URL("../../pipelines/ship.yaml", import.meta.url).pathname);
+    const approveStep = def.steps.find((s) => s.id === "approve");
+    assert.ok(approveStep !== undefined, "approve step must exist in ship.yaml");
+    assert.equal(
+      (approveStep as unknown as Record<string, unknown>).manualOnly,
+      true,
+      "ship.approve must declare manualOnly: true (FR-014)"
+    );
+  });
+});
