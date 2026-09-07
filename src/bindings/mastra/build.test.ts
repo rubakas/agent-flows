@@ -17,11 +17,13 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
+import { loadPipeline } from "../../canon/load.js";
 import { ModelRegistry } from "../../canon/registry.js";
 import { makeInMemoryDb } from "../../db/index.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
 import { mastraDbPath } from "./paths.js";
+import { BUNDLED_PIPELINES_DIR } from "./pipelineLoader.js";
 import type { StepRunnerDeps, runLlmStep } from "../../canon/runStep.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 
@@ -1799,6 +1801,274 @@ describe("buildPipelineWorkflow — export-spec resolves relative path against d
       }
     } finally {
       await rm(projectDir, { recursive: true });
+    }
+  });
+});
+
+// ─── FR-003/FR-005: convergence rejects code that passes tests but fails gate ─
+//
+// Test-plan item 1: proves the {{checkCommand}} wiring changes convergence outcomes.
+//
+// The INVERSION to pin:
+//   old wiring (command: "exit 0") — simulates a test-only gate that ignores typecheck
+//     → converges: the gate cannot fail for the right reason (passes even on broken code)
+//   new wiring (command: "{{checkCommand}}" → "exit 1") — simulates a gate that includes
+//     typecheck, which fails on the deliberately-broken fixture
+//     → does NOT converge after maxIterations
+//
+// Both cases use a no-op runner for the fix step so the loop iterates cleanly
+// without a real LLM call. The check step runs real /bin/sh commands.
+
+// Loop body: check step uses {{checkCommand}}, fix step is a no-op LLM step.
+const CHECK_CMD_BODY: LoadedPipeline = {
+  def: {
+    id: "check-cmd-body",
+    version: 1,
+    description: "Loop body exercising {{checkCommand}} wiring",
+    inputs: [],
+    steps: [
+      { id: "test", kind: "check", command: "{{checkCommand}}" },
+      {
+        id: "fix",
+        kind: "llm",
+        role: "worker",
+        prompt: "prompts/fix.md",
+        permissions: { contents: "write" },
+        dependsOn: ["test"],
+      },
+    ],
+  },
+  prompts: { fix: "Fix it." },
+};
+
+const LOOP_CHECK_CMD_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "loop-check-cmd",
+    version: 1,
+    description: "Outer loop exercising {{checkCommand}} wiring",
+    inputs: [],
+    steps: [
+      {
+        id: "converge",
+        kind: "loop",
+        pipeline: "check-cmd-body",
+        maxIterations: 3,
+        until: "test.passed",
+      },
+    ],
+  },
+  prompts: {},
+  bodies: { converge: CHECK_CMD_BODY },
+};
+
+// Loop body: hardcoded old-wiring command.
+const OLD_WIRING_BODY: LoadedPipeline = {
+  def: {
+    id: "old-wiring-body",
+    version: 1,
+    description: "Loop body with hardcoded command (old wiring)",
+    inputs: [],
+    steps: [
+      { id: "test", kind: "check", command: "exit 0" },
+      {
+        id: "fix",
+        kind: "llm",
+        role: "worker",
+        prompt: "prompts/fix.md",
+        permissions: { contents: "write" },
+        dependsOn: ["test"],
+      },
+    ],
+  },
+  prompts: { fix: "Fix it." },
+};
+
+const LOOP_OLD_WIRING_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "loop-old-wiring",
+    version: 1,
+    description: "Outer loop with hardcoded command (old wiring)",
+    inputs: [],
+    steps: [
+      {
+        id: "converge",
+        kind: "loop",
+        pipeline: "old-wiring-body",
+        maxIterations: 3,
+        until: "test.passed",
+      },
+    ],
+  },
+  prompts: {},
+  bodies: { converge: OLD_WIRING_BODY },
+};
+
+describe("buildPipelineWorkflow — convergence signal: {{checkCommand}} vs hardcoded command", () => {
+  it("new wiring: loop converges when checkCommand resolves to a passing gate", async () => {
+    // Falsifier: if buildCheckStep omitted the {{checkCommand}} substitution,
+    // the shell would receive the literal string "{{checkCommand}}", which is a
+    // POSIX syntax error and exits non-zero — so the loop would never converge
+    // even though we passed checkCommand: "exit 0". This assertion goes red
+    // when the substitution is absent, proving the feature exists.
+    const noopRunner: typeof runLlmStep = async () => "";
+    const { storage, store, cleanup } = makeTestFixture("check-cmd-pass");
+    try {
+      const wf = buildPipelineWorkflow(LOOP_CHECK_CMD_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: noopRunner,
+        checkCommand: "exit 0",
+      });
+      const mastra = new Mastra({
+        storage,
+        workflows: { [LOOP_CHECK_CMD_PIPELINE.def.id]: wf },
+      });
+      const run = await mastra.getWorkflow(LOOP_CHECK_CMD_PIPELINE.def.id).createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(r1.status, "success", "loop must not throw when it converges");
+      const result = r1.result as Record<string, unknown>;
+      const outcome = result.converge as { converged: boolean; iterations: number };
+      assert.equal(
+        outcome.converged,
+        true,
+        "new wiring must report converged: true when the gate always passes"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("new wiring: loop does not converge when checkCommand resolves to a failing gate", async () => {
+    // Paired inversion: checkCommand: "exit 1" must yield converged: false.
+    // Note this alone is not a sufficient falsifier — an unsubstituted
+    // "{{checkCommand}}" also exits non-zero. The "exit 0" case above is the
+    // real guard; this case confirms the inversion is bidirectional.
+    const noopRunner: typeof runLlmStep = async () => "";
+    const { storage, store, cleanup } = makeTestFixture("check-cmd-fail");
+    try {
+      const wf = buildPipelineWorkflow(LOOP_CHECK_CMD_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: noopRunner,
+        checkCommand: "exit 1",
+      });
+      const mastra = new Mastra({
+        storage,
+        workflows: { [LOOP_CHECK_CMD_PIPELINE.def.id]: wf },
+      });
+      const run = await mastra.getWorkflow(LOOP_CHECK_CMD_PIPELINE.def.id).createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(r1.status, "success", "loop must not throw when it fails to converge");
+      const result = r1.result as Record<string, unknown>;
+      const outcome = result.converge as { converged: boolean; iterations: number };
+      assert.equal(
+        outcome.converged,
+        false,
+        "new wiring must report converged: false when the gate always fails"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("old wiring: loop converges when hardcoded test passes (pinning the pre-fix inversion)", async () => {
+    // With a hardcoded 'exit 0' the test step always passes — just as pnpm test
+    // passed on code with typecheck errors before this spec. The loop converges
+    // immediately, proving the old gate could not fail for the right reason.
+    const noopRunner: typeof runLlmStep = async () => "";
+    const { storage, store, cleanup } = makeTestFixture("old-wiring-pass");
+    try {
+      const wf = buildPipelineWorkflow(LOOP_OLD_WIRING_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: noopRunner,
+      });
+      const mastra = new Mastra({
+        storage,
+        workflows: { [LOOP_OLD_WIRING_PIPELINE.def.id]: wf },
+      });
+      const run = await mastra.getWorkflow(LOOP_OLD_WIRING_PIPELINE.def.id).createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(r1.status, "success");
+      const result = r1.result as Record<string, unknown>;
+      const outcome = result.converge as { converged: boolean; iterations: number };
+      assert.equal(
+        outcome.converged,
+        true,
+        "old wiring converges even when the real gate would fail — this is the defect the spec fixes"
+      );
+      assert.equal(outcome.iterations, 1, "converges on the first iteration");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ─── CHUNK A: bundled pipeline timeoutMs regression guard ────────────────────
+//
+// develop.yaml/implement and build-round.yaml/fix must carry timeoutMs: 0.
+// No other bundled pipeline step may declare a timeout — prevents accidental
+// reintroduction of a deadline on steps that legitimately need hours.
+
+describe("bundled pipelines — timeoutMs regression guard (CHUNK A)", () => {
+  it("develop.yaml/implement carries timeoutMs: 0 and build-round.yaml/fix carries timeoutMs: 0", () => {
+    const developLoaded = loadPipeline(join(BUNDLED_PIPELINES_DIR, "develop.yaml"));
+    const implementStep = developLoaded.def.steps.find((s) => s.id === "implement");
+    assert.ok(implementStep !== undefined, "develop.yaml must have an implement step");
+    assert.equal(
+      implementStep.timeoutMs,
+      0,
+      "develop.yaml/implement must carry timeoutMs: 0 — a write step that may need hours"
+    );
+
+    const buildRoundLoaded = loadPipeline(join(BUNDLED_PIPELINES_DIR, "build-round.yaml"));
+    const fixStep = buildRoundLoaded.def.steps.find((s) => s.id === "fix");
+    assert.ok(fixStep !== undefined, "build-round.yaml must have a fix step");
+    assert.equal(
+      fixStep.timeoutMs,
+      0,
+      "build-round.yaml/fix must carry timeoutMs: 0 — scope-bounded repair may still need hours"
+    );
+  });
+
+  it("no other bundled pipeline step declares a timeoutMs (regression guard)", () => {
+    // Only implement (develop.yaml) and fix (build-round.yaml) may carry timeoutMs: 0.
+    // Every other step inherits the built-in 10-minute default.
+    //
+    // loadPipeline expands nested pipelines: build.yaml inlines develop.yaml steps as
+    // develop.implement, and build-round.yaml steps as converge.fix. The exemption covers
+    // both bare ids and their namespaced variants by checking the final id segment.
+    //
+    // If a future edit adds timeoutMs to a new step this test fails, prompting review.
+    const pipelineFiles = [
+      "audit.yaml",
+      "build.yaml",
+      "build-round.yaml",
+      "correct-plan.yaml",
+      "cycle-dev.yaml",
+      "cycle.yaml",
+      "develop.yaml",
+      "investigate.yaml",
+      "ship.yaml",
+      "spec-creation.yaml",
+      "test.yaml",
+    ];
+    for (const file of pipelineFiles) {
+      const loaded = loadPipeline(join(BUNDLED_PIPELINES_DIR, file));
+      for (const step of loaded.def.steps) {
+        // Exempt the two write steps and their namespaced expansions in parent pipelines.
+        // "implement" only appears in develop.yaml; "fix" only in build-round.yaml.
+        const baseName = step.id.split(".").pop();
+        if (baseName === "implement" || baseName === "fix") continue;
+        assert.equal(
+          step.timeoutMs,
+          undefined,
+          `${file}/${step.id} must NOT declare timeoutMs — only implement and fix are exempted`
+        );
+      }
     }
   });
 });

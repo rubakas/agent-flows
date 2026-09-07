@@ -102,6 +102,16 @@ export const BUILD_CONFIG_DENY_PATTERNS: readonly string[] = [
   "**/.git/**",
   "**/.husky/**",
   "**/*.config.*",
+  // Protect project-level agent-flows config from mid-run edits. A write step
+  // that rewrites checkCommand would change the convergence gate for future runs.
+  // FR-003's read-once-at-startup rule closes the hole for the current run;
+  // this closes it for the next one. Read stays allowed: steps legitimately
+  // inspect the config to understand the project setup.
+  "**/.agent-flows/**",
+  // Duplicate with capital A: macOS APFS is case-insensitive, so
+  // .Agent-flows/config.json resolves to the same file. Both spellings must be
+  // denied to prevent a case-varied path from slipping through the glob match.
+  "**/.Agent-flows/**",
 ];
 
 /** Thrown when a step's deadline fires before the transport completes. */

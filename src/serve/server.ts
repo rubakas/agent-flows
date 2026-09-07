@@ -287,6 +287,52 @@ interface HandlerCtx {
   skillsBase: string;
 }
 
+// ── readAgentFlowsConfig ───────────────────────────────────────────────────────
+
+/**
+ * Read `.agent-flows/config.json` from `projectDir` and return the resolved
+ * `checkCommand`, or `undefined` when the file or the key is absent.
+ *
+ * Throws a loud error for: unreadable file, malformed JSON, or a
+ * `checkCommand` key of the wrong type. Called ONCE at CLI startup; the
+ * validated value is then passed into `startServer` via options so the server
+ * never needs to touch the file itself.
+ */
+export function readAgentFlowsConfig(projectDir: string): string | undefined {
+  const configPath = join(projectDir, ".agent-flows", "config.json");
+  if (!existsSync(configPath)) return undefined;
+
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, "utf8");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`agent-flows: failed to read ${configPath}: ${msg}`, { cause: err });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`agent-flows: ${configPath} contains malformed JSON: ${msg}`, { cause: err });
+  }
+
+  if (typeof parsed !== "object" || parsed === null || !("checkCommand" in parsed)) {
+    return undefined;
+  }
+
+  const val = (parsed as Record<string, unknown>).checkCommand;
+  if (typeof val !== "string") {
+    // Wrong-typed key is malformed config — a silent fallback would use the
+    // default gate with no feedback, hiding a misconfigured project.
+    throw new Error(`agent-flows: ${configPath}: checkCommand must be a string, got ${typeof val}`);
+  }
+
+  console.log(`agent-flows serve: checkCommand from ${configPath}: ${val}`);
+  return val;
+}
+
 // ── startServer ────────────────────────────────────────────────────────────────
 
 /**
@@ -302,6 +348,7 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
   const uiPath = join(__dirname, "ui.html");
   const projectDir = opts.projectDir ?? process.cwd();
   const bundledPipelinesDir = opts.bundledPipelinesDir ?? BUNDLED_PIPELINES_DIR;
+
   const skillsBase =
     opts.skillsBase ?? process.env.AGENT_FLOWS_SKILLS_DIR ?? join(homedir(), ".claude");
 
@@ -896,7 +943,7 @@ async function handleRequest(
       const yamlText = stringifyBundle(bundle);
       res.writeHead(200, {
         "Content-Type": "application/x-yaml",
-        "Content-Disposition": `attachment; filename="${id}.yoke-bundle.yaml"`,
+        "Content-Disposition": `attachment; filename="${id}.agent-flows-bundle.yaml"`,
       });
       res.end(yamlText);
     } catch (err) {
@@ -979,11 +1026,21 @@ if (process.argv[1] === __filename) {
   const store = new DrizzleTicketStore(db);
   const registry = defaultRegistry();
 
+  // FR-003: read once at startup; the resolved value is baked into each workflow
+  // at build time. readAgentFlowsConfig throws loudly on malformed config so a
+  // misconfigured project never silently falls back to the default gate.
+  const checkCommand = readAgentFlowsConfig(projectDir);
+
   const pipelineFiles = listPipelines(pipelinesDir);
   const loadedPipelines = pipelineFiles.map((f) => loadPipeline(f));
   const workflows: Record<string, unknown> = {};
   for (const loaded of loadedPipelines) {
-    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, { registry, store, cwd: projectDir });
+    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, {
+      registry,
+      store,
+      cwd: projectDir,
+      ...(checkCommand !== undefined ? { checkCommand } : {}),
+    });
   }
 
   const mastra = new Mastra({ storage: mastraStorage, workflows });

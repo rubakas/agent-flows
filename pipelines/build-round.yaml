@@ -5,13 +5,20 @@ inputs: []
 steps:
   - id: test
     kind: check
-    command: pnpm test
+    # Command is resolved from .agent-flows/config.json (checkCommand key) or
+    # defaults to: pnpm lint && pnpm typecheck && pnpm test
+    # format:check is excluded: the fix step has no shell access, so a prettier
+    # failure would consume an LLM iteration on whitespace instead of real defects.
+    command: "{{checkCommand}}"
   # Known inefficiency: fix also runs when test has already passed on the loop's
   # final passing iteration. Without conditionals in the canon this is unavoidable;
   # build-fix.md instructs the model to change nothing in that case.
   - id: fix
     kind: llm
     role: worker
+    # No deadline: repairing a failing gate is scope-bounded but may still need
+    # hours on a local model. Progress watchdog (spec-024) guards liveness.
+    timeoutMs: 0
     permissions:
       contents: write
     dependsOn: [test]

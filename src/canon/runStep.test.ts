@@ -985,6 +985,89 @@ describe("runLlmStep — credential deny list", () => {
     }
   });
 
+  it("write mode: --disallowedTools denies Edit for **/.agent-flows/** and does NOT deny Read for it", async () => {
+    // FR-006: .agent-flows/** is in BUILD_CONFIG_DENY_PATTERNS. A write step
+    // must not be able to edit config.json mid-run (closing the gate-rewrite attack).
+    // Read must stay allowed: steps may legitimately inspect project config.
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "edit files", {
+      spawn,
+      contentsAccess: "write",
+      workspaceDir: repoRoot,
+    });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "write mode must emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1] ?? "";
+
+    const agentFlowsPattern = "**/.agent-flows/**";
+    assert.ok(
+      disallowedValue.includes(`Edit(${agentFlowsPattern})`),
+      `--disallowedTools must deny Edit for ${agentFlowsPattern}`
+    );
+    assert.ok(
+      !disallowedValue.includes(`Read(${agentFlowsPattern})`),
+      `--disallowedTools must NOT deny Read for ${agentFlowsPattern} — steps must be able to inspect project config`
+    );
+  });
+
+  it("BUILD_CONFIG_DENY_PATTERNS contains both .agent-flows and .Agent-flows spellings in Edit, neither in Read", async () => {
+    // macOS APFS is case-insensitive: .Agent-flows/config.json resolves to the
+    // same file as .agent-flows/config.json. Both spellings must be in the Edit
+    // deny list so a case-varied path cannot bypass the pattern match.
+    const lower = "**/.agent-flows/**";
+    const upper = "**/.Agent-flows/**";
+
+    assert.ok(
+      BUILD_CONFIG_DENY_PATTERNS.includes(lower),
+      `BUILD_CONFIG_DENY_PATTERNS must contain ${lower}`
+    );
+    assert.ok(
+      BUILD_CONFIG_DENY_PATTERNS.includes(upper),
+      `BUILD_CONFIG_DENY_PATTERNS must contain ${upper}`
+    );
+
+    // Read must NOT be denied for either spelling.
+    const { child } = makeFakeChild({ stdoutChunks: ["ok"] });
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "edit files", {
+      spawn,
+      contentsAccess: "write",
+      workspaceDir: repoRoot,
+    });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1] ?? "";
+
+    assert.ok(
+      disallowedValue.includes(`Edit(${lower})`),
+      `Edit deny must include lowercase spelling ${lower}`
+    );
+    assert.ok(
+      disallowedValue.includes(`Edit(${upper})`),
+      `Edit deny must include uppercase spelling ${upper}`
+    );
+    assert.ok(
+      !disallowedValue.includes(`Read(${lower})`),
+      `Read deny must NOT include lowercase spelling ${lower}`
+    );
+    assert.ok(
+      !disallowedValue.includes(`Read(${upper})`),
+      `Read deny must NOT include uppercase spelling ${upper}`
+    );
+  });
+
   it("step with no permissions emits --disallowedTools with credential Read-only denials", async () => {
     // A step without contentsAccess still gets --tools Read,Glob (the safe hardened
     // fallback). Without credential Read denials it could read .env, *.pem, id_rsa

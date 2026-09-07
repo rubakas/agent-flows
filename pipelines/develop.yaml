@@ -7,6 +7,9 @@ steps:
   - id: implement
     kind: llm
     role: worker
+    # No deadline: a full spec implementation may legitimately need hours on a local model.
+    # Liveness is guarded by the progress watchdog (spec-024), not a hard timeout.
+    timeoutMs: 0
     permissions:
       contents: write
     prompt: prompts/develop-implement.md

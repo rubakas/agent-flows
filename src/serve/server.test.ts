@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { RunService, type MastraLike } from "../runtime/runService.js";
-import { startServer, type ServeHandle, CONTENT_CAP } from "./server.js";
+import { startServer, readAgentFlowsConfig, type ServeHandle, CONTENT_CAP } from "./server.js";
 
 // ── Mock RunService helpers (mirrors runService.test.ts pattern) ──────────────
 
@@ -1153,7 +1153,7 @@ describe("GET /api/export/:id — export workflow bundle", () => {
     assert.equal(res.status, 200);
     const cd = res.headers.get("content-disposition") ?? "";
     assert.ok(
-      cd.includes("attachment") && cd.includes("investigate.yoke-bundle.yaml"),
+      cd.includes("attachment") && cd.includes("investigate.agent-flows-bundle.yaml"),
       `Content-Disposition must be attachment with filename; got: "${cd}"`
     );
   });
@@ -1248,5 +1248,77 @@ describe("POST /api/import — import workflow bundle", () => {
     assert.equal(res.status, 400);
     const body = (await res.json()) as { error: string };
     assert.ok(body.error.includes("bundle"), "error must mention the missing field");
+  });
+});
+
+// ── FR-003: readAgentFlowsConfig — all four paths ─────────────────────────────
+// Testing the extracted function directly is faster (no port, no server boot)
+// and reaches paths the server harness cannot (absent file, malformed JSON).
+
+describe("readAgentFlowsConfig (FR-003)", () => {
+  it("returns undefined when the config file is absent", () => {
+    const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-cfg-")));
+    try {
+      assert.strictEqual(readAgentFlowsConfig(projectDir), undefined);
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the checkCommand string when the file is valid", () => {
+    const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-cfg-")));
+    try {
+      mkdirSync(join(projectDir, ".agent-flows"), { recursive: true });
+      writeFileSync(
+        join(projectDir, ".agent-flows", "config.json"),
+        JSON.stringify({ checkCommand: "pnpm check" })
+      );
+      assert.strictEqual(readAgentFlowsConfig(projectDir), "pnpm check");
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws naming the file when JSON is malformed", () => {
+    const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-cfg-")));
+    try {
+      mkdirSync(join(projectDir, ".agent-flows"), { recursive: true });
+      writeFileSync(join(projectDir, ".agent-flows", "config.json"), "{bad json");
+      assert.throws(
+        () => readAgentFlowsConfig(projectDir),
+        (err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.ok(msg.includes("config.json"), `error must name the file; got: ${msg}`);
+          return true;
+        }
+      );
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws naming the file and key when checkCommand is the wrong type, without the value", () => {
+    // FR-003: wrong-typed key is malformed config — a silent fallback would hide a
+    // misconfigured project. The error must name the key and typeof, NOT the raw value.
+    const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-cfg-")));
+    try {
+      mkdirSync(join(projectDir, ".agent-flows"), { recursive: true });
+      writeFileSync(
+        join(projectDir, ".agent-flows", "config.json"),
+        JSON.stringify({ checkCommand: 42 })
+      );
+      assert.throws(
+        () => readAgentFlowsConfig(projectDir),
+        (err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.ok(msg.includes("config.json"), `error must name the config file; got: ${msg}`);
+          assert.ok(msg.includes("checkCommand"), `error must name the offending key; got: ${msg}`);
+          assert.ok(!msg.includes("42"), `error must not include the value; got: ${msg}`);
+          return true;
+        }
+      );
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 });

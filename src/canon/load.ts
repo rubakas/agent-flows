@@ -171,6 +171,16 @@ export function loadPipeline(
         if (!step.command) {
           throw new Error(`Step "${step.id}": check step requires command`);
         }
+        // FR-004: {{checkCommand}} is the only supported placeholder in a command.
+        // Any other {{...}} would reach /bin/sh literally; reject it loudly so the
+        // author discovers the mistake at load time rather than at runtime.
+        for (const ph of extractPlaceholders(step.command)) {
+          if (ph !== "checkCommand") {
+            throw new Error(
+              `Step "${step.id}": command contains unknown placeholder "{{${ph}}}" — only {{checkCommand}} is supported`
+            );
+          }
+        }
         // Validate the optional env allowlist field.
         const envField = (step as unknown as Record<string, unknown>).env;
         if (envField !== undefined) {

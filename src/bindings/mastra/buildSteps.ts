@@ -1,6 +1,7 @@
 // Binding B helpers: context/parsing helpers and per-kind Mastra step builders.
 // Consumed by buildLevelsOntoBuilder in build.ts.
 
+import { spawnSync } from "node:child_process";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { assembleSpec } from "../../canon/assemble.js";
@@ -19,6 +20,36 @@ import type { TicketStore } from "../../module/seams.js";
 export const ctx = z.record(z.string(), z.unknown());
 type Ctx = Record<string, unknown>;
 
+/**
+ * Default convergence gate command, used when no checkCommand is configured in
+ * .agent-flows/config.json. Excludes format:check: the fix step has no shell
+ * access (Bash is never granted), so a prettier failure would waste an LLM
+ * iteration on whitespace while real defects remain.
+ */
+export const DEFAULT_CHECK_COMMAND = "pnpm lint && pnpm typecheck && pnpm test";
+
+/**
+ * Runs `git status --porcelain` in cwd via spawnSync and returns a human-readable
+ * message describing the workspace state. Called from the daemon process (not a
+ * sandboxed step) when a write step fails, so the operator knows what was left behind.
+ */
+function workspaceDirtyMessage(cwd: string): string {
+  const result = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
+  // git exits 128 when the directory is not a git repository.
+  if (result.error !== undefined || result.status === 128) {
+    return "Workspace may contain partial writes; not a git repository, dirty-file listing unavailable.";
+  }
+  const lines = (result.stdout ?? "")
+    .trim()
+    .split("\n")
+    .filter((l) => l.length > 0);
+  const cap = 20;
+  if (lines.length <= cap) {
+    return `Workspace may contain partial writes:\n${lines.join("\n")}`;
+  }
+  return `Workspace may contain partial writes:\n${lines.slice(0, cap).join("\n")}\n…and ${lines.length - cap} more`;
+}
+
 export interface BuildDeps {
   registry: ModelRegistry;
   store: TicketStore;
@@ -27,6 +58,13 @@ export interface BuildDeps {
   runnerDeps?: StepRunnerDeps;
   /** Working directory for check step commands. Defaults to process.cwd(). */
   cwd?: string;
+  /**
+   * Per-project convergence gate command, resolved once at daemon startup from
+   * <projectDir>/.agent-flows/config.json (checkCommand key).
+   * Substituted into check step commands containing {{checkCommand}} at build time.
+   * When absent, defaults to DEFAULT_CHECK_COMMAND.
+   */
+  checkCommand?: string;
 }
 
 /** Callback type for compiling a nested pipeline body onto a Mastra builder. */
@@ -185,7 +223,21 @@ export function buildLlmStep(
         ...(step.permissions?.deny?.length ? { denyPatterns: step.permissions.deny } : {}),
       };
 
-      const raw = await runner(entry, prompt, runnerDeps);
+      // FR-007: wrap any runner error with the step id so the failure surface
+      // (RunRecord.error, GET /api/runs/:id) names the failing step.
+      // FR-008: for write steps, append workspace state before rethrowing —
+      // the operator needs to know what was left behind after a timeout or crash.
+      let raw: string;
+      try {
+        raw = await runner(entry, prompt, runnerDeps);
+      } catch (err) {
+        const baseMsg = err instanceof Error ? err.message : String(err);
+        const stepMsg = `Step "${step.id}": ${baseMsg}`;
+        if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
+          throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+        }
+        throw new Error(stepMsg, { cause: err });
+      }
 
       let value: unknown = raw;
       if (step.schema) {
@@ -195,7 +247,19 @@ export function buildLlmStep(
           const retryPrompt =
             `${prompt}\n\nYour previous output was not valid JSON (${r1.error}).` +
             ` Return ONLY the JSON object.`;
-          const retryRaw = await runner(entry, retryPrompt, runnerDeps);
+          let retryRaw: string;
+          try {
+            retryRaw = await runner(entry, retryPrompt, runnerDeps);
+          } catch (err) {
+            const baseMsg = err instanceof Error ? err.message : String(err);
+            const stepMsg = `Step "${step.id}": ${baseMsg}`;
+            // FR-008: mirror the write-step workspace report onto the retry path —
+            // a write step that fails during schema retry must also expose workspace state.
+            if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
+              throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+            }
+            throw new Error(stepMsg, { cause: err });
+          }
           const r2 = tryParseSchemaOutput(retryRaw, step.schema);
           if (!r2.ok) {
             throw new Error(`Step "${step.id}": ${r2.error}`);
@@ -355,13 +419,20 @@ export function buildCheckStep(
   deps: BuildDeps,
   defaultTimeoutMs: number | undefined
 ) {
+  // FR-004: substitute {{checkCommand}} at build time from BuildDeps — before any run
+  // exists — so run context (pipeline inputs, step outputs) cannot influence the value.
+  // Any other {{...}} in the command is a load error caught by load.ts before we get here.
+  const resolvedCommand = step.command!.replace(
+    /\{\{checkCommand\}\}/g,
+    deps.checkCommand ?? DEFAULT_CHECK_COMMAND
+  );
   return createStep({
     id: step.id,
     inputSchema: ctx,
     outputSchema: ctx,
     execute: async ({ inputData }) => {
       const rawCtx = inputData as Ctx;
-      const result = await runCheckStep(step.command!, {
+      const result = await runCheckStep(resolvedCommand, {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
         cwd: deps.cwd,
         ...(step.env?.length ? { envAllowlist: step.env } : {}),

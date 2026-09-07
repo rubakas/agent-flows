@@ -1410,6 +1410,56 @@ ${overrides}
     );
   });
 
+  it("loads a check step with command containing {{checkCommand}} without throwing", () => {
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) =>
+        p.endsWith(".yaml") ? makeCheckYaml('    command: "{{checkCommand}}"') : "",
+    });
+    assert.equal(def.steps[0].command, "{{checkCommand}}");
+  });
+
+  it("loads a check step with no braces in command without throwing (byte-identical pass-through)", () => {
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) =>
+        p.endsWith(".yaml") ? makeCheckYaml("    command: pnpm lint && pnpm typecheck") : "",
+    });
+    assert.equal(def.steps[0].command, "pnpm lint && pnpm typecheck");
+  });
+
+  it("throws when check step command contains an unknown placeholder", () => {
+    // {{other}} is not a recognised placeholder — should be a load error naming
+    // the step and the placeholder, not a silent pass-through to /bin/sh.
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? makeCheckYaml('    command: "{{other}}"') : ""),
+        }),
+      (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        assert.ok(msg.includes("verify"), `error must name the step; got: ${msg}`);
+        assert.ok(msg.includes("other"), `error must name the placeholder; got: ${msg}`);
+        return true;
+      }
+    );
+  });
+
+  it("throws when check step command mixes {{checkCommand}} with an unknown placeholder", () => {
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) =>
+            p.endsWith(".yaml")
+              ? makeCheckYaml('    command: "echo {{checkCommand}} {{other}}"')
+              : "",
+        }),
+      (err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        assert.ok(msg.includes("other"), `error must name the unknown placeholder; got: ${msg}`);
+        return true;
+      }
+    );
+  });
+
   it("throws when a non-check step kind has env set", () => {
     // env is only valid on check steps. gate steps must reject it.
     // This MUST FAIL before the fix: load.ts currently doesn't check env on gate steps.
