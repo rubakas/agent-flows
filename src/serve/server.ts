@@ -805,6 +805,40 @@ async function handleRequest(
     return;
   }
 
+  // POST /api/gate-judge — stateless judge-as-a-service for the n8n binding (FR-012)
+  if (method === "POST" && pathname === "/api/gate-judge") {
+    if (!ctx.runService) {
+      json(res, 503, { error: "RunService not available in this instance" });
+      return;
+    }
+    const raw = await readBody(req, BODY_LIMIT_DEFAULT);
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { gateMessage, spec, pipelineId } = parsed.value as {
+      gateMessage?: unknown;
+      spec?: unknown;
+      pipelineId?: unknown;
+    };
+    if (typeof gateMessage !== "string") {
+      json(res, 400, { error: 'Field "gateMessage" must be a string' });
+      return;
+    }
+    const result = await ctx.runService.gateJudge({
+      gateMessage,
+      spec,
+      pipelineId: typeof pipelineId === "string" ? pipelineId : undefined,
+    });
+    if ("error" in result) {
+      json(res, 502, { error: result.error });
+      return;
+    }
+    json(res, 200, { verdict: result.verdict, reason: result.reason });
+    return;
+  }
+
   // POST /api/install — install bundled workflows into the project directory
   if (method === "POST" && pathname === "/api/install") {
     const raw = await readBody(req, BODY_LIMIT_DEFAULT);

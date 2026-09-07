@@ -537,6 +537,93 @@ export class RunService {
   }
 
   /**
+   * Run the gate judge for a given gate material (FR-004/FR-005/FR-012).
+   *
+   * Shared by dispatchJudge (auto-mode internal) and the /api/gate-judge route (FR-012).
+   * Returns the verdict and metadata on success, or an error string on judge failure.
+   * Never returns a successful result that could be interpreted as an approval on failure.
+   */
+  async gateJudge(material: {
+    gateMessage: string;
+    spec?: unknown;
+    pipelineId?: string;
+  }): Promise<{ verdict: "approve" | "reject"; reason: string } | { error: string }> {
+    if (!this.judgeDeps) {
+      return { error: "Gate judge not configured" };
+    }
+    const payload = { message: material.gateMessage, spec: material.spec };
+    const result = await this.runJudgeCore(material.pipelineId ?? "unknown", "unknown", payload);
+    if ("error" in result) return { error: result.error };
+    return { verdict: result.verdict, reason: result.reason };
+  }
+
+  /**
+   * Core judge execution: builds the prompt, resolves the model, runs with one retry.
+   * Returns verdict+metadata on success, or error string on failure.
+   */
+  private async runJudgeCore(
+    pipelineId: string,
+    gateStepId: string,
+    payload: { message?: string; spec?: unknown } | undefined
+  ): Promise<
+    | {
+        verdict: "approve" | "reject";
+        reason: string;
+        judgeModelId: string;
+        workspaceAccess: boolean;
+      }
+    | { error: string }
+  > {
+    if (!this.judgeDeps) return { error: "Gate judge not configured" };
+
+    const judgePromptText = this.buildJudgePrompt(pipelineId, gateStepId, payload);
+
+    const { runner, registry, profile, projectDir } = this.judgeDeps;
+    const activeProfile = profile ?? getActiveProfile();
+    const judgeModelId = activeProfile.roles.reasoner;
+    const entry = registry.resolve(judgeModelId);
+    const isApiTransport = entry.transport === "api";
+
+    const deps: StepRunnerDeps = isApiTransport
+      ? {} // api transport: no workspace access (FR-004, Context §7)
+      : { contentsAccess: "read" as const, workspaceDir: projectDir };
+
+    const actualRunner = runner ?? runLlmStep;
+
+    let lastParseError: string | undefined;
+    // One retry on parse failure; second malformed verdict → judge failure (FR-005).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const promptToUse =
+        attempt === 0
+          ? judgePromptText
+          : judgePromptText +
+            `\n\n[PARSE ERROR on attempt 1: ${String(lastParseError)}. Output only the JSON object on a single line.]`;
+
+      let raw: string;
+      try {
+        raw = await actualRunner(entry, promptToUse, deps);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { error: `Judge transport error: ${msg}` };
+      }
+
+      const parsed = this.parseVerdict(raw);
+      if (parsed.ok) {
+        return {
+          verdict: parsed.verdict.verdict,
+          reason: parsed.verdict.reason,
+          judgeModelId: entry.id,
+          workspaceAccess: !isApiTransport,
+        };
+      }
+
+      lastParseError = parsed.error;
+    }
+
+    return { error: `Judge produced malformed verdict: ${lastParseError ?? "unknown"}` };
+  }
+
+  /**
    * Dispatch the gate judge for an auto run (FR-003/FR-004/FR-005).
    *
    * Fire-and-forget: called without await from afterSettlement() and approve().
@@ -554,66 +641,25 @@ export class RunService {
     const payload = record.suspendPayload as
       { message?: string; spec?: unknown; manualOnly?: boolean } | undefined;
 
-    const judgePromptText = this.buildJudgePrompt(record.pipelineId, gateStepId, payload);
+    const result = await this.runJudgeCore(record.pipelineId, gateStepId, payload);
 
-    // Resolve the judge model via reasoner role (FR-004).
-    const { runner, registry, profile, projectDir } = this.judgeDeps;
-    const activeProfile = profile ?? getActiveProfile();
-    const judgeModelId = activeProfile.roles.reasoner;
-    const entry = registry.resolve(judgeModelId);
-    const isApiTransport = entry.transport === "api";
-
-    const deps: StepRunnerDeps = isApiTransport
-      ? {} // api transport: no workspace access (FR-004, Context §7)
-      : { contentsAccess: "read" as const, workspaceDir: projectDir };
-
-    const actualRunner = runner ?? runLlmStep;
-
-    // One retry on parse failure; second malformed verdict → judge failure (FR-005).
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const promptToUse =
-        attempt === 0
-          ? judgePromptText
-          : judgePromptText +
-            `\n\n[PARSE ERROR on attempt 1: ${String(this.lastParseError)}. Output only the JSON object on a single line.]`;
-
-      let raw: string;
-      try {
-        raw = await actualRunner(entry, promptToUse, deps);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.degradeToManual(record, `Judge transport error: ${msg}`);
-        return;
-      }
-
-      const parsed = this.parseVerdict(raw);
-      if (parsed.ok) {
-        const decision: GateDecision = {
-          gateStepId,
-          mode: "auto",
-          decidedBy: "agent",
-          approved: parsed.verdict.verdict === "approve",
-          reason: parsed.verdict.reason,
-          judgeModelId: entry.id,
-          workspaceAccess: !isApiTransport,
-          decidedAt: new Date().toISOString(),
-        };
-        await this.resolveGate(record, decision.approved, decision);
-        return;
-      }
-
-      this.lastParseError = parsed.error;
+    if ("error" in result) {
+      this.degradeToManual(record, result.error);
+      return;
     }
 
-    // Both attempts failed.
-    this.degradeToManual(
-      record,
-      `Judge produced malformed verdict: ${this.lastParseError ?? "unknown"}`
-    );
+    const decision: GateDecision = {
+      gateStepId,
+      mode: "auto",
+      decidedBy: "agent",
+      approved: result.verdict === "approve",
+      reason: result.reason,
+      judgeModelId: result.judgeModelId,
+      workspaceAccess: result.workspaceAccess,
+      decidedAt: new Date().toISOString(),
+    };
+    await this.resolveGate(record, decision.approved, decision);
   }
-
-  /** Temporary storage for the last parse error (for retry prompt). Single-flight safe. */
-  private lastParseError: string | undefined;
 
   /**
    * Degrade to manual by setting judgeError and settling as awaiting_approval.

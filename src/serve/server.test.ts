@@ -25,8 +25,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
-import { RunService, type MastraLike } from "../runtime/runService.js";
+import { ModelRegistry } from "../canon/registry.js";
+import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
 import { startServer, readAgentFlowsConfig, type ServeHandle, CONTENT_CAP } from "./server.js";
+import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
 
 // ── Mock RunService helpers (mirrors runService.test.ts pattern) ──────────────
 
@@ -1416,6 +1418,138 @@ describe("POST /api/import — import workflow bundle", () => {
     assert.equal(res.status, 400);
     const body = (await res.json()) as { error: string };
     assert.ok(body.error.includes("bundle"), "error must mention the missing field");
+  });
+});
+
+// ── FR-012: POST /api/gate-judge — judge-as-a-service ──────────────────────────
+
+const gateJudgeStubEntry: ModelEntry = {
+  id: "stub-model",
+  transport: "cli",
+  cli: { bin: "claude" },
+};
+const gateJudgeStubRegistry = new ModelRegistry([gateJudgeStubEntry]);
+const gateJudgeStubProfile: ProviderProfile = {
+  id: "stub",
+  roles: { reasoner: "stub-model", worker: "stub-model", scout: "stub-model" },
+};
+
+function makeGateJudgeDeps(verdictJson: string): JudgeDeps {
+  return {
+    runner: async (_entry, _prompt) => verdictJson,
+    registry: gateJudgeStubRegistry,
+    profile: gateJudgeStubProfile,
+    projectDir: process.cwd(),
+    judgePrompt: "Gate judge prompt.",
+  };
+}
+
+function makeMastraStubForGateJudge(): MastraLike {
+  const dummyRun = {
+    runId: "stub-run",
+    watchers: [] as ((e: Record<string, unknown>) => void)[],
+    start: async () => ({ status: "success", result: {} }),
+    resume: async () => ({ status: "success", result: {} }),
+    watch: (_cb: (e: Record<string, unknown>) => void) => () => undefined,
+    emit: (_e: Record<string, unknown>) => undefined,
+  };
+  return {
+    getWorkflow: (_id) => ({
+      createRun: async () =>
+        dummyRun as unknown as Awaited<
+          ReturnType<ReturnType<MastraLike["getWorkflow"]>["createRun"]>
+        >,
+    }),
+  };
+}
+
+describe("POST /api/gate-judge — FR-012 judge-as-a-service", () => {
+  let srv: ServeHandle;
+
+  before(async () => {
+    const mastra = makeMastraStubForGateJudge();
+    const judgeDeps = makeGateJudgeDeps('{"verdict":"approve","reason":"Looks good."}');
+    const runService = new RunService(mastra, judgeDeps);
+    srv = await startServer({ port: 0, runService });
+  });
+
+  after(async () => {
+    await srv.close();
+  });
+
+  it("valid body → 200 { verdict, reason } from the stubbed judge", async () => {
+    const res = await mutate(srv.port, "POST", "/api/gate-judge", {
+      gateMessage: "Approve this change?",
+      pipelineId: "test-pipeline",
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.verdict, "approve");
+    assert.equal(body.reason, "Looks good.");
+  });
+
+  it("judge failure → 502 { error }", async () => {
+    const mastra = makeMastraStubForGateJudge();
+    // Return malformed verdict twice → judge failure
+    const failDeps: JudgeDeps = {
+      runner: async () => "not json",
+      registry: gateJudgeStubRegistry,
+      profile: gateJudgeStubProfile,
+      projectDir: process.cwd(),
+      judgePrompt: "Gate judge prompt.",
+    };
+    const failService = new RunService(mastra, failDeps);
+    const failSrv = await startServer({ port: 0, runService: failService });
+    try {
+      const res = await mutate(failSrv.port, "POST", "/api/gate-judge", {
+        gateMessage: "Approve this?",
+      });
+      assert.equal(res.status, 502);
+      const body = (await res.json()) as Record<string, unknown>;
+      assert.ok(typeof body.error === "string" && body.error.length > 0, "502 must include error");
+    } finally {
+      await failSrv.close();
+    }
+  });
+
+  it("missing gateMessage → 400", async () => {
+    const res = await mutate(srv.port, "POST", "/api/gate-judge", { spec: { foo: 1 } });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.ok(
+      typeof body.error === "string" && body.error.includes("gateMessage"),
+      `error must mention gateMessage; got: ${JSON.stringify(body.error)}`
+    );
+  });
+
+  it("malformed JSON body → 400", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/gate-judge`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{bad json",
+    });
+    assert.equal(res.status, 400);
+  });
+
+  it("no RunService → 503", async () => {
+    const noSrv = await startServer({ port: 0 });
+    try {
+      const res = await mutate(noSrv.port, "POST", "/api/gate-judge", {
+        gateMessage: "Approve?",
+      });
+      assert.equal(res.status, 503);
+    } finally {
+      await noSrv.close();
+    }
+  });
+
+  it("optional fields (spec, pipelineId) are accepted without error", async () => {
+    const res = await mutate(srv.port, "POST", "/api/gate-judge", {
+      gateMessage: "Gate check",
+      spec: { title: "My spec", acceptanceCriteria: ["AC-1"] },
+      pipelineId: "ship",
+    });
+    assert.equal(res.status, 200);
   });
 });
 

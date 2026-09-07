@@ -7,7 +7,9 @@ import {
   WORKSPACE_DIR_EXPR,
   AGENT_FLOWS_NODE_TYPE,
   LLM_STEP_PARAMS,
+  DEFAULT_DAEMON_URL,
   generateN8nWorkflow,
+  type N8nWorkflow,
 } from "./build.js";
 import type { LoadedPipeline, StepDef } from "../../canon/types.js";
 
@@ -220,9 +222,9 @@ describe("generateN8nWorkflow — fan-out and fan-in", () => {
 // ---------------------------------------------------------------------------
 
 describe("generateN8nWorkflow — step kind → node type", () => {
-  // FR-006: gate/assemble-spec/persist-ticket steps are NoOps. This pipeline has
-  // no llm prompts that reference them, so generation succeeds. The FR-006 error
-  // path is tested in the "loud failures" suite below.
+  // FR-011: gate steps are real HITL branch subgraphs, not NoOps.
+  // assemble-spec/persist-ticket remain NoOps (not yet implemented in Binding C).
+  // The pipeline has no llm prompts referencing these steps, so generation succeeds.
   const loaded = makeLoaded([
     { id: "llmStep", kind: "llm", role: "worker" },
     { id: "gateStep", kind: "gate", message: "Approve?", dependsOn: ["llmStep"] },
@@ -237,10 +239,19 @@ describe("generateN8nWorkflow — step kind → node type", () => {
     assert.equal(byName.get("llmStep")?.type, AGENT_FLOWS_NODE_TYPE);
   });
 
-  it("gate → n8n-nodes-base.noOp with message as notes", () => {
-    const node = byName.get("gateStep")!;
-    assert.equal(node.type, "n8n-nodes-base.noOp");
-    assert.equal(node.notes, "Approve?");
+  it("gate → subgraph with mode-if, wait, approved-if, http, verdict-if nodes (FR-011)", () => {
+    // No single node named "gateStep" — it expands to a subgraph
+    assert.equal(byName.get("gateStep"), undefined, "gate step id must not become a single node");
+    assert.ok(byName.get("gateStep mode-if"), "mode-if node must exist");
+    assert.ok(byName.get("gateStep wait"), "wait node must exist");
+    assert.ok(byName.get("gateStep approved-if"), "approved-if node must exist");
+    assert.ok(byName.get("gateStep http"), "http node must exist");
+    assert.ok(byName.get("gateStep verdict-if"), "verdict-if node must exist");
+    assert.equal(byName.get("gateStep mode-if")?.type, "n8n-nodes-base.if");
+    assert.equal(byName.get("gateStep wait")?.type, "n8n-nodes-base.wait");
+    assert.equal(byName.get("gateStep approved-if")?.type, "n8n-nodes-base.if");
+    assert.equal(byName.get("gateStep http")?.type, "n8n-nodes-base.httpRequest");
+    assert.equal(byName.get("gateStep verdict-if")?.type, "n8n-nodes-base.if");
   });
 
   it("assemble-spec → n8n-nodes-base.noOp", () => {
@@ -762,5 +773,303 @@ describe("FR-010 — parameter contract: emitted params equal node-read params",
       [],
       `Generated node is missing parameter keys: ${missing.join(", ")}`
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR-011: gate step becomes a real HITL branch subgraph
+// ---------------------------------------------------------------------------
+
+/**
+ * Walk the connection graph from startName, taking ONLY the false (port 1)
+ * branch at every two-port node (IF nodes). Single-port nodes (regular steps)
+ * pass through on port 0 as usual.
+ *
+ * This models the "rejected path": if commit is reachable via this traversal
+ * it means a rejection can still reach downstream irreversible steps.
+ */
+function reachableViaRejectedBranch(
+  connections: N8nWorkflow["connections"],
+  startName: string
+): Set<string> {
+  const visited = new Set<string>();
+  const queue = [startName];
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (visited.has(name)) continue;
+    visited.add(name);
+    const conn = connections[name];
+    if (!conn) continue;
+    const { main } = conn;
+    // For two-port nodes (IF nodes): follow port 1 (false/rejected).
+    // For one-port nodes (regular nodes): follow port 0.
+    const portToFollow = main.length >= 2 ? 1 : 0;
+    for (const target of main[portToFollow] ?? []) {
+      queue.push(target.node);
+    }
+  }
+  return visited;
+}
+
+/**
+ * Walk ALL connections (port 0 only — normal execution path through approving branches).
+ * Follows port 0 of every node.
+ */
+function reachableViaApprovedBranch(
+  connections: N8nWorkflow["connections"],
+  startName: string
+): Set<string> {
+  const visited = new Set<string>();
+  const queue = [startName];
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (visited.has(name)) continue;
+    visited.add(name);
+    const conn = connections[name];
+    if (!conn) continue;
+    for (const target of conn.main[0] ?? []) {
+      queue.push(target.node);
+    }
+  }
+  return visited;
+}
+
+describe("FR-011 — gate step: non-manualOnly subgraph structure", () => {
+  const loaded = makeLoaded([
+    { id: "prep", kind: "llm", role: "worker" },
+    { id: "myGate", kind: "gate", message: "Approve?", dependsOn: ["prep"] },
+    { id: "finalStep", kind: "check", command: "echo done", dependsOn: ["myGate"] },
+  ]);
+  const wf = generateN8nWorkflow(loaded);
+  const byName = new Map(wf.nodes.map((n) => [n.name, n]));
+
+  it("no single node with the gate step id exists", () => {
+    assert.equal(byName.get("myGate"), undefined);
+  });
+
+  it("emits all five gate subgraph nodes", () => {
+    assert.ok(byName.get("myGate mode-if"), "mode-if missing");
+    assert.ok(byName.get("myGate wait"), "wait missing");
+    assert.ok(byName.get("myGate approved-if"), "approved-if missing");
+    assert.ok(byName.get("myGate http"), "http missing");
+    assert.ok(byName.get("myGate verdict-if"), "verdict-if missing");
+  });
+
+  it("node types are correct", () => {
+    assert.equal(byName.get("myGate mode-if")?.type, "n8n-nodes-base.if");
+    assert.equal(byName.get("myGate wait")?.type, "n8n-nodes-base.wait");
+    assert.equal(byName.get("myGate approved-if")?.type, "n8n-nodes-base.if");
+    assert.equal(byName.get("myGate http")?.type, "n8n-nodes-base.httpRequest");
+    assert.equal(byName.get("myGate verdict-if")?.type, "n8n-nodes-base.if");
+  });
+
+  it("node typeVersions match verified n8n-nodes-base 2.22.6 defaults", () => {
+    assert.equal(byName.get("myGate mode-if")?.typeVersion, 2.3, "IF typeVersion must be 2.3");
+    assert.equal(byName.get("myGate wait")?.typeVersion, 1.1, "Wait typeVersion must be 1.1");
+    assert.equal(
+      byName.get("myGate http")?.typeVersion,
+      4.4,
+      "HTTP Request typeVersion must be 4.4"
+    );
+  });
+
+  it("Inputs node includes gateMode and agentFlowsDaemonUrl fields", () => {
+    const inputsNode = wf.nodes.find((n) => n.name === "Inputs")!;
+    const assignments = (
+      inputsNode.parameters.assignments as { assignments: { name: string; value: string }[] }
+    ).assignments;
+    const names = assignments.map((a) => a.name);
+    assert.ok(names.includes("gateMode"), "Inputs must include gateMode");
+    assert.ok(names.includes("agentFlowsDaemonUrl"), "Inputs must include agentFlowsDaemonUrl");
+    const daemonAssign = assignments.find((a) => a.name === "agentFlowsDaemonUrl")!;
+    assert.equal(
+      daemonAssign.value,
+      DEFAULT_DAEMON_URL,
+      "agentFlowsDaemonUrl default must equal DEFAULT_DAEMON_URL"
+    );
+  });
+
+  it("mode-if true branch (port 0) leads to wait; false branch (port 1) leads to http", () => {
+    const modeIfConn = wf.connections["myGate mode-if"];
+    assert.ok(modeIfConn, "mode-if must have connections");
+    assert.equal(modeIfConn.main.length, 2, "mode-if must have two output ports");
+    assert.ok(
+      modeIfConn.main[0].some((c) => c.node === "myGate wait"),
+      "port 0 must lead to wait"
+    );
+    assert.ok(
+      modeIfConn.main[1].some((c) => c.node === "myGate http"),
+      "port 1 must lead to http"
+    );
+  });
+
+  it("wait → approved-if", () => {
+    const waitConn = wf.connections["myGate wait"];
+    assert.ok(
+      waitConn?.main[0].some((c) => c.node === "myGate approved-if"),
+      "wait must lead to approved-if"
+    );
+  });
+
+  it("http → verdict-if", () => {
+    const httpConn = wf.connections["myGate http"];
+    assert.ok(
+      httpConn?.main[0].some((c) => c.node === "myGate verdict-if"),
+      "http must lead to verdict-if"
+    );
+  });
+
+  it("approved-if port 0 (true) connects to finalStep", () => {
+    const approvedConn = wf.connections["myGate approved-if"];
+    assert.ok(approvedConn, "approved-if must have connections");
+    assert.ok(
+      approvedConn.main[0]?.some((c) => c.node === "finalStep"),
+      "approved-if port 0 must lead to finalStep"
+    );
+  });
+
+  it("approved-if port 1 (false/rejected) has no outgoing connection", () => {
+    const approvedConn = wf.connections["myGate approved-if"];
+    // port 1 either absent or empty — rejected path must be dead
+    const port1 = approvedConn?.main[1];
+    assert.ok(!port1 || port1.length === 0, "approved-if port 1 must have no connections");
+  });
+
+  it("verdict-if port 0 (true) connects to finalStep", () => {
+    const verdictConn = wf.connections["myGate verdict-if"];
+    assert.ok(
+      verdictConn?.main[0]?.some((c) => c.node === "finalStep"),
+      "verdict-if port 0 must lead to finalStep"
+    );
+  });
+
+  it("verdict-if port 1 (false/rejected) has no outgoing connection", () => {
+    const verdictConn = wf.connections["myGate verdict-if"];
+    const port1 = verdictConn?.main[1];
+    assert.ok(!port1 || port1.length === 0, "verdict-if port 1 must have no connections");
+  });
+
+  it("predecessor (prep) connects to the mode-if entry node", () => {
+    assert.ok(
+      wf.connections.prep?.main[0]?.some((c) => c.node === "myGate mode-if"),
+      "prep must connect to myGate mode-if"
+    );
+  });
+
+  it("http node URL expression references agentFlowsDaemonUrl from Inputs", () => {
+    const httpNode = byName.get("myGate http")!;
+    const url = httpNode.parameters.url as string;
+    assert.ok(url.includes("agentFlowsDaemonUrl"), "URL must reference agentFlowsDaemonUrl");
+    assert.ok(url.includes("/api/gate-judge"), "URL must include /api/gate-judge");
+  });
+
+  it("http node sends gate message and pipelineId in JSON body", () => {
+    const httpNode = byName.get("myGate http")!;
+    assert.equal(httpNode.parameters.sendBody, true);
+    assert.equal(httpNode.parameters.contentType, "json");
+    const body = JSON.parse(httpNode.parameters.jsonBody as string) as Record<string, unknown>;
+    assert.equal(body.gateMessage, "Approve?", "jsonBody must include the gate message");
+    assert.ok("pipelineId" in body, "jsonBody must include pipelineId");
+  });
+
+  it("serialises to JSON without throwing", () => {
+    assert.doesNotThrow(() => JSON.stringify(wf));
+  });
+});
+
+describe("FR-011 — gate step: manualOnly subgraph structure (FR-013)", () => {
+  const loaded = makeLoaded([
+    { id: "prep", kind: "llm", role: "worker" },
+    {
+      id: "safeGate",
+      kind: "gate",
+      message: "Approve irreversible action?",
+      manualOnly: true,
+      dependsOn: ["prep"],
+    },
+    { id: "irrev", kind: "check", command: "rm -rf .", dependsOn: ["safeGate"] },
+  ]);
+  const wf = generateN8nWorkflow(loaded);
+  const byName = new Map(wf.nodes.map((n) => [n.name, n]));
+
+  it("emits only wait and approved-if — no mode-if, http, or verdict-if", () => {
+    assert.ok(byName.get("safeGate wait"), "wait must exist");
+    assert.ok(byName.get("safeGate approved-if"), "approved-if must exist");
+    assert.equal(
+      byName.get("safeGate mode-if"),
+      undefined,
+      "mode-if must NOT exist for manualOnly"
+    );
+    assert.equal(byName.get("safeGate http"), undefined, "http must NOT exist for manualOnly");
+    assert.equal(
+      byName.get("safeGate verdict-if"),
+      undefined,
+      "verdict-if must NOT exist for manualOnly"
+    );
+  });
+
+  it("predecessor connects to wait (not mode-if)", () => {
+    assert.ok(
+      wf.connections.prep?.main[0]?.some((c) => c.node === "safeGate wait"),
+      "prep must connect to safeGate wait"
+    );
+  });
+
+  it("approved-if port 0 (true) connects to irrev", () => {
+    assert.ok(
+      wf.connections["safeGate approved-if"]?.main[0]?.some((c) => c.node === "irrev"),
+      "approved-if port 0 must lead to irrev"
+    );
+  });
+
+  it("approved-if port 1 (false/rejected) has no outgoing connection", () => {
+    const port1 = wf.connections["safeGate approved-if"]?.main[1];
+    assert.ok(!port1 || port1.length === 0, "approved-if port 1 must have no connections");
+  });
+
+  it("serialises to JSON without throwing", () => {
+    assert.doesNotThrow(() => JSON.stringify(wf));
+  });
+});
+
+describe("FR-011 — unreachability proof: commit only reachable via approved path", () => {
+  // Load the real ship.yaml which has manualOnly: true on the approve gate
+  // followed by commit and pr steps.
+  const shipYaml = join(repoRoot, "pipelines", "ship.yaml");
+  const loaded = loadPipeline(shipYaml);
+  const wf = generateN8nWorkflow(loaded);
+
+  it("approve gate emits a wait node as entry (manualOnly = true)", () => {
+    const byName = new Map(wf.nodes.map((n) => [n.name, n]));
+    assert.ok(byName.get("approve wait"), "approve wait node must exist");
+    assert.equal(
+      byName.get("approve mode-if"),
+      undefined,
+      "approve must have no mode-if (manualOnly)"
+    );
+  });
+
+  it("commit is reachable via the approved (true) path", () => {
+    const reached = reachableViaApprovedBranch(wf.connections, "Manual Trigger");
+    assert.ok(reached.has("commit"), "commit must be reachable via the approved path");
+  });
+
+  it("commit is NOT reachable via the rejected (false) path — the load-bearing property", () => {
+    // This test proves the core structural guarantee: a rejected gate cannot
+    // reach downstream irreversible steps (ship's commit and pr).
+    // If this assertion fails, a false/rejected branch connects to commit —
+    // the same silent-check defect this spec exists to prevent.
+    const reached = reachableViaRejectedBranch(wf.connections, "Manual Trigger");
+    assert.ok(!reached.has("commit"), "commit must be UNREACHABLE via the rejected path");
+    assert.ok(!reached.has("pr"), "pr must be UNREACHABLE via the rejected path");
+  });
+
+  it("pr is NOT reachable via the rejected path", () => {
+    const reached = reachableViaRejectedBranch(wf.connections, "Manual Trigger");
+    assert.ok(!reached.has("pr"), "pr must be unreachable via the rejected path");
+  });
+
+  it("serialises to JSON without throwing", () => {
+    assert.doesNotThrow(() => JSON.stringify(wf));
   });
 });

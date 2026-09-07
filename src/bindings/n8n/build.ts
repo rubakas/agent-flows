@@ -20,6 +20,24 @@ export const WORKSPACE_DIR_EXPR = "={{ $('Inputs').first().json.projectDir }}";
 const MANUAL_TRIGGER_TYPE = "n8n-nodes-base.manualTrigger";
 const SET_NODE_TYPE = "n8n-nodes-base.set";
 const NOOP_TYPE = "n8n-nodes-base.noOp";
+const IF_NODE_TYPE = "n8n-nodes-base.if";
+const WAIT_NODE_TYPE = "n8n-nodes-base.wait";
+const HTTP_REQUEST_NODE_TYPE = "n8n-nodes-base.httpRequest";
+
+// typeVersions verified from installed n8n-nodes-base 2.22.6:
+//   IF defaultVersion: 2.3 (uses IfV2)
+//   Wait version: [1, 1.1] → 1.1
+//   HTTP Request defaultVersion: 4.4 (uses HttpRequestV3 internally)
+const IF_TYPE_VERSION = 2.3;
+const WAIT_TYPE_VERSION = 1.1;
+const HTTP_REQUEST_TYPE_VERSION = 4.4;
+
+/**
+ * Default daemon base URL. n8n's HTTP Request node will POST to this URL + /api/gate-judge.
+ * The operator can override it in the generated workflow's Inputs node (agentFlowsDaemonUrl).
+ * 7411 is the daemon's default port (server.ts ServeOptions.port default).
+ */
+export const DEFAULT_DAEMON_URL = "http://127.0.0.1:7411";
 
 /**
  * The complete set of parameter keys that Binding C emits for llm steps.
@@ -35,7 +53,13 @@ export const LLM_STEP_PARAMS = Object.freeze([
   "timeoutMs",
 ]);
 
-/** Step kinds that Binding C emits as NoOp nodes and therefore cannot be referenced by llm prompts. */
+/**
+ * Step kinds whose output cannot be referenced by llm prompts in Binding C.
+ * Gate steps are real HITL/branch subgraphs (FR-011) and not NoOps, but their
+ * output is still not a usable text value for downstream prompts — the
+ * restriction therefore stays (spec FR-011: "the prompt-reference restriction
+ * for gate outputs stays").
+ */
 const NOOP_STEP_KINDS: ReadonlySet<StepKind> = new Set([
   "gate",
   "loop",
@@ -102,9 +126,24 @@ function makeNode(
  * Build the Inputs (Set) node.
  * Uses typeVersion 3.4 (Edit Fields / assignments style).
  * Each declared pipeline input plus `projectDir` is emitted as a string field defaulting to "".
+ * When `hasGates` is true, `gateMode` (default: "manual") and `agentFlowsDaemonUrl`
+ * (default: DEFAULT_DAEMON_URL) are added so gate subgraph nodes can reference them.
  */
-function makeInputsNode(inputs: readonly string[], position: [number, number]): N8nNode {
+function makeInputsNode(
+  inputs: readonly string[],
+  position: [number, number],
+  hasGates = false
+): N8nNode {
   const allFields = [...inputs, "projectDir"];
+  const extraAssignments: { name: string; value: string; type: string }[] = [];
+  if (hasGates) {
+    extraAssignments.push({ name: "gateMode", value: "manual", type: "string" });
+    extraAssignments.push({
+      name: "agentFlowsDaemonUrl",
+      value: DEFAULT_DAEMON_URL,
+      type: "string",
+    });
+  }
   return {
     id: randomUUID(),
     name: "Inputs",
@@ -114,11 +153,10 @@ function makeInputsNode(inputs: readonly string[], position: [number, number]): 
     parameters: {
       mode: "manual",
       assignments: {
-        assignments: allFields.map((name) => ({
-          name,
-          value: "",
-          type: "string",
-        })),
+        assignments: [
+          ...allFields.map((name) => ({ name, value: "", type: "string" })),
+          ...extraAssignments,
+        ],
       },
       includeOthers: false,
     },
@@ -190,11 +228,15 @@ function rewritePrompt(
         );
       }
       if (NOOP_STEP_KINDS.has(kind)) {
+        const detail =
+          kind === "gate"
+            ? `gate steps emit a HITL branch subgraph; their output is not a text value`
+            : `${kind} steps are emitted as NoOps in Binding C (not yet implemented); ` +
+              `a NoOp passes its input through, so this reference would resolve to the wrong upstream data. ` +
+              `This pipeline needs ${kind} implemented in Binding C first`;
         throw new Error(
           `Step "${referringStepId}": prompt references "{{${key}}}" which is a ${kind} step. ` +
-            `${kind} steps are emitted as NoOps in Binding C (not yet implemented); ` +
-            `a NoOp passes its input through, so this reference would resolve to the wrong upstream data. ` +
-            `This pipeline needs ${kind} implemented in Binding C first.`
+            `${detail}.`
         );
       }
       if (kind === "llm") {
@@ -247,11 +289,6 @@ function buildStepNode(
     });
   }
 
-  if (step.kind === "gate") {
-    // TODO(binding-c): map gate to a real HITL/Wait node
-    return makeNode(step.id, NOOP_TYPE, position, {}, step.message);
-  }
-
   if (step.kind === "loop") {
     // TODO(binding-c): loop body is a sub-workflow; Binding C does not execute it yet
     return makeNode(
@@ -280,6 +317,227 @@ function buildStepNode(
 }
 
 // ---------------------------------------------------------------------------
+// Gate subgraph builder (FR-011)
+// ---------------------------------------------------------------------------
+
+/**
+ * Describes the multi-node subgraph emitted for a gate step.
+ *
+ * Predecessors connect to `entryName`. Successors receive connections from
+ * the true (port 0) branches of every node listed in `exitNames`. The false
+ * (port 1) branches of exit nodes are intentionally left unconnected so that
+ * a rejection makes all downstream nodes unreachable by construction.
+ */
+interface GateSubgraph {
+  /** First node name — predecessors and Inputs connect here. */
+  entryName: string;
+  /** Node names whose port 0 (true/approved) connects to successors. */
+  exitNames: string[];
+  /** All nodes in the subgraph. */
+  nodes: N8nNode[];
+  /** Internal connections within the subgraph (not including → successors). */
+  connections: Record<string, { main: N8nConnection[][] }>;
+}
+
+/**
+ * Build an IF-node condition parameters block (n8n-nodes-base.if typeVersion 2.3).
+ * Verified against n8n-nodes-base 2.22.6 / IfV2 source (defaultVersion 2.3).
+ */
+function makeIfConditions(
+  conditions: {
+    leftValue: string;
+    rightValue?: unknown;
+    operator: { type: string; operation: string };
+  }[]
+): Record<string, unknown> {
+  return {
+    conditions: {
+      combinator: "and" as const,
+      conditions,
+      options: {
+        caseSensitive: true,
+        leftValue: "",
+        typeValidation: "strict",
+        version: 2,
+      },
+    },
+    options: {},
+  };
+}
+
+/**
+ * Build the multi-node subgraph for a single gate step (FR-011).
+ *
+ * Non-manualOnly gate emits:
+ *   modeIf → (true/manual) wait → approvedIf
+ *         → (false/auto)  http → verdictIf
+ *
+ * manualOnly gate emits (FR-013: no auto branch, no HTTP Request node):
+ *   wait → approvedIf
+ *
+ * The reject/false branch of every IF exit node has no outgoing connection,
+ * making downstream nodes unreachable on rejection by construction.
+ *
+ * Schema notes (verified from installed n8n-nodes-base 2.22.6):
+ *   - IF typeVersion 2.3: conditions use filter schema with combinator/conditions/options
+ *   - Wait typeVersion 1.1: resume: "webhook" puts the POST body at $json.body in the next node
+ *     (inherits Webhook.node.js output: { headers, params, query, body })
+ *     ASSUMPTION: $json.body.approved is where the resume caller's "approved" field lands.
+ *     This assumption could not be verified without a live n8n runtime; flagged in spec Design G.
+ *   - HTTP Request typeVersion 4.4: sendBody+contentType+specifyBody+jsonBody for POST JSON
+ *     Response body for application/json is placed directly in $json of the next node.
+ */
+function buildGateSubgraph(
+  step: StepDef,
+  position: [number, number],
+  pipelineId: string
+): GateSubgraph {
+  const id = step.id;
+  const [x, y] = position;
+  const manualOnly = step.manualOnly === true;
+
+  const gateMessage = step.message ?? "Approve this gate?";
+
+  if (manualOnly) {
+    // ── manualOnly: only the manual branch ──────────────────────────────────
+    const waitName = `${id} wait`;
+    const approvedIfName = `${id} approved-if`;
+
+    const waitNode = makeNode(
+      waitName,
+      WAIT_NODE_TYPE,
+      [x, y],
+      { resume: "webhook", options: {} },
+      undefined,
+      WAIT_TYPE_VERSION
+    );
+
+    const approvedIfNode = makeNode(
+      approvedIfName,
+      IF_NODE_TYPE,
+      [x + 200, y],
+      // ASSUMPTION: resume webhook POST body fields are at $json.body.*
+      makeIfConditions([
+        {
+          leftValue: "={{ $json.body.approved }}",
+          operator: { type: "boolean", operation: "true" },
+        },
+      ]),
+      undefined,
+      IF_TYPE_VERSION
+    );
+
+    return {
+      entryName: waitName,
+      exitNames: [approvedIfName],
+      nodes: [waitNode, approvedIfNode],
+      connections: {
+        [waitName]: { main: [[{ node: approvedIfName, type: "main", index: 0 }]] },
+        // approvedIf → successors is wired by generateN8nWorkflow (port 0 only)
+      },
+    };
+  }
+
+  // ── Full (non-manualOnly) gate: mode-IF → wait branch + HTTP branch ────────
+  const modeIfName = `${id} mode-if`;
+  const waitName = `${id} wait`;
+  const approvedIfName = `${id} approved-if`;
+  const httpName = `${id} http`;
+  const verdictIfName = `${id} verdict-if`;
+
+  const modeIfNode = makeNode(
+    modeIfName,
+    IF_NODE_TYPE,
+    [x, y],
+    makeIfConditions([
+      {
+        leftValue: "={{ $('Inputs').first().json.gateMode }}",
+        rightValue: "manual",
+        operator: { type: "string", operation: "equals" },
+      },
+    ]),
+    undefined,
+    IF_TYPE_VERSION
+  );
+
+  // Manual branch nodes
+  const waitNode = makeNode(
+    waitName,
+    WAIT_NODE_TYPE,
+    [x + 200, y - 100],
+    { resume: "webhook", options: {} },
+    undefined,
+    WAIT_TYPE_VERSION
+  );
+
+  const approvedIfNode = makeNode(
+    approvedIfName,
+    IF_NODE_TYPE,
+    [x + 400, y - 100],
+    makeIfConditions([
+      {
+        leftValue: "={{ $json.body.approved }}",
+        operator: { type: "boolean", operation: "true" },
+      },
+    ]),
+    undefined,
+    IF_TYPE_VERSION
+  );
+
+  // Auto branch nodes
+  const daemonUrlExpr = `={{ $('Inputs').first().json.agentFlowsDaemonUrl }}/api/gate-judge`;
+  const judgeBody = JSON.stringify({ gateMessage, pipelineId });
+  const httpNode = makeNode(
+    httpName,
+    HTTP_REQUEST_NODE_TYPE,
+    [x + 200, y + 100],
+    {
+      method: "POST",
+      url: daemonUrlExpr,
+      sendBody: true,
+      contentType: "json",
+      specifyBody: "json",
+      jsonBody: judgeBody,
+    },
+    undefined,
+    HTTP_REQUEST_TYPE_VERSION
+  );
+
+  const verdictIfNode = makeNode(
+    verdictIfName,
+    IF_NODE_TYPE,
+    [x + 400, y + 100],
+    makeIfConditions([
+      {
+        leftValue: "={{ $json.verdict }}",
+        rightValue: "approve",
+        operator: { type: "string", operation: "equals" },
+      },
+    ]),
+    undefined,
+    IF_TYPE_VERSION
+  );
+
+  return {
+    entryName: modeIfName,
+    exitNames: [approvedIfName, verdictIfName],
+    nodes: [modeIfNode, waitNode, approvedIfNode, httpNode, verdictIfNode],
+    connections: {
+      // mode-IF: port 0 (true/manual) → wait; port 1 (false/auto) → http
+      [modeIfName]: {
+        main: [
+          [{ node: waitName, type: "main", index: 0 }],
+          [{ node: httpName, type: "main", index: 0 }],
+        ],
+      },
+      [waitName]: { main: [[{ node: approvedIfName, type: "main", index: 0 }]] },
+      [httpName]: { main: [[{ node: verdictIfName, type: "main", index: 0 }]] },
+      // approvedIf and verdictIf → successors wired by generateN8nWorkflow (port 0 only)
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -287,14 +545,14 @@ function buildStepNode(
  * Generate an n8n workflow object from a loaded canon pipeline.
  *
  * The result is a plain JS object that serialises to valid n8n workflow JSON.
- * One n8n node is emitted per canon step, plus a Manual Trigger entry node and
- * an Inputs (Set) node. Connections mirror the canon DAG (dependsOn edges).
- * Layout is deterministic: nodes are placed left-to-right by topological level
- * and top-to-bottom within each level in declaration order.
+ * One n8n node is emitted per non-gate step, plus a Manual Trigger entry node and
+ * an Inputs (Set) node. Gate steps emit multi-node HITL branch subgraphs (FR-011).
+ * Connections mirror the canon DAG (dependsOn edges); gate subgraph reject branches
+ * are unconnected so downstream nodes are unreachable on rejection by construction.
  *
  * Throws if:
  * - any step id collides with reserved node names ("Manual Trigger", "Inputs") — FR-007
- * - any llm prompt references a step that Binding C emits as a NoOp — FR-006
+ * - any llm prompt references a step that Binding C cannot produce output for — FR-006
  * - any llm prompt references the `{{models}}` context key — FR-006
  */
 export function generateN8nWorkflow(
@@ -318,11 +576,13 @@ export function generateN8nWorkflow(
   // ── Build lookup maps ─────────────────────────────────────────────────────
   const stepKindById = new Map<string, StepKind>(def.steps.map((s) => [s.id, s.kind]));
   const pipelineInputs = new Set<string>(def.inputs);
+  const hasGates = def.steps.some((s) => s.kind === "gate");
 
   // ── Assign positions ──────────────────────────────────────────────────────
   // Manual Trigger sits at [100, 300].
   // Inputs node sits at [350, 300].
   // Steps: x = 600 + 250 * levelIndex, y = 100 + 150 * indexWithinLevel.
+  // Gate subgraph nodes are placed relative to the gate step's anchor position.
   const positionByStepId = new Map<string, [number, number]>();
   for (let li = 0; li < levels.length; li++) {
     const x = 600 + 250 * li;
@@ -331,23 +591,46 @@ export function generateN8nWorkflow(
     }
   }
 
+  // ── Build gate subgraphs (FR-011) ─────────────────────────────────────────
+  const gateSubgraphs = new Map<string, GateSubgraph>();
+  for (const step of def.steps) {
+    if (step.kind === "gate") {
+      gateSubgraphs.set(step.id, buildGateSubgraph(step, positionByStepId.get(step.id)!, def.id));
+    }
+  }
+
+  // ── stepEntryName: the node name that predecessors connect to for a step ──
+  // For regular steps it equals the step id; for gate steps it is the subgraph entry.
+  function stepEntryName(stepId: string): string {
+    return gateSubgraphs.get(stepId)?.entryName ?? stepId;
+  }
+
   // ── Build nodes ───────────────────────────────────────────────────────────
   const triggerNode = makeNode("Manual Trigger", MANUAL_TRIGGER_TYPE, [100, 300], {});
-  const inputsNode = makeInputsNode(def.inputs, [350, 300]);
-  const stepNodes = def.steps.map((step) =>
-    buildStepNode(
-      step,
-      positionByStepId.get(step.id)!,
-      prompts[step.id] ?? "",
-      pipelineInputs,
-      stepKindById
-    )
-  );
-  const nodes = [triggerNode, inputsNode, ...stepNodes];
+  const inputsNode = makeInputsNode(def.inputs, [350, 300], hasGates);
+
+  const regularNodes: N8nNode[] = [];
+  const subgraphNodes: N8nNode[] = [];
+  for (const step of def.steps) {
+    if (step.kind === "gate") {
+      subgraphNodes.push(...gateSubgraphs.get(step.id)!.nodes);
+    } else {
+      regularNodes.push(
+        buildStepNode(
+          step,
+          positionByStepId.get(step.id)!,
+          prompts[step.id] ?? "",
+          pipelineInputs,
+          stepKindById
+        )
+      );
+    }
+  }
+  const nodes = [triggerNode, inputsNode, ...regularNodes, ...subgraphNodes];
 
   // ── Build connections ─────────────────────────────────────────────────────
   // n8n connections keyed by source node name: { main: [[{node, type, index}…]] }
-  // The outer array is indexed by output port; all targets share port 0.
+  // The outer array is indexed by output port; IF nodes use port 0 (true) and port 1 (false).
   const connections: Record<string, { main: N8nConnection[][] }> = {};
 
   // Manual Trigger → Inputs
@@ -355,30 +638,54 @@ export function generateN8nWorkflow(
     main: [[{ node: "Inputs", type: "main", index: 0 }]],
   };
 
-  // Inputs → every level-0 step (preserve declaration order).
+  // Inputs → every level-0 step entry (preserve declaration order).
+  // Gate steps redirect to their subgraph entry node.
   const level0Targets: N8nConnection[] = levels[0].map((id) => ({
-    node: id,
+    node: stepEntryName(id),
     type: "main",
     index: 0,
   }));
   connections.Inputs = { main: [level0Targets] };
 
-  // Build forward edges: source stepId → dependent stepIds (declaration order).
+  // Build forward edges: source stepId → [entry node names of successor steps].
+  // Using entry names ensures predecessors wire to the gate subgraph's first node.
   const forwardEdges = new Map<string, string[]>();
   for (const step of def.steps) {
     for (const dep of step.dependsOn ?? []) {
       if (!forwardEdges.has(dep)) forwardEdges.set(dep, []);
-      forwardEdges.get(dep)!.push(step.id);
+      forwardEdges.get(dep)!.push(stepEntryName(step.id));
     }
   }
 
-  // Emit step connections in declaration order for determinism.
+  // Emit connections in declaration order for determinism.
   for (const step of def.steps) {
-    const targets = forwardEdges.get(step.id);
-    if (targets && targets.length > 0) {
-      connections[step.id] = {
-        main: [targets.map((tid) => ({ node: tid, type: "main" as const, index: 0 as const }))],
-      };
+    if (step.kind === "gate") {
+      const subgraph = gateSubgraphs.get(step.id)!;
+      // Add internal subgraph connections.
+      Object.assign(connections, subgraph.connections);
+
+      // Connect each exit node's port 0 (true/approved) to successor steps.
+      // Port 1 (false/rejected) is intentionally left unconnected —
+      // downstream nodes are unreachable on rejection by construction (FR-011).
+      const successorTargets = forwardEdges.get(step.id);
+      if (successorTargets && successorTargets.length > 0) {
+        const targetConns: N8nConnection[] = successorTargets.map((t) => ({
+          node: t,
+          type: "main" as const,
+          index: 0 as const,
+        }));
+        for (const exitName of subgraph.exitNames) {
+          // port 0 (approved/true) → successors; port 1 (rejected/false) → intentionally empty
+          connections[exitName] = { main: [targetConns, []] };
+        }
+      }
+    } else {
+      const targets = forwardEdges.get(step.id);
+      if (targets && targets.length > 0) {
+        connections[step.id] = {
+          main: [targets.map((tid) => ({ node: tid, type: "main" as const, index: 0 as const }))],
+        };
+      }
     }
   }
 
