@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "serve",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["scripts/dev-serve.sh"],
+      "port": 7411
+    }
+  ]
+}
