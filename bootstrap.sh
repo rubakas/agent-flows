@@ -82,8 +82,8 @@ else
 fi
 
 # ── 5. Preflight doctor ───────────────────────────────────────────────────────
-step "pnpm run doctor"
-run pnpm run doctor
+step "agent-flows doctor"
+run pnpm run preflight
 
 # ── 6. Build ──────────────────────────────────────────────────────────────────
 step "pnpm build"
@@ -91,4 +91,4 @@ run pnpm build
 
 # DB schema is applied by makeDb() on first open (src/db/index.ts); no migration step needed
 # ── 7. Done ───────────────────────────────────────────────────────────────────
-step "Bootstrap complete — entry points: pnpm mcp  |  pnpm canon:check  |  pnpm bindings:claude  |  pnpm doctor"
+step "Bootstrap complete — entry points: agent-flows serve  |  agent-flows mcp  |  agent-flows doctor"

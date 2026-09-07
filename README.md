@@ -26,9 +26,9 @@ cd agent-flows
 pnpm bootstrap
 ```
 
-This command checks Node 22, enables pnpm, installs dependencies, validates the `better-sqlite3` native module, and builds the project. It ends with a preflight check (`pnpm run doctor`) that confirms the Claude CLI is available.
+This command checks Node 22, enables pnpm, installs dependencies, validates the `better-sqlite3` native module, and builds the project. It ends with a preflight check (`agent-flows doctor`) that confirms the Claude CLI is available.
 
-If any step fails, `pnpm run doctor` will tell you exactly what is missing and how to fix it.
+If any step fails, `agent-flows doctor` will tell you exactly what is missing and how to fix it.
 
 ### Point agent-flows at your repository
 
@@ -37,7 +37,7 @@ agent-flows is provider-neutral; it needs to know which repository to run workfl
 First, see what workflows are available:
 
 ```sh
-AGENT_FLOWS_PROJECT_DIR=<path-to-your-repo> pnpm flows:list
+cd <path-to-your-repo> && agent-flows list
 ```
 
 This lists every bundled workflow and shows whether it is already installed in your project. For example:
@@ -62,7 +62,7 @@ AVAILABLE WORKFLOWS:
 Now install the workflow(s) you want:
 
 ```sh
-AGENT_FLOWS_PROJECT_DIR=<path-to-your-repo> pnpm flows:install cycle-dev
+cd <path-to-your-repo> && agent-flows install cycle-dev
 ```
 
 This command copies the `cycle-dev` workflow and all its dependencies into `<your-repo>/.agent-flows/`. The files are yours to edit—that's the entire point. If you install `cycle-dev`, you will NOT get `ship`, because `ship` is not part of that chain; your installed workflow cannot commit or open a pull request.
@@ -76,10 +76,10 @@ Before you use the workflow from the chat, the daemon must be running. The chat 
 Open a new terminal (or terminal tab) and run:
 
 ```sh
-AGENT_FLOWS_PROJECT_DIR=<path-to-your-repo> pnpm serve
+cd <path-to-your-repo> && agent-flows serve
 ```
 
-Run this from the agent-flows checkout — the `pnpm` scripts exist only there, and the environment variable is what aims it at your repository. (The MCP server is the exception: the chat launches it from your repository, so it needs no such variable.)
+Run this from your project directory — `agent-flows serve` uses cwd as the project directory by default. (You can also set `AGENT_FLOWS_PROJECT_DIR` to override the target, but running from the project directory is simpler.)
 
 This starts an HTTP server on port 7411 (override with `AGENT_FLOWS_PORT=<port>`). The daemon stays running and serves a web page at `http://127.0.0.1:7411` showing active runs and available workflows. Leave this terminal open while you work.
 
@@ -254,7 +254,7 @@ The section above covers the primary path: running workflows from your MCP-capab
 If you prefer to run workflows as native Claude Code JavaScript files instead of through the MCP server, you can generate them:
 
 ```sh
-pnpm bindings:claude          # generate .claude/workflows/*.js
+agent-flows generate claude   # generate .claude/workflows/*.js
 ```
 
 This creates native Claude Code workflows. They can execute `llm` and `assemble-spec` steps, but not gates, checks, loops, or other advanced step types. Any pipeline using those kinds is refused at generation time (no file is written). The native path is simpler but has narrower coverage; use the MCP path (above) for full pipeline support.
@@ -266,7 +266,7 @@ This creates native Claude Code workflows. They can execute `llm` and `assemble-
 To author and run workflows in n8n (the visual editor):
 
 ```sh
-pnpm bindings:n8n             # generate .n8n-workflows/*.json from the canon
+agent-flows generate n8n      # generate .n8n-workflows/*.json from the canon
 ```
 
 Install the typed agent node into n8n: copy the built `integrations/n8n-nodes-agent-flows` into `<N8N_USER_FOLDER>/.n8n/nodes/node_modules/`, then import the generated workflow. See `integrations/n8n-nodes-agent-flows/README.md` for details.
@@ -285,7 +285,7 @@ pnpm mastra:smoke --db ./custom.sqlite --intake-model opus  # with custom flags
 Run the preflight check at any time:
 
 ```sh
-pnpm run doctor               # verify all prerequisites; lists missing items with fix hints
+agent-flows doctor            # verify all prerequisites; lists missing items with fix hints
 ```
 
 ---
@@ -294,13 +294,13 @@ pnpm run doctor               # verify all prerequisites; lists missing items wi
 
 **Built (ready to use):**
 
-- **Provider-neutral canon** — `pipelines/*.yaml` + `prompts/*.md` + loader (`src/canon/`); schema includes llm, gate, assemble-spec, persist-ticket, check, loop, pipeline, export-spec; step ordering is explicit via `dependsOn` edges (ADR-0014), compiled to parallel levels. A step may declare `permissions: { contents: read }` to run its agent read-only in the project directory (follows the GitHub Actions `permissions:` convention); `permissions` replaces the deprecated `workspace` key. LLM steps may declare `skills` to invoke named Agent Skills. Hardening is unconditional: every claude CLI invocation gets `--restricted --strict-mcp-config`. Check steps run shell commands with an allowlist-controlled environment (`PATH`, `HOME`, `SHELL`, `TMPDIR`, `LANG`, and any vars declared via the step's `env` field). Pipelines install into `<project>/.agent-flows/` via `pnpm agent-flows install`. Audit runs inside the build pipeline (`build.yaml`) after the converge loop, not as a separate top-level workflow.
-- **Binding A** — Claude Code dynamic workflow generator (`.claude/workflows/*.js`, generated via `pnpm bindings:claude`); approval gates happen in chat between runs; subscription-billed; exit path is Binding B.
+- **Provider-neutral canon** — `pipelines/*.yaml` + `prompts/*.md` + loader (`src/canon/`); schema includes llm, gate, assemble-spec, persist-ticket, check, loop, pipeline, export-spec; step ordering is explicit via `dependsOn` edges (ADR-0014), compiled to parallel levels. A step may declare `permissions: { contents: read }` to run its agent read-only in the project directory (follows the GitHub Actions `permissions:` convention); `permissions` replaces the deprecated `workspace` key. LLM steps may declare `skills` to invoke named Agent Skills. Hardening is unconditional: every claude CLI invocation gets `--restricted --strict-mcp-config`. Check steps run shell commands with an allowlist-controlled environment (`PATH`, `HOME`, `SHELL`, `TMPDIR`, `LANG`, and any vars declared via the step's `env` field). Pipelines install into `<project>/.agent-flows/` via `agent-flows install`. Audit runs inside the build pipeline (`build.yaml`) after the converge loop, not as a separate top-level workflow.
+- **Binding A** — Claude Code dynamic workflow generator (`.claude/workflows/*.js`, generated via `agent-flows generate claude`); approval gates happen in chat between runs; subscription-billed; exit path is Binding B.
   - **Implements:** `llm` steps (sequential and parallel, with `skills` and `schema` support) and `assemble-spec` steps.
   - **Does not implement:** `gate`, `check`, `loop`, `persist-ticket`, `export-spec`, or nested `pipeline` steps. A pipeline containing any of these kinds is refused at generation time (no file is written; any stale artifact is deleted). Use Binding B for full pipeline coverage.
   - **Permissions not enforced:** per-step `permissions.contents` declared in the canon is not passed through to the Claude Code `agent()` API (which has no permission-restriction option). Every step runs with the host session's access level. A notice comment is emitted at the top of every generated file.
-- **Binding B** — Mastra interpreter + MCP server (Apache-2.0); durable suspend/resume HITL; steps execute via the open model registry (`pnpm mcp` starts the server; `pnpm mastra:smoke` runs standalone).
-- **Binding C** — n8n workflow generator (`.n8n-workflows/*.json`, generated via `pnpm bindings:n8n`); the canon compiles to an n8n workflow whose llm steps reference the installable `n8n-nodes-agent-flows.agentFlowsAgent` community node (`integrations/n8n-nodes-agent-flows/`). n8n provides the visual editor and execution surface; the canon stays the git-backed source.
+- **Binding B** — Mastra interpreter + MCP server (Apache-2.0); durable suspend/resume HITL; steps execute via the open model registry (`agent-flows mcp` starts the server; `pnpm mastra:smoke` runs standalone).
+- **Binding C** — n8n workflow generator (`.n8n-workflows/*.json`, generated via `agent-flows generate n8n`); the canon compiles to an n8n workflow whose llm steps reference the installable `n8n-nodes-agent-flows.agentFlowsAgent` community node (`integrations/n8n-nodes-agent-flows/`). n8n provides the visual editor and execution surface; the canon stays the git-backed source.
 - **Model registry** — open; CLI aliases + passthrough of any model id; local `claude`/`codex` CLIs on subscription auth, Ollama local models, keyed APIs via LiteLLM.
 - **SQLite ticket store** — pipeline source of truth (better-sqlite3 + Drizzle); persisted by the `persist-ticket` step in each pipeline run.
 - **Layer-0 key isolation** — agent-flows process environment holds no real provider keys; LLM child processes (claude CLI) receive a scrubbed environment with credential keys removed; check step child processes receive only the allowlisted base env plus any vars explicitly declared on the step (Charter invariant).

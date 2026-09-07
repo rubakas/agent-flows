@@ -6,6 +6,9 @@
   "engines": {
     "node": ">=22"
   },
+  "bin": {
+    "agent-flows": "bin/agent-flows"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -15,7 +18,6 @@
     "check": "pnpm lint && pnpm typecheck && pnpm format:check && pnpm test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "doctor": "tsx src/doctor.ts",
     "bootstrap": "./bootstrap.sh",
     "canon:check": "tsx src/canon/validate-cli.ts",
     "bindings:claude": "tsx src/bindings/write-cli.ts",
@@ -25,7 +27,8 @@
     "evals:run": "bash scripts/evals-run.sh",
     "flows:install": "bash scripts/install.sh install",
     "flows:list": "bash scripts/install.sh list",
-    "serve": "tsx src/serve/server.ts"
+    "serve": "tsx src/serve/server.ts",
+    "preflight": "tsx src/doctor.ts"
   },
   "dependencies": {
     "@mastra/core": "1.63.2",
