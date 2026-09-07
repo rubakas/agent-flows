@@ -12,7 +12,9 @@ import type { LoadedPipeline } from "../canon/types.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = join(__dirname, "..", "..");
-const pipelineYaml = join(repoRoot, "pipelines", "spec-creation.yaml");
+// audit.yaml is an all-llm pipeline (supported by Binding A) with a parallel
+// level and a sequential level — enough structure to exercise the generator.
+const pipelineYaml = join(repoRoot, "pipelines", "audit.yaml");
 
 function getGenerated(): string {
   return generateWorkflowScript(loadPipeline(pipelineYaml));
@@ -21,49 +23,52 @@ function getGenerated(): string {
 describe("generateWorkflowScript — structural checks", () => {
   it("contains the meta literal with correct name", () => {
     const s = getGenerated();
-    assert.ok(s.includes("name: 'spec-creation'"), "meta name missing");
+    assert.ok(s.includes("name: 'audit'"), "meta name missing");
     assert.ok(s.includes("export const meta"), "meta export missing");
   });
 
-  it("contains all three phase titles derived from step ids", () => {
+  it("contains both phase titles derived from step ids", () => {
     const s = getGenerated();
-    assert.ok(s.includes("title: 'Intake'"), "'Intake' phase missing");
-    assert.ok(s.includes("title: 'Enrich'"), "'Enrich' phase missing");
-    assert.ok(s.includes("title: 'Critic'"), "'Critic' phase missing");
+    assert.ok(s.includes("title: 'Correctness'"), "'Correctness' phase missing");
+    assert.ok(s.includes("title: 'Synthesis'"), "'Synthesis' phase missing");
   });
 
-  it("emits the early-abort throw for 'request' input", () => {
+  it("emits the early-abort throw for 'plan' input", () => {
     const s = getGenerated();
-    assert.ok(s.includes("args.request is required"), "early-abort throw for request missing");
+    assert.ok(s.includes("args.plan is required"), "early-abort throw for plan missing");
     assert.ok(s.includes("throw new Error"), "throw statement missing");
   });
 
-  it("emits label:'intake' in the intake agent call", () => {
+  it("emits label:'correctness' in the correctness agent call", () => {
     const s = getGenerated();
-    assert.ok(s.includes("label: 'intake'"), "label 'intake' missing");
+    assert.ok(s.includes("label: 'correctness'"), "label 'correctness' missing");
   });
 
   it("emits model variable references for all llm steps", () => {
     const s = getGenerated();
-    assert.ok(s.includes("mIntake"), "mIntake missing");
-    assert.ok(s.includes("mEnrich"), "mEnrich missing");
-    assert.ok(s.includes("mCritic"), "mCritic missing");
+    assert.ok(s.includes("mCorrectness"), "mCorrectness missing");
     assert.ok(s.includes("mSecurity"), "mSecurity missing");
+    assert.ok(s.includes("mSynthesis"), "mSynthesis missing");
   });
 
-  it("wraps critic and security agents in parallel([", () => {
+  it("wraps correctness and security agents in parallel([", () => {
     const s = getGenerated();
     assert.ok(s.includes("await parallel(["), "parallel([ missing");
     const parallelIdx = s.indexOf("await parallel([");
-    assert.ok(s.slice(parallelIdx).includes("label: 'critic'"), "critic not inside parallel");
+    assert.ok(
+      s.slice(parallelIdx).includes("label: 'correctness'"),
+      "correctness not inside parallel"
+    );
     assert.ok(s.slice(parallelIdx).includes("label: 'security'"), "security not inside parallel");
   });
 
-  it("emits WEAK_SCHEMA and SEC_SCHEMA literals", () => {
+  it("emits the permissions notice banner", () => {
     const s = getGenerated();
-    assert.ok(s.includes("WEAK_SCHEMA"), "WEAK_SCHEMA missing");
-    assert.ok(s.includes("SEC_SCHEMA"), "SEC_SCHEMA missing");
-    assert.ok(s.includes("FINDING"), "FINDING missing");
+    assert.ok(s.includes("NOTICE: per-step permissions"), "permissions banner missing");
+    assert.ok(
+      s.includes("are NOT enforced by Binding A"),
+      "permissions enforcement disclaimer missing"
+    );
   });
 
   it("has no un-substituted {{ }} placeholders left", () => {
@@ -77,29 +82,6 @@ describe("generateWorkflowScript — structural checks", () => {
     assert.ok(!s.includes("Math.random"), "Math.random found — not allowed");
   });
 
-  it("contains gate and persist comments", () => {
-    const s = getGenerated();
-    assert.ok(s.includes("// gate 'approve'"), "gate comment missing");
-    assert.ok(
-      s.includes("// persist: pipe result.spec into 'pnpm persist'"),
-      "persist comment missing"
-    );
-  });
-
-  it("returns { spec, summary } at the end", () => {
-    const s = getGenerated();
-    assert.ok(s.includes("return {"), "return statement missing");
-    assert.ok(s.includes("spec,"), "spec field missing in return");
-    assert.ok(s.includes("summary:"), "summary field missing in return");
-    assert.ok(s.includes("blocking,"), "blocking field missing in summary");
-  });
-
-  it("inlines assemble logic via IIFE (single source of truth)", () => {
-    const s = getGenerated();
-    assert.ok(s.includes("(function(input)"), "IIFE wrapper for assemble missing");
-    assert.ok(s.includes("sectionBullets"), "sectionBullets not inlined from ASSEMBLE_JS");
-  });
-
   it("syntax check — node --check passes on the generated script", () => {
     const s = getGenerated();
     // The generated script is a workflow body (intended to run inside a function
@@ -107,7 +89,7 @@ describe("generateWorkflowScript — structural checks", () => {
     // Fix: strip the `export` keyword from the meta declaration and wrap the
     // entire script in an async function — `return` and `await` are then valid.
     const wrapped =
-      "(async function() {\n" + s.replace(/^export const meta/, "const meta") + "\n})";
+      "(async function() {\n" + s.replace(/\bexport const meta\b/, "const meta") + "\n})";
     const tmpFile = join(tmpdir(), "agent-flows-gen-syntax-check.mjs");
     writeFileSync(tmpFile, wrapped);
     try {
@@ -126,14 +108,86 @@ describe("generateWorkflowScript — structural checks", () => {
 });
 
 describe("generateWorkflowScript — drift guard", () => {
-  it("generated output matches .claude/workflows/spec-creation.js on disk", () => {
+  it("generated output matches .claude/workflows/audit.js on disk", () => {
     const generated = getGenerated();
-    const onDisk = readFileSync(join(repoRoot, ".claude", "workflows", "spec-creation.js"), "utf8");
+    const onDisk = readFileSync(join(repoRoot, ".claude", "workflows", "audit.js"), "utf8");
     assert.equal(
       generated,
       onDisk,
-      "Generated script has drifted from .claude/workflows/spec-creation.js — run pnpm bindings:claude to regenerate"
+      "Generated script has drifted from .claude/workflows/audit.js — run pnpm bindings:claude to regenerate"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Refusal tests
+// ---------------------------------------------------------------------------
+
+describe("generateWorkflowScript — unsupported kind refusal", () => {
+  it("throws for a pipeline containing a 'check' step, naming the step id", () => {
+    const loaded: LoadedPipeline = {
+      def: {
+        id: "with-check",
+        version: 1,
+        description: "pipeline with a check step",
+        inputs: [],
+        steps: [{ id: "verify", kind: "check" as const, command: "pnpm test" }],
+      },
+      prompts: {},
+    };
+    assert.throws(
+      () => generateWorkflowScript(loaded),
+      (err: Error) => {
+        assert.ok(err.message.includes("with-check"), "error must name the pipeline");
+        assert.ok(err.message.includes("verify"), "error must name the step id");
+        assert.ok(err.message.includes("check"), "error must name the step kind");
+        assert.ok(err.message.includes("Binding A"), "error must say Binding A");
+        return true;
+      },
+      "expected a refusal error for check step"
+    );
+  });
+
+  it("throws for a pipeline containing a 'loop' step, naming the step id", () => {
+    const loaded: LoadedPipeline = {
+      def: {
+        id: "with-loop",
+        version: 1,
+        description: "pipeline with a loop step",
+        inputs: [],
+        steps: [{ id: "converge", kind: "loop" as const, pipeline: "develop", maxIterations: 3 }],
+      },
+      prompts: {},
+    };
+    assert.throws(
+      () => generateWorkflowScript(loaded),
+      (err: Error) => {
+        assert.ok(err.message.includes("with-loop"), "error must name the pipeline");
+        assert.ok(err.message.includes("converge"), "error must name the step id");
+        assert.ok(err.message.includes("loop"), "error must name the step kind");
+        assert.ok(err.message.includes("Binding A"), "error must say Binding A");
+        return true;
+      },
+      "expected a refusal error for loop step"
+    );
+  });
+
+  it("generates successfully for an llm-only pipeline", () => {
+    const loaded: LoadedPipeline = {
+      def: {
+        id: "llm-only",
+        version: 1,
+        description: "pure llm pipeline",
+        inputs: ["task"],
+        steps: [
+          { id: "work", kind: "llm" as const, role: "worker" as const, prompt: "prompts/work.md" },
+        ],
+      },
+      prompts: { work: "Do the work for {{task}}" },
+    };
+    // Must not throw
+    const s = generateWorkflowScript(loaded);
+    assert.ok(s.includes("label: 'work'"), "agent label missing");
   });
 });
 

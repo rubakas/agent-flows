@@ -2,7 +2,15 @@
 // Run via: npx tsx --test src/canon/canonWriter.test.ts
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -92,14 +100,23 @@ steps:
 `;
 
 function setup(content: string) {
-  const { root, pipelinePath, cleanup } = makeTmpPipelineDir();
-  writeFileSync(pipelinePath, content, "utf8");
+  const { root: rawRoot, cleanup } = makeTmpPipelineDir();
+  // On macOS, mkdtempSync returns /var/... which is a symlink to /private/var/...
+  // loadPipeline compares realpath of prompt files against the repo root, so the
+  // root stored in the DB must be the real path to avoid false symlink failures.
+  const root = realpathSync(rawRoot);
+  const realPipelinePath = join(root, "pipelines", "test.yaml");
+  writeFileSync(realPipelinePath, content, "utf8");
+  // Create a minimal prompts stub so that llm steps can be loaded without
+  // needing a separate prompt file. Gate-only pipelines ignore this directory.
+  mkdirSync(join(root, "prompts"), { recursive: true });
+  writeFileSync(join(root, "prompts", "work.md"), "Do the work for {{request}}", "utf8");
   const db = makeInMemoryDb();
   const relPath = "pipelines/test.yaml";
   const baseHash = hashContent(content);
   const sourceId = indexSource(db, root, relPath, "pipeline", baseHash);
   const draftId = openDraft(db, sourceId, content, baseHash);
-  return { db, root, pipelinePath, sourceId, draftId, cleanup };
+  return { db, root, pipelinePath: realPipelinePath, sourceId, draftId, cleanup };
 }
 
 // ── Byte-identical round-trip (regression) ────────────────────────────────────
@@ -341,8 +358,10 @@ describe("saveDraft — clean save", () => {
 // ── saveDraftAndRegenerate ────────────────────────────────────────────────────
 
 /**
- * A pipeline whose step id we can change in the draft. Gate steps produce a
- * predictable comment line in the generated script, making the assertion easy.
+ * A pipeline whose step id we can change in the draft. Uses an llm step so
+ * that generateWorkflowScript (Binding A) can write a .js artifact — gate steps
+ * are refused by Binding A and would prevent the "successful save" tests from
+ * asserting that the workflow script was written.
  */
 const REGEN_PIPELINE_BEFORE = `\
 id: test
@@ -351,9 +370,10 @@ description: Regen test
 inputs:
   - request
 steps:
-  - id: original-gate
-    kind: gate
-    message: approve?
+  - id: original-step
+    kind: llm
+    role: worker
+    prompt: prompts/work.md
 `;
 
 const REGEN_PIPELINE_AFTER = `\
@@ -363,9 +383,10 @@ description: Regen test
 inputs:
   - request
 steps:
-  - id: renamed-gate
-    kind: gate
-    message: approve?
+  - id: renamed-step
+    kind: llm
+    role: worker
+    prompt: prompts/work.md
 `;
 
 describe("saveDraftAndRegenerate — successful save", () => {
@@ -383,14 +404,14 @@ describe("saveDraftAndRegenerate — successful save", () => {
 
       // YAML on disk must reflect the draft body
       const yaml = readFileSync(pipelinePath, "utf8");
-      assert.ok(yaml.includes("renamed-gate"), "YAML must contain the edited step id");
+      assert.ok(yaml.includes("renamed-step"), "YAML must contain the edited step id");
 
       // Workflow script must exist and reflect the edited definition
       const jsPath = join(root, ".claude", "workflows", "test.js");
       assert.ok(existsSync(jsPath), ".claude/workflows/test.js must exist");
       const script = readFileSync(jsPath, "utf8");
-      assert.ok(script.includes("renamed-gate"), "script must contain the new step id");
-      assert.ok(!script.includes("original-gate"), "script must NOT contain the old step id");
+      assert.ok(script.includes("renamed-step"), "script must contain the new step id");
+      assert.ok(!script.includes("original-step"), "script must NOT contain the old step id");
     } finally {
       cleanup();
     }
@@ -496,7 +517,7 @@ describe("saveDraftAndRegenerate — generation failure is isolated", () => {
 
       // The YAML save must have succeeded — the file on disk should reflect the draft
       const yaml = readFileSync(pipelinePath, "utf8");
-      assert.ok(yaml.includes("original-gate"), "YAML write must have completed before generation");
+      assert.ok(yaml.includes("original-step"), "YAML write must have completed before generation");
     } finally {
       cleanup();
     }

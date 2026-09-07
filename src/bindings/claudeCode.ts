@@ -8,7 +8,10 @@ import {
   type ProviderProfile,
 } from "../canon/registry.js";
 import { FINDING } from "../canon/schemas.js";
-import type { LoadedPipeline, StepDef } from "../canon/types.js";
+import type { LoadedPipeline, StepDef, StepKind } from "../canon/types.js";
+
+// Step kinds that Binding A can fully execute. All others produce a loud refusal.
+const SUPPORTED_STEP_KINDS = new Set<StepKind>(["llm", "assemble-spec"]);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -84,6 +87,17 @@ export function generateWorkflowScript(
   const resolvedProfile = profile ?? getActiveProfile();
   const resolvedRegistry = registry ?? defaultRegistry();
   const { def, prompts } = loaded;
+
+  // Refuse loudly rather than silently emit a NoOp comment for unsupported step kinds.
+  for (const step of def.steps) {
+    if (!SUPPORTED_STEP_KINDS.has(step.kind)) {
+      throw new Error(
+        `Pipeline '${def.id}': step '${step.id}' (kind: '${step.kind}') is not implemented by Binding A — ` +
+          `Binding A only executes 'llm' and 'assemble-spec' steps.`
+      );
+    }
+  }
+
   const inputVars = new Set<string>(def.inputs);
   const llmSteps = def.steps.filter((s) => s.kind === "llm");
 
@@ -91,6 +105,18 @@ export function generateWorkflowScript(
   const phases = computePhasesForDependsOn(def.steps, dependsOnLevels);
 
   const out: string[] = [];
+
+  // ── permissions banner ────────────────────────────────────────────────────
+  // The Claude Code dynamic-workflow agent() API (as of the current CLI) accepts
+  // only { label, phase, model, schema?, skills? }. It has no permissions option.
+  // Any per-step permissions: { contents: ... } declared in the canon are NOT
+  // enforced by Binding A — steps run with the host session's access level.
+  out.push("// NOTICE: per-step permissions declared in the pipeline canon (permissions.contents)");
+  out.push("// are NOT enforced by Binding A. The Claude Code workflow agent() API does not");
+  out.push("// accept a permission-restriction option. Every step in this workflow runs with");
+  out.push("// the host Claude Code session's access level. Use Binding B (Mastra) for");
+  out.push("// per-step permission enforcement.");
+  out.push("");
 
   // ── meta ──────────────────────────────────────────────────────────────────
   out.push("export const meta = {");
@@ -226,6 +252,8 @@ export function generateWorkflowScript(
       }
 
       // Emit non-llm steps that land in this level.
+      // At this point all steps are guaranteed to be in SUPPORTED_STEP_KINDS (the
+      // guard at the top of generateWorkflowScript throws before we get here otherwise).
       for (const step of nonLlmInLevel) {
         if (step.kind === "assemble-spec") {
           const allLlm = def.steps.filter((s) => s.kind === "llm");
@@ -248,18 +276,6 @@ export function generateWorkflowScript(
             "log(`Assembled: ${spec.requirements.length} requirements, ${spec.acceptanceCriteria.length} AC, ${spec.weaknesses.length} weaknesses, ${spec.securityFindings.length} security findings (${blocking} blocking)`)"
           );
           out.push("");
-        } else if (step.kind === "gate") {
-          out.push(`// gate '${step.id}': handled in chat by the orchestrating session`);
-        } else if (step.kind === "persist-ticket") {
-          out.push("// persist: pipe result.spec into 'pnpm persist'");
-        } else if (step.kind === "export-spec") {
-          out.push(`// export-spec '${step.id}': write spec.md to '${step.path}'`);
-        } else if (step.kind === "loop") {
-          out.push(
-            `// loop '${step.id}': body pipeline '${step.pipeline}', cap ${step.maxIterations} iterations — Binding A does not implement the loop`
-          );
-        } else if (step.kind === "check") {
-          out.push(`// check '${step.id}': run \`${step.command}\``);
         }
       }
     }

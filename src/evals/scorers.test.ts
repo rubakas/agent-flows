@@ -418,12 +418,20 @@ describe("assertReadOnly: loop body safety check", () => {
 // ── feature-collision fixture: gap freshness anti-rot guard (Fix 5) ──────────
 
 describe("feature-collision fixture: gap freshness guard", () => {
-  it("Binding A loop stub still present in claudeCode.ts — if this fails, the gap is implemented and the fixture must be updated", () => {
+  it("Binding A still does not implement loop steps — if this fails, the gap is implemented and the fixture must be updated", () => {
     const claudeCodePath = join(REPO_ROOT, "src/bindings/claudeCode.ts");
     const source = readFileSync(claudeCodePath, "utf8");
+    // The refusal guard in generateWorkflowScript (SUPPORTED_STEP_KINDS) must
+    // exist and must NOT list "loop" — evidence that loop steps are still refused.
     assert.ok(
-      source.includes("Binding A does not implement the loop"),
-      `The loop stub was removed from src/bindings/claudeCode.ts — ` +
+      source.includes("SUPPORTED_STEP_KINDS"),
+      `SUPPORTED_STEP_KINDS missing from src/bindings/claudeCode.ts — ` +
+        `update the feature-collision fixture expectedGaps to reflect the new open gap`
+    );
+    const kindSet = /SUPPORTED_STEP_KINDS\s*=\s*new Set[^;]+/.exec(source)?.[0] ?? "";
+    assert.ok(
+      !kindSet.includes('"loop"'),
+      `"loop" was added to SUPPORTED_STEP_KINDS — ` +
         `update the feature-collision fixture expectedGaps to reflect the new open gap`
     );
   });

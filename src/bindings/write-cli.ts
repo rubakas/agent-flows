@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listPipelines, loadPipeline } from "../canon/load.js";
@@ -22,8 +22,22 @@ const registry = defaultRegistry(process.env, providers.models);
 const yamlFiles = listPipelines(pipelinesDir);
 for (const yamlFile of yamlFiles) {
   const loaded = loadPipeline(yamlFile);
-  const script = generateWorkflowScript(loaded, profile, registry);
   const outFile = join(outDir, `${loaded.def.id}.js`);
+  let script: string;
+  try {
+    script = generateWorkflowScript(loaded, profile, registry);
+  } catch (err) {
+    // A pipeline with unsupported step kinds is refused loudly. Delete any stale
+    // artifact so the directory does not contain silently-broken workflows.
+    console.error(`Skipped ${loaded.def.id}: ${(err as Error).message}`);
+    try {
+      rmSync(outFile);
+      console.log(`Deleted stale artifact: ${outFile}`);
+    } catch {
+      // File may not exist; that is fine.
+    }
+    continue;
+  }
   writeFileSync(outFile, script);
   console.log(`Written: ${outFile}`);
 }

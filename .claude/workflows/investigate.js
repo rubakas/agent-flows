@@ -1,3 +1,9 @@
+// NOTICE: per-step permissions declared in the pipeline canon (permissions.contents)
+// are NOT enforced by Binding A. The Claude Code workflow agent() API does not
+// accept a permission-restriction option. Every step in this workflow runs with
+// the host Claude Code session's access level. Use Binding B (Mastra) for
+// per-step permission enforcement.
+
 export const meta = {
   name: 'investigate',
   description: 'Read the real repo and surface what matters before any code is written',
