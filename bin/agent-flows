@@ -11,7 +11,17 @@ set -euo pipefail
 # ran the command from.
 AGENT_FLOWS_PROJECT_DIR="${AGENT_FLOWS_PROJECT_DIR:-$PWD}"
 export AGENT_FLOWS_PROJECT_DIR
-cd "$(dirname "$0")/.."
+# Resolve through symlinks: the command is meant to be installed on PATH
+# (a link in ~/.local/bin or a pnpm global bin), and the repository root must
+# be computed from the real script location, not from the link's parent.
+# readlink -f is not available on stock macOS, so we loop manually.
+SOURCE="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
+done
+cd "$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 export NVM_DIR="$HOME/.nvm"
 # shellcheck disable=SC1091
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"

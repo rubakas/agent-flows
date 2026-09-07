@@ -8,7 +8,16 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { accessSync, constants, readFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -292,7 +301,51 @@ describe("FR-009: pnpm built-in name collision guard", () => {
   });
 });
 
-// ── 6. bin/agent-flows is committed, executable, and wired in package.json ────
+// ── 6. bin/agent-flows: symlink resolution ────────────────────────────────────
+//
+// When installed on PATH the command is reached through a symlink. Without
+// explicit resolution $0 points to the link, so "cd $(dirname $0)/.." lands
+// in the link's parent (e.g. ~/.local) rather than the repo root. The fix
+// loops through the symlink chain before computing the repo root.
+
+describe("bin/agent-flows: symlink resolution", () => {
+  it("resolves the repository root correctly when invoked through a PATH symlink", () => {
+    // Fresh temp dirs: one to act as the user's working directory, one to hold
+    // the symlink (simulating ~/.local/bin or a pnpm global bin directory).
+    // realpathSync normalises macOS /var → /private/var so the $PWD comparison
+    // does not fail on path aliasing.
+    const invocationDir = realpathSync(mkdtempSync(join(tmpdir(), "af-invoke-")));
+    const linkDir = realpathSync(mkdtempSync(join(tmpdir(), "af-bin-")));
+    const linkPath = join(linkDir, "agent-flows");
+    try {
+      symlinkSync(join(repoRoot, "bin", "agent-flows"), linkPath);
+      const result = spawnSync(linkPath, ["list"], {
+        cwd: invocationDir,
+        env: { ...process.env },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      const output = result.stdout + result.stderr;
+      assert.equal(
+        result.status,
+        0,
+        `Expected exit 0; tsx was not found (wrong repo root?):\n${output}`
+      );
+      // list always prints "Project: <AGENT_FLOWS_PROJECT_DIR>" on its first
+      // line; the script must have captured invocationDir ($PWD) before the
+      // cd, proving both the $PWD capture and the symlink resolution work.
+      assert.ok(
+        output.includes(`Project: ${invocationDir}`),
+        `Expected "Project: ${invocationDir}" in output:\n${output}`
+      );
+    } finally {
+      rmSync(invocationDir, { recursive: true, force: true });
+      rmSync(linkDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── 7. bin/agent-flows is committed, executable, and wired in package.json ────
 
 describe("FR-001: bin/agent-flows committed and wired", () => {
   it("bin/agent-flows file exists", () => {
