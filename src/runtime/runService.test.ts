@@ -1230,6 +1230,97 @@ describe("FR-002/FR-008 — human approval records GateDecision with decidedBy:'
   });
 });
 
+// ── Tests: resume payload — approved flag reaches the workflow ────────────────
+//
+// The existing FR-002/FR-008 tests assert the GateDecision record only; they do
+// not verify what RunService.approve() actually passes to run.resume(). Mutating
+// RunService to resume with approved:true on a rejection would leave those tests
+// green while the audit trail records approved:false. These tests capture the
+// resume payload and assert it matches the caller's intent.
+
+describe("approve — resumeData.approved is threaded correctly to the workflow", () => {
+  it("approve(runId, false) calls resume with resumeData.approved === false", async () => {
+    const rejectedResult = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected'), { name: "GateRejectedError" }),
+    };
+
+    let capturedResumeArgs: unknown = undefined;
+    const run = makeMockRun(
+      "run-resume-false",
+      suspendedResult("run-resume-false"),
+      rejectedResult
+    );
+    // Override resume to capture its argument.
+    run.resume = async (params: unknown) => {
+      capturedResumeArgs = params;
+      return rejectedResult;
+    };
+
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    await service.approve(runId, false);
+
+    assert.ok(capturedResumeArgs !== undefined, "run.resume must have been called");
+    const args = capturedResumeArgs as { step: unknown; resumeData: { approved: boolean } };
+    assert.equal(
+      args.resumeData.approved,
+      false,
+      "resume must receive approved:false when the human rejects — a bug that flips this to true would ship silently otherwise"
+    );
+  });
+
+  it("approve(runId, true) calls resume with resumeData.approved === true", async () => {
+    let capturedResumeArgs: unknown = undefined;
+    const run = makeMockRun("run-resume-true", suspendedResult("run-resume-true"), successResult());
+    run.resume = async (params: unknown) => {
+      capturedResumeArgs = params;
+      return successResult();
+    };
+
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    await service.approve(runId, true);
+
+    assert.ok(capturedResumeArgs !== undefined, "run.resume must have been called");
+    const args = capturedResumeArgs as { step: unknown; resumeData: { approved: boolean } };
+    assert.equal(
+      args.resumeData.approved,
+      true,
+      "resume must receive approved:true when the human approves"
+    );
+  });
+
+  it("approve passes the step path to run.resume so the workflow resumes at the correct gate", async () => {
+    // Guards against a bug that passes the wrong step — the suspendedStep is
+    // determined by the workflow and must not be guessed or hard-coded here.
+    let capturedStep: unknown = undefined;
+    const run = makeMockRun("run-resume-step", suspendedResult("run-resume-step"), successResult());
+    run.resume = async (params: unknown) => {
+      const p = params as { step: unknown; resumeData: unknown };
+      capturedStep = p.step;
+      return successResult();
+    };
+
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+    await service.waitForSettled(runId);
+
+    await service.approve(runId, true);
+
+    // suspendedResult() returns suspended: [["approve"]], so the step path is ["approve"].
+    assert.deepEqual(
+      capturedStep,
+      ["approve"],
+      "resume must be called with the suspended step path"
+    );
+  });
+});
+
 // ── Tests: FR-003/FR-009 — auto run dispatches judge; waitForSettled deferred ─
 
 describe("FR-003/FR-009 — auto run: judge dispatched; waitForSettled does not resolve at gate", () => {

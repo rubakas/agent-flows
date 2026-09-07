@@ -1880,3 +1880,117 @@ describe("runLlmStep — credential Read denials emitted for no-permissions step
     }
   });
 });
+
+// ── Deny-list content snapshot ────────────────────────────────────────────────
+//
+// These snapshot tests assert the EXACT membership of the deny-list constants.
+// The loop tests above cover plumbing (that every element in the constant reaches
+// the argv), but a loop that iterates over the constant itself cannot detect a
+// missing entry — shrinking the constant just shrinks the loop.
+//
+// The duplication below IS the guard: do not replace the inline arrays with
+// references to the constants.
+
+describe("deny-list content snapshot", () => {
+  it("CREDENTIAL_DENY_PATTERNS exactly equals the 34-entry snapshot", () => {
+    const expected: readonly string[] = [
+      // Environment files (8)
+      "**/.env",
+      "**/.env.ci",
+      "**/.env.docker",
+      "**/.env.production",
+      "**/.env.staging",
+      "**/.env.local",
+      "**/.env.development",
+      "**/.env.test",
+      // Named credential and secret files (15)
+      "**/aws.json",
+      "**/credentials",
+      "**/credentials.production",
+      "**/credentials.staging",
+      "**/credentials.json",
+      "**/credentials.toml",
+      "**/credentials.yaml",
+      "**/secrets.json",
+      "**/secrets.yaml",
+      "**/secrets.yml",
+      "**/service-account*.json",
+      "**/terraform.tfvars",
+      "**/terraform.tfvars.json",
+      "**/*.tfstate",
+      "**/*.tfstate.backup",
+      // Key material by extension (7)
+      "**/*.key",
+      "**/*.pem",
+      "**/*.p12",
+      "**/*.pfx",
+      "**/*.jks",
+      "**/*.keystore",
+      "**/*.truststore",
+      // SSH private keys without extension (4)
+      "**/id_rsa*",
+      "**/id_ed25519*",
+      "**/id_ecdsa*",
+      "**/id_dsa*",
+    ];
+    assert.deepEqual(
+      [...CREDENTIAL_DENY_PATTERNS],
+      expected,
+      "CREDENTIAL_DENY_PATTERNS membership changed — update both the constant and this snapshot"
+    );
+  });
+
+  it("BUILD_CONFIG_DENY_PATTERNS exactly equals the 8-entry snapshot", () => {
+    const expected: readonly string[] = [
+      "**/package.json",
+      "**/Makefile",
+      "**/.github/workflows/**",
+      "**/.git/**",
+      "**/.husky/**",
+      "**/*.config.*",
+      "**/.agent-flows/**",
+      "**/.Agent-flows/**",
+    ];
+    assert.deepEqual(
+      [...BUILD_CONFIG_DENY_PATTERNS],
+      expected,
+      "BUILD_CONFIG_DENY_PATTERNS membership changed — update both the constant and this snapshot"
+    );
+  });
+
+  it("write-mode argv entry count equals CREDENTIAL_DENY_PATTERNS.length * 2 + BUILD_CONFIG_DENY_PATTERNS.length", async () => {
+    // Each credential pattern contributes Read(pat) + Edit(pat) = 2 entries.
+    // Each build-config pattern contributes Edit(pat) = 1 entry.
+    // Total expected with empty allow/deny overrides: 34*2 + 8 = 76.
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { child } = makeStreamJsonChild("ok");
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "edit file", {
+      spawn,
+      contentsAccess: "write",
+      workspaceDir: repoRoot,
+    });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "write mode must emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+    assert.ok(typeof disallowedValue === "string", "--disallowedTools must have a value");
+
+    const entryCount = disallowedValue.split(",").length;
+    const expectedCount = CREDENTIAL_DENY_PATTERNS.length * 2 + BUILD_CONFIG_DENY_PATTERNS.length;
+    assert.equal(
+      entryCount,
+      expectedCount,
+      `--disallowedTools entry count must be ${expectedCount} (${CREDENTIAL_DENY_PATTERNS.length} credential patterns × 2 + ${BUILD_CONFIG_DENY_PATTERNS.length} build-config patterns × 1); got ${entryCount}`
+    );
+  });
+});

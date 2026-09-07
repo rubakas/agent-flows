@@ -1738,6 +1738,99 @@ describe("Template lifecycle (FR-002)", () => {
   });
 });
 
+// ── Path traversal guard: all id-bearing routes reject hostile ids ────────────
+
+describe("path traversal guard — id-bearing routes reject hostile ids (FR-002/FR-006)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let templatesBase: string;
+  let projectDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-traversal-")));
+    templatesBase = join(tmpDir, "templates");
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      templatesBase,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // Hostile id values (decoded form); they will be percent-encoded before
+  // insertion into the URL path so the URL parser does not normalize them away.
+  const HOSTILE_IDS = [
+    "../x",
+    "..%2Fx",
+    "%2e%2e%2fx",
+    "/etc/passwd",
+    "a/b",
+    "a".repeat(101), // exceeds the isSafeId length limit
+  ];
+
+  for (const id of HOSTILE_IDS) {
+    const seg = encodeURIComponent(id);
+
+    it(`GET /api/templates/${id} → 400`, async () => {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/templates/${seg}`);
+      assert.equal(res.status, 400, `GET /api/templates/${id} must be rejected with 400`);
+    });
+
+    it(`DELETE /api/templates/${id} → 400`, async () => {
+      const res = await mutate(srv.port, "DELETE", `/api/templates/${seg}`, {});
+      assert.equal(res.status, 400, `DELETE /api/templates/${id} must be rejected with 400`);
+    });
+
+    it(`POST /api/templates/${id}/install → 400`, async () => {
+      const res = await mutate(srv.port, "POST", `/api/templates/${seg}/install`, {});
+      assert.equal(res.status, 400, `POST /api/templates/${id}/install must be rejected with 400`);
+    });
+
+    it(`DELETE /api/pipelines/${id} → 400`, async () => {
+      const res = await mutate(srv.port, "DELETE", `/api/pipelines/${seg}`, {});
+      assert.equal(res.status, 400, `DELETE /api/pipelines/${id} must be rejected with 400`);
+    });
+
+    it(`POST /api/pipelines/${id}/n8n → 400`, async () => {
+      const res = await mutate(srv.port, "POST", `/api/pipelines/${seg}/n8n`, {});
+      assert.equal(res.status, 400, `POST /api/pipelines/${id}/n8n must be rejected with 400`);
+    });
+  }
+
+  it("install route positive-containment: traversal bundle file is not installed into project", async () => {
+    // Plant a bundle file OUTSIDE templatesBase to simulate a traversal target.
+    // The install route must reject the request with 400 BEFORE any I/O, so
+    // the project directory must remain empty regardless.
+    const outsideDir = join(tmpDir, "outside");
+    mkdirSync(outsideDir, { recursive: true });
+    writeFileSync(join(outsideDir, "planted.yaml"), "id: planted\n", "utf8");
+
+    // The traversal id would resolve to: templatesBase + "/../outside/planted"
+    // = outsideDir + "/planted". We percent-encode to bypass URL normalization.
+    const traversalSeg = encodeURIComponent("../outside/planted");
+    const res = await mutate(srv.port, "POST", `/api/templates/${traversalSeg}/install`, {});
+
+    assert.equal(res.status, 400, "traversal install must return 400 before any I/O");
+
+    // Verify no file was written into the project directory.
+    const { readdirSync } = await import("node:fs");
+    const projectContents = readdirSync(projectDir, { recursive: true });
+    assert.deepEqual(
+      projectContents,
+      [],
+      `project dir must be empty after traversal attempt; found: ${JSON.stringify(projectContents)}`
+    );
+  });
+});
+
 // ── FR-005/FR-008: n8n status and key secrecy ─────────────────────────────────
 
 describe("n8n status and key secrecy (FR-005/FR-008)", () => {

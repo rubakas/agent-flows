@@ -2283,6 +2283,121 @@ steps:
   });
 });
 
+// ── maxBudgetUsd validation ───────────────────────────────────────────────────
+
+describe("maxBudgetUsd and defaultMaxBudgetUsd validation at load time", () => {
+  it("check step carrying maxBudgetUsd throws the llm-only message", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: build
+    kind: check
+    command: "exit 0"
+    maxBudgetUsd: 1
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      /maxBudgetUsd.*llm|llm.*maxBudgetUsd/i
+    );
+  });
+
+  it("llm step with maxBudgetUsd: -1 throws the positive-number message", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: intake
+    kind: llm
+    role: worker
+    prompt: prompts/intake.md
+    maxBudgetUsd: -1
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "LLM prompt"),
+        }),
+      /maxBudgetUsd.*positive|positive.*number.*maxBudgetUsd/i
+    );
+  });
+
+  it('llm step with maxBudgetUsd: "5" (string) throws the positive-number message', () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: intake
+    kind: llm
+    role: worker
+    prompt: prompts/intake.md
+    maxBudgetUsd: "5"
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "LLM prompt"),
+        }),
+      /maxBudgetUsd.*positive|positive.*number.*maxBudgetUsd/i
+    );
+  });
+
+  it("pipeline with defaultMaxBudgetUsd: 0 throws (zero is not a positive number)", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs: []
+defaultMaxBudgetUsd: 0
+steps:
+  - id: intake
+    kind: llm
+    role: worker
+    prompt: prompts/intake.md
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "LLM prompt"),
+        }),
+      /defaultMaxBudgetUsd.*positive|positive.*number.*defaultMaxBudgetUsd/i
+    );
+  });
+
+  it("llm step with maxBudgetUsd: 2.5 loads successfully and the value is the number 2.5", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: intake
+    kind: llm
+    role: worker
+    prompt: prompts/intake.md
+    maxBudgetUsd: 2.5
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "LLM prompt"),
+    });
+    const step = def.steps[0] as unknown as Record<string, unknown>;
+    assert.equal(
+      step.maxBudgetUsd,
+      2.5,
+      "maxBudgetUsd must be passed through as the number 2.5, not a string or other form"
+    );
+  });
+});
+
 // ── FR-014: ship.yaml declares manualOnly: true on the approve step ───────────
 
 describe("FR-014: ship.yaml approve step declares manualOnly: true", () => {
