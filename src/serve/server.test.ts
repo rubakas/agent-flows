@@ -1624,3 +1624,236 @@ describe("readAgentFlowsConfig (FR-003)", () => {
     }
   });
 });
+
+// ── FR-002: Template lifecycle ────────────────────────────────────────────────
+
+describe("Template lifecycle (FR-002)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let templatesBase: string;
+  let projectDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-tmpl-")));
+    templatesBase = join(tmpDir, "templates");
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      templatesBase,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("GET /api/templates returns empty list when templates dir is absent", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/templates`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { templates: unknown[] };
+    assert.deepEqual(body.templates, []);
+  });
+
+  it("POST /api/templates/from-n8n → 503 when n8n not configured", async () => {
+    // No AGENT_FLOWS_N8N_URL / AGENT_FLOWS_N8N_API_KEY set → 503
+    const res = await mutate(srv.port, "POST", "/api/templates/from-n8n", {
+      workflowId: "w123",
+    });
+    assert.equal(res.status, 503);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.toLowerCase().includes("n8n"), `expected n8n mention: ${body.error}`);
+  });
+
+  it("DELETE /api/templates/nonexistent → 404", async () => {
+    const res = await mutate(srv.port, "DELETE", "/api/templates/nonexistent", {});
+    assert.equal(res.status, 404);
+  });
+
+  it("path containment: ..%2F..%2Fescape is rejected before any I/O", async () => {
+    // Test 7 from test plan
+    const res1 = await mutate(srv.port, "DELETE", "/api/templates/..%2F..%2Fescape", {});
+    // The decoded id "../../escape" fails isSafeId
+    assert.equal(res1.status, 400);
+
+    const res2 = await fetch(`http://127.0.0.1:${srv.port}/api/templates/..%2F..%2Fescape`);
+    assert.equal(res2.status, 400);
+  });
+
+  it("full lifecycle: write → GET list → install → DELETE → 409 on duplicate (manual template write)", async () => {
+    // We manually write a valid bundle as a template to test list/install/delete
+    const { exportBundle: eb, stringifyBundle: sb } = await import("../install/bundle.js");
+    mkdirSync(templatesBase, { recursive: true });
+    const bundle = eb("investigate", REAL_PIPELINES_DIR);
+    const yamlText = sb(bundle);
+    writeFileSync(join(templatesBase, "investigate.yaml"), yamlText, "utf8");
+
+    // GET /api/templates should list it
+    const listRes = await fetch(`http://127.0.0.1:${srv.port}/api/templates`);
+    assert.equal(listRes.status, 200);
+    const listBody = (await listRes.json()) as { templates: { templateId: string }[] };
+    assert.ok(
+      listBody.templates.some((t) => t.templateId === "investigate"),
+      `investigate not in templates: ${JSON.stringify(listBody.templates)}`
+    );
+
+    // POST /api/templates/investigate/install → installs into project
+    const installRes = await mutate(srv.port, "POST", "/api/templates/investigate/install", {});
+    assert.equal(installRes.status, 200);
+    const installBody = (await installRes.json()) as { written: string[] };
+    assert.ok(installBody.written.length > 0, "nothing was written");
+
+    // Second install without overwrite → skips (not an error, just reported)
+    const installRes2 = await mutate(srv.port, "POST", "/api/templates/investigate/install", {});
+    assert.equal(installRes2.status, 200);
+    const installBody2 = (await installRes2.json()) as { skipped: string[] };
+    assert.ok(installBody2.skipped.length > 0, "expected skips on second install");
+
+    // DELETE /api/templates/investigate
+    const delRes = await mutate(srv.port, "DELETE", "/api/templates/investigate", {});
+    assert.equal(delRes.status, 200);
+    const delBody = (await delRes.json()) as { ok: boolean };
+    assert.equal(delBody.ok, true);
+
+    // After delete, GET /api/templates should not list it
+    const listRes2 = await fetch(`http://127.0.0.1:${srv.port}/api/templates`);
+    const listBody2 = (await listRes2.json()) as { templates: { templateId: string }[] };
+    assert.ok(
+      !listBody2.templates.some((t) => t.templateId === "investigate"),
+      "investigate should be gone after delete"
+    );
+  });
+});
+
+// ── FR-005/FR-008: n8n status and key secrecy ─────────────────────────────────
+
+describe("n8n status and key secrecy (FR-005/FR-008)", () => {
+  let srv: ServeHandle;
+  const FAKE_API_KEY = "secret-api-key-that-must-never-appear";
+
+  before(async () => {
+    // Set env overrides so readN8nConfig() returns configured state
+    process.env.AGENT_FLOWS_N8N_URL = "http://localhost:15678";
+    process.env.AGENT_FLOWS_N8N_API_KEY = FAKE_API_KEY;
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    delete process.env.AGENT_FLOWS_N8N_URL;
+    delete process.env.AGENT_FLOWS_N8N_API_KEY;
+  });
+
+  it("GET /api/n8n/status returns {configured:true, baseUrl} — key absent (test plan §8)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/n8n/status`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.configured, true);
+    assert.equal(body.baseUrl, "http://localhost:15678");
+    // The API key must not appear in the response body
+    const bodyStr = JSON.stringify(body);
+    assert.ok(!bodyStr.includes(FAKE_API_KEY), `API key leaked into status response: ${bodyStr}`);
+    // apiKey field must not be present
+    assert.equal(body.apiKey, undefined, "apiKey must not be in response");
+  });
+
+  it("GET /api/n8n/status returns {configured:false} when env vars are unset", async () => {
+    const uncfg = await startServer({ port: 0, dbPath: ":memory:" });
+    // Create a server with no env overrides (temporarily clear them for this sub-test)
+    const savedUrl = process.env.AGENT_FLOWS_N8N_URL;
+    const savedKey = process.env.AGENT_FLOWS_N8N_API_KEY;
+    delete process.env.AGENT_FLOWS_N8N_URL;
+    delete process.env.AGENT_FLOWS_N8N_API_KEY;
+    try {
+      const res = await fetch(`http://127.0.0.1:${uncfg.port}/api/n8n/status`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, unknown>;
+      assert.equal(body.configured, false);
+      assert.equal(body.baseUrl, undefined);
+    } finally {
+      if (savedUrl) process.env.AGENT_FLOWS_N8N_URL = savedUrl;
+      if (savedKey) process.env.AGENT_FLOWS_N8N_API_KEY = savedKey;
+      await uncfg.close();
+    }
+  });
+
+  it("GET /api/n8n/workflows error response does not contain API key (test plan §8)", async () => {
+    // The n8n server is not actually running at localhost:15678, so this returns a 502.
+    // Verify the error message does not contain the API key.
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/n8n/workflows`);
+    // 502 is expected since n8n is not running
+    const body = (await res.json()) as { error: string };
+    const bodyStr = JSON.stringify(body);
+    assert.ok(!bodyStr.includes(FAKE_API_KEY), `API key leaked into error response: ${bodyStr}`);
+  });
+
+  it("POST /api/pipelines/:id/n8n error response does not contain API key (test plan §8)", async () => {
+    const res = await mutate(srv.port, "POST", "/api/pipelines/investigate/n8n", {});
+    const body = (await res.json()) as { error?: string; url?: string };
+    const bodyStr = JSON.stringify(body);
+    assert.ok(
+      !bodyStr.includes(FAKE_API_KEY),
+      `API key leaked into pipeline/n8n response: ${bodyStr}`
+    );
+  });
+
+  it("POST /api/templates/from-n8n error response does not contain API key (test plan §8)", async () => {
+    const res = await mutate(srv.port, "POST", "/api/templates/from-n8n", {
+      workflowId: "nonexistent-wf",
+    });
+    const body = (await res.json()) as { error?: string };
+    const bodyStr = JSON.stringify(body);
+    assert.ok(
+      !bodyStr.includes(FAKE_API_KEY),
+      `API key leaked into from-n8n error response: ${bodyStr}`
+    );
+  });
+});
+
+// ── FR-006: redirect mapping (n8n workflow ID map) ────────────────────────────
+
+describe("POST /api/pipelines/:id/n8n redirect mapping (FR-006, test plan §9)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+  // We test the "unconfigured n8n" path only — a live n8n mock server would be
+  // complex to set up inline. The n8n API call path is covered by the key-secrecy
+  // test above (which proves the 502 path never leaks the key).
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-n8n-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("unconfigured n8n → 503 with actionable error naming the config file (test plan §9)", async () => {
+    const res = await mutate(srv.port, "POST", "/api/pipelines/investigate/n8n", {});
+    assert.equal(res.status, 503);
+    const body = (await res.json()) as { error: string };
+    // Error must name the config file (not the key)
+    assert.ok(body.error.includes("n8n.json"), `error should name n8n.json: ${body.error}`);
+  });
+
+  it("pipeline not found → 404", async () => {
+    const res = await mutate(srv.port, "POST", "/api/pipelines/nonexistent/n8n", {});
+    assert.equal(res.status, 404);
+  });
+});

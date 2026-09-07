@@ -3,2075 +3,745 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>agent-flows Editor</title>
+    <title>agent-flows</title>
     <style>
-      /* ── design tokens (prototype-verbatim) ── */
       :root {
         --bg: #eceef1;
         --panel: #f8f9fb;
         --sunk: #e2e6ea;
         --line: #ccd2d9;
-        --line-soft: #dde2e7;
         --ink: #161a20;
         --ink-2: #414954;
         --muted: #6d7783;
         --accent: #2d6a92;
         --accent-bg: #d9e6ef;
-        --llm: #3f7a5f;
-        --gate: #9a7318;
-        --assemble: #6a5a9c;
-        --persist: #9c5f3c;
         --ok: #2a7a3b;
         --err: #b52d2d;
         --ui: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-        --cond: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-        --mono: ui-monospace, "Cascadia Code", Menlo, "Liberation Mono", monospace;
+        --mono: ui-monospace, "Cascadia Code", Menlo, monospace;
       }
       @media (prefers-color-scheme: dark) {
-        :root:not([data-theme="light"]) {
+        :root {
           --bg: #101318;
           --panel: #171c23;
           --sunk: #0c0f13;
           --line: #2a323c;
-          --line-soft: #212831;
           --ink: #e6e9ec;
           --ink-2: #bcc3cb;
           --muted: #838d99;
           --accent: #6aa9d6;
           --accent-bg: #17303f;
-          --llm: #7fb99a;
-          --gate: #d9a441;
-          --assemble: #9d8ec7;
-          --persist: #c98b6b;
           --ok: #4db86a;
           --err: #e05555;
         }
       }
-      :root[data-theme="dark"] {
-        --bg: #101318;
-        --panel: #171c23;
-        --sunk: #0c0f13;
-        --line: #2a323c;
-        --line-soft: #212831;
-        --ink: #e6e9ec;
-        --ink-2: #bcc3cb;
-        --muted: #838d99;
-        --accent: #6aa9d6;
-        --accent-bg: #17303f;
-        --llm: #7fb99a;
-        --gate: #d9a441;
-        --assemble: #9d8ec7;
-        --persist: #c98b6b;
-        --ok: #4db86a;
-        --err: #e05555;
-      }
-
       * {
         box-sizing: border-box;
+        margin: 0;
+        padding: 0;
       }
       body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--ink);
         font-family: var(--ui);
         font-size: 14px;
+        background: var(--bg);
+        color: var(--ink);
+        min-height: 100vh;
       }
-      [hidden] {
-        display: none !important;
-      }
-      @media (prefers-reduced-motion: reduce) {
-        * {
-          animation: none !important;
-          transition: none !important;
-        }
-      }
-
-      /* ── header bar ── */
-      header.bar {
+      header {
         display: flex;
-        align-items: baseline;
-        gap: 0.8rem;
-        flex-wrap: wrap;
-        padding: 0.7rem 1rem;
-        border-bottom: 1px solid var(--line);
-        background: var(--panel);
-        flex-shrink: 0;
-      }
-      .bar h1 {
-        font-family: var(--cond);
-        font-size: 1.05rem;
-        font-weight: 700;
-        margin: 0;
-        letter-spacing: 0.01em;
-      }
-      .bar .id {
-        font-family: var(--mono);
-        font-size: 0.74rem;
-        color: var(--muted);
-      }
-      .bar .desc {
-        font-size: 0.8rem;
-        color: var(--ink-2);
-      }
-      .bar .actions {
-        margin-left: auto;
-        display: flex;
-        gap: 0.5rem;
         align-items: center;
+        gap: 12px;
+        padding: 12px 20px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--line);
       }
-
-      /* ── buttons ── */
+      header h1 {
+        font-size: 16px;
+        font-weight: 600;
+      }
+      header .spacer {
+        flex: 1;
+      }
       .btn {
-        font-family: var(--mono);
-        font-size: 0.78rem;
-        font-weight: 500;
-        padding: 0.3rem 0.7rem;
-        border-radius: 2px;
-        cursor: pointer;
+        font: inherit;
+        font-size: 13px;
+        padding: 5px 12px;
         border: 1px solid var(--line);
+        border-radius: 5px;
         background: var(--panel);
         color: var(--ink);
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-block;
+        line-height: 1.4;
       }
       .btn:hover {
-        border-color: var(--accent);
-        color: var(--accent);
-      }
-      .btn:focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: 1px;
+        background: var(--sunk);
       }
       .btn.primary {
         background: var(--accent);
-        color: var(--bg);
+        color: #fff;
         border-color: var(--accent);
       }
       .btn.primary:hover {
-        opacity: 0.85;
-        color: var(--bg);
-        border-color: var(--accent);
+        opacity: 0.88;
       }
       .btn.danger {
-        background: var(--err);
-        color: #fff;
+        color: var(--err);
         border-color: var(--err);
       }
       .btn.danger:hover {
-        opacity: 0.85;
-        color: #fff;
-        border-color: var(--err);
+        background: color-mix(in srgb, var(--err) 10%, transparent);
       }
-      .btn-link {
-        background: none;
-        border: none;
-        color: var(--accent);
-        font-family: var(--ui);
-        font-size: 0.85rem;
-        cursor: pointer;
-        padding: 0.2rem 0.4rem;
+      main {
+        padding: 20px;
+        max-width: 1000px;
       }
-      .btn-link:hover {
-        text-decoration: underline;
+      .section {
+        margin-bottom: 28px;
       }
-      .btn-link:focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: 1px;
-        border-radius: 2px;
-      }
-
-      /* ── pipeline list view ── */
-      #view-list {
-        display: flex;
-        flex-direction: column;
-        min-height: 100vh;
-      }
-      .list-body {
-        padding: 1.5rem;
-        max-width: 56rem;
-      }
-      .list-body h2 {
-        font-family: var(--mono);
-        font-size: 0.64rem;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: var(--muted);
-        margin: 0 0 1rem;
-      }
-      .pipeline-card {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 3px;
-        padding: 0.75rem 1rem;
-        margin-bottom: 0.6rem;
-        cursor: pointer;
-        display: flex;
-        flex-direction: column;
-        gap: 0.2rem;
-      }
-      .pipeline-card:hover {
-        border-color: var(--accent);
-      }
-      .pipeline-card:focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: 1px;
-      }
-      .pipeline-card .pid {
-        font-family: var(--mono);
-        font-size: 0.88rem;
-        font-weight: 500;
-      }
-      .pipeline-card .pdesc {
-        font-size: 0.8rem;
-        color: var(--ink-2);
-      }
-      .pipeline-card .ppath {
-        font-family: var(--mono);
-        font-size: 0.65rem;
-        color: var(--muted);
-      }
-
-      /* ── run list cards (FR-003) ── */
-      .run-card {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 3px;
-        padding: 0.55rem 1rem;
-        margin-bottom: 0.4rem;
-        cursor: pointer;
+      .section-header {
         display: flex;
         align-items: center;
-        gap: 0.75rem;
+        gap: 10px;
+        margin-bottom: 10px;
       }
-      .run-card:hover {
-        border-color: var(--accent);
+      .section-header h2 {
+        font-size: 14px;
+        font-weight: 600;
       }
-      .run-card:focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: 1px;
-      }
-      .run-card .rc-id {
-        font-family: var(--mono);
-        font-size: 0.75rem;
-        color: var(--muted);
-        flex: 0 0 auto;
-      }
-      .run-card .rc-pid {
-        font-family: var(--mono);
-        font-size: 0.85rem;
-        font-weight: 500;
-        flex: 1 1 auto;
-      }
-      .run-card .rc-badge {
-        font-size: 0.7rem;
-        padding: 0.15rem 0.5rem;
+      .tier-badge {
+        font-size: 11px;
+        padding: 2px 7px;
         border-radius: 10px;
-        flex: 0 0 auto;
+        background: var(--sunk);
+        color: var(--muted);
+        font-weight: 500;
       }
-      .rc-badge.running {
+      .tier-project {
         background: var(--accent-bg);
         color: var(--accent);
       }
-      .rc-badge.suspended {
-        background: #2a2205;
-        color: #f5c518;
+      .tier-template {
+        background: color-mix(in srgb, #9a7318 12%, transparent);
+        color: #9a7318;
       }
-      .rc-badge.success {
-        background: #0a2a0a;
-        color: var(--ok);
+      .tier-bundled {
+        background: color-mix(in srgb, var(--muted) 12%, transparent);
+        color: var(--muted);
       }
-      .rc-badge.failed {
-        background: #2a0a0a;
-        color: var(--err);
-      }
-
-      /* ── editor view ── */
-      #view-editor {
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-        overflow: hidden;
-      }
-
-      .work {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) 19rem;
-        flex: 1;
-        min-height: 0;
-        overflow: hidden;
-      }
-      @media (max-width: 800px) {
-        .work {
-          grid-template-columns: 1fr;
+      @media (prefers-color-scheme: dark) {
+        .tier-project {
+          color: var(--accent);
+        }
+        .tier-template {
+          color: #d9a441;
+        }
+        .tier-bundled {
+          color: var(--muted);
         }
       }
-
-      .stage {
-        overflow: auto;
-        padding: 1.2rem;
-        background: var(--sunk);
+      table {
+        width: 100%;
+        border-collapse: collapse;
       }
-
-      /* ── level bands (variant A — the chosen design) ── */
-      .bands {
-        display: flex;
-        flex-direction: column;
-        gap: 0;
-      }
-      .band {
-        display: grid;
-        grid-template-columns: 4.4rem 1fr;
-        gap: 0.8rem;
-        align-items: center;
-        padding: 0.55rem 0;
-      }
-      .band + .band {
-        border-top: 1px dashed var(--line-soft);
-      }
-      .band .lvl {
-        font-family: var(--mono);
-        font-size: 0.64rem;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--muted);
-        text-align: right;
-      }
-      .band .lvl b {
-        display: block;
-        font-size: 1.05rem;
-        color: var(--ink-2);
+      th {
+        text-align: left;
+        font-size: 12px;
         font-weight: 600;
+        color: var(--muted);
+        padding: 4px 10px;
+        border-bottom: 1px solid var(--line);
       }
-      .band.par .lvl::after {
-        content: "parallel";
-        display: block;
-        color: var(--accent);
-        font-size: 0.58rem;
-        margin-top: 0.15rem;
+      td {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
       }
-      .band .row {
-        display: flex;
-        gap: 0.7rem;
-        flex-wrap: wrap;
+      tr:last-child td {
+        border-bottom: none;
       }
-
-      /* ── nodes ── */
-      .node {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-left: 3px solid var(--kind);
-        border-radius: 3px;
-        padding: 0.5rem 0.6rem;
-        min-width: 9.5rem;
-        flex: 1 1 12rem;
-        max-width: 24rem;
-        cursor: pointer;
-        display: flex;
-        flex-direction: column;
-        gap: 0.18rem;
-        position: relative;
+      tr:hover td {
+        background: color-mix(in srgb, var(--accent) 5%, transparent);
       }
-      .node:hover {
-        border-color: var(--accent);
-      }
-      .node[aria-selected="true"] {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 2px var(--accent-bg);
-      }
-      .node:focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: 2px;
-      }
-      .node .nid {
+      .pipeline-id {
         font-family: var(--mono);
-        font-size: 0.82rem;
+        font-size: 13px;
         font-weight: 500;
       }
-      .node .meta {
-        font-family: var(--mono);
-        font-size: 0.64rem;
-        color: var(--muted);
-        letter-spacing: 0.04em;
-      }
-      .node .kindtag {
-        color: var(--kind);
-        font-weight: 600;
-        text-transform: uppercase;
-      }
-
-      .k-llm {
-        --kind: var(--llm);
-      }
-      .k-gate {
-        --kind: var(--gate);
-      }
-      .k-assemble-spec {
-        --kind: var(--assemble);
-      }
-      .k-persist-ticket {
-        --kind: var(--persist);
-      }
-
-      /* step output excerpt shown below meta (FR-006/FR-007) */
-      .node .nout {
-        font-family: var(--mono);
-        font-size: 0.6rem;
-        color: var(--muted);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        max-width: 100%;
-      }
-
-      /* run status indicators on nodes */
-      .node .sdot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: var(--muted);
-        position: absolute;
-        top: 0.4rem;
-        right: 0.4rem;
-        opacity: 0.25;
-      }
-      .ns-started .sdot {
-        background: var(--accent);
-        opacity: 1;
-        animation: blink 1.2s ease infinite;
-      }
-      .ns-succeeded .sdot {
-        background: var(--ok);
-        opacity: 1;
-      }
-      .ns-failed .sdot {
-        background: var(--err);
-        opacity: 1;
-      }
-      .ns-suspended .sdot {
-        background: var(--gate);
-        opacity: 1;
-        animation: blink 1.5s ease infinite;
-      }
-      @keyframes blink {
-        0%,
-        100% {
-          opacity: 1;
-        }
-        50% {
-          opacity: 0.3;
-        }
-      }
-
-      /* ── inspector sidebar ── */
-      aside {
-        border-left: 1px solid var(--line);
-        background: var(--panel);
-        padding: 0.9rem;
-        overflow: auto;
-      }
-      @media (max-width: 800px) {
-        aside {
-          border-left: 0;
-          border-top: 1px solid var(--line);
-        }
-      }
-      aside > h2 {
-        font-family: var(--mono);
-        font-size: 0.64rem;
-        letter-spacing: 0.11em;
-        text-transform: uppercase;
-        color: var(--muted);
-        margin: 0 0 0.7rem;
-      }
-      .field {
-        display: flex;
-        flex-direction: column;
-        gap: 0.22rem;
-        margin-bottom: 0.75rem;
-      }
-      .field label {
-        font-family: var(--mono);
-        font-size: 0.62rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--muted);
-      }
-      .field input,
-      .field select {
-        font-family: var(--mono);
-        font-size: 0.8rem;
-        background: var(--sunk);
-        color: var(--ink);
-        border: 1px solid var(--line);
-        border-radius: 2px;
-        padding: 0.3rem 0.4rem;
-        width: 100%;
-      }
-      .field input:focus,
-      .field select:focus {
-        outline: 2px solid var(--accent);
-        outline-offset: 1px;
-      }
-      .field .ro {
-        font-family: var(--mono);
-        font-size: 0.8rem;
+      .pipeline-desc {
         color: var(--ink-2);
-        padding: 0.3rem 0;
+        font-size: 13px;
+      }
+      .actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
       }
       .empty {
         color: var(--muted);
-        font-size: 0.82rem;
+        font-style: italic;
+        padding: 12px 10px;
       }
-
-      .constraint {
-        margin-top: 1rem;
-        padding: 0.6rem;
-        border: 1px solid var(--line);
-        border-left: 3px solid var(--gate);
-        border-radius: 2px;
-        font-size: 0.76rem;
-        line-height: 1.5;
-        color: var(--ink-2);
-        background: var(--sunk);
-      }
-      .constraint b {
-        color: var(--ink);
-        font-weight: 600;
-      }
-
-      /* run panel inside inspector */
-      .run-section {
-        margin-top: 1rem;
-        padding-top: 0.7rem;
-        border-top: 1px solid var(--line);
-      }
-      .run-section h2 {
-        font-family: var(--mono);
-        font-size: 0.64rem;
-        letter-spacing: 0.11em;
-        text-transform: uppercase;
-        color: var(--muted);
-        margin: 0 0 0.6rem;
-      }
-      .run-badge {
-        display: inline-block;
-        font-family: var(--mono);
-        font-size: 0.7rem;
-        font-weight: 600;
-        padding: 0.15rem 0.45rem;
-        border-radius: 2px;
-        border: 1px solid currentColor;
-        margin-bottom: 0.6rem;
-      }
-      .run-badge.running {
-        color: var(--accent);
-      }
-      .run-badge.suspended {
-        color: var(--gate);
-      }
-      .run-badge.success {
-        color: var(--ok);
-      }
-      .run-badge.failed {
+      .error-box {
+        background: color-mix(in srgb, var(--err) 8%, transparent);
         color: var(--err);
+        border: 1px solid var(--err);
+        border-radius: 6px;
+        padding: 10px 14px;
+        margin: 8px 0;
+        font-size: 13px;
       }
-      .gate-msg {
-        font-size: 0.82rem;
-        color: var(--ink-2);
-        margin-bottom: 0.7rem;
-        line-height: 1.45;
-      }
-      .gate-actions {
-        display: flex;
-        gap: 0.5rem;
-      }
-
-      /* ── status bar (save feedback) ── */
-      .status-bar {
-        padding: 0.45rem 1rem;
-        font-family: var(--mono);
-        font-size: 0.78rem;
-        border-top: 1px solid var(--line);
-        background: var(--panel);
-        flex-shrink: 0;
-      }
-      .status-bar.ok {
+      .success-box {
+        background: color-mix(in srgb, var(--ok) 8%, transparent);
         color: var(--ok);
+        border: 1px solid var(--ok);
+        border-radius: 6px;
+        padding: 10px 14px;
+        margin: 8px 0;
+        font-size: 13px;
       }
-      .status-bar.err {
-        color: var(--err);
-      }
-      .status-bar.conflict {
-        color: var(--gate);
-      }
-
-      /* ── run inputs modal ── */
-      .modal-overlay {
+      /* Detail panel */
+      #detail-panel {
         position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.42);
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: 480px;
+        max-width: 100vw;
+        background: var(--panel);
+        border-left: 1px solid var(--line);
+        box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12);
+        overflow-y: auto;
+        display: none;
         z-index: 100;
       }
-      .modal {
+      #detail-panel.open {
+        display: block;
+      }
+      #detail-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+        position: sticky;
+        top: 0;
+        background: var(--panel);
+      }
+      #detail-header h3 {
+        font-size: 15px;
+        flex: 1;
+        font-family: var(--mono);
+      }
+      #detail-body {
+        padding: 16px;
+      }
+      .step-row {
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        margin-bottom: 6px;
+      }
+      .step-kind {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: var(--sunk);
+        color: var(--muted);
+        margin-right: 6px;
+      }
+      .step-id {
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+      /* Dialog */
+      #dialog-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.35);
+        z-index: 200;
+        align-items: center;
+        justify-content: center;
+      }
+      #dialog-backdrop.open {
+        display: flex;
+      }
+      #dialog {
         background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: 4px;
-        padding: 1.2rem 1.4rem;
-        min-width: 22rem;
-        max-width: min(90vw, 32rem);
+        border-radius: 10px;
+        padding: 20px;
+        width: 420px;
+        max-width: 96vw;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
       }
-      .modal h3 {
-        font-family: var(--cond);
-        font-size: 0.95rem;
-        font-weight: 700;
-        margin: 0 0 0.9rem;
+      #dialog h3 {
+        font-size: 15px;
+        margin-bottom: 14px;
       }
-      .modal-actions {
-        display: flex;
-        gap: 0.5rem;
-        margin-top: 1rem;
-        justify-content: flex-end;
+      #dialog label {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 4px;
+        color: var(--ink-2);
       }
-      .modal .field textarea {
-        font-family: var(--mono);
-        font-size: 0.8rem;
+      #dialog select,
+      #dialog input[type="text"] {
+        width: 100%;
+        font: inherit;
+        font-size: 13px;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
         background: var(--sunk);
         color: var(--ink);
-        border: 1px solid var(--line);
-        border-radius: 2px;
-        padding: 0.3rem 0.4rem;
-        width: 100%;
-        resize: vertical;
-        min-height: 3.5rem;
+        margin-bottom: 12px;
       }
-      .modal .field textarea:focus {
-        outline: 2px solid var(--accent);
-        outline-offset: 1px;
-      }
-
-      /* ── error box ── */
-      .error-box {
-        padding: 0.8rem 1rem;
-        background: var(--panel);
-        border: 1px solid var(--err);
-        border-left: 3px solid var(--err);
-        border-radius: 3px;
-        font-size: 0.82rem;
-        color: var(--err);
-        margin: 0.8rem 0;
-      }
-
-      /* ── pipeline card delete button ── */
-      .card-top {
+      #dialog .dialog-actions {
         display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 0.5rem;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 4px;
       }
-      .btn-icon {
-        font-family: var(--mono);
-        font-size: 0.68rem;
-        padding: 0.1rem 0.5rem;
-        flex-shrink: 0;
-        line-height: 1.4;
+      #flash {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--ink);
+        color: var(--bg);
+        padding: 8px 18px;
+        border-radius: 6px;
+        font-size: 13px;
+        opacity: 0;
+        transition: opacity 0.2s;
+        pointer-events: none;
+        z-index: 999;
       }
-
-      /* ── environment / install / skills panels ── */
-      .env-section {
-        margin-top: 1.8rem;
-        padding-top: 1rem;
-        border-top: 1px solid var(--line);
-      }
-      .install-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 0.4rem 0.7rem;
-        border: 1px solid var(--line);
-        border-radius: 2px;
-        margin-bottom: 0.4rem;
-        background: var(--sunk);
-        gap: 0.6rem;
-      }
-      .install-item .iname {
-        font-family: var(--mono);
-        font-size: 0.82rem;
-      }
-      .install-result {
-        font-family: var(--mono);
-        font-size: 0.74rem;
-        margin: -0.35rem 0 0.45rem;
-        padding: 0.35rem 0.6rem;
-        border-radius: 0 0 2px 2px;
-        background: var(--sunk);
-        border: 1px solid var(--line);
-        border-top: none;
-        line-height: 1.6;
-      }
-      .r-written {
-        color: var(--ok);
-      }
-      .r-skipped {
-        color: var(--muted);
-      }
-      .r-err {
-        color: var(--err);
-      }
-      .tag-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.35rem;
-        margin-top: 0.3rem;
-        margin-bottom: 0.75rem;
-      }
-      .tag {
-        font-family: var(--mono);
-        font-size: 0.72rem;
-        padding: 0.1rem 0.45rem;
-        background: var(--sunk);
-        border: 1px solid var(--line);
-        border-radius: 2px;
-        color: var(--ink-2);
-      }
-      .hint {
-        font-size: 0.76rem;
-        color: var(--muted);
-        margin: 0 0 0.5rem;
-        line-height: 1.5;
-      }
-
-      /* ── clickable tag buttons (skill / agent chips) ── */
-      button.tag {
-        cursor: pointer;
-        font-family: inherit;
-      }
-      button.tag:hover {
-        border-color: var(--accent);
-        color: var(--accent);
-      }
-      button.tag:focus-visible {
-        outline: 2px solid var(--accent);
-        outline-offset: 1px;
-      }
-
-      /* ── skill / agent content viewer ── */
-      .content-pre {
-        font-family: var(--mono);
-        font-size: 0.78rem;
-        line-height: 1.5;
-        white-space: pre-wrap;
-        word-break: break-word;
-        background: var(--sunk);
-        border: 1px solid var(--line);
-        border-radius: 2px;
-        padding: 0.6rem 0.8rem;
-        overflow: auto;
-        flex: 1;
-        min-height: 4rem;
-        margin: 0;
-        color: var(--ink-2);
-      }
-      .content-modal-inner {
-        display: flex;
-        flex-direction: column;
-        max-height: 78vh;
-        min-width: 22rem;
-        max-width: min(90vw, 56rem);
-      }
-      .content-path {
-        font-family: var(--mono);
-        font-size: 0.65rem;
-        color: var(--muted);
-        margin-bottom: 0.6rem;
-        word-break: break-all;
+      #flash.show {
+        opacity: 1;
       }
     </style>
   </head>
   <body>
-    <!-- ═══════════════════════════════════ View: pipeline list ═══════════════════ -->
-    <section id="view-list">
-      <header class="bar">
-        <h1>agent-flows</h1>
-        <span class="desc">DAG editor</span>
-        <div class="actions">
-          <button class="btn" id="import-btn">Import bundle</button>
-          <button class="btn primary" id="new-pipeline-btn">+ New pipeline</button>
-        </div>
-      </header>
-      <div class="list-body">
-        <h2>Pipelines</h2>
-        <div id="list-items">Loading…</div>
-        <div id="runs-section" style="margin-top: 1.5rem">
-          <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem">
-            <h2 style="margin: 0">Active runs</h2>
-            <button class="btn btn-icon" id="refresh-runs-btn" title="Refresh run list">
-              ↺ Refresh
-            </button>
-          </div>
-          <div id="run-list-items">
-            <span style="color: var(--muted); font-size: 0.8rem">Loading…</span>
-          </div>
-        </div>
-        <div id="env-panel"></div>
-      </div>
-    </section>
+    <header>
+      <h1>agent-flows</h1>
+      <span class="spacer"></span>
+      <span id="n8n-status-badge" style="font-size: 12px; color: var(--muted)">n8n: checking…</span>
+      <button class="btn" id="btn-new-in-n8n" style="display: none">New in n8n</button>
+      <button class="btn primary" id="btn-save-from-n8n" style="display: none">
+        Save from n8n…
+      </button>
+    </header>
 
-    <!-- ═══════════════════════════════════ View: editor ════════════════════════════ -->
-    <section id="view-editor" hidden>
-      <header class="bar">
-        <button class="btn-link" id="back-btn">← Pipelines</button>
-        <h1 id="editor-title"></h1>
-        <span class="id" id="editor-meta"></span>
-        <span class="desc" id="editor-desc"></span>
-        <div class="actions">
-          <button class="btn primary" id="run-btn">Run ▶</button>
-          <button class="btn" id="save-btn">Save</button>
+    <main>
+      <div id="flash-area"></div>
+
+      <!-- Project tier -->
+      <div class="section">
+        <div class="section-header">
+          <h2>Project workflows</h2>
+          <span class="tier-badge tier-project">project</span>
         </div>
-      </header>
-
-      <div class="work">
-        <!-- canvas: level-band layout populated from pipeline.levels -->
-        <div class="stage" id="canvas"></div>
-
-        <aside id="inspector-panel">
-          <h2>Step inspector</h2>
-          <div id="inspector-body"><p class="empty">Select a node on the canvas.</p></div>
-          <div class="constraint">
-            <b>An edge means dependency only.</b> It orders execution and scopes a step's context to
-            its ancestors. The canon stores no data routing along edges and no conditionals.
-            Repetition exists only as a bounded <code>loop</code> step with an iteration cap — the
-            graph itself stays acyclic.
-          </div>
-          <div id="run-panel" hidden></div>
-        </aside>
+        <div id="project-table-wrap">Loading…</div>
       </div>
 
-      <div id="status-bar" class="status-bar" hidden></div>
-    </section>
-
-    <!-- ═══════════════════════════════════ Run inputs modal ════════════════════════ -->
-    <div id="run-modal" class="modal-overlay" hidden>
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-        <h3 id="modal-title">Run pipeline</h3>
-        <div id="modal-fields"></div>
-        <div class="modal-actions">
-          <button class="btn" id="modal-cancel">Cancel</button>
-          <button class="btn primary" id="modal-submit">Start run</button>
+      <!-- Template tier -->
+      <div class="section">
+        <div class="section-header">
+          <h2>Templates</h2>
+          <span class="tier-badge tier-template">template</span>
+          <span style="font-size: 12px; color: var(--muted)">global ~/.agent-flows/templates/</span>
         </div>
+        <div id="template-table-wrap">Loading…</div>
+      </div>
+
+      <!-- Bundled tier -->
+      <div class="section">
+        <div class="section-header">
+          <h2>Bundled workflows</h2>
+          <span class="tier-badge tier-bundled">bundled</span>
+        </div>
+        <div id="bundled-table-wrap">Loading…</div>
+      </div>
+    </main>
+
+    <!-- Read-only detail panel -->
+    <div id="detail-panel">
+      <div id="detail-header">
+        <h3 id="detail-title">—</h3>
+        <button class="btn" id="btn-close-detail">✕</button>
+      </div>
+      <div id="detail-body"></div>
+    </div>
+
+    <!-- Save-from-n8n dialog -->
+    <div id="dialog-backdrop">
+      <div id="dialog">
+        <h3>Save workflow from n8n as template</h3>
+        <label for="dlg-wf-select">n8n workflow</label>
+        <select id="dlg-wf-select">
+          <option value="">Loading…</option>
+        </select>
+        <label for="dlg-template-id">Template id (optional)</label>
+        <input type="text" id="dlg-template-id" placeholder="auto (slugified workflow name)" />
+        <div class="dialog-actions">
+          <button class="btn" id="btn-dlg-cancel">Cancel</button>
+          <button class="btn primary" id="btn-dlg-save">Save</button>
+        </div>
+        <div id="dlg-error" class="error-box" style="display: none; margin-top: 10px"></div>
       </div>
     </div>
 
-    <!-- ═══════════════════════════════════ Create pipeline modal ═══════════════ -->
-    <div id="create-modal" class="modal-overlay" hidden>
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="create-modal-title">
-        <h3 id="create-modal-title">New pipeline</h3>
-        <div class="field">
-          <label for="create-id-input">id</label>
-          <input id="create-id-input" type="text" placeholder="my-pipeline" autocomplete="off" />
-        </div>
-        <div class="field">
-          <label for="create-desc-input">description</label>
-          <input id="create-desc-input" type="text" placeholder="What this pipeline does" />
-        </div>
-        <div id="create-error" class="error-box" hidden></div>
-        <div class="modal-actions">
-          <button class="btn" id="create-cancel">Cancel</button>
-          <button class="btn primary" id="create-submit">Create</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ═══════════════════════════════════ Delete confirm modal ══════════════════ -->
-    <div id="delete-modal" class="modal-overlay" hidden>
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
-        <h3 id="delete-modal-title">Delete pipeline</h3>
-        <p style="font-size: 0.85rem; color: var(--ink-2); margin: 0 0 0.8rem">
-          Delete
-          <strong
-            id="delete-target-name"
-            style="font-family: var(--mono); color: var(--ink)"
-          ></strong
-          >? This removes the YAML file and cannot be undone.
-        </p>
-        <div id="delete-error" class="error-box" hidden></div>
-        <div class="modal-actions">
-          <button class="btn" id="delete-cancel">Cancel</button>
-          <button class="btn danger" id="delete-confirm">Delete</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ═══════════════════════════════════ Import bundle modal ════════════════════ -->
-    <input type="file" id="import-file" accept=".yaml,.yml" hidden />
-    <div id="import-modal" class="modal-overlay" hidden>
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="import-modal-title">
-        <h3 id="import-modal-title">Import bundle</h3>
-        <div id="import-result" hidden></div>
-        <div id="import-error" class="error-box" hidden></div>
-        <div class="modal-actions">
-          <button class="btn" id="import-close">Close</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- ═══════════════════════════════════ Skill / agent content modal ══════════ -->
-    <div id="content-modal" class="modal-overlay" hidden>
-      <div
-        class="modal content-modal-inner"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="content-modal-title"
-      >
-        <h3 id="content-modal-title"></h3>
-        <div id="content-modal-path" class="content-path"></div>
-        <div id="content-modal-err" class="error-box" hidden></div>
-        <div id="content-modal-trunc" class="hint" hidden>
-          Content truncated at 64 KB — file continues on disk.
-        </div>
-        <pre id="content-modal-pre" class="content-pre"></pre>
-        <div class="modal-actions">
-          <button class="btn" id="content-modal-close">Close</button>
-        </div>
-      </div>
-    </div>
+    <div id="flash"></div>
 
     <script>
-      "use strict";
+      // ── DOM helpers ────────────────────────────────────────────────────────
 
-      // ── Application state ─────────────────────────────────────────────────────────
-      const S = {
-        pipelines: null, // null until first fetch completes
-        pipeline: null, // { def, prompts, levels, graph }
-        editedSteps: [], // deep-copied, mutable
-        selectedId: null,
-        draftId: null,
-        // run
-        runId: null,
-        runStatus: null, // 'running' | 'suspended' | 'success' | 'failed'
-        stepStatuses: {}, // stepId → status string
-        stepOutputs: {}, // stepId → { excerpt, truncated } (FR-006)
-        suspendedStepId: null,
-        gateMessage: null, // gate message from snapshot (FR-004)
-        sseSource: null,
-        // manage
-        deleteTarget: null, // id of pipeline awaiting delete confirmation
-        env: null, // cached GET /api/environment response
-        installResults: {}, // wfId → result html (persists across panel re-renders)
-      };
-
-      // ── DOM helpers ───────────────────────────────────────────────────────────────
-      const el = (id) => document.getElementById(id);
-
+      /** Escape HTML entities. All untrusted data reaching the DOM goes through this. */
       function escH(s) {
         return String(s)
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;");
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
       }
 
-      // ── View routing ──────────────────────────────────────────────────────────────
-      function showView(name) {
-        el("view-list").hidden = name !== "list";
-        el("view-editor").hidden = name !== "editor";
+      function flash(msg, isErr) {
+        const el = document.getElementById("flash");
+        el.textContent = msg;
+        el.style.background = isErr ? "var(--err)" : "var(--ink)";
+        el.classList.add("show");
+        clearTimeout(el._t);
+        el._t = setTimeout(() => el.classList.remove("show"), 3000);
       }
 
-      // ── Status bar ────────────────────────────────────────────────────────────────
-      function setStatus(msg, cls) {
-        const bar = el("status-bar");
-        bar.textContent = msg;
-        bar.className = "status-bar" + (cls ? " " + cls : "");
-        bar.hidden = !msg;
+      async function api(method, path, body) {
+        const opts = { method, headers: { "content-type": "application/json" } };
+        if (body !== undefined) opts.body = JSON.stringify(body);
+        const res = await fetch(path, opts);
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok)
+          throw Object.assign(new Error(json.error || "Request failed"), { status: res.status });
+        return json;
       }
 
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Screen 1: Pipeline list
-      // ══════════════════════════════════════════════════════════════════════════════
-
-      function renderPipelines() {
-        const items = el("list-items");
-        if (S.pipelines === null) return; // still fetching
-        if (!S.pipelines.length) {
-          items.innerHTML = '<p class="empty">No pipelines found.</p>';
-          return;
-        }
-        const isBundled = S.env?.pipelinesSource === "bundled";
-        const installedSet = new Set(S.env?.installed ?? []);
-        items.innerHTML = S.pipelines
-          .map((p) => {
-            const isInstalled = installedSet.has(p.id);
-            const result = S.installResults[p.id];
-            const exportBtn = `<a class="btn btn-icon" href="/api/export/${encodeURIComponent(p.id)}" download="${escH(p.id)}.agent-flows-bundle.yaml" title="Export ${escH(p.id)} as bundle" aria-label="Export ${escH(p.id)}">Export</a>`;
-            let actionHtml;
-            if (isBundled) {
-              if (isInstalled) {
-                actionHtml = `<span class="tag" style="color:var(--ok);border-color:var(--ok)">installed</span>${exportBtn}`;
-              } else {
-                actionHtml = `<button class="btn btn-icon" data-install="${escH(p.id)}">Install</button>${exportBtn}`;
-              }
-            } else {
-              actionHtml = `<button class="btn btn-icon" data-del="${escH(p.id)}" title="Delete ${escH(p.id)}" aria-label="Delete ${escH(p.id)}">✕</button>${exportBtn}`;
-            }
-            const sourcePrefix = isBundled ? "bundled — " : "project — ";
-            const resultHtml =
-              result && isBundled ? `<div class="install-result">${result}</div>` : "";
-            return `<div class="pipeline-card" role="button" tabindex="0" data-pid="${escH(p.id)}">
-        <div class="card-top">
-          <span class="pid">${escH(p.id)}</span>
-          <span style="display:flex;gap:0.35rem;flex-shrink:0">${actionHtml}</span>
-        </div>
-        <span class="pdesc">${escH(p.description || "")}</span>
-        <span class="ppath">${escH(sourcePrefix)}${escH(p.path)}</span>
-      </div>${resultHtml}`;
-          })
-          .join("");
-
-        items.querySelectorAll(".pipeline-card").forEach((card) => {
-          const pid = card.dataset.pid;
-          card.addEventListener("click", () => openPipeline(pid));
-          card.addEventListener("keydown", (e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              openPipeline(pid);
-            }
-          });
-        });
-
-        items.querySelectorAll("[data-del]").forEach((btn) => {
-          btn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            showDeleteModal(btn.dataset.del);
-          });
-        });
-
-        items.querySelectorAll("[data-install]").forEach((btn) => {
-          btn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            installSingle(btn.dataset.install);
-          });
-        });
-      }
-
-      async function loadList() {
-        const items = el("list-items");
-        try {
-          const res = await fetch("/api/pipelines");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = await res.json();
-          S.pipelines = data.pipelines;
-          renderPipelines();
-        } catch (err) {
-          items.innerHTML = `<div class="error-box">Could not load pipelines: ${escH(err.message)}</div>`;
-        }
-      }
-
-      // ── Run list (FR-003) ─────────────────────────────────────────────────────────
-
-      async function loadRuns() {
-        const list = el("run-list-items");
-        try {
-          const res = await fetch("/api/runs");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = await res.json();
-          const runs = data.runs;
-          if (!runs || runs.length === 0) {
-            list.innerHTML = `<span style="color:var(--muted);font-size:0.8rem">No active runs.</span>`;
-            return;
-          }
-          list.innerHTML = runs
-            .map(
-              (r) =>
-                `<div class="run-card" role="button" tabindex="0"
-                  data-run-id="${escH(r.runId)}" data-pipeline-id="${escH(r.pipelineId)}">
-                  <span class="rc-id">${escH(r.runId.slice(0, 8))}…</span>
-                  <span class="rc-pid">${escH(r.pipelineId)}</span>
-                  <span class="rc-badge ${escH(r.status)}">${escH(r.status)}</span>
-                </div>`
-            )
-            .join("");
-          list.querySelectorAll(".run-card").forEach((card) => {
-            const runId = card.dataset.runId;
-            const pipelineId = card.dataset.pipelineId;
-            card.addEventListener("click", () => attachToRun(runId, pipelineId));
-            card.addEventListener("keydown", (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                attachToRun(runId, pipelineId);
-              }
-            });
-          });
-        } catch (err) {
-          list.innerHTML = `<div class="error-box">Could not load runs: ${escH(err.message)}</div>`;
-        }
-      }
-
-      /**
-       * Attach the UI to an existing run (FR-003/FR-004).
-       * Opens the pipeline editor if it is not already open, then connects to the SSE stream.
-       * The snapshot event will correct S.runStatus and hydrate step states immediately.
-       */
-      async function attachToRun(runId, pipelineId) {
-        if (!S.pipeline || S.pipeline.def.id !== pipelineId) {
-          await openPipeline(pipelineId);
-          // openPipeline() calls resetRun() internally
-        } else {
-          resetRun();
-        }
-        S.runId = runId;
-        S.runStatus = "running"; // snapshot will correct this
-        renderRunPanel();
-        openSse(runId);
-      }
-
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Screen 2: Editor
-      // ══════════════════════════════════════════════════════════════════════════════
-
-      async function openPipeline(id) {
-        try {
-          const res = await fetch(`/api/pipelines/${encodeURIComponent(id)}`);
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = await res.json();
-
-          // Stop any live run
-          closeSse();
-          resetRun();
-
-          S.pipeline = data;
-          // Deep-copy steps for in-memory editing
-          S.editedSteps = data.def.steps.map((s) => ({
-            ...s,
-            dependsOn: s.dependsOn ? [...s.dependsOn] : [],
-          }));
-          S.selectedId = null;
-          S.draftId = null;
-
-          showView("editor");
-          renderEditorHeader();
-          renderBands();
-          renderInspector();
-          el("run-panel").hidden = true;
-          setStatus("");
-        } catch (err) {
-          el("list-items").innerHTML =
-            `<div class="error-box">Could not load pipeline "${escH(id)}": ${escH(err.message)}</div>`;
-        }
-      }
-
-      function renderEditorHeader() {
-        const { def } = S.pipeline;
-        el("editor-title").textContent = def.id;
-        el("editor-meta").textContent = `v${def.version} · inputs: ${def.inputs.join(", ")}`;
-        el("editor-desc").textContent = def.description || "";
-      }
-
-      // ── Level-band canvas ─────────────────────────────────────────────────────────
-      // S.pipeline.levels is string[][] from the server — execution bands in order.
-      // A band with >1 id runs in parallel.
-
-      function renderBands() {
-        const { levels } = S.pipeline;
-        const byId = {};
-        for (const s of S.editedSteps) byId[s.id] = s;
-
-        el("canvas").innerHTML = `<div class="bands">${levels
-          .map(
-            (band, i) => `
-      <div class="band${band.length > 1 ? " par" : ""}">
-        <div class="lvl">level<b>${i}</b></div>
-        <div class="row">${band.map((id) => nodeHtml(byId[id] || { id, kind: "llm" })).join("")}</div>
-      </div>`
-          )
-          .join("")}</div>`;
-
-        el("canvas")
-          .querySelectorAll(".node")
-          .forEach((node) => {
-            const nid = node.dataset.nid;
-            node.addEventListener("click", () => selectNode(nid));
-            node.addEventListener("keydown", (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                selectNode(nid);
-              }
-            });
-          });
-      }
-
-      function nodeHtml(s) {
-        const status = S.stepStatuses[s.id] || "";
-        const meta = [s.role, s.schema ? "schema:" + s.schema : null].filter(Boolean).join(" · ");
-        // Step output excerpt — untrusted model output, always escaped (FR-006/FR-007).
-        const out = S.stepOutputs[s.id];
-        const outHtml = out?.excerpt ? `<span class="nout">${escH(out.excerpt)}</span>` : "";
-        return `<div class="node k-${escH(s.kind)}${status ? " ns-" + status : ""}"
-    data-nid="${escH(s.id)}" role="button" tabindex="0"
-    aria-selected="${s.id === S.selectedId}">
-    <span class="nid">${escH(s.id)}</span>
-    <span class="meta"><span class="kindtag">${escH(s.kind)}</span>${meta ? " " + escH(meta) : ""}</span>
-    ${outHtml}
-    <span class="sdot" aria-hidden="true"></span>
-  </div>`;
-      }
-
-      function selectNode(id) {
-        S.selectedId = id;
-        el("canvas")
-          .querySelectorAll(".node")
-          .forEach((n) => {
-            n.setAttribute("aria-selected", n.dataset.nid === id ? "true" : "false");
-          });
-        renderInspector();
-      }
-
-      // ── Inspector ─────────────────────────────────────────────────────────────────
-
-      function levelOf(id) {
-        return S.pipeline.levels.findIndex((band) => band.includes(id));
-      }
-
-      function renderInspector() {
-        const body = el("inspector-body");
-        const s = S.editedSteps.find((x) => x.id === S.selectedId);
-        if (!s) {
-          body.innerHTML = '<p class="empty">Select a node on the canvas.</p>';
-          return;
-        }
-
-        const depStr = s.dependsOn?.length ? "[" + s.dependsOn.join(", ") + "]" : "— (level 0)";
-
-        const kindOpts = ["llm", "gate", "assemble-spec", "persist-ticket"];
-        const roleOpts = ["reasoner", "worker", "scout"];
-
-        body.innerHTML = `
-    <div class="field"><label>id</label><div class="ro">${escH(s.id)}</div></div>
-    <div class="field">
-      <label>kind</label>
-      <select data-f="kind">
-        ${kindOpts.map((k) => `<option${k === s.kind ? " selected" : ""}>${k}</option>`).join("")}
-      </select>
-    </div>
-    ${
-      s.kind === "llm"
-        ? `
-    <div class="field">
-      <label>role</label>
-      <select data-f="role">
-        ${roleOpts.map((r) => `<option${r === (s.role || "worker") ? " selected" : ""}>${r}</option>`).join("")}
-      </select>
-    </div>
-    <div class="field">
-      <label>prompt</label>
-      <input type="text" data-f="prompt" value="${escH(s.prompt || "")}">
-    </div>`
-        : ""
-    }
-    ${
-      s.kind === "gate"
-        ? `
-    <div class="field">
-      <label>message</label>
-      <input type="text" data-f="message" value="${escH(s.message || "")}">
-    </div>`
-        : ""
-    }
-    <div class="field"><label>dependsOn</label><div class="ro">${escH(depStr)}</div></div>
-    <div class="field"><label>execution level</label><div class="ro">${levelOf(s.id)}</div></div>`;
-
-        // Wire field changes → in-memory step mutation
-        body.querySelectorAll("[data-f]").forEach((input) => {
-          input.addEventListener("change", () => {
-            const f = input.dataset.f;
-            const step = S.editedSteps.find((x) => x.id === S.selectedId);
-            if (!step) return;
-            step[f] = input.value;
-            // kind change affects node CSS class and inspector fields
-            if (f === "kind") {
-              renderBands();
-              renderInspector();
-            }
-          });
-        });
-      }
-
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Save flow
-      // POST /api/pipelines/:id/drafts → PUT /api/drafts/:id → POST /api/drafts/:id/save
-      // ══════════════════════════════════════════════════════════════════════════════
-
-      async function saveFlow() {
-        setStatus("Saving…");
-        const { def } = S.pipeline;
-        try {
-          // 1 — open draft (server snapshots current file body + baseHash)
-          const draftRes = await fetch(`/api/pipelines/${encodeURIComponent(def.id)}/drafts`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: "{}",
-          });
-          if (!draftRes.ok) throw new Error(`open draft: HTTP ${draftRes.status}`);
-          const { draftId } = await draftRes.json();
-
-          // 2 — serialize edited steps back to YAML and PUT the draft body
-          const yamlBody = serializeYaml(def, S.editedSteps);
-          const putRes = await fetch(`/api/drafts/${draftId}`, {
-            method: "PUT",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ body: yamlBody }),
-          });
-          if (!putRes.ok) throw new Error(`update draft: HTTP ${putRes.status}`);
-
-          // 3 — commit the draft
-          const saveRes = await fetch(`/api/drafts/${draftId}/save`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: "{}",
-          });
-          const saved = await saveRes.json();
-
-          if (saved.ok) {
-            const regen = saved.regenerated?.length
-              ? ` · regenerated: ${saved.regenerated.join(", ")}`
-              : "";
-            setStatus(`Saved${regen}`, "ok");
-          } else if (saved.reason === "conflict") {
-            // File changed on disk between open and save
-            setStatus(`Conflict: ${saved.message}`, "conflict");
-          } else {
-            // invalid — validator rejected the YAML
-            setStatus(`Invalid: ${saved.message}`, "err");
-          }
-        } catch (err) {
-          setStatus(`Save error: ${err.message}`, "err");
-        }
-      }
-
-      // ── YAML emitter ──────────────────────────────────────────────────────────────
-      // Emits only the subset of YAML the canon loader accepts.
-      // The daemon re-validates; comment preservation is the writer's job, not ours.
-
-      function serializeYaml(def, steps) {
-        const lines = [];
-        lines.push(`id: ${ys(def.id)}`);
-        lines.push(`version: ${def.version}`);
-        lines.push(`description: ${ys(def.description)}`);
-        if (def.defaultTimeoutMs !== undefined) {
-          lines.push(`defaultTimeoutMs: ${def.defaultTimeoutMs}`);
-        }
-        if (def.inputs && def.inputs.length) {
-          lines.push("inputs:");
-          def.inputs.forEach((inp) => lines.push(`  - ${ys(inp)}`));
-        }
-        lines.push("steps:");
-        for (const s of steps) {
-          lines.push(`  - id: ${ys(s.id)}`);
-          lines.push(`    kind: ${s.kind}`);
-          if (s.role) lines.push(`    role: ${s.role}`);
-          if (s.model) lines.push(`    model: ${ys(s.model)}`);
-          if (s.prompt) lines.push(`    prompt: ${ys(s.prompt)}`);
-          if (s.schema) lines.push(`    schema: ${s.schema}`);
-          if (s.message) lines.push(`    message: ${ys(s.message)}`);
-          if (s.timeoutMs !== undefined) lines.push(`    timeoutMs: ${s.timeoutMs}`);
-          if (s.dependsOn && s.dependsOn.length) {
-            lines.push(`    dependsOn: [${s.dependsOn.join(", ")}]`);
-          }
-        }
-        return lines.join("\n") + "\n";
-      }
-
-      // YAML scalar: quote with JSON double-quoting when the value contains
-      // characters that would be ambiguous in bare YAML context.
-      function ys(s) {
-        if (typeof s !== "string") return String(s);
-        if (!s || /[:#\[\]{},&*?|<>=!%@`"'\n\r\t]/.test(s) || s !== s.trim()) {
-          return JSON.stringify(s);
-        }
-        return s;
-      }
-
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Screen 3: Run
-      // POST /api/runs → SSE /api/runs/:id/events → POST /api/runs/:id/approve
-      // ══════════════════════════════════════════════════════════════════════════════
-
-      function openRunModal() {
-        const { def } = S.pipeline;
-        el("modal-title").textContent = `Run: ${def.id}`;
-        const fields = el("modal-fields");
-
-        if (!def.inputs || !def.inputs.length) {
-          fields.innerHTML = '<p class="empty">No inputs required.</p>';
-        } else {
-          fields.innerHTML = def.inputs
-            .map(
-              (inp) => `
-      <div class="field">
-        <label>${escH(inp)}</label>
-        <textarea data-inp="${escH(inp)}" rows="3"></textarea>
-      </div>`
-            )
-            .join("");
-        }
-
-        el("run-modal").hidden = false;
-        const first = fields.querySelector("textarea");
-        if (first) first.focus();
-      }
-
-      async function startRun() {
-        el("run-modal").hidden = true;
-        const { def } = S.pipeline;
-
-        // Collect inputs
-        const inputs = {};
-        el("modal-fields")
-          .querySelectorAll("[data-inp]")
-          .forEach((t) => {
-            inputs[t.dataset.inp] = t.value;
-          });
-
-        // Reset per-step statuses and re-draw canvas
-        resetRun();
-        renderBands();
-        renderRunPanel();
-
-        try {
-          const res = await fetch("/api/runs", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ pipeline: def.id, inputs }),
-          });
-          if (!res.ok) {
-            const e = await res.json().catch(() => ({}));
-            throw new Error(e.error || `HTTP ${res.status}`);
-          }
-          const runData = await res.json();
-          S.runId = runData.runId;
-
-          // Map StartResult.status to internal status
-          // StartResult: "awaiting_approval" | "success" | "failed"
-          if (runData.status === "success") S.runStatus = "success";
-          else if (runData.status === "failed") S.runStatus = "failed";
-          else if (runData.status === "awaiting_approval") S.runStatus = "suspended";
-          else S.runStatus = "running";
-
-          renderRunPanel();
-          openSse(runData.runId);
-        } catch (err) {
-          S.runStatus = "failed";
-          renderRunPanel();
-          setStatus(`Run error: ${err.message}`, "err");
-        }
-      }
-
-      function openSse(runId) {
-        closeSse();
-        const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
-        S.sseSource = es;
-
-        es.addEventListener("snapshot", (e) => {
-          const snap = JSON.parse(e.data);
-          // GetResult: status 'running' | 'suspended' | 'success' | 'failed'
-          if (snap.status) {
-            S.runStatus = snap.status;
-            // Hydrate per-step states for mid-run attach (FR-004/FR-006).
-            if (snap.steps && typeof snap.steps === "object") {
-              for (const [sid, st] of Object.entries(snap.steps)) {
-                S.stepStatuses[sid] = st.status;
-                if (st.outputExcerpt !== undefined) {
-                  S.stepOutputs[sid] = { excerpt: st.outputExcerpt, truncated: st.outputTruncated };
-                }
-                if (st.status === "suspended") S.suspendedStepId = sid;
-              }
-              renderBands();
-            }
-            // Gate message from snapshot when attaching to a suspended run (FR-004).
-            if (snap.status === "suspended" && snap.gateMessage) {
-              S.gateMessage = snap.gateMessage;
-            }
-            renderRunPanel();
-          }
-        });
-
-        es.addEventListener("step", (e) => {
-          const { stepId, status, outputExcerpt, outputTruncated } = JSON.parse(e.data);
-          S.stepStatuses[stepId] = status;
-          // Accumulate step output for display (FR-006/FR-007 — consumed via escH in nodeHtml).
-          if (outputExcerpt !== undefined) {
-            S.stepOutputs[stepId] = { excerpt: outputExcerpt, truncated: outputTruncated };
-          }
-
-          if (status === "suspended") {
-            S.suspendedStepId = stepId;
-            S.runStatus = "suspended";
-          } else if (status === "succeeded" || status === "failed") {
-            if (S.suspendedStepId === stepId) S.suspendedStepId = null;
-          }
-
-          // Update just the one node's status class in-place (avoids full re-render).
-          // Also refresh the output excerpt span when a step finishes (FR-006/FR-007).
-          const node = el("canvas").querySelector(`[data-nid="${CSS.escape(stepId)}"]`);
-          if (node) {
-            node.classList.remove("ns-started", "ns-succeeded", "ns-failed", "ns-suspended");
-            if (status) node.classList.add("ns-" + status);
-            // Update output excerpt via textContent — never innerHTML (FR-007).
-            let nout = node.querySelector(".nout");
-            if (outputExcerpt !== undefined) {
-              if (!nout) {
-                nout = document.createElement("span");
-                nout.className = "nout";
-                node.querySelector(".sdot")?.before(nout);
-              }
-              nout.textContent = outputExcerpt;
-            }
-          }
-
-          // Infer terminal state from all step statuses
-          const allIds = S.pipeline.levels.flat();
-          const terminal = new Set(["succeeded", "failed"]);
-          if (allIds.every((id) => terminal.has(S.stepStatuses[id] || ""))) {
-            const anyFailed = allIds.some((id) => S.stepStatuses[id] === "failed");
-            S.runStatus = anyFailed ? "failed" : "success";
-            closeSse();
-          } else if (!S.suspendedStepId) {
-            const anySuspended = Object.values(S.stepStatuses).some((st) => st === "suspended");
-            if (!anySuspended) S.runStatus = "running";
-          }
-
-          renderRunPanel();
-        });
-
-        es.addEventListener("error", () => {
-          // EventSource auto-reconnects on transient errors; do nothing unless terminal
-          if (S.runStatus === "success" || S.runStatus === "failed") closeSse();
-        });
-      }
-
-      function closeSse() {
-        if (S.sseSource) {
-          S.sseSource.close();
-          S.sseSource = null;
-        }
-      }
-
-      function resetRun() {
-        closeSse();
-        S.runId = null;
-        S.runStatus = null;
-        S.stepStatuses = {};
-        S.stepOutputs = {};
-        S.suspendedStepId = null;
-        S.gateMessage = null;
-      }
-
-      async function approve(approved) {
-        if (!S.runId) return;
-        try {
-          const res = await fetch(`/api/runs/${encodeURIComponent(S.runId)}/approve`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ approved }),
-          });
-          if (!res.ok) {
-            const e = await res.json().catch(() => ({}));
-            throw new Error(e.error || `HTTP ${res.status}`);
-          }
-          const data = await res.json();
-          S.suspendedStepId = null;
-          // The approve endpoint blocks until the run fully settles — use the returned
-          // status directly rather than waiting for further SSE events.
-          if (data.status === "success") {
-            S.runStatus = "success";
-          } else {
-            S.runStatus = "failed";
-          }
-          closeSse();
-          renderRunPanel();
-        } catch (err) {
-          setStatus(`Approve error: ${err.message}`, "err");
-        }
-      }
-
-      function renderRunPanel() {
-        const panel = el("run-panel");
-        if (!S.runId && !S.runStatus) {
-          panel.hidden = true;
-          return;
-        }
-        panel.hidden = false;
-
-        const labels = {
-          running: "running",
-          suspended: "suspended — gate awaiting approval",
-          success: "success",
-          failed: "failed",
-        };
-        const label = labels[S.runStatus] || S.runStatus || "";
-
-        let gateHtml = "";
-        if (S.runStatus === "suspended") {
-          // Gate message priority: snapshot (FR-004) > step definition > fallback.
-          const gs = S.suspendedStepId
-            ? S.editedSteps.find((s) => s.id === S.suspendedStepId)
-            : null;
-          const msg = S.gateMessage || gs?.message || "Gate awaiting approval.";
-          gateHtml = `
-      <div class="gate-msg">${escH(msg)}</div>
-      <div class="gate-actions">
-        <button class="btn primary" id="approve-yes">Approve</button>
-        <button class="btn danger"  id="approve-no">Reject</button>
-      </div>`;
-        }
-
-        panel.innerHTML = `
-    <div class="run-section">
-      <h2>Run</h2>
-      <span class="run-badge ${escH(S.runStatus || "")}">${escH(label)}</span>
-      ${gateHtml}
-    </div>`;
-
-        if (S.runStatus === "suspended") {
-          const yesBtn = panel.querySelector("#approve-yes");
-          const noBtn = panel.querySelector("#approve-no");
-          // Disable both buttons on first click — prevents double-approval from the UI.
-          // (The service is already single-flight, but the UI should not fire twice.)
-          function lockGate() {
-            if (yesBtn) yesBtn.disabled = true;
-            if (noBtn) noBtn.disabled = true;
-          }
-          yesBtn?.addEventListener("click", () => {
-            lockGate();
-            approve(true);
-          });
-          noBtn?.addEventListener("click", () => {
-            lockGate();
-            approve(false);
-          });
-        }
-      }
-
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Environment panel
-      // GET /api/environment → show launch context, install section, skills & agents
-      // ══════════════════════════════════════════════════════════════════════════════
-
-      async function loadEnvironment() {
-        const panel = el("env-panel");
-        try {
-          const res = await fetch("/api/environment");
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          S.env = await res.json();
-          renderEnvPanel(S.env);
-          renderPipelines();
-          el("new-pipeline-btn").hidden = S.env.pipelinesSource === "bundled";
-        } catch (err) {
-          panel.innerHTML = `<div class="env-section"><div class="error-box">Could not load environment: ${escH(err.message)}</div></div>`;
-        }
-      }
-
-      function renderEnvPanel(env) {
-        const panel = el("env-panel");
-        const installedSet = new Set(env.installed);
-        const uninstalled = env.available.filter((id) => !installedSet.has(id));
-        const isBundled = env.pipelinesSource === "bundled";
-
+      // ── Detail panel ───────────────────────────────────────────────────────
+
+      const detailPanel = document.getElementById("detail-panel");
+      document.getElementById("btn-close-detail").onclick = () =>
+        detailPanel.classList.remove("open");
+
+      function showDetail(title, steps, inputs, description) {
+        document.getElementById("detail-title").textContent = title;
+        const body = document.getElementById("detail-body");
         let html = "";
+        if (description)
+          html += `<p style="margin-bottom:10px;color:var(--ink-2);font-size:13px">${escH(description)}</p>`;
+        if (inputs && inputs.length) {
+          html += `<div style="margin-bottom:12px"><strong style="font-size:12px;color:var(--muted)">INPUTS</strong> `;
+          html += inputs
+            .map(
+              (i) =>
+                `<code style="font-size:12px;background:var(--sunk);padding:1px 5px;border-radius:3px">${escH(i)}</code>`
+            )
+            .join(" ");
+          html += "</div>";
+        }
+        if (steps && steps.length) {
+          html += `<div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px">STEPS</div>`;
+          for (const s of steps) {
+            const deps =
+              s.dependsOn && s.dependsOn.length ? ` ← ${escH(s.dependsOn.join(", "))}` : "";
+            html += `<div class="step-row">
+              <span class="step-kind">${escH(s.kind)}</span>
+              <span class="step-id">${escH(s.id)}</span>
+              <span style="color:var(--muted);font-size:12px">${deps}</span>
+            </div>`;
+          }
+        }
+        body.innerHTML = html;
+        detailPanel.classList.add("open");
+      }
 
-        // ── Launch context ──
-        html += `<div class="env-section">
-          <h2>Launch context</h2>
-          <div class="field">
-            <label>Project</label>
-            <div class="ro">${escH(env.projectDir)}</div>
-          </div>
-          <div class="field">
-            <label>Pipelines</label>
-            <div class="ro">from <strong>${escH(env.pipelinesSource)}</strong> catalog${isBundled ? " — read-only, cannot create or delete" : ""}</div>
-          </div>
-          <div class="field">
-            <label>Installed</label>
-            <div class="ro">${env.installed.length} of ${env.available.length} bundled available</div>
-          </div>
-        </div>`;
+      // ── n8n state ──────────────────────────────────────────────────────────
 
-        // ── Install ── (project mode only; in bundled mode each card carries its own install action)
-        if (!isBundled && env.available.length > 0) {
-          html += `<div class="env-section"><h2>Available to install</h2>`;
-          if (uninstalled.length === 0) {
-            html += `<p class="empty">All ${env.available.length} bundled workflow${env.available.length === 1 ? "" : "s"} already installed.</p>`;
+      let n8nBaseUrl = null;
+
+      async function loadN8nStatus() {
+        try {
+          const s = await api("GET", "/api/n8n/status");
+          if (s.configured) {
+            n8nBaseUrl = s.baseUrl;
+            document.getElementById("n8n-status-badge").textContent = "n8n: connected";
+            document.getElementById("n8n-status-badge").style.color = "var(--ok)";
+            document.getElementById("btn-new-in-n8n").style.display = "";
+            document.getElementById("btn-save-from-n8n").style.display = "";
           } else {
-            for (const wfId of uninstalled) {
-              const result = S.installResults[wfId];
-              html += `<div class="install-item">
-                <span class="iname">${escH(wfId)}</span>
-                <button class="btn btn-icon" data-install="${escH(wfId)}">Install</button>
-              </div>`;
-              if (result) {
-                html += `<div class="install-result">${result}</div>`;
+            document.getElementById("n8n-status-badge").textContent = "n8n: not configured";
+          }
+        } catch {
+          document.getElementById("n8n-status-badge").textContent = "n8n: error";
+        }
+      }
+
+      document.getElementById("btn-new-in-n8n").onclick = () => {
+        if (n8nBaseUrl) window.open(`${n8nBaseUrl}/workflow/new`, "_blank");
+      };
+
+      // ── Project tier ───────────────────────────────────────────────────────
+
+      async function loadProjectTier() {
+        const wrap = document.getElementById("project-table-wrap");
+        try {
+          const env = await api("GET", "/api/environment");
+          const installed = env.installed || [];
+          if (!installed.length) {
+            wrap.innerHTML = `<p class="empty">No workflows installed in this project.</p>`;
+            return;
+          }
+          let html = `<table><thead><tr>
+            <th>ID</th><th>Tier</th><th>Actions</th>
+          </tr></thead><tbody>`;
+          for (const id of installed) {
+            html += `<tr>
+              <td class="pipeline-id">${escH(id)}</td>
+              <td><span class="tier-badge tier-project">project</span></td>
+              <td class="actions">
+                <button class="btn" data-view-project="${escH(id)}">View</button>
+                <button class="btn" data-edit-n8n="${escH(id)}" ${n8nBaseUrl ? "" : 'disabled title="n8n not configured"'}>Edit in n8n</button>
+                <button class="btn danger" data-del-project="${escH(id)}">Delete</button>
+              </td>
+            </tr>`;
+          }
+          html += "</tbody></table>";
+          wrap.innerHTML = html;
+
+          // Wire view buttons
+          wrap.querySelectorAll("[data-view-project]").forEach((btn) => {
+            btn.onclick = async () => {
+              try {
+                const d = await api(
+                  "GET",
+                  `/api/pipelines/${encodeURIComponent(btn.dataset.viewProject)}`
+                );
+                showDetail(btn.dataset.viewProject, d.def.steps, d.def.inputs, d.def.description);
+              } catch (e) {
+                flash(e.message, true);
               }
-            }
-          }
-          html += `</div>`;
+            };
+          });
+
+          // Wire edit-in-n8n buttons
+          wrap.querySelectorAll("[data-edit-n8n]").forEach((btn) => {
+            btn.onclick = async () => {
+              try {
+                const r = await api(
+                  "POST",
+                  `/api/pipelines/${encodeURIComponent(btn.dataset.editN8n)}/n8n`,
+                  {}
+                );
+                window.open(r.url, "_blank");
+              } catch (e) {
+                flash(e.message, true);
+              }
+            };
+          });
+
+          // Wire delete buttons
+          wrap.querySelectorAll("[data-del-project]").forEach((btn) => {
+            btn.onclick = async () => {
+              const id = btn.dataset.delProject;
+              if (!confirm(`Delete pipeline "${id}"?`)) return;
+              try {
+                await api("DELETE", `/api/pipelines/${encodeURIComponent(id)}`, {});
+                flash(`Deleted "${id}"`);
+                loadProjectTier();
+              } catch (e) {
+                flash(e.message, true);
+              }
+            };
+          });
+        } catch (e) {
+          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
-
-        // ── Skills & agents ──
-        if (env.skills.length > 0 || env.agents.length > 0) {
-          html += `<div class="env-section">
-            <h2>Skills &amp; agents</h2>
-            <p class="hint">Names from agent-notes. A step references them via its <code>skills:</code> field — agent-flows does not own them.</p>`;
-          if (env.skills.length > 0) {
-            html += `<div class="field">
-              <label>Skills (${env.skills.length})</label>
-              <div class="tag-list">${env.skills.map((s) => `<button class="tag" data-skill="${escH(s)}" title="View skill: ${escH(s)}">${escH(s)}</button>`).join("")}</div>
-            </div>`;
-          }
-          if (env.agents.length > 0) {
-            html += `<div class="field">
-              <label>Agents (${env.agents.length})</label>
-              <div class="tag-list">${env.agents.map((a) => `<button class="tag" data-agent="${escH(a)}" title="View agent: ${escH(a)}">${escH(a)}</button>`).join("")}</div>
-            </div>`;
-          }
-          html += `</div>`;
-        }
-
-        panel.innerHTML = html;
-
-        panel.querySelectorAll("[data-install]").forEach((btn) => {
-          btn.addEventListener("click", () => installSingle(btn.dataset.install));
-        });
-
-        panel.querySelectorAll("[data-skill]").forEach((btn) => {
-          btn.addEventListener("click", () => openContentModal("skill", btn.dataset.skill));
-        });
-
-        panel.querySelectorAll("[data-agent]").forEach((btn) => {
-          btn.addEventListener("click", () => openContentModal("agent", btn.dataset.agent));
-        });
       }
 
-      async function installSingle(wfId) {
-        // Optimistically disable the button while request is in flight.
-        // The button may be in list-items (bundled mode) or env-panel (project mode).
-        const btn = document.querySelector(`[data-install="${CSS.escape(wfId)}"]`);
-        if (btn) btn.disabled = true;
+      // ── Template tier ──────────────────────────────────────────────────────
+
+      async function loadTemplateTier() {
+        const wrap = document.getElementById("template-table-wrap");
         try {
-          const res = await fetch("/api/install", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ ids: [wfId] }),
+          const data = await api("GET", "/api/templates");
+          const templates = data.templates || [];
+          if (!templates.length) {
+            wrap.innerHTML = `<p class="empty">No templates saved yet. Use "Save from n8n…" to add one.</p>`;
+            return;
+          }
+          let html = `<table><thead><tr>
+            <th>ID</th><th>Tier</th><th>Source pipeline</th><th>Actions</th>
+          </tr></thead><tbody>`;
+          for (const t of templates) {
+            html += `<tr>
+              <td class="pipeline-id">${escH(t.templateId)}</td>
+              <td><span class="tier-badge tier-template">template</span></td>
+              <td class="pipeline-desc">${escH(t.sourcePipeline)}</td>
+              <td class="actions">
+                <button class="btn" data-install-tmpl="${escH(t.templateId)}">Install</button>
+                <button class="btn danger" data-del-tmpl="${escH(t.templateId)}">Delete</button>
+              </td>
+            </tr>`;
+          }
+          html += "</tbody></table>";
+          wrap.innerHTML = html;
+
+          wrap.querySelectorAll("[data-install-tmpl]").forEach((btn) => {
+            btn.onclick = async () => {
+              try {
+                const r = await api(
+                  "POST",
+                  `/api/templates/${encodeURIComponent(btn.dataset.installTmpl)}/install`,
+                  {}
+                );
+                flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
+                loadProjectTier();
+              } catch (e) {
+                flash(e.message, true);
+              }
+            };
           });
-          const data = await res.json();
-          if (!res.ok) {
-            S.installResults[wfId] =
-              `<span class="r-err">Error: ${escH(data.error || `HTTP ${res.status}`)}</span>`;
+
+          wrap.querySelectorAll("[data-del-tmpl]").forEach((btn) => {
+            btn.onclick = async () => {
+              const id = btn.dataset.delTmpl;
+              if (!confirm(`Delete template "${id}"?`)) return;
+              try {
+                await api("DELETE", `/api/templates/${encodeURIComponent(id)}`, {});
+                flash(`Deleted template "${id}"`);
+                loadTemplateTier();
+              } catch (e) {
+                flash(e.message, true);
+              }
+            };
+          });
+        } catch (e) {
+          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      // ── Bundled tier ───────────────────────────────────────────────────────
+
+      async function loadBundledTier() {
+        const wrap = document.getElementById("bundled-table-wrap");
+        try {
+          const env = await api("GET", "/api/environment");
+          const available = env.available || [];
+          if (!available.length) {
+            wrap.innerHTML = `<p class="empty">No bundled workflows found.</p>`;
+            return;
+          }
+          let html = `<table><thead><tr>
+            <th>ID</th><th>Tier</th><th>Actions</th>
+          </tr></thead><tbody>`;
+          for (const id of available) {
+            html += `<tr>
+              <td class="pipeline-id">${escH(id)}</td>
+              <td><span class="tier-badge tier-bundled">bundled</span></td>
+              <td class="actions">
+                <button class="btn" data-install-bundled="${escH(id)}">Install</button>
+              </td>
+            </tr>`;
+          }
+          html += "</tbody></table>";
+          wrap.innerHTML = html;
+
+          wrap.querySelectorAll("[data-install-bundled]").forEach((btn) => {
+            btn.onclick = async () => {
+              try {
+                const r = await api("POST", "/api/install", {
+                  ids: [btn.dataset.installBundled],
+                  overwrite: false,
+                });
+                flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
+                loadProjectTier();
+              } catch (e) {
+                flash(e.message, true);
+              }
+            };
+          });
+        } catch (e) {
+          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      // ── Save-from-n8n dialog ────────────────────────────────────────────────
+
+      const dialogBackdrop = document.getElementById("dialog-backdrop");
+      document.getElementById("btn-dlg-cancel").onclick = () =>
+        dialogBackdrop.classList.remove("open");
+      dialogBackdrop.onclick = (e) => {
+        if (e.target === dialogBackdrop) dialogBackdrop.classList.remove("open");
+      };
+
+      document.getElementById("btn-save-from-n8n").onclick = async () => {
+        const select = document.getElementById("dlg-wf-select");
+        const dlgError = document.getElementById("dlg-error");
+        dlgError.style.display = "none";
+        select.innerHTML = `<option value="">Loading workflows…</option>`;
+        dialogBackdrop.classList.add("open");
+        try {
+          const data = await api("GET", "/api/n8n/workflows");
+          const wfs = data.workflows || [];
+          if (!wfs.length) {
+            select.innerHTML = `<option value="">No workflows found in n8n</option>`;
           } else {
-            const writtenLines = (data.written || []).map(
-              (p) => `<span class="r-written">written: ${escH(p)}</span>`
-            );
-            const skippedLines = (data.skipped || []).map(
-              (p) => `<span class="r-skipped">skipped (already exists): ${escH(p)}</span>`
-            );
-            const combined = [...writtenLines, ...skippedLines];
-            S.installResults[wfId] =
-              combined.length > 0
-                ? combined.join("<br>")
-                : `<span class="r-skipped">No files changed</span>`;
+            // escH on workflow names — they are untrusted input (FR-013)
+            select.innerHTML = wfs
+              .map((w) => `<option value="${escH(w.id)}">${escH(w.name)}</option>`)
+              .join("");
           }
-        } catch (err) {
-          S.installResults[wfId] = `<span class="r-err">Error: ${escH(err.message)}</span>`;
+        } catch (e) {
+          select.innerHTML = `<option value="">Error loading workflows</option>`;
+          dlgError.textContent = escH(e.message);
+          dlgError.style.display = "";
         }
-        // Reload env to update installed counts; the result is preserved via S.installResults.
-        await loadEnvironment();
-      }
+      };
 
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Create pipeline
-      // POST /api/pipelines → 201 { id, path } | 400 unsafe id | 409 duplicate
-      // ══════════════════════════════════════════════════════════════════════════════
+      document.getElementById("btn-dlg-save").onclick = async () => {
+        const select = document.getElementById("dlg-wf-select");
+        const templateIdInput = document.getElementById("dlg-template-id");
+        const dlgError = document.getElementById("dlg-error");
+        dlgError.style.display = "none";
 
-      function showCreateModal() {
-        el("create-id-input").value = "";
-        el("create-desc-input").value = "";
-        el("create-error").hidden = true;
-        el("create-error").textContent = "";
-        el("create-modal").hidden = false;
-        el("create-id-input").focus();
-      }
-
-      async function submitCreate() {
-        const id = el("create-id-input").value.trim();
-        const description = el("create-desc-input").value.trim();
-        const errBox = el("create-error");
-        const submitBtn = el("create-submit");
-
-        errBox.hidden = true;
-        if (!id) {
-          errBox.textContent = "Pipeline id is required.";
-          errBox.hidden = false;
-          el("create-id-input").focus();
+        const workflowId = select.value;
+        if (!workflowId) {
+          flash("Select a workflow first", true);
           return;
         }
-
-        submitBtn.disabled = true;
-        try {
-          const res = await fetch("/api/pipelines", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ id, description }),
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            errBox.textContent = data.error || `HTTP ${res.status}`;
-            errBox.hidden = false;
-            return;
-          }
-          el("create-modal").hidden = true;
-          await loadList();
-          openPipeline(data.id);
-        } catch (err) {
-          errBox.textContent = `Request error: ${err.message}`;
-          errBox.hidden = false;
-        } finally {
-          submitBtn.disabled = false;
-        }
-      }
-
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Delete pipeline
-      // DELETE /api/pipelines/:id → 200 { ok, id } | 409 dependants | 403 bundled
-      // ══════════════════════════════════════════════════════════════════════════════
-
-      function showDeleteModal(id) {
-        S.deleteTarget = id;
-        el("delete-target-name").textContent = id;
-        el("delete-error").hidden = true;
-        el("delete-error").textContent = "";
-        el("delete-modal").hidden = false;
-        el("delete-confirm").focus();
-      }
-
-      async function confirmDelete() {
-        const id = S.deleteTarget;
-        if (!id) return;
-        const errBox = el("delete-error");
-        const confirmBtn = el("delete-confirm");
-
-        errBox.hidden = true;
-        confirmBtn.disabled = true;
-        try {
-          const res = await fetch(`/api/pipelines/${encodeURIComponent(id)}`, {
-            method: "DELETE",
-            headers: { "content-type": "application/json" },
-            body: "{}",
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            // Surface the API response verbatim — includes dependant names on 409.
-            errBox.textContent = data.error || `HTTP ${res.status}`;
-            errBox.hidden = false;
-            return;
-          }
-          el("delete-modal").hidden = true;
-          S.deleteTarget = null;
-          await loadList();
-        } catch (err) {
-          errBox.textContent = `Request error: ${err.message}`;
-          errBox.hidden = false;
-        } finally {
-          confirmBtn.disabled = false;
-        }
-      }
-
-      // ── Event wiring ──────────────────────────────────────────────────────────────
-
-      el("back-btn").addEventListener("click", () => {
-        closeSse();
-        showView("list");
-        loadRuns(); // refresh run list on return to list view (FR-003)
-      });
-
-      el("save-btn").addEventListener("click", saveFlow);
-
-      el("run-btn").addEventListener("click", openRunModal);
-
-      el("modal-cancel").addEventListener("click", () => {
-        el("run-modal").hidden = true;
-      });
-
-      el("modal-submit").addEventListener("click", startRun);
-
-      el("run-modal").addEventListener("keydown", (e) => {
-        if (e.key === "Escape") {
-          el("run-modal").hidden = true;
-          return;
-        }
-        // Enter submits only when not in a textarea (textarea needs multi-line)
-        if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") startRun();
-      });
-
-      el("new-pipeline-btn").addEventListener("click", showCreateModal);
-
-      el("create-cancel").addEventListener("click", () => {
-        el("create-modal").hidden = true;
-      });
-      el("create-submit").addEventListener("click", submitCreate);
-      el("create-modal").addEventListener("keydown", (e) => {
-        if (e.key === "Escape") {
-          el("create-modal").hidden = true;
-          return;
-        }
-        if (e.key === "Enter" && e.target.tagName !== "TEXTAREA") submitCreate();
-      });
-
-      el("delete-cancel").addEventListener("click", () => {
-        el("delete-modal").hidden = true;
-        S.deleteTarget = null;
-      });
-      el("delete-confirm").addEventListener("click", confirmDelete);
-      el("delete-modal").addEventListener("keydown", (e) => {
-        if (e.key === "Escape") {
-          el("delete-modal").hidden = true;
-          S.deleteTarget = null;
-          return;
-        }
-        if (e.key === "Enter") confirmDelete();
-      });
-
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Skill / agent content modal
-      // GET /api/skills/:name | GET /api/agents/:name
-      // ══════════════════════════════════════════════════════════════════════════════
-
-      async function openContentModal(kind, name) {
-        const modal = el("content-modal");
-        const titleEl = el("content-modal-title");
-        const pathEl = el("content-modal-path");
-        const pre = el("content-modal-pre");
-        const truncEl = el("content-modal-trunc");
-        const errEl = el("content-modal-err");
-
-        titleEl.textContent = kind + ": " + name;
-        pathEl.textContent = "";
-        pre.textContent = "";
-        truncEl.hidden = true;
-        errEl.hidden = true;
-        modal.hidden = false;
-        el("content-modal-close").focus();
+        const templateId = templateIdInput.value.trim() || undefined;
 
         try {
-          const endpoint =
-            kind === "skill"
-              ? `/api/skills/${encodeURIComponent(name)}`
-              : `/api/agents/${encodeURIComponent(name)}`;
-          const res = await fetch(endpoint);
-          const data = await res.json();
-          if (!res.ok) {
-            errEl.textContent = data.error || `HTTP ${res.status}`;
-            errEl.hidden = false;
-            return;
-          }
-          pathEl.textContent = data.filePath;
-          pre.textContent = data.content;
-          if (data.truncated) {
-            truncEl.hidden = false;
-          }
-        } catch (err) {
-          errEl.textContent = err.message;
-          errEl.hidden = false;
+          const r = await api("POST", "/api/templates/from-n8n", { workflowId, templateId });
+          flash(`Saved as template "${escH(r.templateId)}"`);
+          dialogBackdrop.classList.remove("open");
+          templateIdInput.value = "";
+          loadTemplateTier();
+        } catch (e) {
+          dlgError.textContent = escH(e.message);
+          dlgError.style.display = "";
         }
-      }
+      };
 
-      el("content-modal-close").addEventListener("click", () => {
-        el("content-modal").hidden = true;
-      });
+      // ── Boot ───────────────────────────────────────────────────────────────
 
-      el("content-modal").addEventListener("keydown", (e) => {
-        if (e.key === "Escape") {
-          el("content-modal").hidden = true;
-        }
-      });
-
-      // ══════════════════════════════════════════════════════════════════════════════
-      // Import bundle
-      // POST /api/import { bundle: <yaml text> } → { written, skipped } | { error }
-      // ══════════════════════════════════════════════════════════════════════════════
-
-      el("import-btn").addEventListener("click", () => {
-        el("import-file").value = "";
-        el("import-file").click();
-      });
-
-      el("import-file").addEventListener("change", () => {
-        const file = el("import-file").files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          void doImport(reader.result);
-        };
-        reader.readAsText(file);
-      });
-
-      async function doImport(bundleText) {
-        const resultEl = el("import-result");
-        const errEl = el("import-error");
-        resultEl.hidden = true;
-        errEl.hidden = true;
-        el("import-modal").hidden = false;
-        el("import-close").focus();
-
-        try {
-          const res = await fetch("/api/import", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ bundle: bundleText, overwrite: false }),
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            errEl.textContent = data.error || `HTTP ${res.status}`;
-            errEl.hidden = false;
-            return;
-          }
-          const writtenLines = (data.written || []).map(
-            (p) => `<span class="r-written">written: ${escH(p)}</span>`
-          );
-          const skippedLines = (data.skipped || []).map(
-            (p) => `<span class="r-skipped">skipped (already exists): ${escH(p)}</span>`
-          );
-          const combined = [...writtenLines, ...skippedLines];
-          resultEl.innerHTML =
-            `<div class="install-result" style="margin:0 0 0.5rem">` +
-            (combined.length > 0
-              ? combined.join("<br>")
-              : `<span class="r-skipped">No files changed</span>`) +
-            `</div>`;
-          resultEl.hidden = false;
-          // Refresh list so newly imported pipelines appear.
-          await loadList();
-          await loadEnvironment();
-        } catch (err) {
-          errEl.textContent = `Request error: ${err.message}`;
-          errEl.hidden = false;
-        }
-      }
-
-      el("import-close").addEventListener("click", () => {
-        el("import-modal").hidden = true;
-      });
-
-      el("import-modal").addEventListener("keydown", (e) => {
-        if (e.key === "Escape") {
-          el("import-modal").hidden = true;
-        }
-      });
-
-      el("refresh-runs-btn").addEventListener("click", loadRuns);
-
-      // ── Boot ──────────────────────────────────────────────────────────────────────
-      showView("list");
-      loadList();
-      loadRuns();
-      loadEnvironment();
+      (async () => {
+        await loadN8nStatus();
+        await Promise.all([loadProjectTier(), loadTemplateTier(), loadBundledTier()]);
+      })();
     </script>
   </body>
 </html>

@@ -4,7 +4,15 @@
 // dependencies — node:http only.
 
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import {
   createServer as nodeCreateServer,
   type IncomingMessage,
@@ -18,6 +26,8 @@ import { parse, stringify } from "yaml";
 
 import { BUNDLED_PIPELINES_DIR, resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
+import { generateN8nWorkflow } from "../bindings/n8n/build.js";
+import { importN8nWorkflow } from "../bindings/n8n/import.js";
 import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
 import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
@@ -26,6 +36,7 @@ import { loadProviders } from "../canon/loadProviders.js";
 import { makeDb, type DbInstance } from "../db/index.js";
 import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../install/bundle.js";
 import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
+import { assertSafePath } from "../install/paths.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -55,6 +66,9 @@ const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
 const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
 const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
 const RE_EXPORT = /^\/api\/export\/([^/]+)$/u;
+const RE_TEMPLATE_DETAIL = /^\/api\/templates\/([^/]+)$/u;
+const RE_TEMPLATE_INSTALL = /^\/api\/templates\/([^/]+)\/install$/u;
+const RE_PIPELINE_N8N = /^\/api\/pipelines\/([^/]+)\/n8n$/u;
 
 // Safe pipeline id: lowercase alphanumeric and hyphens, must start with a letter or digit.
 // Prohibits dot, slash, backslash, space — blocks all path-traversal attempts.
@@ -95,6 +109,72 @@ function isContained(dir: string, filePath: string): boolean {
   const base = resolve(dir);
   const target = resolve(filePath);
   return target === base || target.startsWith(base + "/");
+}
+
+// ── n8n connection config (FR-004/FR-005) ─────────────────────────────────────
+
+/**
+ * The n8n global config file path. Lives in `~/.agent-flows/n8n.json`.
+ * Format: `{"baseUrl": "...", "apiKey": "..."}`.
+ *
+ * The file is outside every project directory so it cannot be committed with a project.
+ * The apiKey must NEVER appear in any response, error message, or log line.
+ */
+const N8N_GLOBAL_CONFIG_PATH = join(homedir(), ".agent-flows", "n8n.json");
+
+interface N8nConfig {
+  configured: true;
+  /** Base URL of the n8n instance (no trailing slash). */
+  baseUrl: string;
+  /** API key for n8n — daemon-side only; NEVER sent to clients. */
+  apiKey: string;
+}
+
+/**
+ * Read the n8n connection config from env overrides first, then from disk.
+ * Returns `null` when n8n is not configured. The returned `apiKey` must never
+ * appear in any HTTP response, error message, or log line.
+ */
+function readN8nConfig(): N8nConfig | null {
+  const envUrl = process.env.AGENT_FLOWS_N8N_URL;
+  const envKey = process.env.AGENT_FLOWS_N8N_API_KEY;
+  if (envUrl && envKey) {
+    return { configured: true, baseUrl: envUrl.replace(/\/+$/u, ""), apiKey: envKey };
+  }
+  if (!existsSync(N8N_GLOBAL_CONFIG_PATH)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(N8N_GLOBAL_CONFIG_PATH, "utf8")) as Record<string, unknown>;
+    const baseUrl = typeof raw.baseUrl === "string" ? raw.baseUrl.replace(/\/+$/u, "") : undefined;
+    const apiKey = typeof raw.apiKey === "string" ? raw.apiKey : undefined;
+    if (!baseUrl || !apiKey) return null;
+    return { configured: true, baseUrl, apiKey };
+  } catch {
+    return null;
+  }
+}
+
+// ── Project-level n8n workflow ID map (FR-006) ────────────────────────────────
+// Stored at <projectDir>/.agent-flows/n8n.json (different from the global config).
+// Format: {"workflows": {"<pipelineId>": "<n8nWorkflowId>"}}.
+
+function readProjectN8nMap(projectDir: string): Record<string, string> {
+  const path = join(projectDir, ".agent-flows", "n8n.json");
+  if (!existsSync(path)) return {};
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    if (typeof raw.workflows === "object" && raw.workflows !== null) {
+      return raw.workflows as Record<string, string>;
+    }
+  } catch {
+    // Malformed file — treat as empty
+  }
+  return {};
+}
+
+function writeProjectN8nMap(projectDir: string, map: Record<string, string>): void {
+  const dir = join(projectDir, ".agent-flows");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "n8n.json"), JSON.stringify({ workflows: map }, null, 2), "utf8");
 }
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
@@ -267,6 +347,11 @@ export interface ServeOptions {
   bundledPipelinesDir?: string;
   /** Root directory containing skills/ and agents/ subdirs. Defaults to AGENT_FLOWS_SKILLS_DIR or ~/.claude. */
   skillsBase?: string;
+  /**
+   * Directory for the global template store. Defaults to `~/.agent-flows/templates/`.
+   * Each template is one `<templateId>.yaml` bundle file (FR-001).
+   */
+  templatesBase?: string;
 }
 
 export interface ServeHandle {
@@ -286,6 +371,8 @@ interface HandlerCtx {
   projectDir: string;
   bundledPipelinesDir: string;
   skillsBase: string;
+  /** Global template store directory (FR-001). */
+  templatesBase: string;
 }
 
 // ── readAgentFlowsConfig ───────────────────────────────────────────────────────
@@ -353,6 +440,11 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
   const skillsBase =
     opts.skillsBase ?? process.env.AGENT_FLOWS_SKILLS_DIR ?? join(homedir(), ".claude");
 
+  const templatesBase =
+    opts.templatesBase ??
+    process.env.AGENT_FLOWS_TEMPLATES_DIR ??
+    join(homedir(), ".agent-flows", "templates");
+
   // boundPort is updated once the OS assigns a port (important when port: 0).
   let boundPort = opts.port ?? 7411;
 
@@ -367,6 +459,7 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
       projectDir,
       bundledPipelinesDir,
       skillsBase,
+      templatesBase,
     }).catch((err: unknown) => {
       if (!res.headersSent) {
         if (err instanceof RequestTooLargeError) {
@@ -1030,6 +1123,334 @@ async function handleRequest(
       json(res, 200, report);
     } catch (err) {
       json(res, 422, { error: safePath((err as Error).message, root) });
+    }
+    return;
+  }
+
+  // ── Template routes (FR-002) ───────────────────────────────────────────────
+
+  // GET /api/templates — list all templates in the global store
+  if (method === "GET" && pathname === "/api/templates") {
+    const templates: { templateId: string; sourcePipeline: string; exportedAt: string }[] = [];
+    const errors: string[] = [];
+    if (existsSync(ctx.templatesBase)) {
+      for (const f of readdirSync(ctx.templatesBase).sort()) {
+        if (!f.endsWith(".yaml") && !f.endsWith(".yml")) continue;
+        const templateId = f.replace(/\.ya?ml$/u, "");
+        const filePath = join(ctx.templatesBase, f);
+        try {
+          const bundle = parseBundle(readFileSync(filePath, "utf8"));
+          templates.push({
+            templateId,
+            sourcePipeline: bundle.sourcePipeline,
+            exportedAt: bundle.exportedAt,
+          });
+        } catch (err) {
+          errors.push(`${f}: ${(err as Error).message}`);
+        }
+      }
+    }
+    json(res, 200, { templates, ...(errors.length > 0 ? { errors } : {}) });
+    return;
+  }
+
+  // POST /api/templates/from-n8n — save an n8n workflow as a template (FR-011)
+  // Must be checked BEFORE the RE_TEMPLATE_DETAIL regex to avoid capturing "from-n8n" as an id.
+  if (method === "POST" && pathname === "/api/templates/from-n8n") {
+    const raw = await readBody(req, BODY_LIMIT_IMPORT);
+    const parsed = parseJsonBody(raw);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { workflowId, templateId: requestedId, overwrite } = parsed.value;
+    if (typeof workflowId !== "string" || workflowId.trim() === "") {
+      json(res, 400, { error: 'Field "workflowId" must be a non-empty string' });
+      return;
+    }
+    const n8nCfg = readN8nConfig();
+    if (!n8nCfg) {
+      json(res, 503, {
+        error: `n8n is not configured — add a baseUrl and apiKey to ${N8N_GLOBAL_CONFIG_PATH}`,
+      });
+      return;
+    }
+    // Fetch the workflow from n8n
+    let wfJson: unknown;
+    try {
+      const resp = await fetch(`${n8nCfg.baseUrl}/api/v1/workflows/${workflowId}`, {
+        headers: { "X-N8N-API-KEY": n8nCfg.apiKey },
+      });
+      if (!resp.ok) {
+        // Do NOT include the API key in this error message
+        json(res, resp.status === 404 ? 404 : 502, {
+          error: `n8n GET workflow ${workflowId} returned HTTP ${resp.status}`,
+        });
+        return;
+      }
+      wfJson = await resp.json();
+    } catch (err) {
+      json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
+      return;
+    }
+    // Import the n8n workflow JSON to canon files
+    let importResult: ReturnType<typeof importN8nWorkflow>;
+    try {
+      importResult = importN8nWorkflow(wfJson as Parameters<typeof importN8nWorkflow>[0]);
+    } catch (err) {
+      json(res, 422, { error: (err as Error).message });
+      return;
+    }
+    // Determine the template id
+    const tId =
+      typeof requestedId === "string" && isSafeId(requestedId)
+        ? requestedId
+        : importResult.pipelineId;
+    if (!isSafeId(tId)) {
+      json(res, 400, {
+        error: `Template id "${tId}" is invalid — must be lowercase alphanumeric and hyphens only`,
+      });
+      return;
+    }
+    // Path containment
+    try {
+      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
+    } catch {
+      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
+      return;
+    }
+    const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
+    if (existsSync(templatePath) && overwrite !== true) {
+      json(res, 409, {
+        error: `Template "${tId}" already exists — pass overwrite:true to replace`,
+      });
+      return;
+    }
+    // Build bundle from import result
+    const bundle = {
+      bundleVersion: 1 as const,
+      exportedAt: new Date().toISOString(),
+      sourcePipeline: importResult.pipelineId,
+      files: importResult.files,
+    };
+    const yamlText = stringifyBundle(bundle);
+    mkdirSync(ctx.templatesBase, { recursive: true });
+    writeFileSync(templatePath, yamlText, "utf8");
+    json(res, 200, { templateId: tId, path: templatePath });
+    return;
+  }
+
+  // GET /api/templates/:id — get template details
+  const templateDetailMatch = RE_TEMPLATE_DETAIL.exec(pathname);
+  if (method === "GET" && templateDetailMatch) {
+    const tId = decodeURIComponent(templateDetailMatch[1]);
+    if (!isSafeId(tId)) {
+      json(res, 400, { error: `Template id "${tId}" is invalid` });
+      return;
+    }
+    try {
+      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
+    } catch {
+      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
+      return;
+    }
+    const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
+    if (!existsSync(templatePath)) {
+      json(res, 404, { error: `Template "${tId}" not found` });
+      return;
+    }
+    try {
+      const bundle = parseBundle(readFileSync(templatePath, "utf8"));
+      json(res, 200, {
+        templateId: tId,
+        sourcePipeline: bundle.sourcePipeline,
+        exportedAt: bundle.exportedAt,
+        files: bundle.files.map((f) => f.path),
+      });
+    } catch (err) {
+      json(res, 422, { error: `Template "${tId}" is invalid: ${(err as Error).message}` });
+    }
+    return;
+  }
+
+  // DELETE /api/templates/:id
+  if (method === "DELETE" && templateDetailMatch) {
+    const tId = decodeURIComponent(templateDetailMatch[1]);
+    if (!isSafeId(tId)) {
+      json(res, 400, { error: `Template id "${tId}" is invalid` });
+      return;
+    }
+    try {
+      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
+    } catch {
+      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
+      return;
+    }
+    await readBody(req, BODY_LIMIT_DEFAULT); // consume body
+    const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
+    if (!existsSync(templatePath)) {
+      json(res, 404, { error: `Template "${tId}" not found` });
+      return;
+    }
+    rmSync(templatePath);
+    json(res, 200, { ok: true, id: tId });
+    return;
+  }
+
+  // POST /api/templates/:id/install — install a template into the project (FR-002)
+  const templateInstallMatch = RE_TEMPLATE_INSTALL.exec(pathname);
+  if (method === "POST" && templateInstallMatch) {
+    const tId = decodeURIComponent(templateInstallMatch[1]);
+    if (!isSafeId(tId)) {
+      json(res, 400, { error: `Template id "${tId}" is invalid` });
+      return;
+    }
+    try {
+      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
+    } catch {
+      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
+      return;
+    }
+    const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
+    if (!existsSync(templatePath)) {
+      json(res, 404, { error: `Template "${tId}" not found` });
+      return;
+    }
+    const bodyRaw = await readBody(req, BODY_LIMIT_DEFAULT);
+    const bodyParsed = parseJsonBody(bodyRaw);
+    const doOverwrite = bodyParsed.ok && bodyParsed.value.overwrite === true;
+    try {
+      const bundle = parseBundle(readFileSync(templatePath, "utf8"));
+      const report = importBundle(bundle, ctx.projectDir, doOverwrite);
+      json(res, 200, report);
+    } catch (err) {
+      json(res, 422, { error: safePath((err as Error).message, root) });
+    }
+    return;
+  }
+
+  // ── n8n status and proxy routes (FR-005/FR-006/FR-011) ────────────────────
+
+  // GET /api/n8n/status — return whether n8n is configured and the base URL (FR-005)
+  // The API key NEVER appears in this response.
+  if (method === "GET" && pathname === "/api/n8n/status") {
+    const cfg = readN8nConfig();
+    if (!cfg) {
+      json(res, 200, { configured: false });
+    } else {
+      json(res, 200, { configured: true, baseUrl: cfg.baseUrl });
+    }
+    return;
+  }
+
+  // GET /api/n8n/workflows — proxy n8n's workflow list (FR-011)
+  if (method === "GET" && pathname === "/api/n8n/workflows") {
+    const cfg = readN8nConfig();
+    if (!cfg) {
+      json(res, 503, {
+        error: `n8n is not configured — add a baseUrl and apiKey to ${N8N_GLOBAL_CONFIG_PATH}`,
+      });
+      return;
+    }
+    try {
+      const resp = await fetch(`${cfg.baseUrl}/api/v1/workflows`, {
+        headers: { "X-N8N-API-KEY": cfg.apiKey },
+      });
+      if (!resp.ok) {
+        json(res, resp.status === 401 ? 401 : 502, {
+          error: `n8n list workflows returned HTTP ${resp.status}`,
+        });
+        return;
+      }
+      const data = (await resp.json()) as { data?: { id: string; name: string }[] };
+      const workflows = (data.data ?? []).map(({ id, name }) => ({ id, name }));
+      json(res, 200, { workflows });
+    } catch (err) {
+      json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
+    }
+    return;
+  }
+
+  // POST /api/pipelines/:id/n8n — push a pipeline to n8n and return the edit URL (FR-006)
+  const pipelineN8nMatch = RE_PIPELINE_N8N.exec(pathname);
+  if (method === "POST" && pipelineN8nMatch) {
+    const id = decodeURIComponent(pipelineN8nMatch[1]);
+    if (!isSafeId(id)) {
+      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
+      return;
+    }
+    const entry = findPipelineById(ctx.pipelinesDir, id);
+    if (!entry) {
+      json(res, 404, { error: `Pipeline "${id}" not found` });
+      return;
+    }
+    await readBody(req, BODY_LIMIT_DEFAULT); // consume body
+    const cfg = readN8nConfig();
+    if (!cfg) {
+      json(res, 503, {
+        error: `n8n is not configured — add a baseUrl and apiKey to ${N8N_GLOBAL_CONFIG_PATH}`,
+      });
+      return;
+    }
+    // Generate the n8n workflow JSON from the canon definition
+    let wfJson: ReturnType<typeof generateN8nWorkflow>;
+    try {
+      wfJson = generateN8nWorkflow(entry.loaded);
+    } catch (err) {
+      json(res, 422, { error: safePath((err as Error).message, root) });
+      return;
+    }
+    // Check if a workflow was already pushed for this pipeline
+    const wfMap = readProjectN8nMap(ctx.projectDir);
+    let existingN8nId = wfMap[id];
+    if (existingN8nId) {
+      // Verify the workflow still exists in n8n; re-create if 404
+      try {
+        const checkResp = await fetch(`${cfg.baseUrl}/api/v1/workflows/${existingN8nId}`, {
+          headers: { "X-N8N-API-KEY": cfg.apiKey },
+        });
+        if (checkResp.ok) {
+          json(res, 200, { url: `${cfg.baseUrl}/workflow/${existingN8nId}` });
+          return;
+        }
+        if (checkResp.status === 404) {
+          // Stale mapping — re-create below
+          existingN8nId = undefined as unknown as string;
+        } else {
+          json(res, 502, {
+            error: `n8n GET workflow ${existingN8nId} returned HTTP ${checkResp.status}`,
+          });
+          return;
+        }
+      } catch (err) {
+        json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
+        return;
+      }
+    }
+    // Create the workflow in n8n (POST /api/v1/workflows)
+    // Remove `id` from the request body — it is readOnly and the server assigns it.
+    const { id: _id, active: _active, ...wfBody } = wfJson;
+    try {
+      const createResp = await fetch(`${cfg.baseUrl}/api/v1/workflows`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-N8N-API-KEY": cfg.apiKey,
+        },
+        body: JSON.stringify(wfBody),
+      });
+      if (!createResp.ok) {
+        json(res, 502, { error: `n8n POST workflow returned HTTP ${createResp.status}` });
+        return;
+      }
+      const created = (await createResp.json()) as { id: string };
+      const n8nId = created.id;
+      // Record the mapping in the project-level n8n.json
+      const updatedMap = { ...wfMap, [id]: n8nId };
+      writeProjectN8nMap(ctx.projectDir, updatedMap);
+      json(res, 200, { url: `${cfg.baseUrl}/workflow/${n8nId}` });
+    } catch (err) {
+      json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
     }
     return;
   }
