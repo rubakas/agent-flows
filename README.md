@@ -4,6 +4,216 @@ A modular, TypeScript workflow-control harness for LLM-driven software developme
 
 agent-flows turns a request into a **hardened spec** through an adversarial pipeline: intake → enrichment → parallel criticism and security review → assembly → approval gate → persisted ticket. Pipelines are defined once as provider-neutral data (YAML + prompt files) and executed by thin bindings to Claude, Mastra, or other runtimes.
 
+## Getting started with your repository
+
+If you use an MCP-capable chat (like Claude Code or Codex) and want to put your day-to-day development workflow into a repeatable flow, this is where you start. You'll install agent-flows itself, point it at your repository, and use it from the chat. By the end of this section you'll have run your first pipeline and seen how gates work.
+
+### Prerequisites
+
+You need three things. The first two are JavaScript tools; the third is the Claude CLI.
+
+- **Node ≥ 22** (required for native dependency `better-sqlite3`, which is compiled for Node 22's ABI). If you use nvm, `nvm install 22` and `nvm use 22`. You can check your current version with `node --version`.
+- **pnpm 10.15.0+** (auto-enabled through corepack when you run `pnpm` for the first time in an agent-flows repo). If you don't have pnpm installed, follow https://pnpm.io/installation.
+- **Claude CLI installed and logged in.** Install it from https://docs.claude.com/en/docs/claude-code, then use `claude auth` to authenticate.
+
+### Bootstrap agent-flows
+
+First, check that your setup is complete:
+
+```sh
+git clone <agent-flows-repo-url>
+cd agent-flows
+pnpm bootstrap
+```
+
+This command checks Node 22, enables pnpm, installs dependencies, validates the `better-sqlite3` native module, and builds the project. It ends with a preflight check (`pnpm run doctor`) that confirms the Claude CLI is available.
+
+If any step fails, `pnpm run doctor` will tell you exactly what is missing and how to fix it.
+
+### Point agent-flows at your repository
+
+agent-flows is provider-neutral; it needs to know which repository to run workflows against. You control this with the `AGENT_FLOWS_PROJECT_DIR` environment variable.
+
+First, see what workflows are available:
+
+```sh
+AGENT_FLOWS_PROJECT_DIR=<path-to-your-repo> pnpm flows:list
+```
+
+This lists every bundled workflow and shows whether it is already installed in your project. For example:
+
+```
+Project: /Users/you/code/your-repo
+
+AVAILABLE WORKFLOWS:
+  audit                [not installed]
+  build                [not installed]
+  build-round          [not installed]
+  correct-plan         [not installed]
+  cycle                [not installed]
+  cycle-dev            [not installed]
+  develop              [not installed]
+  investigate          [not installed]
+  ship                 [not installed]
+  spec-creation        [not installed]
+  test                 [not installed]
+```
+
+Now install the workflow(s) you want:
+
+```sh
+AGENT_FLOWS_PROJECT_DIR=<path-to-your-repo> pnpm flows:install cycle-dev
+```
+
+This command copies the `cycle-dev` workflow and all its dependencies into `<your-repo>/.agent-flows/`. The files are yours to edit—that's the entire point. If you install `cycle-dev`, you will NOT get `ship`, because `ship` is not part of that chain; your installed workflow cannot commit or open a pull request.
+
+Once you have at least one pipeline file in `<your-repo>/.agent-flows/pipelines/`, that directory takes precedence over the bundled pipelines. You can edit your copies without affecting the agent-flows source.
+
+### Start the daemon
+
+Before you use the workflow from the chat, the daemon must be running. The chat tools do not execute anything themselves; they send requests to this daemon, which coordinates the run, manages state, and reports back. If the daemon is not running, every chat tool call fails immediately.
+
+Open a new terminal (or terminal tab) and run:
+
+```sh
+AGENT_FLOWS_PROJECT_DIR=<path-to-your-repo> pnpm serve
+```
+
+Run this from the agent-flows checkout — the `pnpm` scripts exist only there, and the environment variable is what aims it at your repository. (The MCP server is the exception: the chat launches it from your repository, so it needs no such variable.)
+
+This starts an HTTP server on port 7411 (override with `AGENT_FLOWS_PORT=<port>`). The daemon stays running and serves a web page at `http://127.0.0.1:7411` showing active runs and available workflows. Leave this terminal open while you work.
+
+**Why the daemon?** The chat, the HTTP API, and the web page all share a single run registry. The daemon is the source of truth for run state, allowing you to start a workflow in the chat, check its status from the HTTP API, and resume it from the web page—all without losing track of what is running.
+
+### Wire the chat
+
+Register the agent-flows MCP server in your repository's MCP configuration. Create `.mcp.json` at your repository root — the same file this repository uses — and add:
+
+```json
+{
+  "mcpServers": {
+    "agent-flows": {
+      "command": "bash",
+      "args": ["/absolute/path/to/agent-flows/scripts/mcp-serve.sh"],
+      "env": { "AGENT_FLOWS_PROVIDER": "anthropic" }
+    }
+  }
+}
+```
+
+Replace `/absolute/path/to/agent-flows` with the actual path to your agent-flows checkout. The path must be absolute because the chat launches the script from your repository, not from the agent-flows checkout. That is also what aims the run: `scripts/mcp-serve.sh` records the directory it was launched in before it changes to the agent-flows root, so every pipeline step runs against your repository without you setting `AGENT_FLOWS_PROJECT_DIR` at all.
+
+The chat tools become available immediately:
+
+- `list_pipelines` — see every installed pipeline and its inputs
+- `run_pipeline` — start a workflow with a request and inputs
+- `approve` — make a gate decision (approve or reject the spec)
+- `get_run` — check the status of a running workflow
+
+If you open the agent-flows repository itself in your chat, you can use the `.mcp.json` already present there for working on agent-flows (not your own repository). You do not need to restart the chat after editing a pipeline file; changes are picked up on the next call.
+
+### Worked example: running your first pipeline
+
+Here's a real exchange with the chat to run a workflow end-to-end.
+
+**You (in chat):**
+
+```
+List the pipelines available in my repo.
+```
+
+**Chat calls `list_pipelines`**, which returns:
+
+```json
+{
+  "pipelines": [
+    {
+      "id": "cycle-dev",
+      "description": "Full development lifecycle — investigate, plan, and build (stops before ship; no commit, no PR)",
+      "inputs": ["request"]
+    }
+  ],
+  "errors": []
+}
+```
+
+The `inputs` array is a list of input names as declared in the pipeline YAML file; the `errors` array lists any pipeline files that failed to load.
+
+**You:**
+
+```
+Run cycle-dev with this request: "Add a --dry-run flag to the deploy command".
+```
+
+**Chat calls `run_pipeline`** with:
+
+```json
+{
+  "pipeline": "cycle-dev",
+  "inputs": { "request": "Add a --dry-run flag to the deploy command" }
+}
+```
+
+The workflow investigates the request, generates a plan, and builds the changes. If no gate is encountered, the workflow completes and returns the spec and build output. The `cycle-dev` pipeline suspends at the approval gate after spec assembly, waiting for your approval.
+
+When the run hits a gate and suspends:
+
+**Chat returns:**
+
+```json
+{
+  "runId": "run-abc123",
+  "status": "awaiting_approval",
+  "gateMessage": "Approve this spec to proceed with the build?",
+  "spec": { ... your assembled spec ... }
+}
+```
+
+**You:**
+
+```
+Approve the spec.
+```
+
+**Chat calls `approve`** with:
+
+```json
+{
+  "runId": "run-abc123",
+  "approved": true
+}
+```
+
+The workflow resumes, executes the build, and reports the final result.
+
+**Why gates?** A gate is a decision point where a human reviews the spec (the request, the plan, the security review) before the workflow proceeds to implementation. This is the core strength of agent-flows: it produces a hardened spec that you review and approve before any code changes happen. No surprises.
+
+### Two modes for gates
+
+Gates can operate in two modes. The default is **manual**: the run suspends and waits for a human decision from the chat, HTTP API, or web page.
+
+You can also use **auto mode**. When you start a run in auto mode, an independent LLM judge evaluates each gate and answers on your behalf. If the judge fails, the run falls back to waiting for you. The decision is recorded as made by an agent, not a human. Try this when you are iterating quickly and trust the judge to catch obvious failures.
+
+To run in auto mode:
+
+```json
+{
+  "pipeline": "cycle-dev",
+  "inputs": { "request": "..." },
+  "gateMode": "auto"
+}
+```
+
+Some gates (like the final approval before `ship` commits real code) are pinned to manual mode and cannot be automated. These are declared with `manualOnly: true` in the pipeline.
+
+### What you cannot do yet
+
+- **No cancel outside gates:** The web page has a "Reject (terminates run)" button for runs waiting at an approval gate. There is no way to cancel a run that is not currently suspended at a gate. A runaway run ends when the daemon stops.
+- **No persistence across restarts:** Runs live in the daemon's memory. If the daemon restarts, all active runs are lost.
+- **No rejection reason:** When you reject a gate, the system records only `approved: false`. There is no field for why you rejected it.
+
+---
+
 ## Charter
 
 **What agent-flows is.** A harness for building, editing and running dynamic workflows for
@@ -37,61 +247,45 @@ pane, T3 Code's desktop Browser panel, or an ordinary browser.
 
 ## Quick start
 
-**Prerequisites (cannot be auto-installed):**
+The section above covers the primary path: running workflows from your MCP-capable chat. These sections cover alternative execution methods.
 
-- Node ≥ 22: `nvm install 22` (`.nvmrc` pins the version)
-- `claude` CLI installed and logged in: see https://docs.claude.com/en/docs/claude-code, then `claude auth login`
+### Generate Claude Code workflows
 
-**Validate and generate:**
-
-```sh
-pnpm canon:check              # validate pipeline definitions
-pnpm bindings:claude          # generate Claude Code workflow into .claude/workflows/
-```
-
-**Start the MCP server (via chat client):**
-
-`.mcp.json` at the repo root wires the server into any MCP-capable client (Claude Code, VS Code with MCP, etc.). Open the repo in your client — it picks up the server automatically.
-
-Manual workflow from the client:
-
-1. Call `list_pipelines` to see available pipelines.
-2. Call `run_pipeline` with `pipeline` and `inputs` to start a run.
-3. If the run returns `status: "awaiting_approval"`, review the spec and call `approve` with the `runId`.
-4. Call `get_run` at any time to check status.
-
-**Switching providers:** edit the `AGENT_FLOWS_PROVIDER` value in `.mcp.json` (`anthropic` → `openai` or `local`) and restart the client. No pipeline or prompt changes needed.
+If you prefer to run workflows as native Claude Code JavaScript files instead of through the MCP server, you can generate them:
 
 ```sh
-pnpm mcp                      # also launchable standalone (stdio, for testing)
+pnpm bindings:claude          # generate .claude/workflows/*.js
 ```
 
-**Generate an n8n workflow (Binding C) and run it in n8n:**
+This creates native Claude Code workflows. They can execute `llm` and `assemble-spec` steps, but not gates, checks, loops, or other advanced step types. Any pipeline using those kinds is refused at generation time (no file is written). The native path is simpler but has narrower coverage; use the MCP path (above) for full pipeline support.
+
+**Important:** Per-step `permissions.contents` declared in your pipeline are NOT enforced by the native binding—each step runs with your current session's access level. The MCP path enforces these boundaries.
+
+### Generate n8n workflows
+
+To author and run workflows in n8n (the visual editor):
 
 ```sh
 pnpm bindings:n8n             # generate .n8n-workflows/*.json from the canon
 ```
 
-Install the typed node so both the n8n editor and CLI load it — copy the built
-`integrations/n8n-nodes-agent-flows` into `<N8N_USER_FOLDER>/.n8n/nodes/node_modules/`, then import the
-generated workflow. See `integrations/n8n-nodes-agent-flows/README.md`.
+Install the typed agent node into n8n: copy the built `integrations/n8n-nodes-agent-flows` into `<N8N_USER_FOLDER>/.n8n/nodes/node_modules/`, then import the generated workflow. See `integrations/n8n-nodes-agent-flows/README.md` for details.
 
-**Node version:** everything requires Node ≥ 22 (`better-sqlite3` is built for it). If your shell
-defaults to an older node, `scripts/dev-serve.sh` and `scripts/mcp-serve.sh` force Node 22 via nvm —
-`.claude/launch.json` and `.mcp.json` invoke them, so the daemon and MCP server start correctly
-regardless of the ambient node.
+### Run a pipeline standalone
 
-**Run the pipeline end-to-end (standalone):**
+To execute a pipeline outside the chat or web UI (for testing or CI):
 
 ```sh
-pnpm mastra:smoke             # execute pipeline with test input
-pnpm mastra:smoke --db ./custom.sqlite --intake-model opus  # with flags
+pnpm mastra:smoke             # execute with default test input
+pnpm mastra:smoke --db ./custom.sqlite --intake-model opus  # with custom flags
 ```
 
-**Preflight check:**
+### Verify prerequisites
+
+Run the preflight check at any time:
 
 ```sh
-pnpm run doctor               # verify all prerequisites; fix hints for each missing item
+pnpm run doctor               # verify all prerequisites; lists missing items with fix hints
 ```
 
 ---
