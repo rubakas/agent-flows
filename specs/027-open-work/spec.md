@@ -11,15 +11,14 @@ This is a handoff record, not a feature spec. It exists so the working context c
 
 ## Verified state
 
-| Fact          | Value                                                                                                   |
-| ------------- | ------------------------------------------------------------------------------------------------------- |
-| HEAD          | Snapshot 2026-09-07. `d8baa27` pushed; `f1616b5` local (rename follow-up). Live: `git log --oneline -1` |
-| Synced        | Snapshot 2026-09-07. `origin/main` == `d8baa27`. Local `main` is 1 ahead. Live: `git status -sb`        |
-| Remote        | `git@github.com:rubakas/agent-flows.git`                                                                |
-| Tests         | 943 total, 942 pass, 0 fail, 1 skipped by design                                                        |
-| `pnpm check`  | green (lint, typecheck, format:check, test)                                                             |
-| Test duration | ~2.3 s                                                                                                  |
-| Specs         | 23 directories under `specs/`                                                                           |
+| Fact          | Value                                                                                                     |
+| ------------- | --------------------------------------------------------------------------------------------------------- |
+| Working tree  | Snapshot 2026-09-07. Clean and in sync with `origin/main`. Live: `git status -sb`, `git log --oneline -1` |
+| Remote        | `git@github.com:rubakas/agent-flows.git`                                                                  |
+| Tests         | 943 total, 942 pass, 0 fail, 1 skipped by design                                                          |
+| `pnpm check`  | green (lint, typecheck, format:check, test)                                                               |
+| Test duration | ~2.3 s                                                                                                    |
+| Specs         | 23 directories under `specs/`                                                                             |
 
 Session start was 612 tests, now 943 total (942 pass, 1 skipped). The local checkout is `/Users/en3e/code/rubakas/agent-flows` and the dogfood sandbox is `/Users/en3e/code/rubakas/agent-flows-sandbox`, both renamed on 2026-09-07 from `yoke` and `newfolder`.
 
