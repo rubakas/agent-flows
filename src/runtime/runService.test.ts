@@ -766,7 +766,14 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
 
     run.emit({
       type: "workflow-step-result",
-      payload: { id: "s1", stepCallId: "c", status: "success", output: { answer: "hello" } },
+      // Mastra step output is { ...accumulatedCtx, [stepId]: ownValue }.
+      // The shared context prefix (request) must NOT appear in the excerpt.
+      payload: {
+        id: "s1",
+        stepCallId: "c",
+        status: "success",
+        output: { request: "r", s1: { answer: "hello" } },
+      },
     });
 
     got = service.get(runId)!;
@@ -790,10 +797,16 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
     const { runId } = await service.start("p", {});
 
     // Emit a large output — serialized > 2048 chars.
+    // Wrap under the step id key as Mastra does: { request: ..., big: ownOutput }.
     const bigOutput = { text: "x".repeat(3000) };
     run.emit({
       type: "workflow-step-result",
-      payload: { id: "big", stepCallId: "c", status: "success", output: bigOutput },
+      payload: {
+        id: "big",
+        stepCallId: "c",
+        status: "success",
+        output: { request: "r", big: bigOutput },
+      },
     });
 
     const got = service.get(runId)!;
@@ -813,7 +826,12 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
 
     run.emit({
       type: "workflow-step-result",
-      payload: { id: "s", stepCallId: "c", status: "success", output: { ok: true } },
+      payload: {
+        id: "s",
+        stepCallId: "c",
+        status: "success",
+        output: { request: "r", s: { ok: true } },
+      },
     });
 
     const got = service.get(runId)!;
@@ -831,7 +849,12 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
 
     run.emit({
       type: "workflow-step-result",
-      payload: { id: "q", stepCallId: "c", status: "success", output: { data: "world" } },
+      payload: {
+        id: "q",
+        stepCallId: "c",
+        status: "success",
+        output: { request: "r", q: { data: "world" } },
+      },
     });
 
     const finish = events.find((e) => e.kind === "step-finish" && e.stepId === "q");
@@ -857,6 +880,91 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
       got.steps["empty-step"]?.outputExcerpt,
       undefined,
       "no excerpt when output absent"
+    );
+  });
+
+  it("two llm steps with different outputs produce different excerpts, each matching its own step output", async () => {
+    // This is the regression test whose ABSENCE let the bug ship.
+    // The bug: every step serialises the whole accumulated context, which always
+    // starts with the shared request prefix — so all excerpts were byte-identical
+    // once the request is long enough to fill the 2048-char cap on its own.
+    //
+    // {"request":"<value>"} — the key + quotes consume 12 chars, leaving 2036
+    // for the value before the slice cuts off. A request of 2100 chars means
+    // the broken path produces the same truncated prefix for every step.
+    // With the fix each excerpt is the step's own value, which differ.
+    //
+    // BREAK TEST: revert the fix (serialize `output` instead of `output[id]`)
+    // and this test goes red — the two excerpts become byte-identical request prefixes.
+    const sharedRequest = "x".repeat(2100); // > 2036 so request prefix fills the 2048-char cap
+    const run = makeMockRun("run-distinct", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+
+    // Shared context prefix that both steps carry in their output object.
+    const baseCtx = { request: sharedRequest };
+
+    run.emit({
+      type: "workflow-step-result",
+      payload: {
+        id: "step-a",
+        stepCallId: "c1",
+        status: "success",
+        output: { ...baseCtx, "step-a": "Alpha step produced this unique text" },
+      },
+    });
+    run.emit({
+      type: "workflow-step-result",
+      payload: {
+        id: "step-b",
+        stepCallId: "c2",
+        status: "success",
+        output: { ...baseCtx, "step-b": "Beta step produced this unique text" },
+      },
+    });
+
+    const got = service.get(runId)!;
+    const excerptA = got.steps["step-a"]?.outputExcerpt;
+    const excerptB = got.steps["step-b"]?.outputExcerpt;
+
+    assert.ok(typeof excerptA === "string", "step-a must have an excerpt");
+    assert.ok(typeof excerptB === "string", "step-b must have an excerpt");
+    assert.notEqual(
+      excerptA,
+      excerptB,
+      "two steps with different outputs must produce different excerpts"
+    );
+    assert.ok(excerptA.includes("Alpha"), "step-a excerpt must contain step-a's own output");
+    assert.ok(excerptB.includes("Beta"), "step-b excerpt must contain step-b's own output");
+    assert.ok(!excerptA.includes("Beta"), "step-a excerpt must not contain step-b's output");
+    assert.ok(!excerptB.includes("Alpha"), "step-b excerpt must not contain step-a's output");
+  });
+
+  it("merge step that writes no own output key has no outputExcerpt", async () => {
+    // buildParallelMergeStep returns the merged context but never writes at
+    // output["__merge_level_4"], so the excerpt must be undefined — not the
+    // shared context serialised as a fake excerpt.
+    const run = makeMockRun("run-merge-node", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+
+    run.emit({
+      type: "workflow-step-result",
+      payload: {
+        id: "__merge_level_4",
+        stepCallId: "c",
+        status: "success",
+        // Merged context carries other step outputs but no key at "__merge_level_4".
+        output: { request: "r", "plan.intake": "some intake text" },
+      },
+    });
+
+    const got = service.get(runId)!;
+    const mergeState = got.steps["__merge_level_4" as string];
+    assert.equal(
+      mergeState?.outputExcerpt,
+      undefined,
+      "merge step with no own output key must have no excerpt"
     );
   });
 });

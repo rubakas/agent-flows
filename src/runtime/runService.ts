@@ -280,8 +280,16 @@ export class RunService {
         const { id, status, output } = event.payload;
         const uiStatus = status === "success" || status === "skipped" ? "succeeded" : status;
         const state: StepState = { status: uiStatus };
-        if (output !== undefined) {
-          const serialized = JSON.stringify(output);
+        // Extract the step's OWN output from the accumulated context.
+        // Every step returns { ...rawCtx, [step.id]: ownValue } so the full
+        // context always begins with the shared request prefix — serializing
+        // it whole produces byte-identical excerpts across all steps (FR-006).
+        const ownOutput =
+          output !== null && typeof output === "object"
+            ? (output as Record<string, unknown>)[id]
+            : undefined;
+        if (ownOutput !== undefined) {
+          const serialized = JSON.stringify(ownOutput);
           if (serialized.length > OUTPUT_EXCERPT_LIMIT) {
             state.outputExcerpt = serialized.slice(0, OUTPUT_EXCERPT_LIMIT);
             state.outputTruncated = true;

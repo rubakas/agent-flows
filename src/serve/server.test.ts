@@ -795,7 +795,13 @@ describe("GET /api/runs/:id — steps field always present in GetResult (FR-006)
 
       localRun.emit({
         type: "workflow-step-result",
-        payload: { id: "q", stepCallId: "c", status: "success", output: { msg: "hello" } },
+        // Wrap under the step id key as Mastra does: output = { ...ctx, q: ownOutput }.
+        payload: {
+          id: "q",
+          stepCallId: "c",
+          status: "success",
+          output: { request: "r", q: { msg: "hello" } },
+        },
       });
 
       const { value: stepVal } = await reader3.read();
