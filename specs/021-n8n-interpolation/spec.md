@@ -60,6 +60,7 @@ Research established the target n8n semantics (all checked 2026-09-07):</thinkin
 - Previously generated `.n8n-workflows/*.json` are superseded; regeneration (FR-008) is part of the change. No runtime consumer parses these files today except n8n itself.
 - Intentional break: pipelines whose prompts reference gate/loop/export-spec/assemble-spec/persist-ticket steps now fail to generate (FR-006) instead of producing silently-wrong JSON.
 - Bindings A/B, the canon loader, and `renderPrompt` are untouched; the canon `{{key}}` syntax remains the single authoring format.
+- **Timeout semantics (amendment, 2026-09-07).** Binding C mirrors the canon's no-declared-timeout semantics: when a step sets no `timeoutMs`, `build.ts` emits `timeoutMs: 0`, and the AgentFlowsAgent node treats `0` as "no limit" — the kill timer is not armed. This is the owner-approved trade-off: n8n executions are visible and cancellable from the n8n UI. Spec 024 (`specs/024-progress-watchdog/spec.md`) implements stall detection and loop detection for the Mastra path (Binding B); that watchdog does not exist for Binding C, and no design for it is attempted here.
 
 ## Out of scope
 

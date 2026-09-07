@@ -39,7 +39,6 @@ const ALLOWED_MODELS: ReadonlySet<string> = new Set([
 ]);
 
 const DEFAULT_MODEL = ROLE_TO_MODEL['scout'];
-const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024; // 4 MB — hard cap on buffered output
 
 // ---------------------------------------------------------------------------
@@ -146,6 +145,7 @@ interface ClaudeRunOptions {
   model: string;
   workspaceCwd: string; // already validated absolute real path
   timeoutMs: number;
+  allowedTools: string; // comma-separated list of tools to allow
 }
 
 interface ClaudeRunResult {
@@ -172,7 +172,7 @@ async function runClaude(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
     ...(hasApiKey ? ['--bare'] : []), // maximum isolation when API key available
     '--no-session-persistence',    // no session files written to disk
     '--permission-prompts', 'none', // deny any permission prompt (fail-safe)
-    '--allowedTools', 'Read,Glob', // read-only tool allowlist
+    '--allowedTools', opts.allowedTools, // tool allowlist derived from workspaceAccess
     '--strict-mcp-config',         // ignore project MCP config; use only --mcp-config
     '--output-format', 'text',     // plain text response
     '--model', model,              // validated model string
@@ -203,13 +203,19 @@ async function runClaude(opts: ClaudeRunOptions): Promise<ClaudeRunResult> {
     let timedOut = false;
     let settled = false;
 
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        if (!settled) child.kill('SIGKILL');
-      }, 5_000);
-    }, timeoutMs);
+    // Only arm the kill timer when timeoutMs is positive.
+    // timeoutMs === 0 mirrors the canon's no-declared-timeout semantics: the step runs
+    // unbounded. n8n executions are visible and cancellable from the n8n UI.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+        setTimeout(() => {
+          if (!settled) child.kill('SIGKILL');
+        }, 5_000);
+      }, timeoutMs);
+    }
 
     child.on('error', (err: NodeJS.ErrnoException) => {
       clearTimeout(timer);
@@ -320,6 +326,13 @@ export class AgentFlowsAgent implements INodeType {
             description: 'Allow the agent to read files from Workspace Directory using Read and Glob tools',
           },
           {
+            name: 'Write',
+            value: 'write',
+            description:
+              'Allow the agent to read and edit files in Workspace Directory using Read, Glob, Edit, and Write tools. ' +
+              'Use for steps that must modify repository files (e.g. implement, fix).',
+          },
+          {
             name: 'None',
             value: 'none',
             description:
@@ -336,10 +349,10 @@ export class AgentFlowsAgent implements INodeType {
         default: '',
         placeholder: '/absolute/path/to/repo',
         description:
-          'Absolute path to the directory the agent is spawned in. Required when Workspace Access is "read". ' +
+          'Absolute path to the directory the agent is spawned in. Required when Workspace Access is "read" or "write". ' +
           'Must exist and be a directory. ".." segments are rejected.',
         displayOptions: {
-          show: { workspaceAccess: ['read'] },
+          show: { workspaceAccess: ['read', 'write'] },
         },
       },
       {
@@ -357,8 +370,11 @@ export class AgentFlowsAgent implements INodeType {
         displayName: 'Timeout (ms)',
         name: 'timeoutMs',
         type: 'number',
-        default: DEFAULT_TIMEOUT_MS,
-        description: `Maximum milliseconds to wait for the agent to finish. The child process is killed (SIGTERM then SIGKILL) on timeout. Default: ${DEFAULT_TIMEOUT_MS}.`,
+        default: 0,
+        description:
+          'Maximum milliseconds to wait for the agent to finish. ' +
+          'The child process is killed (SIGTERM then SIGKILL) on timeout. ' +
+          '0 means no limit — the step runs until it completes or is cancelled from the n8n UI.',
       },
     ],
   };
@@ -370,10 +386,10 @@ export class AgentFlowsAgent implements INodeType {
     for (let i = 0; i < items.length; i++) {
       const role = this.getNodeParameter('role', i) as Role;
       const modelOverride = this.getNodeParameter('model', i, '') as string;
-      const workspaceAccess = this.getNodeParameter('workspaceAccess', i) as 'read' | 'none';
+      const workspaceAccess = this.getNodeParameter('workspaceAccess', i) as 'read' | 'write' | 'none';
       const rawWorkspaceDir = this.getNodeParameter('workspaceDirectory', i, '') as string;
       const prompt = this.getNodeParameter('prompt', i) as string;
-      const timeoutMs = this.getNodeParameter('timeoutMs', i, DEFAULT_TIMEOUT_MS) as number;
+      const timeoutMs = this.getNodeParameter('timeoutMs', i, 0) as number;
 
       if (!prompt || prompt.trim() === '') {
         throw new NodeOperationError(this.getNode(), 'prompt must not be empty', { itemIndex: i });
@@ -391,9 +407,9 @@ export class AgentFlowsAgent implements INodeType {
       let workspaceCwd: string;
       let tempDir: string | undefined;
       try {
-        if (workspaceAccess === 'read') {
+        if (workspaceAccess === 'read' || workspaceAccess === 'write') {
           if (!rawWorkspaceDir || rawWorkspaceDir.trim() === '') {
-            throw new Error('workspaceDirectory is required when workspaceAccess is "read"');
+            throw new Error(`workspaceDirectory is required when workspaceAccess is "${workspaceAccess}"`);
           }
           workspaceCwd = await validateWorkspaceDirectory(rawWorkspaceDir);
         } else {
@@ -406,12 +422,16 @@ export class AgentFlowsAgent implements INodeType {
         throw new NodeOperationError(this.getNode(), (err as Error).message, { itemIndex: i });
       }
 
+      const allowedTools =
+        workspaceAccess === 'write' ? 'Read,Glob,Edit,Write' : 'Read,Glob';
+
       try {
         const result = await runClaude({
           prompt: prompt.trim(),
           model: resolvedModel,
           workspaceCwd,
           timeoutMs,
+          allowedTools,
         });
 
         outputItems.push({

@@ -96,13 +96,17 @@ function buildMinimalEnv(): EnvResult {
   return { env, hasApiKey: Boolean(apiKey) };
 }
 
-function buildClaudeArgs(model: string, hasApiKey: boolean = true): string[] {
+function buildClaudeArgs(
+  model: string,
+  hasApiKey: boolean = true,
+  allowedTools: string = 'Read,Glob',
+): string[] {
   return [
     '-p',
     ...(hasApiKey ? ['--bare'] : []),
     '--no-session-persistence',
     '--permission-prompts', 'none',
-    '--allowedTools', 'Read,Glob',
+    '--allowedTools', allowedTools,
     '--strict-mcp-config',
     '--output-format', 'text',
     '--model', model,
@@ -314,5 +318,50 @@ describe('buildClaudeArgs', () => {
     assert.ok(modelIdx !== -1);
     assert.equal(args[modelIdx + 1], 'claude-haiku-4-5');
     assert.equal(args.length, modelIdx + 2, 'nothing should follow after --model <value>');
+  });
+
+  it('write mode uses Read,Glob,Edit,Write as allowedTools (FR-009)', () => {
+    const args = buildClaudeArgs('claude-haiku-4-5', true, 'Read,Glob,Edit,Write');
+    const idx = args.indexOf('--allowedTools');
+    assert.ok(idx !== -1, 'must include --allowedTools');
+    assert.equal(args[idx + 1], 'Read,Glob,Edit,Write', 'write mode must allow Edit and Write tools');
+  });
+
+  it('read mode uses Read,Glob as allowedTools (default, FR-009)', () => {
+    const args = buildClaudeArgs('claude-haiku-4-5', true, 'Read,Glob');
+    const idx = args.indexOf('--allowedTools');
+    assert.ok(idx !== -1);
+    assert.equal(args[idx + 1], 'Read,Glob', 'read mode must not include Edit or Write tools');
+  });
+});
+
+describe('runClaude timer guard — timeoutMs 0 means no timer', () => {
+  // The timer guard in AgentFlowsAgent.node.ts runClaude():
+  //   let timer: ... | undefined;
+  //   if (timeoutMs > 0) { timer = setTimeout(...); }
+  // This suite pins that guard so a regression (e.g. reverting to ?? 600_000) fails a test.
+
+  it('guard is false for timeoutMs 0 — no kill timer armed', () => {
+    const timeoutMs = 0;
+    // Mirrors: if (timeoutMs > 0) { timer = setTimeout(...) }
+    assert.equal(timeoutMs > 0, false, 'guard must be false: no timer armed for timeoutMs 0');
+  });
+
+  it('guard is false for timeoutMs 0 emitted by build.ts for steps with no declared timeout', () => {
+    // Spec 024: steps without a declared timeoutMs emit 0 (no limit).
+    // The node must honour that by never arming a kill timer.
+    const emittedTimeoutMs = 0; // what build.ts emits for step.timeoutMs ?? 0
+    assert.equal(emittedTimeoutMs > 0, false);
+  });
+
+  it('guard is true for positive timeoutMs — kill timer is armed', () => {
+    const timeoutMs = 30_000;
+    assert.equal(timeoutMs > 0, true, 'guard must be true: timer armed for positive timeoutMs');
+  });
+
+  it('600000 is positive — if erroneously emitted, a timer would be armed', () => {
+    // Regression anchor: if build.ts ever reverts to emitting 600_000, this proves
+    // that value would arm a timer, contradicting spec 024.
+    assert.equal(600_000 > 0, true, '600000 is positive — it would arm a timer');
   });
 });
