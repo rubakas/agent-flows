@@ -1,6 +1,12 @@
 id: audit
 version: 1
 description: Adversarial read-only review of a plan; fans out to correctness and security then converges
+# stage-handoff (spec 029 FR-011): inputs.plan ← artifact.spec from spec-creation or
+# correct-plan. artifact.spec may be a HardenedSpec object (spec-creation) or a plain
+# string (correct-plan); a HardenedSpec is rendered with renderSpecKitSpec so plan
+# arrives as the same markdown the operator read at the gate. The synthesis step outputs
+# its verdict in result (accumulated context); a caller that wants findings reads
+# artifact.result.findings.
 inputs:
   - plan
 steps:

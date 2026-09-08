@@ -102,3 +102,52 @@ describe("loadCatalog — malformed pipeline does not take down valid ones", () 
     }
   });
 });
+
+describe("FR-010 defect fix: list_pipelines resolves pipelinesDir per call (not at startup)", () => {
+  it("resolveCanonDir returns project pipelines after they are installed post-startup", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agent-flows-mcp-staleness-"));
+    try {
+      // Simulate a project with no .agent-flows/pipelines/ at "startup" time.
+      const projectDir = dir;
+      const { resolveCanonDir } = await import("./pipelineLoader.js");
+
+      const before = resolveCanonDir(projectDir);
+      // Before installation: resolves to bundled (no project copy exists).
+      assert.equal(before.source, "bundled", "before installation, source must be bundled");
+
+      // Simulate installing a pipeline: create .agent-flows/pipelines/ with a YAML file.
+      const projectPipelinesDir = join(projectDir, ".agent-flows", "pipelines");
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(projectPipelinesDir, { recursive: true });
+      await writeFile(
+        join(projectPipelinesDir, "alpha.yaml"),
+        ["id: alpha", "version: 1", "description: Alpha pipeline", "inputs: []", "steps: []"].join(
+          "\n"
+        ),
+        "utf8"
+      );
+
+      // Call resolveCanonDir AGAIN — simulates what the per-call fix inside
+      // list_pipelines's execute() does on each invocation.
+      const after = resolveCanonDir(projectDir);
+      assert.equal(
+        after.source,
+        "project",
+        "after installation, resolveCanonDir must return project source"
+      );
+      assert.ok(
+        after.pipelinesDir.includes(".agent-flows"),
+        "pipelinesDir must point to the project's .agent-flows/pipelines dir"
+      );
+
+      // Verify loadCatalog sees the new pipeline in the updated dir.
+      const { loadCatalog } = await import("./pipelineLoader.js");
+      const catalog = loadCatalog(after.pipelinesDir);
+      const ids = catalog.loaded.map((p) => p.def.id);
+      assert.ok(ids.includes("alpha"), `catalog must include 'alpha'; found: ${ids.join(", ")}`);
+    } finally {
+      const { rm } = await import("node:fs/promises");
+      await rm(dir, { recursive: true });
+    }
+  });
+});

@@ -1,6 +1,11 @@
 id: develop
 version: 1
 description: Execute an approved implementation plan by writing code and tests
+# stage-handoff (spec 029 FR-011): inputs.plan ← artifact.spec from spec-creation
+# or correct-plan. When starting via artifactPath the daemon maps artifact.spec → plan.
+# artifact.spec may be a HardenedSpec object (written by spec-creation's assemble-spec step)
+# or a plain string (written by correct-plan). A HardenedSpec is rendered with
+# renderSpecKitSpec so plan arrives as the same markdown the operator read at the gate.
 inputs:
   - plan
 steps:

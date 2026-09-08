@@ -19,7 +19,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parse, stringify } from "yaml";
@@ -31,13 +31,15 @@ import { generateN8nWorkflow } from "../bindings/n8n/build.js";
 import { importN8nWorkflow } from "../bindings/n8n/import.js";
 import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
 import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
+import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import { listPipelines, loadPipeline } from "../canon/load.js";
 import { loadProviders } from "../canon/loadProviders.js";
+import { getActiveProfile } from "../canon/registry.js";
 import { makeDb, type DbInstance } from "../db/index.js";
 import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../install/bundle.js";
 import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
-import { assertSafePath } from "../install/paths.js";
+import { assertSafePath, isContained } from "../install/paths.js";
 
 import {
   isSafeId,
@@ -59,6 +61,9 @@ import {
   validateN8nBaseUrl,
   writeN8nConfig,
 } from "./routes/n8n.js";
+import type { HardenedSpec } from "../canon/types.js";
+import { decideEntryPoint } from "../runtime/entryPoint.js";
+import { readManifest } from "../runtime/artifactStore.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -87,6 +92,7 @@ const RE_DRAFT_SAVE = /^\/api\/drafts\/(\d+)\/save$/u;
 const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
 const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
 const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
+const RE_RUN_MANIFEST = /^\/api\/runs\/([^/]+)\/manifest$/u;
 const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
 const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
 const RE_EXPORT = /^\/api\/export\/([^/]+)$/u;
@@ -219,6 +225,79 @@ function findDependants(pipelinesDir: string, targetId: string): string[] {
     }
   }
   return dependants;
+}
+
+// ── Artifact input mapping (spec 029 FR-003/FR-011) ───────────────────────────
+
+/**
+ * Maps each well-known pipeline input name to the artifact field that carries
+ * its value. Canon lives here; the same fact is mirrored as a comment in each
+ * pipeline YAML so stage authors know what field to output and stage callers
+ * know where to read — but a second machine-readable copy would drift.
+ *
+ *   plan     ← artifact.spec          (spec-creation outputs spec; build/audit/develop read it as plan)
+ *   findings ← artifact.result.findings  (result is the run's accumulated context keyed by step id;
+ *                                          the step named "findings" holds the string value)
+ *
+ * Resolution rule (spec 029 FR-003, derived from live defect):
+ *   - If the mapped field is a string, use it directly.
+ *   - If the mapped field is a HardenedSpec object (shape-checked on its two
+ *     required fields: title and description), render it with renderSpecKitSpec
+ *     so the text the next stage receives is byte-identical to the spec.md the
+ *     human approved at the gate — not an ad-hoc serialisation.
+ *   - If the mapped field is some other object that has a key matching the input
+ *     name and that value is a string, use that (handles accumulated-context).
+ *   - Otherwise refuse at the HTTP boundary — silently serialising an object
+ *     into a z.string() input produces a run that passes Mastra schema validation
+ *     on a technicality while reviewing the wrong data (this repo was bitten by
+ *     this failure mode: a stage reported success while its input was garbled).
+ */
+const ARTIFACT_INPUT_FIELDS: Readonly<Record<string, "spec" | "result">> = {
+  plan: "spec",
+  findings: "result",
+};
+
+// Recognises a HardenedSpec by its two required fields. Optional fields
+// (requirements, acceptanceCriteria, weaknesses, securityFindings) are not
+// checked — the renderer handles absent optionals gracefully. Checking the
+// required fields is precise enough to distinguish from accumulated-context
+// objects (whose keys are step ids, not spec field names) without importing
+// a full validator.
+function isHardenedSpec(v: Record<string, unknown>): boolean {
+  return typeof v.title === "string" && typeof v.description === "string";
+}
+
+/**
+ * Resolve an artifact path supplied by an HTTP request.
+ *
+ * Absolute paths are allowed — the operator may deliberately cross project
+ * boundaries (spec 029 FR-003 Design F). Relative paths must stay inside
+ * projectDir; the same containment principle as assertSafePath (install/paths.ts)
+ * applies but adapted for the absolute-path cross-project use case.
+ */
+function resolveArtifactPath(
+  projectDir: string,
+  artifactPath: string
+): { ok: true; resolved: string } | { ok: false; error: string } {
+  if (!artifactPath || artifactPath.includes("\0")) {
+    return { ok: false, error: `Invalid artifact path: ${JSON.stringify(artifactPath)}` };
+  }
+  // Absolute paths are passed through — the operator is explicitly choosing to
+  // cross project boundaries, which is the point of the feature.
+  if (isAbsolute(artifactPath)) {
+    return { ok: true, resolved: artifactPath };
+  }
+  // Relative paths: resolve from projectDir and verify containment.
+  // path.join strips leading slashes from non-first args, so absolute-looking
+  // relative paths (e.g. the empty string after stripping) cannot escape here.
+  const resolved = resolve(join(projectDir, artifactPath));
+  if (!isContained(projectDir, resolved)) {
+    return {
+      ok: false,
+      error: `Artifact path ${JSON.stringify(artifactPath)} escapes the project directory — rejected`,
+    };
+  }
+  return { ok: true, resolved };
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────────
@@ -669,6 +748,33 @@ async function handleRequest(
     return;
   }
 
+  // POST /api/runs/decide — deterministic entry-point selection (spec 029 FR-005).
+  // Must be checked BEFORE the bare POST /api/runs handler (which matches only the
+  // exact path "/api/runs", but a future edit might accidentally collide).
+  if (method === "POST" && pathname === "/api/runs/decide") {
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { input, kind } = parsed.value as { input?: unknown; kind?: unknown };
+    if (typeof input !== "string" || input.trim() === "") {
+      json(res, 400, { error: 'Field "input" must be a non-empty string' });
+      return;
+    }
+    if (kind !== undefined && typeof kind !== "string") {
+      json(res, 400, { error: 'Field "kind" must be a string when provided' });
+      return;
+    }
+    const decision = decideEntryPoint(input, kind);
+    if (!decision.ok) {
+      json(res, 400, { error: decision.error });
+      return;
+    }
+    json(res, 200, { pipeline: decision.pipeline, reason: decision.reason });
+    return;
+  }
+
   // POST /api/runs
   if (method === "POST" && pathname === "/api/runs") {
     const { runService } = ctx;
@@ -678,35 +784,253 @@ async function handleRequest(
       json(res, 400, { error: "Malformed JSON body" });
       return;
     }
-    const { pipeline, inputs, models, gateMode } = parsed.value as {
+    const { pipeline, inputs, models, gateMode, artifactPath } = parsed.value as {
       pipeline?: unknown;
       inputs?: unknown;
       models?: unknown;
       gateMode?: unknown;
+      artifactPath?: unknown;
     };
     if (typeof pipeline !== "string") {
       json(res, 400, { error: 'Field "pipeline" must be a string' });
-      return;
-    }
-    if (typeof inputs !== "object" || inputs === null || Array.isArray(inputs)) {
-      json(res, 400, { error: 'Field "inputs" must be an object' });
       return;
     }
     if (gateMode !== undefined && gateMode !== "manual" && gateMode !== "auto") {
       json(res, 400, { error: 'Field "gateMode" must be "manual" or "auto"' });
       return;
     }
-    const wfInput: Record<string, unknown> = {
-      ...(inputs as Record<string, unknown>),
-      ...(models !== undefined ? { models } : {}),
-    };
-    // Resolve pipeline step defs for provenance recording (spec 029 FR-002).
+
+    // Resolve pipeline step defs for provenance recording (spec 029 FR-002) and
+    // to get the declared inputs list for artifact resolution (spec 029 FR-003).
     // If the pipeline is not found (e.g. not yet written to disk), omit steps —
     // transportPerStep will be empty rather than wrong.
     const pipelineEntry = findPipelineById(ctx.pipelinesDir, pipeline);
+    const pipelineDef = pipelineEntry?.loaded.def;
+
+    // Extract explicit inputs early so the artifact check can skip inputs that
+    // the operator already provided — those don't need to come from the artifact.
+    const explicitInputs =
+      typeof inputs === "object" && inputs !== null && !Array.isArray(inputs)
+        ? (inputs as Record<string, unknown>)
+        : {};
+
+    // ── Artifact-path input resolution (spec 029 FR-003) ──────────────────────
+    // When artifactPath is provided, inputs may be omitted; the artifact seeds
+    // the run's inputs. If both are provided, artifact-derived values take
+    // priority — the operator is being explicit about what to hand off.
+    const artifactDerivedInputs: Record<string, unknown> = {};
+    if (artifactPath !== undefined) {
+      if (typeof artifactPath !== "string") {
+        json(res, 400, { error: 'Field "artifactPath" must be a string' });
+        return;
+      }
+
+      // Resolve and contain the path — absolute paths cross project boundaries
+      // (allowed by design), relative paths must stay inside projectDir.
+      const pathResult = resolveArtifactPath(ctx.projectDir, artifactPath);
+      if (!pathResult.ok) {
+        json(res, 400, { error: pathResult.error });
+        return;
+      }
+
+      // Load the artifact file.
+      let artifactRaw: string;
+      try {
+        artifactRaw = readFileSync(pathResult.resolved, "utf8");
+      } catch {
+        json(res, 400, { error: `Artifact file not found: ${pathResult.resolved}` });
+        return;
+      }
+
+      // Parse and validate the artifact shape.
+      let artifact: Record<string, unknown>;
+      try {
+        const artifactParsed: unknown = JSON.parse(artifactRaw);
+        if (
+          typeof artifactParsed !== "object" ||
+          artifactParsed === null ||
+          Array.isArray(artifactParsed)
+        ) {
+          json(res, 400, { error: "Artifact is not a valid JSON object" });
+          return;
+        }
+        artifact = artifactParsed as Record<string, unknown>;
+      } catch {
+        json(res, 400, { error: "Artifact file contains invalid JSON" });
+        return;
+      }
+
+      // Reject artifacts without a status field — not an artifact shape.
+      const artifactStatus = artifact.status;
+      if (typeof artifactStatus !== "string") {
+        json(res, 400, { error: "Not a valid artifact: missing or non-string status field" });
+        return;
+      }
+
+      // Reject in-flight artifacts — their content is incomplete (FR-003).
+      if (artifactStatus === "running") {
+        json(res, 400, {
+          error: "Cannot use an artifact from a running stage — wait for it to settle first",
+        });
+        return;
+      }
+
+      // Reject unknown statuses — indicates a corrupt or incompatible artifact.
+      const KNOWN_STATUSES = new Set(["succeeded", "awaiting_approval", "failed", "rejected"]);
+      if (!KNOWN_STATUSES.has(artifactStatus)) {
+        json(res, 400, {
+          error: `Artifact has unknown status "${artifactStatus}" — not a recognisable terminal artifact`,
+        });
+        return;
+      }
+
+      // FR-004: log when crossing provider boundaries. Informational, not a warning —
+      // this is the intended path for "continue on GPT when Claude is down".
+      const artifactProvenance = artifact.provenance as Record<string, unknown> | undefined;
+      const artifactProfileId =
+        typeof artifactProvenance?.profileId === "string"
+          ? artifactProvenance.profileId
+          : undefined;
+      let currentProfileId: string;
+      try {
+        currentProfileId = getActiveProfile().id;
+      } catch {
+        currentProfileId = "unknown";
+      }
+      if (artifactProfileId !== undefined && artifactProfileId !== currentProfileId) {
+        console.log(
+          `[agent-flows] stage handoff: artifact produced by profile "${artifactProfileId}", ` +
+            `new run uses profile "${currentProfileId}"`
+        );
+      }
+
+      // Resolve the target pipeline's declared inputs from the artifact fields.
+      // The mapping and resolution rule are defined in ARTIFACT_INPUT_FIELDS above.
+      // Only required inputs (not in optionalInputs) must be resolved; optional ones
+      // may be absent without failing — the Mastra schema gives them default "".
+      const declaredInputs = pipelineDef?.inputs ?? [];
+      const optionalInputs = new Set(pipelineDef?.optionalInputs ?? []);
+      const artifactFields = Object.keys(artifact).filter(
+        (k) => k !== "provenance" && k !== "steps" && k !== "gateDecisions"
+      );
+      const unresolved: string[] = [];
+      let resolveError: string | null = null;
+
+      for (const inputName of declaredInputs) {
+        if (resolveError !== null) break;
+        const artifactField = ARTIFACT_INPUT_FIELDS[inputName];
+        if (artifactField !== undefined) {
+          const fieldValue = artifact[artifactField];
+          if (fieldValue !== undefined) {
+            if (typeof fieldValue === "string") {
+              // Mapped field is a bare string — use it as-is. Artifact takes
+              // priority over any explicit input the operator also provided.
+              artifactDerivedInputs[inputName] = fieldValue;
+            } else if (
+              typeof fieldValue === "object" &&
+              fieldValue !== null &&
+              !Array.isArray(fieldValue)
+            ) {
+              const obj = fieldValue as Record<string, unknown>;
+              if (isHardenedSpec(obj)) {
+                // artifact.spec is the structured HardenedSpec that spec-creation writes.
+                // Render it with the canonical renderer so the plan text the next stage
+                // receives is byte-identical to the spec.md the human approved at the gate,
+                // not an ad-hoc serialisation that diverges from the reviewed document.
+                artifactDerivedInputs[inputName] = renderSpecKitSpec(
+                  obj as unknown as HardenedSpec
+                );
+              } else {
+                // Mapped field is an object that is not a spec (e.g. accumulated-context
+                // keyed by step id). Look for a key that matches the input name and holds
+                // a string. Using the whole object would silently pass a non-string into a
+                // z.string() input — the workflow engine accepts it through its Mastra layer
+                // and produces a run that appears to succeed while operating on garbled data
+                // (this repo was bitten by this failure mode; spec 029 FR-003).
+                const nested = obj[inputName];
+                if (typeof nested === "string") {
+                  artifactDerivedInputs[inputName] = nested;
+                } else {
+                  const heldType =
+                    nested === undefined
+                      ? `key "${inputName}" is absent`
+                      : `type "${typeof nested}"`;
+                  const availableKeys = Object.keys(obj).join(", ");
+                  resolveError =
+                    `Input "${inputName}" cannot be resolved to a string from artifact ` +
+                    `field "${artifactField}": the field is an object but ${heldType} ` +
+                    `(available keys: [${availableKeys}]). ` +
+                    `Artifact: ${pathResult.resolved}.`;
+                }
+              }
+            } else {
+              // Non-string, non-object value (number, array, boolean) — cannot be
+              // coerced into a string input without silently corrupting the run.
+              resolveError =
+                `Input "${inputName}" cannot be resolved from artifact field ` +
+                `"${artifactField}": expected string or object, got ${typeof fieldValue}. ` +
+                `Artifact: ${pathResult.resolved}.`;
+            }
+          } else if (!optionalInputs.has(inputName) && !(inputName in explicitInputs)) {
+            // Required input not in artifact AND not explicitly provided — fail loud
+            // rather than start with an empty input. This repo was bitten once by a
+            // step whose input was silently discarded while the run still reported
+            // success.
+            unresolved.push(inputName);
+          }
+        } else if (!optionalInputs.has(inputName) && !(inputName in explicitInputs)) {
+          // No mapping exists for this input name and the operator did not supply it.
+          unresolved.push(inputName);
+        }
+      }
+
+      if (resolveError !== null) {
+        json(res, 400, { error: resolveError });
+        return;
+      }
+
+      if (unresolved.length > 0) {
+        json(res, 400, {
+          error:
+            `Cannot resolve required input(s) [${unresolved.join(", ")}] from artifact. ` +
+            `Artifact carried fields: [${artifactFields.join(", ")}]. ` +
+            `Known mappings: plan←artifact.spec (string), findings←artifact.result.findings (string).`,
+        });
+        return;
+      }
+    }
+
+    // inputs is required when no artifactPath is provided (existing behaviour).
+    if (artifactPath === undefined) {
+      if (typeof inputs !== "object" || inputs === null || Array.isArray(inputs)) {
+        json(res, 400, { error: 'Field "inputs" must be an object' });
+        return;
+      }
+    }
+
+    // Merge explicit inputs and artifact-derived inputs; artifact takes priority
+    // when both are present (FR-003: "artifactPath takes priority").
+    const wfInput: Record<string, unknown> = {
+      ...explicitInputs,
+      ...artifactDerivedInputs,
+      ...(models !== undefined ? { models } : {}),
+    };
+
+    // FR-006: when chaining from a parent artifact, write the new stage's artifact
+    // into the parent run's directory so all stages in a chain accumulate there.
+    // The chain dir is the directory that contains the source artifact file.
+    let chainArtifactDir: string | undefined;
+    if (artifactPath !== undefined && typeof artifactPath === "string") {
+      const pathResult = resolveArtifactPath(ctx.projectDir, artifactPath);
+      if (pathResult.ok) {
+        chainArtifactDir = dirname(pathResult.resolved);
+      }
+    }
+
     const result = await runService.start(pipeline, wfInput, {
       gateMode: gateMode ?? "manual",
       ...(pipelineEntry !== undefined ? { pipelineSteps: pipelineEntry.loaded.def.steps } : {}),
+      ...(chainArtifactDir !== undefined ? { chainArtifactDir } : {}),
     });
     json(res, 200, result);
     return;
@@ -769,6 +1093,39 @@ async function handleRequest(
     });
 
     return; // Connection is kept open; do not call res.end().
+  }
+
+  // GET /api/runs/:id/manifest — return the chain manifest for a run (spec 029 FR-006).
+  // Must precede GET /api/runs/:id to avoid the bare-id regex eating the "/manifest" suffix.
+  // Reads from disk keyed by id as the directory anchor — the run need not be in the
+  // registry. Artifacts and the manifest exist precisely so a chain survives a daemon
+  // restart and can be picked up later, possibly under a different provider.
+  const manifestMatch = RE_RUN_MANIFEST.exec(pathname);
+  if (method === "GET" && manifestMatch) {
+    const id = decodeURIComponent(manifestMatch[1]);
+    // Validate the id before joining it into a path — a crafted id must not escape runs/.
+    // Follows the same isSafeId pattern used for DELETE /api/pipelines/:id and template routes.
+    if (!isSafeId(id)) {
+      json(res, 400, { error: `Run id "${id}" is invalid` });
+      return;
+    }
+    const runDir = join(ctx.projectDir, ".agent-flows", "runs", id);
+    if (!existsSync(join(runDir, "manifest.json"))) {
+      json(res, 404, { error: `Run "${id}" not found` });
+      return;
+    }
+    let manifest: unknown;
+    try {
+      // readManifest reconciles the file against artifacts present in the same
+      // directory, so stages that wrote an artifact but missed their manifest
+      // entry (write failure or pre-manifest artifact) are still visible.
+      manifest = await readManifest(runDir);
+    } catch {
+      json(res, 500, { error: `Cannot read manifest for run "${id}"` });
+      return;
+    }
+    json(res, 200, manifest);
+    return;
   }
 
   // GET /api/runs/:id

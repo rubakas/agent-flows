@@ -1,6 +1,11 @@
 id: spec-creation
 version: 1
 description: Harden a feature request into an adversarially reviewed spec
+# stage-handoff (spec 029 FR-011): inputs.findings (optional) ← artifact.result.findings
+# from investigate (result is accumulated context; the "findings" step key holds the string).
+# The output spec is stored in artifact.spec as a HardenedSpec object; downstream stages
+# (build, audit, correct-plan) read artifact.spec → inputs.plan by rendering it with
+# renderSpecKitSpec — the plan text they receive is the same markdown the operator approved.
 inputs:
   - request
   - findings

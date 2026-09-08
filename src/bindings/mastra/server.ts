@@ -44,9 +44,14 @@ const projectDir = resolveProjectDir();
 console.error(`agent-flows MCP server: running steps in ${projectDir}`);
 
 // ── Load pipelines ────────────────────────────────────────────────────────────
+// Log the initial resolution for the operator, but resolve per-call inside
+// list_pipelines so newly-installed workflows are visible without a restart
+// (spec 029 FR-010: resolve per call, the way the daemon now does).
 
-const { pipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
-console.error(`agent-flows MCP server: pipelines from ${pipelinesSource} (${pipelinesDir})`);
+const { pipelinesDir: _initialPipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
+console.error(
+  `agent-flows MCP server: pipelines from ${pipelinesSource} (${_initialPipelinesDir})`
+);
 
 // ── MCP custom tools ──────────────────────────────────────────────────────────
 
@@ -55,8 +60,11 @@ const listPipelinesTool = createTool({
   description: "List all loaded pipelines with their IDs and descriptions.",
   inputSchema: z.object({}),
   execute: async () => {
-    // Still reads from disk so newly added pipelines are visible without restart.
-    const catalog = loadCatalog(pipelinesDir);
+    // Resolve the pipelines directory per-call so that a workflow installed after
+    // the MCP server started is visible on the very next call — no restart required
+    // (spec 029 FR-010 defect fix).
+    const { pipelinesDir: currentPipelinesDir } = resolveCanonDir(projectDir);
+    const catalog = loadCatalog(currentPipelinesDir);
     return {
       pipelines: catalog.loaded.map((p) => ({
         id: p.def.id,
@@ -74,7 +82,10 @@ const runPipelineTool = createTool({
     "Start a pipeline run. Returns immediately. Terminal statuses: 'awaiting_approval' (suspended at a gate, includes spec for review), 'succeeded' (completed successfully), 'rejected' (gate declined by human or judge), 'failed' (unexpected error).",
   inputSchema: z.object({
     pipeline: z.string().describe("Pipeline id (e.g. 'spec-creation')"),
-    inputs: z.record(z.string(), z.string()).describe("Pipeline input values"),
+    inputs: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe("Pipeline input values (optional when artifact_path is provided)"),
     models: z
       .record(z.string(), z.string())
       .optional()
@@ -85,14 +96,21 @@ const runPipelineTool = createTool({
       .describe(
         'Gate evaluation mode. "manual" (default): gates wait for human approval. "auto": a judge model evaluates each gate; falls back to manual on judge failure.'
       ),
+    artifact_path: z
+      .string()
+      .optional()
+      .describe(
+        "Optional path to a previous stage's artifact file. When provided, seeds this run's inputs from the artifact (spec 029 FR-010)."
+      ),
   }),
   execute: async (inputData) => {
-    const { pipeline, inputs, models, gateMode } = inputData;
+    const { pipeline, inputs, models, gateMode, artifact_path } = inputData;
     const body = {
       pipeline,
-      inputs,
+      ...(inputs !== undefined ? { inputs } : {}),
       ...(models ? { models } : {}),
       ...(gateMode ? { gateMode } : {}),
+      ...(artifact_path ? { artifactPath: artifact_path } : {}),
     };
 
     // POST to the daemon — fails loudly if the daemon is not running.
@@ -119,21 +137,25 @@ const runPipelineTool = createTool({
         gateMessage?: string;
         spec?: unknown;
         result?: unknown;
+        artifactPath?: string;
       };
       if (state.status === "running") continue;
+      const artifactPathField =
+        state.artifactPath !== undefined ? { artifactPath: state.artifactPath } : {};
       if (state.status === "awaiting_approval") {
         return {
           runId,
           status: "awaiting_approval",
           gateMessage: state.gateMessage,
           spec: state.spec,
+          ...artifactPathField,
         };
       }
       if (state.status === "succeeded") {
-        return { runId, status: "succeeded", result: state.result };
+        return { runId, status: "succeeded", result: state.result, ...artifactPathField };
       }
       if (state.status === "rejected") {
-        return { runId, status: "rejected" };
+        return { runId, status: "rejected", ...artifactPathField };
       }
       return { runId, status: "failed" };
     }
@@ -216,6 +238,42 @@ const getRunTool = createTool({
   },
 });
 
+// ── decide_entry_point tool (spec 029 FR-010) ─────────────────────────────────
+
+const decideEntryPointTool = createTool({
+  id: "decide_entry_point",
+  description:
+    "Decide which pipeline stage to enter based on the input. Returns the recommended pipeline and the reason for the choice, so the operator can correct a wrong inference before starting a billed run.",
+  inputSchema: z.object({
+    input: z
+      .string()
+      .describe(
+        "Free text (feature request or task description) or an absolute path to an existing artifact file"
+      ),
+    kind: z
+      .enum(["feature-request", "task-description"])
+      .optional()
+      .describe(
+        'Optional explicit kind. "feature-request" routes to formulation (investigate); "task-description" routes to development (develop).'
+      ),
+  }),
+  execute: async (inputData) => {
+    const res = await daemonFetch("/api/runs/decide", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(inputData),
+    });
+    if (!res.ok) {
+      const e = (await res.json().catch(() => ({}))) as { error?: string };
+      return {
+        error: e.error ?? `daemon POST /api/runs/decide returned HTTP ${res.status}`,
+      };
+    }
+    const data = (await res.json()) as { pipeline: string; reason: string };
+    return { pipeline: data.pipeline, reason: data.reason };
+  },
+});
+
 // ── Start MCP server ──────────────────────────────────────────────────────────
 
 const server = new MCPServer({
@@ -227,6 +285,7 @@ const server = new MCPServer({
     run_pipeline: runPipelineTool,
     approve: approveTool,
     get_run: getRunTool,
+    decide_entry_point: decideEntryPointTool,
   },
 });
 

@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { ModelRegistry } from "../canon/registry.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
 import { startServer, readAgentFlowsConfig, type ServeHandle, CONTENT_CAP } from "./server.js";
@@ -2270,6 +2271,1095 @@ describe("FR-006: optional rejection reason stored on gate decision", () => {
       decision.reason,
       "Not convinced by the approach.",
       "reason must be stored on decision"
+    );
+  });
+});
+
+// ── spec 029 FR-003/FR-004: POST /api/runs with artifactPath ─────────────────
+//
+// These tests cover stage handoff via durable artifacts: a completed run writes
+// an artifact, and a NEW run (different server instance) reads it as input.
+// The decisive test (V-9 analogue) uses two separate RunService instances to
+// prove the handoff goes through the file, not through shared in-memory state.
+
+describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact file", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-handoff-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    // A minimal RunService so the server can process /api/runs requests.
+    // Tests that need to inspect capturedInput create their own server/service.
+    const sharedRun = makeMockRun("shared-run-01", successResult(), successResult());
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(makeMastra(sharedRun)),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // Write a synthetic artifact to disk — simulates a completed spec-creation run.
+  //
+  // Shape mirrors what the real runtime writes (spec 029 FR-001):
+  //   spec   — the assembled HardenedSpec written as a plain-text string (markdown),
+  //            because build/audit/develop declare plan as z.string() and the
+  //            resolution rule refuses to serialise objects silently.
+  //   result — the run's accumulated context keyed by step id, matching what Mastra
+  //            returns as r.result. The "findings" step output is at result.findings.
+  function writeArtifact(dir: string, overrides: Record<string, unknown> = {}): string {
+    const runsDir = join(dir, ".agent-flows", "runs", "run-handoff-src");
+    mkdirSync(runsDir, { recursive: true });
+    const artifactPath = join(runsDir, "spec-creation.json");
+    const artifact = {
+      runId: "run-handoff-src",
+      pipelineId: "spec-creation",
+      status: "succeeded",
+      gateMode: "manual",
+      steps: {},
+      gateDecisions: [],
+      // spec is a string — the resolution rule maps plan←artifact.spec and requires a string.
+      spec: "My Feature Spec: Implement dark mode",
+      // result is the accumulated context object keyed by step id. The findings
+      // key matches the "findings" step of the investigate pipeline. The resolution
+      // rule maps findings←artifact.result.findings (not the whole result object).
+      result: {
+        request: "Implement dark mode",
+        survey: "Surveyed the codebase; dark-mode token system is partially in place.",
+        findings: "No security issues found",
+      },
+      provenance: {
+        pipelineId: "spec-creation",
+        profileId: "anthropic",
+        transportPerStep: {},
+        startedAt: new Date().toISOString(),
+        settledAt: new Date().toISOString(),
+      },
+      ...overrides,
+    };
+    writeFileSync(artifactPath, JSON.stringify(artifact, null, 2), "utf8");
+    return artifactPath;
+  }
+
+  it("seeds plan input from artifact.spec when build pipeline is targeted", async () => {
+    // Two-run handoff (V-9 analogue): stage A artifact → new run (stage B).
+    // The artifact was produced by a previous run (now gone from memory). A NEW
+    // server instance reads the file and seeds the next run's inputs from it.
+    const artifactFile = writeArtifact(projectDir);
+
+    // The mock run captures inputData so we can assert the plan was injected.
+    let capturedInput: Record<string, unknown> | undefined;
+    const mockRun: MockRun = {
+      runId: "run-handoff-dst",
+      watchers: [],
+      start: async (opts) => {
+        capturedInput = (opts as { inputData: Record<string, unknown> }).inputData;
+        return { status: "success", result: { done: true } };
+      },
+      resume: async () => ({ status: "success", result: { done: true } }),
+      watch: (cb) => {
+        mockRun.watchers.push(cb);
+        return () => {
+          const i = mockRun.watchers.indexOf(cb);
+          if (i !== -1) mockRun.watchers.splice(i, 1);
+        };
+      },
+      emit: (event) => {
+        for (const cb of mockRun.watchers) cb(event);
+      },
+    };
+
+    // New server (new daemon) with a fresh RunService — no shared memory with stage A.
+    const srv2 = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(makeMastra(mockRun)),
+    });
+
+    try {
+      const res = await mutate(srv2.port, "POST", "/api/runs", {
+        pipeline: "build",
+        artifactPath: artifactFile,
+      });
+      assert.equal(res.status, 200, `POST /api/runs must succeed; got ${res.status}`);
+
+      // The run must have received the spec from the artifact as its plan.
+      // This asserts the two-run file-based handoff — not memory sharing.
+      // plan must be a string: the resolution rule maps plan←artifact.spec and
+      // spec is stored as a string (z.string() rejects objects at the Mastra boundary).
+      assert.ok(capturedInput !== undefined, "mock run must have been started");
+      assert.equal(
+        typeof capturedInput.plan,
+        "string",
+        "plan input must be a string resolved from artifact.spec"
+      );
+      assert.equal(
+        capturedInput.plan,
+        "My Feature Spec: Implement dark mode",
+        "plan must equal artifact.spec verbatim"
+      );
+    } finally {
+      await srv2.close();
+    }
+  });
+
+  it("seeds findings input from artifact.result when spec-creation pipeline is targeted", async () => {
+    const artifactFile = writeArtifact(projectDir);
+    let capturedInput: Record<string, unknown> | undefined;
+    const mockRun: MockRun = {
+      runId: "run-handoff-findings",
+      watchers: [],
+      start: async (opts) => {
+        capturedInput = (opts as { inputData: Record<string, unknown> }).inputData;
+        return { status: "success", result: {} };
+      },
+      resume: async () => ({ status: "success", result: {} }),
+      watch: (cb) => {
+        mockRun.watchers.push(cb);
+        return () => {
+          const i = mockRun.watchers.indexOf(cb);
+          if (i !== -1) mockRun.watchers.splice(i, 1);
+        };
+      },
+      emit: (event) => {
+        for (const cb of mockRun.watchers) cb(event);
+      },
+    };
+
+    const srv2 = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(makeMastra(mockRun)),
+    });
+
+    try {
+      // spec-creation has request (required) and findings (optional).
+      // With only an artifact, findings comes from artifact.result.findings (the
+      // string value at the "findings" step id key of the accumulated context).
+      // request must be provided explicitly since the artifact has no mapping for it.
+      const res = await mutate(srv2.port, "POST", "/api/runs", {
+        pipeline: "spec-creation",
+        inputs: { request: "Implement dark mode" },
+        artifactPath: artifactFile,
+      });
+      assert.equal(res.status, 200, `POST /api/runs must succeed; body: ${await res.text()}`);
+      assert.ok(capturedInput !== undefined);
+      // findings must be the string at artifact.result.findings — not the whole result
+      // object. Passing the object would fail z.string() at the Mastra boundary.
+      assert.equal(
+        typeof capturedInput.findings,
+        "string",
+        "findings must be resolved to a string from artifact.result.findings"
+      );
+      assert.equal(
+        capturedInput.findings,
+        "No security issues found",
+        "findings must equal artifact.result.findings verbatim"
+      );
+    } finally {
+      await srv2.close();
+    }
+  });
+
+  it("returns 400 for a non-existent artifact file", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: "/nonexistent/path/artifact.json",
+    });
+    assert.equal(res.status, 400, "missing artifact file must return 400");
+    const body = (await res.json()) as { error: string };
+    assert.ok(
+      body.error.toLowerCase().includes("not found") ||
+        body.error.toLowerCase().includes("artifact"),
+      `error message must mention the artifact; got: ${body.error}`
+    );
+  });
+
+  it("returns 400 for a file that is not valid JSON", async () => {
+    const badPath = join(projectDir, "bad-artifact.json");
+    writeFileSync(badPath, "not json {{{", "utf8");
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: badPath,
+    });
+    assert.equal(res.status, 400, "invalid JSON artifact must return 400");
+    const body = (await res.json()) as { error: string };
+    assert.ok(
+      body.error.toLowerCase().includes("json"),
+      `error must mention JSON; got: ${body.error}`
+    );
+  });
+
+  it("returns 400 for an artifact whose status is running", async () => {
+    const artifactFile = writeArtifact(projectDir, { status: "running" });
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: artifactFile,
+    });
+    assert.equal(res.status, 400, "running artifact must return 400");
+    const body = (await res.json()) as { error: string };
+    assert.ok(
+      body.error.toLowerCase().includes("running"),
+      `error must mention running; got: ${body.error}`
+    );
+  });
+
+  it("returns 400 when a required input cannot be resolved from the artifact (unresolvable guard)", async () => {
+    // Write an artifact that has neither spec nor result — no mappable fields.
+    const runsDir = join(projectDir, ".agent-flows", "runs", "run-no-mappable");
+    mkdirSync(runsDir, { recursive: true });
+    const noMappablePath = join(runsDir, "empty.json");
+    writeFileSync(
+      noMappablePath,
+      JSON.stringify({
+        runId: "run-no-mappable",
+        pipelineId: "investigate",
+        status: "succeeded",
+        gateMode: "manual",
+        steps: {},
+        gateDecisions: [],
+        // Deliberately omit spec and result.
+        provenance: {
+          pipelineId: "investigate",
+          profileId: "anthropic",
+          transportPerStep: {},
+          startedAt: new Date().toISOString(),
+          settledAt: new Date().toISOString(),
+        },
+      }),
+      "utf8"
+    );
+
+    // build pipeline requires `plan` input, which maps to artifact.spec — absent here.
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: noMappablePath,
+    });
+    assert.equal(res.status, 400, "unresolvable required input must return 400");
+    const body = (await res.json()) as { error: string };
+    // The error must name the unresolved input.
+    assert.ok(
+      body.error.includes("plan"),
+      `error must name the unresolved input 'plan'; got: ${body.error}`
+    );
+  });
+
+  it("returns 400 when artifact's mapped field is an object with no key matching the input name", async () => {
+    // This is the live defect: artifact.result is an accumulated-context object
+    // (keyed by step id) but the target input name does not appear as a key.
+    // Silently passing the object into z.string() produces a zod failure deep
+    // in the workflow engine — the guard must catch it at the HTTP boundary instead.
+    const runsDir = join(projectDir, ".agent-flows", "runs", "run-no-findings-key");
+    mkdirSync(runsDir, { recursive: true });
+    const noFindingsKeyPath = join(runsDir, "investigate.json");
+    writeFileSync(
+      noFindingsKeyPath,
+      JSON.stringify({
+        runId: "run-no-findings-key",
+        pipelineId: "investigate",
+        status: "succeeded",
+        gateMode: "manual",
+        steps: {},
+        gateDecisions: [],
+        // result is an accumulated-context object, but the "findings" key is absent —
+        // the step that produces findings was named differently or did not complete.
+        result: {
+          request: "Implement dark mode",
+          survey: "Survey output goes here",
+          // "findings" key is intentionally absent
+        },
+        provenance: {
+          pipelineId: "investigate",
+          profileId: "anthropic",
+          transportPerStep: {},
+          startedAt: new Date().toISOString(),
+          settledAt: new Date().toISOString(),
+        },
+      }),
+      "utf8"
+    );
+
+    let runStarted = false;
+    const mockRun: MockRun = {
+      runId: "run-should-not-start",
+      watchers: [],
+      start: async () => {
+        runStarted = true;
+        return { status: "success", result: {} };
+      },
+      resume: async () => ({ status: "success", result: {} }),
+      watch: (cb) => {
+        mockRun.watchers.push(cb);
+        return () => {
+          const i = mockRun.watchers.indexOf(cb);
+          if (i !== -1) mockRun.watchers.splice(i, 1);
+        };
+      },
+      emit: (event) => {
+        for (const cb of mockRun.watchers) cb(event);
+      },
+    };
+    const srv2 = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(makeMastra(mockRun)),
+    });
+
+    try {
+      // spec-creation expects findings (optional) from artifact.result.findings.
+      // The artifact's result object has no "findings" key → must be refused at the
+      // HTTP boundary, not silently passed to the workflow engine.
+      const res = await mutate(srv2.port, "POST", "/api/runs", {
+        pipeline: "spec-creation",
+        inputs: { request: "Implement dark mode" },
+        artifactPath: noFindingsKeyPath,
+      });
+      assert.equal(
+        res.status,
+        400,
+        `object with no matching key must be refused with 400; got ${res.status}`
+      );
+      const body = (await res.json()) as { error: string };
+      // Error must name the input, describe what the artifact held, and identify the file.
+      assert.ok(
+        body.error.includes("findings"),
+        `error must name the unresolvable input; got: ${body.error}`
+      );
+      assert.ok(
+        body.error.includes("absent") || body.error.includes("available keys"),
+        `error must describe what the artifact held; got: ${body.error}`
+      );
+      assert.ok(!runStarted, "run must NOT have been started when input is unresolvable");
+    } finally {
+      await srv2.close();
+    }
+  });
+
+  it("starts the run normally when both inputs and artifactPath are present (artifact takes priority)", async () => {
+    const artifactFile = writeArtifact(projectDir);
+    let capturedInput: Record<string, unknown> | undefined;
+    const mockRun: MockRun = {
+      runId: "run-handoff-priority",
+      watchers: [],
+      start: async (opts) => {
+        capturedInput = (opts as { inputData: Record<string, unknown> }).inputData;
+        return { status: "success", result: {} };
+      },
+      resume: async () => ({ status: "success", result: {} }),
+      watch: (cb) => {
+        mockRun.watchers.push(cb);
+        return () => {
+          const i = mockRun.watchers.indexOf(cb);
+          if (i !== -1) mockRun.watchers.splice(i, 1);
+        };
+      },
+      emit: (event) => {
+        for (const cb of mockRun.watchers) cb(event);
+      },
+    };
+
+    const srv2 = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(makeMastra(mockRun)),
+    });
+    try {
+      const res = await mutate(srv2.port, "POST", "/api/runs", {
+        pipeline: "build",
+        // Explicit plan is an object — artifact.spec (string) must win and the
+        // string overrides whatever the operator passed.
+        inputs: { plan: "explicit plan — should be overridden by artifact" },
+        artifactPath: artifactFile,
+      });
+      assert.equal(res.status, 200, `must succeed; got ${res.status}`);
+      assert.ok(capturedInput !== undefined);
+      // Artifact-derived plan (string) must override the explicit inputs.plan (FR-003).
+      assert.equal(
+        capturedInput.plan,
+        "My Feature Spec: Implement dark mode",
+        "artifact.spec must override explicit inputs.plan"
+      );
+    } finally {
+      await srv2.close();
+    }
+  });
+
+  it("renders a structured HardenedSpec artifact.spec to the canonical plan text", async () => {
+    // This is the primary spec-creation → build handoff: spec-creation stores a
+    // HardenedSpec object in artifact.spec; the server must render it with
+    // renderSpecKitSpec so the plan text the next stage receives is byte-identical
+    // to the spec.md the operator reviewed at the gate.
+    //
+    // The fixture uses the real HardenedSpec shape — the same fields spec-creation
+    // stores — so if the shape changes this test breaks rather than silently passing
+    // on a mismatch.
+    const hardenedSpec = {
+      title: "Dark Mode",
+      description: "Add a dark mode theme toggle to the application",
+      requirements: ["System MUST provide a theme toggle", "System MUST persist the selection"],
+      acceptanceCriteria: [
+        "Given a light theme, when the user clicks the toggle, then the dark theme is applied",
+      ],
+      weaknesses: [
+        { text: "Toggle state not persisted across sessions", severity: "medium" as const },
+      ],
+      securityFindings: [],
+    };
+
+    const runsDir = join(projectDir, ".agent-flows", "runs", "run-structured-spec");
+    mkdirSync(runsDir, { recursive: true });
+    const artifactPath = join(runsDir, "spec-creation.json");
+    writeFileSync(
+      artifactPath,
+      JSON.stringify({
+        runId: "run-structured-spec",
+        pipelineId: "spec-creation",
+        status: "succeeded",
+        gateMode: "manual",
+        steps: {},
+        gateDecisions: [],
+        // spec is the structured HardenedSpec that spec-creation's assemble-spec step writes.
+        spec: hardenedSpec,
+        provenance: {
+          pipelineId: "spec-creation",
+          profileId: "anthropic",
+          transportPerStep: {},
+          startedAt: new Date().toISOString(),
+          settledAt: new Date().toISOString(),
+        },
+      }),
+      "utf8"
+    );
+
+    let capturedInput: Record<string, unknown> | undefined;
+    const mockRun: MockRun = {
+      runId: "run-structured-dst",
+      watchers: [],
+      start: async (opts) => {
+        capturedInput = (opts as { inputData: Record<string, unknown> }).inputData;
+        return { status: "success", result: { done: true } };
+      },
+      resume: async () => ({ status: "success", result: { done: true } }),
+      watch: (cb) => {
+        mockRun.watchers.push(cb);
+        return () => {
+          const i = mockRun.watchers.indexOf(cb);
+          if (i !== -1) mockRun.watchers.splice(i, 1);
+        };
+      },
+      emit: (event) => {
+        for (const cb of mockRun.watchers) cb(event);
+      },
+    };
+
+    const srv2 = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(makeMastra(mockRun)),
+    });
+
+    try {
+      const res = await mutate(srv2.port, "POST", "/api/runs", {
+        pipeline: "build",
+        artifactPath,
+      });
+      assert.equal(
+        res.status,
+        200,
+        `spec-creation → build handoff must succeed; got ${res.status}`
+      );
+      assert.ok(capturedInput !== undefined, "mock run must have been started");
+
+      // plan must be the rendered markdown — compare against renderSpecKitSpec's own
+      // output so the test breaks if the rendering function ever diverges from what
+      // export-spec writes to disk.
+      const expectedPlan = renderSpecKitSpec(hardenedSpec);
+      assert.equal(
+        capturedInput.plan,
+        expectedPlan,
+        "plan must equal renderSpecKitSpec(hardenedSpec) — rendered markdown, not JSON"
+      );
+
+      // Sanity: the rendered text must contain the spec title, not a JSON brace.
+      assert.ok(
+        typeof capturedInput.plan === "string" && capturedInput.plan.includes("Dark Mode"),
+        "rendered plan must include the spec title"
+      );
+      assert.ok(
+        !capturedInput.plan.toString().startsWith("{"),
+        "rendered plan must not be a JSON-serialised object"
+      );
+    } finally {
+      await srv2.close();
+    }
+  });
+});
+
+// ── FR-003: path safety — traversal outside project directory ─────────────────
+
+describe("FR-003: artifactPath traversal outside project directory is rejected", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-traversal-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    // Plant a file outside the project to verify the traversal guard stops access.
+    writeFileSync(
+      join(tmpDir, "outside.json"),
+      '{"status":"succeeded","runId":"x","pipelineId":"x","gateMode":"manual","steps":{},"gateDecisions":[]}',
+      "utf8"
+    );
+    const traversalRun = makeMockRun("traversal-run-01", successResult(), successResult());
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(makeMastra(traversalRun)),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("rejects a relative path that traverses outside the project directory", async () => {
+    // "../outside.json" relative to projectDir resolves to tmpDir/outside.json — outside.
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: "../outside.json",
+    });
+    assert.equal(res.status, 400, "traversal path must be rejected with 400");
+    const body = (await res.json()) as { error: string };
+    assert.ok(
+      body.error.toLowerCase().includes("escapes") ||
+        body.error.toLowerCase().includes("project directory"),
+      `error must mention containment violation; got: ${body.error}`
+    );
+  });
+
+  it("allows an absolute path that points outside the project (cross-project use case)", async () => {
+    // Absolute paths are the operator's explicit choice for cross-project handoffs (FR-003).
+    // The artifact has status "succeeded" but no resolvable inputs for "build", so this
+    // returns 400 for the unresolvable-input reason — not for path containment.
+    const outsidePath = join(tmpDir, "outside.json");
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: outsidePath,
+    });
+    // Must NOT return 400 for path traversal — the path guard must not fire.
+    // It may return 400 for the unresolvable 'plan' input (outside.json lacks spec),
+    // or 200 if the run starts. Both are acceptable — containment was not the blocker.
+    const body = (await res.json()) as { error?: string };
+    if (body.error !== undefined) {
+      assert.ok(
+        !body.error.toLowerCase().includes("escapes") &&
+          !body.error.toLowerCase().includes("project directory"),
+        `absolute path must pass the containment guard; got: ${body.error}`
+      );
+    }
+  });
+});
+
+// ── FR-004: cross-provider artifact handoff ───────────────────────────────────
+
+describe("FR-004: artifact from a different provider profile starts a new run under current profile", () => {
+  let tmpDir: string;
+  let projectDir: string;
+
+  before(() => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-crossprovider-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+  });
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("accepts an artifact produced by a different profile and starts the run", async () => {
+    // Write an artifact with profileId "anthropic".
+    const runsDir = join(projectDir, ".agent-flows", "runs", "run-cross-profile");
+    mkdirSync(runsDir, { recursive: true });
+    const artifactPath = join(runsDir, "spec-creation.json");
+    writeFileSync(
+      artifactPath,
+      JSON.stringify({
+        runId: "run-cross-profile",
+        pipelineId: "spec-creation",
+        status: "succeeded",
+        gateMode: "manual",
+        steps: {},
+        gateDecisions: [],
+        // spec is a string — resolution rule requires a string for the plan input.
+        spec: "Cross-profile spec: test content",
+        provenance: {
+          pipelineId: "spec-creation",
+          profileId: "anthropic", // different from the "openai" profile we'll use below
+          transportPerStep: {},
+          startedAt: new Date().toISOString(),
+          settledAt: new Date().toISOString(),
+        },
+      }),
+      "utf8"
+    );
+
+    let capturedInput: Record<string, unknown> | undefined;
+    const mockRun: MockRun = {
+      runId: "run-cross-dst",
+      watchers: [],
+      start: async (opts) => {
+        capturedInput = (opts as { inputData: Record<string, unknown> }).inputData;
+        return { status: "success", result: { output: "done on openai" } };
+      },
+      resume: async () => ({ status: "success", result: {} }),
+      watch: (cb) => {
+        mockRun.watchers.push(cb);
+        return () => {
+          const i = mockRun.watchers.indexOf(cb);
+          if (i !== -1) mockRun.watchers.splice(i, 1);
+        };
+      },
+      emit: (event) => {
+        for (const cb of mockRun.watchers) cb(event);
+      },
+    };
+
+    // Simulate a daemon running under a different profile (e.g. "openai") by
+    // providing a profile that differs from the artifact's "anthropic".
+    // We inject a custom profile to avoid touching env vars in tests.
+    const openaiProfile: ProviderProfile = {
+      id: "openai",
+      roles: { reasoner: "codex", worker: "codex", scout: "codex" },
+    };
+    const registry = new ModelRegistry([
+      { id: "codex", transport: "cli", cli: { bin: "codex", model: "codex-1" } },
+    ]);
+
+    const service = new RunService(
+      makeMastra(mockRun),
+      undefined,
+      projectDir,
+      openaiProfile,
+      registry
+    );
+
+    const srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: service,
+    });
+
+    try {
+      const res = await mutate(srv.port, "POST", "/api/runs", {
+        pipeline: "build",
+        artifactPath,
+      });
+      // The cross-profile handoff must start the run successfully.
+      assert.equal(
+        res.status,
+        200,
+        `cross-profile handoff must succeed; body: ${await res.text()}`
+      );
+      assert.ok(capturedInput !== undefined, "mock run must have been started");
+      // plan must be seeded from the anthropic artifact's spec (a string).
+      assert.equal(
+        capturedInput.plan,
+        "Cross-profile spec: test content",
+        "plan must carry the artifact's spec string"
+      );
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+// ── FR-005: POST /api/runs/decide ─────────────────────────────────────────────
+
+describe("FR-005: POST /api/runs/decide — entry-point decision route", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-decide-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("free text → investigate (conservative default)", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs/decide", {
+      input: "I want to add dark mode to the settings page",
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pipeline: string; reason: string };
+    assert.equal(body.pipeline, "investigate");
+    assert.ok(body.reason.length > 0, "reason must be non-empty");
+  });
+
+  it("explicit kind 'feature-request' → investigate", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs/decide", {
+      input: "Add OAuth login",
+      kind: "feature-request",
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pipeline: string; reason: string };
+    assert.equal(body.pipeline, "investigate");
+    assert.ok(
+      body.reason.includes("feature-request"),
+      `reason must mention feature-request; got: ${body.reason}`
+    );
+  });
+
+  it("explicit kind 'task-description' → develop", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs/decide", {
+      input: "Implement the OAuth flow described in the spec",
+      kind: "task-description",
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pipeline: string; reason: string };
+    assert.equal(body.pipeline, "develop");
+    assert.ok(
+      body.reason.includes("task-description"),
+      `reason must mention task-description; got: ${body.reason}`
+    );
+  });
+
+  it("artifact with spec+gateDecisions → develop", async () => {
+    // Write a synthetic artifact file with the artifact signature.
+    const artifactDir = join(projectDir, ".agent-flows", "runs", "decide-src-001");
+    mkdirSync(artifactDir, { recursive: true });
+    const artifactPath = join(artifactDir, "spec-creation.json");
+    writeFileSync(
+      artifactPath,
+      JSON.stringify({
+        runId: "decide-src-001",
+        pipelineId: "spec-creation",
+        status: "succeeded",
+        spec: { title: "My spec", description: "desc" },
+        gateDecisions: [],
+      }),
+      "utf8"
+    );
+
+    const res = await mutate(srv.port, "POST", "/api/runs/decide", {
+      input: artifactPath,
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pipeline: string; reason: string };
+    assert.equal(body.pipeline, "develop");
+    assert.ok(
+      body.reason.includes("spec") && body.reason.includes("gateDecisions"),
+      `reason must mention spec and gateDecisions; got: ${body.reason}`
+    );
+  });
+
+  it("path to non-existent file → 400", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs/decide", {
+      input: "/nonexistent/path/to/file.json",
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.ok(body.error.length > 0, "error must be non-empty");
+  });
+
+  it("missing input → 400", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs/decide", {});
+    assert.equal(res.status, 400);
+  });
+});
+
+// ── FR-006: GET /api/runs/:id/manifest ────────────────────────────────────────
+
+describe("FR-006: GET /api/runs/:id/manifest — manifest HTTP route", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-manifest-http-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns 404 before the manifest is written", async () => {
+    // A mock run that completes immediately.
+    const runId = "run-manifest-http-notyet";
+    const mockRun = makeMockRun(runId, successResult(), successResult());
+
+    // Server started with a RunService that has no projectDir → no artifacts written.
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(makeMastra(mockRun)),
+    });
+
+    // Start the run.
+    const startRes = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "investigate",
+      inputs: { request: "test" },
+    });
+    assert.equal(startRes.status, 200);
+    const { runId: returnedId } = (await startRes.json()) as { runId: string };
+
+    const manifestRes = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(returnedId)}/manifest`
+    );
+    // No projectDir → no artifact → manifest not written → 404.
+    assert.equal(manifestRes.status, 404);
+  });
+
+  it("returns the manifest after the run settles", async () => {
+    const runId = "run-manifest-http-settled";
+    const mockRun = makeMockRun(runId, successResult(), successResult());
+    const profile = { id: "test-profile", roles: { reasoner: "m", worker: "m", scout: "m" } };
+
+    const service = new RunService(makeMastra(mockRun), undefined, projectDir, profile);
+    const srv2 = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: service,
+    });
+
+    try {
+      await mutate(srv2.port, "POST", "/api/runs", {
+        pipeline: "investigate",
+        inputs: { request: "test" },
+      });
+
+      // Wait for the fire-and-forget artifact + manifest writes to complete.
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+      const manifestRes = await fetch(
+        `http://127.0.0.1:${srv2.port}/api/runs/${encodeURIComponent(runId)}/manifest`
+      );
+      assert.equal(
+        manifestRes.status,
+        200,
+        `manifest route must return 200; body: ${await manifestRes.clone().text()}`
+      );
+      const manifest = (await manifestRes.json()) as {
+        runId: string;
+        stages: { stageId: string }[];
+      };
+      assert.equal(manifest.runId, runId);
+      assert.equal(manifest.stages.length, 1);
+      assert.equal(manifest.stages[0].stageId, "investigate");
+    } finally {
+      await srv2.close();
+    }
+  });
+
+  it("returns 404 for an unknown run id", async () => {
+    // srv is still alive from the first test.
+    const manifestRes = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/nonexistent-run-id/manifest`
+    );
+    assert.equal(manifestRes.status, 404);
+  });
+});
+
+// ── FR-006: GET /api/runs/:id/manifest — disk fallback after daemon restart ───
+//
+// This is the scenario that the live defect (ae3eff75 404) required but was
+// missing: the registry is empty, the chain directory is on disk, and the
+// manifest must be served directly from there.
+//
+// To see the disk-read test go RED: change the manifest handler in server.ts
+// to re-add the `requireRunService` + `runService.getManifestPath(id)` guard
+// (restoring the old registry-only path). The "returns manifest from disk" test
+// will fail with 404 instead of 200 — the run is not in the registry.
+//
+// To see the traversal-guard test go RED: remove the `if (!isSafeId(id))`
+// check in the manifest handler. The traversal-id test will fail with 404
+// instead of 400 — the check never runs and the id reaches existsSync.
+
+describe("FR-006: GET /api/runs/:id/manifest — disk fallback, no live run required", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-manifest-disk-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    // Registry has never seen any of the run ids used in this suite.
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(
+        makeMastra(makeMockRun("unrelated-run", successResult(), successResult()))
+      ),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns manifest from disk when the run is not in the registry", async () => {
+    // Produce a chain directory the way a real daemon would — write the manifest
+    // and one stage artifact directly. The registry has never seen this runId.
+    const runId = "ae3eff75-dead-beef-cafe-000000000001";
+    const runDir = join(projectDir, ".agent-flows", "runs", runId);
+    mkdirSync(runDir, { recursive: true });
+
+    const artifactPath = join(runDir, "spec-creation.json");
+    writeFileSync(
+      artifactPath,
+      JSON.stringify({
+        status: "succeeded",
+        spec: "the spec text",
+        provenance: {
+          pipelineId: "spec-creation",
+          profileId: "anthropic",
+          transportPerStep: {},
+          startedAt: "2026-09-07T00:00:00.000Z",
+          settledAt: "2026-09-07T00:01:00.000Z",
+        },
+      }),
+      "utf8"
+    );
+    writeFileSync(
+      join(runDir, "manifest.json"),
+      JSON.stringify({
+        runId,
+        startedAt: "2026-09-07T00:00:00.000Z",
+        status: "completed",
+        stages: [
+          {
+            stageId: "spec-creation",
+            artifactPath,
+            profileId: "anthropic",
+            status: "succeeded",
+            settledAt: "2026-09-07T00:01:00.000Z",
+          },
+        ],
+      }),
+      "utf8"
+    );
+
+    const res = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(runId)}/manifest`
+    );
+    assert.equal(res.status, 200, `expected 200; body: ${await res.clone().text()}`);
+    const body = (await res.json()) as { runId: string; stages: { stageId: string }[] };
+    assert.equal(body.runId, runId);
+    assert.equal(body.stages.length, 1);
+    assert.equal(body.stages[0].stageId, "spec-creation");
+  });
+
+  it("returns 404 when no run directory exists on disk for the id", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/no-such-run-abcdef123/manifest`);
+    assert.equal(res.status, 404);
+  });
+
+  it("refuses run ids containing path-traversal characters", async () => {
+    // Each of these ids must be rejected at the isSafeId guard, before any fs lookup.
+    const badIds = ["../etc", "a/b", "a.b", "UPPER", "has space"];
+    for (const bad of badIds) {
+      const res = await fetch(
+        `http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(bad)}/manifest`
+      );
+      assert.equal(res.status, 400, `expected 400 for id ${JSON.stringify(bad)}`);
+    }
+  });
+});
+
+// ── FR-009: GET /api/runs/:id includes artifactPath ───────────────────────────
+
+describe("FR-009: GET /api/runs/:id includes artifactPath after settlement", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-fr009-http-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("artifactPath field appears in the GET response after the run completes", async () => {
+    const runId = "run-fr009-http-001";
+    const mockRun = makeMockRun(runId, successResult(), successResult());
+    const profile = { id: "http-profile", roles: { reasoner: "m", worker: "m", scout: "m" } };
+    const service = new RunService(makeMastra(mockRun), undefined, projectDir, profile);
+
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: service,
+    });
+
+    await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "investigate",
+      inputs: { request: "test" },
+    });
+
+    // Wait for the fire-and-forget artifact write to complete.
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    const getRes = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(runId)}`
+    );
+    assert.equal(getRes.status, 200);
+    const state = (await getRes.json()) as { status: string; artifactPath?: string };
+    assert.equal(state.status, "succeeded");
+    assert.ok(
+      typeof state.artifactPath === "string",
+      `artifactPath must be present in GET /api/runs/:id after settlement; got: ${JSON.stringify(state.artifactPath)}`
+    );
+    assert.ok(
+      state.artifactPath.endsWith("investigate.json"),
+      `artifactPath must end with investigate.json; got: ${state.artifactPath}`
     );
   });
 });

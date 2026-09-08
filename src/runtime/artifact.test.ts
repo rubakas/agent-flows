@@ -1,4 +1,4 @@
-// Tests for spec 029 FR-001/FR-002/FR-008: durable artifact writing.
+// Tests for spec 029 FR-001/FR-002/FR-006/FR-007/FR-008/FR-009: durable artifacts and manifests.
 //
 // All tests write into mkdtempSync-created directories and clean up afterward.
 // No artifacts are written to the repository or the owner's real projects.
@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { describe, it, after } from "node:test";
 import { ModelRegistry } from "../canon/registry.js";
 import type { StepDef } from "../canon/types.js";
-import type { StepProvenance } from "./artifactStore.js";
+import type { RunManifest, StepProvenance } from "./artifactStore.js";
+import { readManifest } from "./artifactStore.js";
 import { RunService } from "./runService.js";
 import type { MastraLike } from "./runService.js";
 
@@ -529,5 +530,402 @@ describe("FR-002: per-run models override is recorded, not the profile default",
       "sonnet",
       "non-overridden step must still use the profile default"
     );
+  });
+});
+
+// ── Tests: FR-006 — manifest created and updated ─────────────────────────────
+//
+// PROVE GUARD CAN FAIL (task requirement):
+// To see the manifest-ordering guard go RED:
+//   1. In upsertManifestEntry, change `manifest.stages.push(entry)` to
+//      `manifest.stages.unshift(entry)` (prepend instead of append).
+//   2. Run: pnpm test src/runtime/artifact.test.ts
+//   3. The test "second stage entry appears in order after first" fails (FAIL).
+//   4. Restore `push` → GREEN.
+//
+// Similarly, comment out the `manifest.stages[idx] = entry` update branch so the
+// manifest is never updated — the "second stage updates existing entry" test fails.
+
+describe("FR-006: manifest created with the first stage", () => {
+  it("manifest.json exists at the artifact directory and has one entry", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-manifest-first-001";
+    const pipelineId = "investigate";
+    const mockRun = makeMockRun(runId, successResult());
+    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+
+    await service.start(pipelineId, {});
+    await flushAsync();
+
+    const manifestPath = join(tmpDir, ".agent-flows", "runs", runId, "manifest.json");
+    assert.ok(existsSync(manifestPath), "manifest.json must be created on first stage");
+
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
+    assert.equal(manifest.runId, runId, "manifest.runId must be the run's id");
+    assert.ok(typeof manifest.startedAt === "string", "manifest.startedAt must be a string");
+    assert.ok(Array.isArray(manifest.stages), "manifest.stages must be an array");
+    assert.equal(manifest.stages.length, 1, "manifest must have exactly one stage after first run");
+
+    const stage = manifest.stages[0];
+    assert.equal(stage.stageId, pipelineId, "stage.stageId must be the pipeline id");
+    assert.ok(typeof stage.artifactPath === "string", "stage.artifactPath must be a string");
+    assert.equal(stage.profileId, "test-provider", "stage.profileId must match injected profile");
+    assert.equal(stage.status, "succeeded", "stage.status must be succeeded");
+    assert.ok(typeof stage.settledAt === "string", "stage.settledAt must be a string");
+  });
+});
+
+describe("FR-006: second stage in same chain directory adds an ordered entry", () => {
+  it("second stage entry appears AFTER first entry (insertion order preserved)", async () => {
+    const tmpDir = makeTmpDir();
+
+    // Stage 1: run investigate, write artifact and manifest into runs/stage1-id/
+    const stage1RunId = "run-manifest-chain-s1";
+    const stage1Pipeline = "investigate";
+    const mockRun1 = makeMockRun(stage1RunId, successResult());
+    const service1 = new RunService(makeMastra(mockRun1), undefined, tmpDir, stubProfile);
+
+    await service1.start(stage1Pipeline, {});
+    await flushAsync();
+
+    // Stage 2: run spec-creation using chainArtifactDir pointing to stage 1's directory.
+    // This simulates what the server does when POST /api/runs includes artifactPath.
+    const stage2RunId = "run-manifest-chain-s2";
+    const stage2Pipeline = "spec-creation";
+    const mockRun2 = makeMockRun(stage2RunId, successResult());
+    const chainArtifactDir = join(tmpDir, ".agent-flows", "runs", stage1RunId);
+    const service2 = new RunService(makeMastra(mockRun2), undefined, tmpDir, stubProfile);
+
+    await service2.start(stage2Pipeline, {}, { chainArtifactDir });
+    await flushAsync();
+
+    // Read the manifest from the chain directory (stage 1's directory).
+    const manifestPath = join(chainArtifactDir, "manifest.json");
+    assert.ok(existsSync(manifestPath), "manifest.json must exist in the chain directory");
+
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
+    assert.equal(manifest.stages.length, 2, "manifest must have two entries after two stages");
+
+    // Order matters: first stage must appear before second stage.
+    assert.equal(
+      manifest.stages[0].stageId,
+      stage1Pipeline,
+      "first entry must be the first stage's pipeline id"
+    );
+    assert.equal(
+      manifest.stages[1].stageId,
+      stage2Pipeline,
+      "second entry must be the second stage's pipeline id"
+    );
+  });
+
+  it("second stage artifact also lands in the chain directory", async () => {
+    const tmpDir = makeTmpDir();
+
+    const stage1RunId = "run-manifest-artdir-s1";
+    const mockRun1 = makeMockRun(stage1RunId, successResult());
+    const service1 = new RunService(makeMastra(mockRun1), undefined, tmpDir, stubProfile);
+    await service1.start("investigate", {});
+    await flushAsync();
+
+    const chainDir = join(tmpDir, ".agent-flows", "runs", stage1RunId);
+    const stage2RunId = "run-manifest-artdir-s2";
+    const mockRun2 = makeMockRun(stage2RunId, successResult());
+    const service2 = new RunService(makeMastra(mockRun2), undefined, tmpDir, stubProfile);
+    await service2.start("spec-creation", {}, { chainArtifactDir: chainDir });
+    await flushAsync();
+
+    // The second stage's artifact must be in the chain dir, not in its own runId dir.
+    const stage2ArtifactInChain = join(chainDir, "spec-creation.json");
+    assert.ok(
+      existsSync(stage2ArtifactInChain),
+      "second stage artifact must land in the chain directory"
+    );
+  });
+});
+
+// ── Tests: FR-006 — manifest readable from disk without daemon ────────────────
+
+describe("FR-006: manifest is readable from disk without a live service instance", () => {
+  it("manifest persists on disk after the service goes out of scope", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-manifest-nodaemon-001";
+    const pipelineId = "investigate";
+
+    // Write via service — then let the reference go out of scope.
+    {
+      const mockRun = makeMockRun(runId, successResult());
+      const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+      await service.start(pipelineId, {});
+      await flushAsync();
+    }
+
+    // Read directly from disk — no service reference alive.
+    const manifestPath = join(tmpDir, ".agent-flows", "runs", runId, "manifest.json");
+    assert.ok(existsSync(manifestPath), "manifest must persist after service goes out of scope");
+
+    const raw = readFileSync(manifestPath, "utf8");
+    const manifest = JSON.parse(raw) as RunManifest;
+    assert.equal(
+      manifest.runId,
+      runId,
+      "manifest is self-contained: runId readable without daemon"
+    );
+    assert.equal(manifest.stages.length, 1, "manifest has one stage without daemon");
+    assert.equal(manifest.stages[0].stageId, pipelineId);
+  });
+});
+
+// ── Tests: FR-006 — readManifest reconciliation ───────────────────────────────
+//
+// PROVE GUARD CAN FAIL:
+//   To see these tests go RED, remove the reconciliation loop from readManifest
+//   (the `for (const entry of dirEntries)` block and the merge that follows).
+//   The "two artifacts, manifest names only one" test fails because the returned
+//   stages array will have length 1 instead of 2.
+//   The "manifest.json is never reported as a stage" test is vacuously unaffected
+//   by removing reconciliation (it tests a filter, not the presence of entries),
+//   but the "invalid file is ignored" test is also vacuously unaffected since it
+//   relies on the filter, not the merge.  The ordering test fails because there
+//   is nothing to reorder — so the primary failing test is the two-artifact one.
+//   Restore the block → GREEN.
+
+describe("FR-006: readManifest reconciles artifacts missing from the manifest file", () => {
+  it("directory with two stage artifacts but manifest naming only one returns both, in settle-time order", async () => {
+    const tmpDir = makeTmpDir();
+    const artifactDir = join(tmpDir, "reconcile-two-stages");
+    mkdirSync(artifactDir, { recursive: true });
+
+    // Write manifest that only records the first stage.
+    const earlierAt = "2024-01-01T10:00:00.000Z";
+    const laterAt = "2024-01-01T11:00:00.000Z";
+    const manifestContent: RunManifest = {
+      runId: "reconcile-two-stages",
+      startedAt: "2024-01-01T09:00:00.000Z",
+      status: "in-progress",
+      stages: [
+        {
+          stageId: "audit",
+          artifactPath: join(artifactDir, "audit.json"),
+          profileId: "test-provider",
+          status: "succeeded",
+          settledAt: earlierAt,
+        },
+      ],
+    };
+    writeFileSync(join(artifactDir, "manifest.json"), JSON.stringify(manifestContent, null, 2));
+
+    // Write a second artifact that the manifest missed — it settled later.
+    const orphanArtifact = {
+      runId: "reconcile-two-stages",
+      pipelineId: "spec-creation",
+      status: "succeeded",
+      provenance: {
+        pipelineId: "spec-creation",
+        profileId: "test-provider",
+        transportPerStep: {},
+        startedAt: "2024-01-01T10:30:00.000Z",
+        settledAt: laterAt,
+      },
+    };
+    writeFileSync(join(artifactDir, "spec-creation.json"), JSON.stringify(orphanArtifact, null, 2));
+
+    const result = await readManifest(artifactDir);
+
+    assert.equal(result.stages.length, 2, "must return both stages");
+    // Reconciled entry should be ordered by settledAt: audit (earlier) then spec-creation (later).
+    assert.equal(result.stages[0].stageId, "audit", "earlier stage must come first");
+    assert.equal(result.stages[1].stageId, "spec-creation", "later stage must come second");
+    // Reconciled entry fields must come from the artifact file, not the manifest.
+    assert.equal(
+      result.stages[1].profileId,
+      "test-provider",
+      "profileId must be taken from artifact"
+    );
+    assert.equal(result.stages[1].status, "succeeded", "status must be taken from artifact");
+    assert.equal(result.stages[1].settledAt, laterAt, "settledAt must be taken from artifact");
+    assert.ok(
+      result.stages[1].artifactPath.endsWith("spec-creation.json"),
+      "artifactPath must point to the artifact file"
+    );
+  });
+
+  it("a file in the directory that is not a valid artifact is ignored rather than breaking the read", async () => {
+    const tmpDir = makeTmpDir();
+    const artifactDir = join(tmpDir, "reconcile-bad-file");
+    mkdirSync(artifactDir, { recursive: true });
+
+    const manifestContent: RunManifest = {
+      runId: "reconcile-bad-file",
+      startedAt: "2024-01-01T09:00:00.000Z",
+      status: "completed",
+      stages: [
+        {
+          stageId: "investigate",
+          artifactPath: join(artifactDir, "investigate.json"),
+          profileId: "test-provider",
+          status: "succeeded",
+          settledAt: "2024-01-01T10:00:00.000Z",
+        },
+      ],
+    };
+    writeFileSync(join(artifactDir, "manifest.json"), JSON.stringify(manifestContent, null, 2));
+
+    // An invalid JSON file — should be silently ignored.
+    writeFileSync(join(artifactDir, "corrupt.json"), "this is not json {{{");
+    // A JSON file that lacks the provenance block — not a valid artifact.
+    writeFileSync(join(artifactDir, "random.json"), JSON.stringify({ hello: "world" }));
+
+    const result = await readManifest(artifactDir);
+
+    // The corrupt and random files must not appear; only the recorded stage.
+    assert.equal(result.stages.length, 1, "invalid files must not inflate the stage count");
+    assert.equal(result.stages[0].stageId, "investigate");
+  });
+
+  it("manifest.json is never reported as a stage entry", async () => {
+    const tmpDir = makeTmpDir();
+    const artifactDir = join(tmpDir, "reconcile-no-self");
+    mkdirSync(artifactDir, { recursive: true });
+
+    const manifestContent: RunManifest = {
+      runId: "reconcile-no-self",
+      startedAt: "2024-01-01T09:00:00.000Z",
+      status: "completed",
+      stages: [
+        {
+          stageId: "investigate",
+          artifactPath: join(artifactDir, "investigate.json"),
+          profileId: "test-provider",
+          status: "succeeded",
+          settledAt: "2024-01-01T10:00:00.000Z",
+        },
+      ],
+    };
+    writeFileSync(join(artifactDir, "manifest.json"), JSON.stringify(manifestContent, null, 2));
+
+    const result = await readManifest(artifactDir);
+
+    const stageIds = result.stages.map((s) => s.stageId);
+    assert.ok(
+      !stageIds.includes("manifest"),
+      `manifest.json must never appear as a stage; got stageIds: ${JSON.stringify(stageIds)}`
+    );
+  });
+});
+
+// ── Tests: FR-007 — no unattended chaining ────────────────────────────────────
+//
+// The RunService must not start any additional runs after a run completes.
+// This test proves the property by checking registry size before and after settlement.
+
+describe("FR-007: completing a stage starts no further run", () => {
+  it("registry has exactly one run after the run completes", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-nochain-001";
+    const pipelineId = "investigate";
+    const mockRun = makeMockRun(runId, successResult());
+    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+
+    await service.start(pipelineId, {});
+    // Let the background completion handler fire.
+    await flushAsync();
+
+    // The registry contains ONLY the one run we started — no auto-started successor.
+    const list = service.list();
+    assert.equal(
+      list.length,
+      1,
+      `registry must contain exactly 1 run after settlement; found ${list.length}: ${JSON.stringify(list.map((r) => r.runId))}`
+    );
+    assert.equal(list[0].runId, runId, "the one run must be the one we started");
+    assert.equal(list[0].status, "succeeded", "it must have reached a terminal status");
+  });
+
+  it("manifest shows only the completed stage — no phantom next stage", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-nochain-manifest-001";
+    const mockRun = makeMockRun(runId, successResult());
+    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+
+    await service.start("investigate", {});
+    await flushAsync();
+
+    const manifestPath = join(tmpDir, ".agent-flows", "runs", runId, "manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
+
+    assert.equal(
+      manifest.stages.length,
+      1,
+      "manifest must list only the one stage that ran — auto-chaining would add a second"
+    );
+    assert.equal(manifest.stages[0].stageId, "investigate");
+  });
+});
+
+// ── Tests: FR-009 — artifactPath exposed in GetResult ────────────────────────
+
+describe("FR-009: GetResult includes artifactPath after settlement", () => {
+  it("get() returns artifactPath pointing to the written file", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-fr009-001";
+    const pipelineId = "investigate";
+    const mockRun = makeMockRun(runId, successResult());
+    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+
+    await service.start(pipelineId, {});
+    await flushAsync();
+
+    const state = service.get(runId);
+    assert.ok(state !== undefined, "run must be in registry");
+    assert.ok(
+      typeof state.artifactPath === "string",
+      "GetResult.artifactPath must be a string after settlement"
+    );
+    assert.ok(
+      state.artifactPath.endsWith(`${pipelineId}.json`),
+      `artifactPath must end with ${pipelineId}.json; got: ${state.artifactPath}`
+    );
+    // The file must actually exist at the reported path.
+    assert.ok(
+      existsSync(state.artifactPath),
+      `artifactPath must point to an existing file; got: ${state.artifactPath}`
+    );
+  });
+
+  it("artifactPath is absent before settlement (run still in 'running' state)", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-fr009-before-settle-001";
+    const pipelineId = "investigate";
+    // Use a run that never resolves so we can inspect the pre-settled state.
+    let resolveRun!: (v: Record<string, unknown>) => void;
+    const neverResolves = new Promise<Record<string, unknown>>((r) => {
+      resolveRun = r;
+    });
+    const slowRun = {
+      runId,
+      watchers: [] as ((e: Record<string, unknown>) => void)[],
+      start: () => neverResolves,
+      resume: async () => ({ status: "success", result: {} }),
+      watch: (cb: (e: Record<string, unknown>) => void) => {
+        slowRun.watchers.push(cb);
+        return () => undefined;
+      },
+    };
+    const mastra: MastraLike = {
+      getWorkflow: () => ({ createRun: async () => slowRun as never }),
+    };
+
+    const service = new RunService(mastra, undefined, tmpDir, stubProfile);
+    await service.start(pipelineId, {});
+
+    // Before the run settles, artifactPath must be absent.
+    const state = service.get(runId);
+    assert.ok(state !== undefined);
+    assert.equal(state.status, "running");
+    assert.equal(state.artifactPath, undefined, "artifactPath must be absent before settlement");
+
+    // Clean up: resolve the pending promise so the test process can exit cleanly.
+    resolveRun({ status: "success", result: {} });
   });
 });

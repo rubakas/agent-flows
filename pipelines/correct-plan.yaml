@@ -1,6 +1,12 @@
 id: correct-plan
 version: 1
 description: Fold verification findings back into a plan, producing a complete revised plan
+# stage-handoff (spec 029 FR-011): inputs.plan ← artifact.spec from spec-creation (where
+# artifact.spec may be a HardenedSpec object, rendered to plan via renderSpecKitSpec) or
+# from a prior correct-plan run (where artifact.spec is already a plain string).
+# inputs.findings ← artifact.result.findings (result is accumulated context; "findings" is
+# the step key). The revised plan is stored in artifact.spec as a plain string for the
+# next stage.
 inputs:
   - plan
   - findings
