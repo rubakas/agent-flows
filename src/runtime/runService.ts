@@ -5,12 +5,13 @@
 // for all three surfaces.
 
 import { spawnSync } from "node:child_process";
-import { getActiveProfile } from "../canon/registry.js";
+import { getActiveProfile, resolveStepModel } from "../canon/registry.js";
 import { runLlmStep } from "../canon/runStep.js";
 import { writeRunArtifact } from "./artifactStore.js";
 import type { ArtifactProvenance, StepProvenance } from "./artifactStore.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepRunnerDeps } from "../canon/runStep.js";
+import type { StepDef } from "../canon/types.js";
 import type { WorkflowStreamEvent } from "@mastra/core/stream";
 
 // ── Narrow interfaces for the Mastra API subset used here ────────────────────
@@ -245,7 +246,12 @@ export class RunService {
      * Provider profile in force for this daemon instance (spec 029 FR-002).
      * Used to record provenance.profileId when judgeDeps.profile is absent.
      */
-    private readonly standaloneProfile?: ProviderProfile
+    private readonly standaloneProfile?: ProviderProfile,
+    /**
+     * Model registry for provenance recording (spec 029 FR-002).
+     * Used to resolve step roles to ModelEntry when judgeDeps.registry is absent.
+     */
+    private readonly standaloneRegistry?: ModelRegistry
   ) {}
 
   /**
@@ -265,7 +271,20 @@ export class RunService {
   async start(
     pipelineId: string,
     wfInput: Record<string, unknown>,
-    opts?: { gateMode?: GateMode }
+    opts?: {
+      gateMode?: GateMode;
+      /**
+       * Pipeline step definitions for provenance recording (spec 029 FR-002).
+       * When provided alongside a registry and profile, transportPerStep is
+       * filled for every llm step. Non-llm steps (gate, check, persist-ticket,
+       * export-spec, assemble-spec) have no model and are omitted. After
+       * loadPipeline+expandNested, pipeline-kind steps are already inlined as
+       * namespaced children (e.g. "outer.inner") and resolved naturally. Loop
+       * steps have no model; their body steps do not appear in this list and
+       * are therefore absent from transportPerStep.
+       */
+      pipelineSteps?: readonly StepDef[];
+    }
   ): Promise<StartResult> {
     const gateMode: GateMode = opts?.gateMode ?? "manual";
     const wf = this.mastra.getWorkflow(pipelineId);
@@ -277,6 +296,17 @@ export class RunService {
       settle = resolve;
     });
 
+    // Compute transportPerStep up-front from the pipeline step definitions.
+    // The result is an accurate record of what the run will use — not a guess —
+    // because it applies the same model-resolution logic as the step runner,
+    // including per-run model overrides from wfInput.models (spec 029 FR-002).
+    const transportPerStep = this.computeTransportPerStep(
+      opts?.pipelineSteps,
+      wfInput.models,
+      this.judgeDeps?.profile ?? this.standaloneProfile,
+      this.judgeDeps?.registry ?? this.standaloneRegistry
+    );
+
     const record: RunRecord = {
       pipelineId,
       run,
@@ -287,7 +317,7 @@ export class RunService {
       gateDecisions: [],
       settledPromise,
       settle,
-      transportPerStep: {},
+      transportPerStep,
     };
     this.registry.set(runId, record);
 
@@ -819,6 +849,60 @@ export class RunService {
   }
 
   // ── Spec 029: durable artifact helpers ─────────────────────────────────────
+
+  /**
+   * Builds the per-step model/transport map from pipeline step definitions.
+   *
+   * Only llm steps resolve to a model; all other kinds (gate, check, persist-ticket,
+   * export-spec, assemble-spec) are omitted — they have no model and an absent entry
+   * is less misleading than an invented one.
+   *
+   * After loadPipeline+expandNested, pipeline-kind steps no longer exist as-is:
+   * their children appear with namespaced ids (e.g. "outer.inner") and their
+   * original role/model fields intact, so they are resolved naturally. Loop steps
+   * have kind "loop" and are skipped; their body steps do NOT appear in the flat
+   * steps list and are therefore absent from transportPerStep by design — a missing
+   * entry is less harmful than a wrong one.
+   *
+   * Models override: wfInput.models (step id → registry model id) takes precedence
+   * over the profile's role mapping. This is the point of the override feature: a
+   * step run with haiku instead of the profile's opus must say haiku, not opus.
+   */
+  private computeTransportPerStep(
+    steps: readonly StepDef[] | undefined,
+    modelsRaw: unknown,
+    profile: ProviderProfile | undefined,
+    registry: ModelRegistry | undefined
+  ): Record<string, StepProvenance> {
+    if (!steps || !profile || !registry) return {};
+
+    // Extract the models override map, or use an empty object when absent/malformed.
+    const modelsOverride: Record<string, string> =
+      modelsRaw !== null &&
+      modelsRaw !== undefined &&
+      typeof modelsRaw === "object" &&
+      !Array.isArray(modelsRaw)
+        ? (modelsRaw as Record<string, string>)
+        : {};
+
+    const result: Record<string, StepProvenance> = {};
+    for (const step of steps) {
+      if (step.kind !== "llm") continue;
+      const overriddenId = modelsOverride[step.id];
+      const entry =
+        overriddenId !== undefined
+          ? registry.resolve(overriddenId)
+          : resolveStepModel(step, profile, registry);
+      const provenance: StepProvenance = {
+        transport: entry.transport,
+        modelId: entry.id,
+      };
+      const modelName = entry.cli?.model ?? entry.api?.model;
+      if (modelName !== undefined) provenance.model = modelName;
+      result[step.id] = provenance;
+    }
+    return result;
+  }
 
   /** Returns the project directory to use for artifact writes, or undefined if not configured. */
   private getArtifactDir(): string | undefined {

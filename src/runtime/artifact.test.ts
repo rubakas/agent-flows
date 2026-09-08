@@ -8,6 +8,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, after } from "node:test";
+import { ModelRegistry } from "../canon/registry.js";
+import type { StepDef } from "../canon/types.js";
+import type { StepProvenance } from "./artifactStore.js";
 import { RunService } from "./runService.js";
 import type { MastraLike } from "./runService.js";
 
@@ -387,5 +390,144 @@ describe("FR-001: artifact written when a run fails", () => {
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
     assert.equal(parsed.status, "failed", "artifact status must be failed");
     assert.ok(parsed.provenance !== undefined, "artifact must contain provenance even on failure");
+  });
+});
+
+// ── Tests: FR-002 — transportPerStep filled correctly ────────────────────────
+
+// Registry with three named entries for test use — no credentials, no keys.
+const testRegistry = new ModelRegistry([
+  { id: "opus", transport: "cli", cli: { bin: "claude", model: "claude-opus-5" } },
+  { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "claude-sonnet-5" } },
+  { id: "haiku", transport: "cli", cli: { bin: "claude", model: "claude-haiku-4-5" } },
+]);
+
+// Profile mapping each role to a distinct model so assertions are unambiguous.
+const testProfileFull = {
+  id: "anthropic",
+  roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" } as Record<string, string>,
+};
+
+// A small multi-step pipeline definition with one step per role plus non-llm steps.
+const testSteps: StepDef[] = [
+  { id: "reason-step", kind: "llm", role: "reasoner", prompt: "p1.md" },
+  { id: "work-step", kind: "llm", role: "worker", prompt: "p2.md" },
+  { id: "scout-step", kind: "llm", role: "scout", prompt: "p3.md" },
+  // Non-llm steps must not produce an entry.
+  { id: "gate-step", kind: "gate" },
+  { id: "check-step", kind: "check", command: "true" },
+];
+
+describe("FR-002: transportPerStep filled for model-bearing steps", () => {
+  it("each llm step has correct transport and modelId from profile", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-tps-profile-001";
+    const pipelineId = "tps-pipeline";
+    const mockRun = makeMockRun(runId, successResult());
+    const service = new RunService(
+      makeMastra(mockRun),
+      undefined,
+      tmpDir,
+      testProfileFull,
+      testRegistry
+    );
+
+    await service.start(pipelineId, {}, { pipelineSteps: testSteps });
+    await flushAsync();
+
+    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
+    const prov = parsed.provenance as Record<string, unknown>;
+    const tps = prov.transportPerStep as Record<string, StepProvenance>;
+
+    // All three llm steps must have entries.
+    assert.ok(tps["reason-step"] !== undefined, "reason-step must have a transportPerStep entry");
+    assert.ok(tps["work-step"] !== undefined, "work-step must have a transportPerStep entry");
+    assert.ok(tps["scout-step"] !== undefined, "scout-step must have a transportPerStep entry");
+
+    assert.equal(tps["reason-step"].transport, "cli");
+    assert.equal(tps["reason-step"].modelId, "opus");
+    assert.equal(tps["reason-step"].model, "claude-opus-5");
+
+    assert.equal(tps["work-step"].transport, "cli");
+    assert.equal(tps["work-step"].modelId, "sonnet");
+
+    assert.equal(tps["scout-step"].transport, "cli");
+    assert.equal(tps["scout-step"].modelId, "haiku");
+  });
+});
+
+describe("FR-002: non-llm steps are omitted from transportPerStep", () => {
+  it("gate and check steps produce no entry", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-tps-nonllm-001";
+    const pipelineId = "tps-nonllm-pipeline";
+    const mockRun = makeMockRun(runId, successResult());
+    const service = new RunService(
+      makeMastra(mockRun),
+      undefined,
+      tmpDir,
+      testProfileFull,
+      testRegistry
+    );
+
+    await service.start(pipelineId, {}, { pipelineSteps: testSteps });
+    await flushAsync();
+
+    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
+    const prov = parsed.provenance as Record<string, unknown>;
+    const tps = prov.transportPerStep as Record<string, StepProvenance>;
+
+    assert.ok(tps["gate-step"] === undefined, "gate step must not appear in transportPerStep");
+    assert.ok(tps["check-step"] === undefined, "check step must not appear in transportPerStep");
+  });
+});
+
+describe("FR-002: per-run models override is recorded, not the profile default", () => {
+  it("overridden step records the overridden model — not the profile default", async () => {
+    const tmpDir = makeTmpDir();
+    const runId = "run-tps-override-001";
+    const pipelineId = "tps-override-pipeline";
+    const mockRun = makeMockRun(runId, successResult());
+    // Profile maps "reasoner" to "opus".
+    const service = new RunService(
+      makeMastra(mockRun),
+      undefined,
+      tmpDir,
+      testProfileFull,
+      testRegistry
+    );
+
+    // Override: run reason-step with "haiku" instead of the profile-default "opus".
+    await service.start(
+      pipelineId,
+      { models: { "reason-step": "haiku" } },
+      { pipelineSteps: testSteps }
+    );
+    await flushAsync();
+
+    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
+    const prov = parsed.provenance as Record<string, unknown>;
+    const tps = prov.transportPerStep as Record<string, StepProvenance>;
+
+    // The override must be recorded — "haiku", not the profile's "opus".
+    assert.equal(
+      tps["reason-step"].modelId,
+      "haiku",
+      "overridden step must record the overridden model id, not the profile default"
+    );
+    assert.equal(
+      tps["reason-step"].model,
+      "claude-haiku-4-5",
+      "overridden step must record the overridden model name"
+    );
+    // Non-overridden step must still resolve from profile.
+    assert.equal(
+      tps["work-step"].modelId,
+      "sonnet",
+      "non-overridden step must still use the profile default"
+    );
   });
 });

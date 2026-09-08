@@ -700,8 +700,13 @@ async function handleRequest(
       ...(inputs as Record<string, unknown>),
       ...(models !== undefined ? { models } : {}),
     };
+    // Resolve pipeline step defs for provenance recording (spec 029 FR-002).
+    // If the pipeline is not found (e.g. not yet written to disk), omit steps —
+    // transportPerStep will be empty rather than wrong.
+    const pipelineEntry = findPipelineById(ctx.pipelinesDir, pipeline);
     const result = await runService.start(pipeline, wfInput, {
       gateMode: gateMode ?? "manual",
+      ...(pipelineEntry !== undefined ? { pipelineSteps: pipelineEntry.loaded.def.steps } : {}),
     });
     json(res, 200, result);
     return;
@@ -1424,9 +1429,10 @@ if (process.argv[1] === __filename) {
     }
   );
 
-  // Pass projectDir and profile so the service can write durable artifacts
-  // (spec 029 FR-001/FR-002) without requiring judgeDeps in production.
-  const runService = new RunServiceClass(mastra, undefined, projectDir, profile);
+  // Pass projectDir, profile, and registry so the service can write durable
+  // artifacts with full provenance (spec 029 FR-001/FR-002) without requiring
+  // judgeDeps in production.
+  const runService = new RunServiceClass(mastra, undefined, projectDir, profile, registry);
 
   // FR-004: pipelinesDir is NOT passed to startServer so the HTTP layer resolves
   // the canon directory per-request.
