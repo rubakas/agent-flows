@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 
 import { parse, stringify } from "yaml";
 
+import { createDynamicMastra } from "../bindings/mastra/dynamicMastra.js";
 import { BUNDLED_PIPELINES_DIR, resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import { generateN8nWorkflow } from "../bindings/n8n/build.js";
@@ -1398,13 +1399,37 @@ if (process.argv[1] === __filename) {
     });
   }
 
-  const mastra = new Mastra({ storage: mastraStorage, workflows });
-  const runService = new RunServiceClass(mastra);
+  const initialMastra = new Mastra({ storage: mastraStorage, workflows });
+
+  // FR-004: wrap the Mastra instance so that pipelines installed or edited while
+  // the daemon is running become executable without a restart.  The wrapper catches
+  // "not found" throws from getWorkflow, rescans the current canon, rebuilds all
+  // workflow objects, and retries — matching the per-request canon resolution that
+  // the listing endpoint already performs.
+  const mastra = createDynamicMastra(
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+    initialMastra,
+    {
+      MastraClass: Mastra,
+      mastraStorage,
+      buildFn: buildPipelineWorkflow,
+      buildDeps: {
+        registry,
+        store,
+        profile,
+        cwd: projectDir,
+        ...(checkCommand !== undefined ? { checkCommand } : {}),
+      },
+      projectDir,
+    }
+  );
+
+  // Pass projectDir and profile so the service can write durable artifacts
+  // (spec 029 FR-001/FR-002) without requiring judgeDeps in production.
+  const runService = new RunServiceClass(mastra, undefined, projectDir, profile);
 
   // FR-004: pipelinesDir is NOT passed to startServer so the HTTP layer resolves
-  // the canon directory per-request. Mastra workflows are already built above from
-  // the startup snapshot; newly-installed pipelines appear in GET /api/pipelines
-  // immediately but require a restart to become executable (hot-reload is out of scope).
+  // the canon directory per-request.
   const handle = await startServer({ port, dbPath, runService, projectDir });
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
   console.log(`agent-flows serve listening on http://127.0.0.1:${handle.port}`);

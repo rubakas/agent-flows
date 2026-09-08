@@ -7,6 +7,8 @@
 import { spawnSync } from "node:child_process";
 import { getActiveProfile } from "../canon/registry.js";
 import { runLlmStep } from "../canon/runStep.js";
+import { writeRunArtifact } from "./artifactStore.js";
+import type { ArtifactProvenance, StepProvenance } from "./artifactStore.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepRunnerDeps } from "../canon/runStep.js";
 import type { WorkflowStreamEvent } from "@mastra/core/stream";
@@ -42,6 +44,9 @@ export interface MastraLike {
 }
 
 // ── Public types ──────────────────────────────────────────────────────────────
+
+// Re-export for callers that need the provenance types alongside GetResult.
+export type { StepProvenance, ArtifactProvenance } from "./artifactStore.js";
 
 /** Run-level gate mode (FR-001). Default "manual" preserves existing behaviour. */
 export type GateMode = "manual" | "auto";
@@ -204,6 +209,12 @@ interface RunRecord {
   readonly settledPromise: Promise<SettledResult>;
   /** Call exactly once from the background to resolve settledPromise. */
   readonly settle: (result: SettledResult) => void;
+  /**
+   * Per-step model/transport info for the provenance block (spec 029 FR-002).
+   * Populated by callers that can resolve step→model mapping; absent entries
+   * are omitted rather than guessed.
+   */
+  transportPerStep: Record<string, StepProvenance>;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -224,7 +235,17 @@ export class RunService {
 
   constructor(
     private readonly mastra: MastraLike,
-    private readonly judgeDeps?: JudgeDeps
+    private readonly judgeDeps?: JudgeDeps,
+    /**
+     * Project root for writing durable artifacts (spec 029 FR-001).
+     * Takes precedence only when judgeDeps is absent; otherwise judgeDeps.projectDir wins.
+     */
+    private readonly standaloneProjectDir?: string,
+    /**
+     * Provider profile in force for this daemon instance (spec 029 FR-002).
+     * Used to record provenance.profileId when judgeDeps.profile is absent.
+     */
+    private readonly standaloneProfile?: ProviderProfile
   ) {}
 
   /**
@@ -266,6 +287,7 @@ export class RunService {
       gateDecisions: [],
       settledPromise,
       settle,
+      transportPerStep: {},
     };
     this.registry.set(runId, record);
 
@@ -434,6 +456,10 @@ export class RunService {
       }
     }
 
+    // Spec 029 FR-001: write artifact for every gate suspension and terminal
+    // transition reached through the human-approval path.
+    void this.persistArtifact(record);
+
     if (settled.status === "awaiting_approval") {
       return {
         runId,
@@ -509,8 +535,15 @@ export class RunService {
    * Manual mode or completed/failed: settle immediately.
    * Auto mode at a non-manualOnly gate: dispatch judge without settling.
    * Auto mode at a manualOnly gate: settle as awaiting_approval.
+   *
+   * Spec 029 FR-001: write a durable artifact on every gate suspension and
+   * terminal transition. Fire-and-forget — disk errors must not affect the run.
    */
   private afterSettlement(record: RunRecord, settled: SettledResult): void {
+    // Persist before potentially dispatching the judge so the gate-suspension
+    // state is captured on disk even for auto runs (spec 029 FR-001).
+    void this.persistArtifact(record);
+
     if (settled.status === "awaiting_approval" && record.gateMode === "auto") {
       const payload = record.suspendPayload as { manualOnly?: boolean } | undefined;
       if (!payload?.manualOnly) {
@@ -783,6 +816,60 @@ export class RunService {
     }
 
     return { ok: true, verdict: { verdict, reason } };
+  }
+
+  // ── Spec 029: durable artifact helpers ─────────────────────────────────────
+
+  /** Returns the project directory to use for artifact writes, or undefined if not configured. */
+  private getArtifactDir(): string | undefined {
+    // judgeDeps.projectDir is the authoritative source when judgeDeps is present.
+    if (this.judgeDeps) return this.judgeDeps.projectDir;
+    return this.standaloneProjectDir;
+  }
+
+  /**
+   * Returns the active provider profile id for provenance recording.
+   * Falls back through: judgeDeps.profile → standaloneProfile → getActiveProfile() → "unknown".
+   */
+  private getProfileId(): string {
+    const profile = this.judgeDeps?.profile ?? this.standaloneProfile;
+    if (profile) return profile.id;
+    try {
+      return getActiveProfile().id;
+    } catch {
+      return "unknown";
+    }
+  }
+
+  /**
+   * Assemble and write a durable artifact to disk.
+   *
+   * Swallows all errors — a disk problem must never lose a completed run's
+   * result (spec 029 FR-001). The write is fire-and-forget from all callers.
+   */
+  private async persistArtifact(record: RunRecord): Promise<void> {
+    const dir = this.getArtifactDir();
+    if (!dir) return;
+
+    const runId = record.run.runId;
+    const snapshot = this.get(runId);
+    if (!snapshot) return;
+
+    const provenance: ArtifactProvenance = {
+      pipelineId: record.pipelineId,
+      profileId: this.getProfileId(),
+      // Shallow-copy so future step additions don't mutate the written value.
+      transportPerStep: { ...record.transportPerStep },
+      startedAt: record.createdAt.toISOString(),
+      settledAt: new Date().toISOString(),
+    };
+
+    const artifactData: Record<string, unknown> = {
+      ...snapshot,
+      provenance,
+    };
+
+    await writeRunArtifact(dir, runId, record.pipelineId, artifactData);
   }
 
   /**
