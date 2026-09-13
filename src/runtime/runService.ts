@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { getActiveProfile, resolveStepModel } from "../canon/registry.js";
 import { runLlmStep } from "../canon/runStep.js";
 import { writeRunArtifact, upsertManifestEntry } from "./artifactStore.js";
+import { clearRun, getRun as getStepIntrospection } from "./stepIntrospection.js";
 import type { ArtifactProvenance, StepProvenance } from "./artifactStore.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepRunnerDeps } from "../canon/runStep.js";
@@ -140,6 +141,29 @@ export interface StepState {
   outputExcerpt?: string;
   /** True when the output was longer than OUTPUT_EXCERPT_LIMIT. */
   outputTruncated?: boolean;
+  /** Rendered prompt sent to the model, for llm steps (spec 033 FR-017). */
+  prompt?: string;
+  /** Shell command executed, for check steps (spec 033 FR-017). */
+  command?: string;
+  /** Resolved model id and transport for the step (spec 033 FR-017). */
+  model?: string;
+}
+
+/**
+ * How a run was invoked, recorded once in start() and never mutated
+ * (spec 033 D6/FR-016). Inputs are kept verbatim so the operator can reproduce
+ * the run from the UI, chat or curl.
+ */
+export interface RunInvocation {
+  pipeline: string;
+  inputs: Record<string, unknown>;
+  models?: unknown;
+  gateMode: GateMode;
+  artifactPath?: string;
+  /** ISO-8601 timestamp of the start() call. */
+  startedAt: string;
+  /** Every run enters through the daemon's HTTP API, including the MCP tools. */
+  source: "http";
 }
 
 /** Recorded when an operator cancels a run (spec 033 FR-002). */
@@ -161,6 +185,8 @@ export interface GetResult {
   gateMode: GateMode;
   /** Per-step states accumulated in flight (FR-006). Always present; empty before any step fires. */
   steps: Record<string, StepState>;
+  /** How the run was invoked (spec 033 FR-016). */
+  invocation?: RunInvocation;
   /** All gate decisions recorded so far (FR-008). Empty until a gate is decided. */
   gateDecisions: GateDecision[];
   result?: unknown;
@@ -195,6 +221,12 @@ export interface RunSummary {
   status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
   /** ISO-8601 timestamp of when start() was called. */
   createdAt: string;
+  /**
+   * ISO-8601 timestamp of the terminal transition (spec 034 FR-002). Absent
+   * while the run is running or waiting at a gate — a suspended run has not
+   * settled — so a list consumer can tell "still going" from "took this long".
+   */
+  settledAt?: string;
 }
 
 // ── Judge deps (injectable for testing) ───────────────────────────────────────
@@ -227,8 +259,12 @@ interface RunRecord {
   status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
   /** Set once in start(); never mutated. */
   readonly createdAt: Date;
+  /** Set once by finalizeSettlement at the terminal transition (spec 034 FR-002). */
+  settledAt?: string;
   /** Run-level gate mode (FR-001). */
   gateMode: GateMode;
+  /** Set once in start(); never mutated (spec 033 FR-016). */
+  readonly invocation: RunInvocation;
   /** Per-step states accumulated by the record-level watch (FR-006). */
   steps: Record<string, StepState>;
   /** All gate decisions recorded so far (FR-008). */
@@ -348,6 +384,11 @@ export class RunService {
        * (spec 029 FR-006). Stored on the RunRecord and used by persistArtifact.
        */
       chainArtifactDir?: string;
+      /**
+       * The artifactPath the caller handed in, recorded verbatim on the
+       * invocation (spec 033 FR-016) so the run can be reproduced as issued.
+       */
+      artifactPath?: string;
     }
   ): Promise<StartResult> {
     const gateMode: GateMode = opts?.gateMode ?? "manual";
@@ -371,12 +412,28 @@ export class RunService {
       this.judgeDeps?.registry ?? this.standaloneRegistry
     );
 
+    // FR-016: the invocation is the run as the operator issued it. `models` is
+    // merged into wfInput for the workflow, so it is split back out here rather
+    // than left inside the inputs the UI offers for replay.
+    const { models, ...inputsOnly } = wfInput;
+    const createdAt = new Date();
+    const invocation: RunInvocation = {
+      pipeline: pipelineId,
+      inputs: inputsOnly,
+      ...(models !== undefined ? { models } : {}),
+      gateMode,
+      ...(opts?.artifactPath !== undefined ? { artifactPath: opts.artifactPath } : {}),
+      startedAt: createdAt.toISOString(),
+      source: "http",
+    };
+
     const record: RunRecord = {
       pipelineId,
       run,
       status: "running",
-      createdAt: new Date(),
+      createdAt,
       gateMode,
+      invocation,
       steps: {},
       gateDecisions: [],
       listeners: new Set<StepListener>(),
@@ -472,6 +529,7 @@ export class RunService {
         const errStr = name ? `${name}: ${msg}` : msg;
         record.status = "failed";
         record.error = errStr;
+        this.finalizeSettlement(record);
         record.settle({ status: "failed", error: errStr });
       });
 
@@ -495,6 +553,46 @@ export class RunService {
     return record.settledPromise;
   }
 
+  /**
+   * Per-step state with the step's own introspection (prompt/command/model)
+   * folded in (spec 033 FR-017).
+   *
+   * Read-through rather than written into the record on every call: the watch
+   * accumulator replaces `record.steps[id]` wholesale on each step event, so a
+   * value merged in early would be dropped again by the next event. The record
+   * only takes ownership at settlement, where `finalizeSettlement` copies it
+   * before the map entry is cleared — and record fields win from then on.
+   */
+  private mergedSteps(record: RunRecord): Record<string, StepState> {
+    const recorded = getStepIntrospection(record.run.runId);
+    if (!recorded) return record.steps;
+    const merged: Record<string, StepState> = { ...record.steps };
+    for (const [stepId, info] of Object.entries(recorded)) {
+      // A step can record its prompt before Mastra emits workflow-step-start,
+      // so there may be no record state to merge onto yet.
+      const existing = record.steps[stepId] as StepState | undefined;
+      merged[stepId] = existing ? { ...info, ...existing } : { status: "started", ...info };
+    }
+    return merged;
+  }
+
+  /**
+   * Stamp the settle time (spec 034 FR-002), copy the run's introspection into
+   * the record and drop the map entry (spec 033 FR-017).
+   *
+   * Called on every terminal transition: the map is process-
+   * global, so a run that never clears it leaks its prompts for the daemon's
+   * lifetime, and a run cleared without copying loses them from its own state.
+   */
+  private finalizeSettlement(record: RunRecord): void {
+    // First terminal transition wins: cancel() resumes a gate, so a second
+    // settlement can arrive afterwards and would otherwise restamp the run with
+    // a later time than the operator's decision.
+    record.settledAt ??= new Date().toISOString();
+    record.steps = this.mergedSteps(record);
+    clearRun(record.run.runId);
+  }
+
   /** Return the current state of a run, or undefined if the id is unknown. */
   get(runId: string): GetResult | undefined {
     const record = this.registry.get(runId);
@@ -504,7 +602,8 @@ export class RunService {
       pipelineId: record.pipelineId,
       status: record.status,
       gateMode: record.gateMode,
-      steps: record.steps,
+      invocation: record.invocation,
+      steps: this.mergedSteps(record),
       gateDecisions: record.gateDecisions,
       result: record.result,
       ...(record.error !== undefined ? { error: record.error } : {}),
@@ -534,6 +633,7 @@ export class RunService {
       pipelineId: record.pipelineId,
       status: record.status,
       createdAt: record.createdAt.toISOString(),
+      ...(record.settledAt !== undefined ? { settledAt: record.settledAt } : {}),
     }));
   }
 
@@ -582,6 +682,7 @@ export class RunService {
     });
 
     const settled = this.applyWorkflowResult(record, r2);
+    if (settled.status !== "awaiting_approval") this.finalizeSettlement(record);
 
     // For auto mode, if the workflow hits another auto gate, dispatch judge.
     // The approve() caller still receives the awaiting_approval shape so the UI
@@ -688,6 +789,7 @@ export class RunService {
       await record.run.cancel();
     }
 
+    this.finalizeSettlement(record);
     record.settle({ status: "cancelled", error: record.error });
     void this.persistArtifact(record);
     return { ok: true };
@@ -767,6 +869,7 @@ export class RunService {
    * terminal transition. Fire-and-forget — disk errors must not affect the run.
    */
   private afterSettlement(record: RunRecord, settled: SettledResult): void {
+    if (settled.status !== "awaiting_approval") this.finalizeSettlement(record);
     // Persist before potentially dispatching the judge so the gate-suspension
     // state is captured on disk even for auto runs (spec 029 FR-001).
     void this.persistArtifact(record);
@@ -814,6 +917,7 @@ export class RunService {
       const msg = err instanceof Error ? err.message : String(err);
       record.status = "failed";
       record.error = msg;
+      this.finalizeSettlement(record);
       record.settle({ status: "failed", error: msg });
     }
   }

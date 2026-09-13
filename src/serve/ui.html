@@ -97,6 +97,85 @@
         padding: 20px;
         max-width: 1000px;
       }
+      /* Views and tabs (spec 034 D1/D7) */
+      .tabs {
+        display: flex;
+        gap: 4px;
+      }
+      .tab {
+        font-size: 13px;
+        padding: 5px 12px;
+        border-radius: 5px;
+        color: var(--ink-2);
+        text-decoration: none;
+        border: 1px solid transparent;
+      }
+      .tab:hover {
+        background: var(--sunk);
+      }
+      .tab.active {
+        background: var(--accent-bg);
+        color: var(--accent);
+        border-color: var(--line);
+        font-weight: 600;
+      }
+      .view[hidden] {
+        display: none;
+      }
+      .chips {
+        display: flex;
+        gap: 4px;
+      }
+      .chip {
+        font: inherit;
+        font-size: 12px;
+        padding: 3px 10px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        color: var(--ink-2);
+        cursor: pointer;
+      }
+      .chip:hover {
+        background: var(--sunk);
+      }
+      .chip.active {
+        background: var(--accent-bg);
+        color: var(--accent);
+        border-color: var(--accent);
+        font-weight: 600;
+      }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 14px 16px;
+        font-size: 13px;
+      }
+      .kv {
+        display: flex;
+        gap: 12px;
+        padding: 3px 0;
+      }
+      .kv > span:first-child {
+        color: var(--muted);
+        min-width: 150px;
+      }
+      .kv code {
+        font-family: var(--mono);
+        font-size: 12px;
+        word-break: break-all;
+      }
+      tr[data-run-row] {
+        cursor: pointer;
+      }
+      /* A run waiting on a human is the one row that must not blend in (FR-002). */
+      tr.awaiting td {
+        background: color-mix(in srgb, #9a7318 10%, transparent);
+      }
+      tr.awaiting td:first-child {
+        border-left: 3px solid #9a7318;
+      }
       .section {
         margin-bottom: 28px;
       }
@@ -255,6 +334,62 @@
       .step-id {
         font-family: var(--mono);
         font-size: 13px;
+      }
+      .step-model {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        margin-left: 6px;
+      }
+      /* Run details: invocation and per-step prompt/command blocks (spec 033 FR-019..FR-021) */
+      #run-detail-title {
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      #run-detail-id {
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 12px;
+      }
+      #run-detail-id code {
+        font-family: var(--mono);
+      }
+      .code-block {
+        font-family: var(--mono);
+        font-size: 11px;
+        background: var(--sunk);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 8px;
+        margin: 4px 0 8px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 260px;
+        overflow: auto;
+      }
+      .block-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      .copy-btn {
+        font-size: 11px;
+        padding: 1px 6px;
+      }
+      .step-detail {
+        margin-top: 6px;
+      }
+      .step-detail > summary {
+        font-size: 12px;
+        color: var(--muted);
+        cursor: pointer;
       }
       /* Dialog */
       #dialog-backdrop {
@@ -430,60 +565,120 @@
   <body>
     <header>
       <h1>agent-flows</h1>
+      <span id="project-name" style="font-size: 13px; color: var(--ink-2)"></span>
       <span id="state-dir" style="font-size: 12px; color: var(--muted)"></span>
       <span class="spacer"></span>
-      <span id="n8n-status-badge" style="font-size: 12px; color: var(--muted)">n8n: checking…</span>
-      <button class="btn" id="btn-n8n-connect" style="display: none; font-size: 12px">
-        Connect n8n
-      </button>
-      <button class="btn danger" id="btn-n8n-disconnect" style="display: none; font-size: 12px">
-        Disconnect n8n
-      </button>
-      <button class="btn" id="btn-new-in-n8n" style="display: none">New in n8n</button>
-      <button class="btn primary" id="btn-save-from-n8n" style="display: none">
-        Save from n8n…
-      </button>
+      <nav class="tabs">
+        <a class="tab" id="tab-runs" href="#/runs">Runs</a>
+        <a class="tab" id="tab-workflows" href="#/workflows">Workflows</a>
+        <a class="tab" id="tab-templates" href="#/templates">Templates</a>
+        <a class="tab" id="tab-settings" href="#/settings">Settings</a>
+      </nav>
     </header>
 
     <main>
       <div id="flash-area"></div>
 
-      <!-- Active Runs -->
-      <div class="section">
+      <!-- Runs view (D2) -->
+      <section class="view" id="view-runs" hidden>
         <div class="section-header">
-          <h2>Active Runs</h2>
+          <h2>Runs</h2>
+          <div class="chips" id="runs-filter">
+            <button class="chip" data-runs-filter="active">Active</button>
+            <button class="chip" data-runs-filter="finished">Finished</button>
+            <button class="chip" data-runs-filter="all">All</button>
+          </div>
           <button class="btn" id="btn-refresh-runs" style="margin-left: auto">Refresh</button>
         </div>
         <div id="runs-table-wrap">Loading…</div>
-      </div>
+      </section>
 
-      <!-- Project tier -->
-      <div class="section">
+      <!-- Run details view (D3) -->
+      <section class="view" id="view-run" hidden>
         <div class="section-header">
-          <h2>Project workflows</h2>
-          <span class="tier-badge tier-project">project</span>
+          <a class="btn" id="btn-back-runs" href="#/runs">← Runs</a>
         </div>
-        <div id="project-table-wrap">Loading…</div>
-      </div>
+        <div id="run-view-body"></div>
+      </section>
 
-      <!-- Template tier -->
-      <div class="section">
-        <div class="section-header">
-          <h2>Templates</h2>
-          <span class="tier-badge tier-template">template</span>
-          <span style="font-size: 12px; color: var(--muted)">global ~/.agent-flows/templates/</span>
+      <!-- Workflows view (D4) -->
+      <section class="view" id="view-workflows" hidden>
+        <div class="section">
+          <div class="section-header">
+            <h2>Project workflows</h2>
+            <span class="tier-badge tier-project">project</span>
+            <button class="btn" id="btn-new-in-n8n" style="display: none; margin-left: auto">
+              New in n8n
+            </button>
+          </div>
+          <div id="project-table-wrap">Loading…</div>
         </div>
-        <div id="template-table-wrap">Loading…</div>
-      </div>
 
-      <!-- Bundled tier -->
-      <div class="section">
-        <div class="section-header">
-          <h2>Bundled workflows</h2>
-          <span class="tier-badge tier-bundled">bundled</span>
+        <div class="section">
+          <div class="section-header">
+            <h2>Bundled workflows</h2>
+            <span class="tier-badge tier-bundled">bundled</span>
+            <button class="btn" id="btn-install-all" style="margin-left: auto">Install all</button>
+          </div>
+          <div id="bundled-table-wrap">Loading…</div>
         </div>
-        <div id="bundled-table-wrap">Loading…</div>
-      </div>
+      </section>
+
+      <!-- Templates view (D5) -->
+      <section class="view" id="view-templates" hidden>
+        <div class="section">
+          <div class="section-header">
+            <h2>Templates</h2>
+            <span class="tier-badge tier-template">template</span>
+            <span style="font-size: 12px; color: var(--muted)"
+              >global ~/.agent-flows/templates/</span
+            >
+            <button class="btn primary" id="btn-save-from-n8n" style="display: none">
+              Save from n8n…
+            </button>
+          </div>
+          <p class="empty" id="templates-n8n-hint" hidden>
+            n8n is not connected — connect it in Settings to save a workflow as a template.
+          </p>
+          <div id="template-table-wrap">Loading…</div>
+        </div>
+      </section>
+
+      <!-- Settings view (D6) -->
+      <section class="view" id="view-settings" hidden>
+        <div class="section">
+          <div class="section-header">
+            <h2>n8n</h2>
+            <span id="n8n-status-badge" style="font-size: 12px; color: var(--muted)"
+              >n8n: checking…</span
+            >
+          </div>
+          <div class="card">
+            <div class="kv"><span>Base URL</span><code id="n8n-base-url">—</code></div>
+            <div class="actions" style="margin-top: 10px">
+              <button class="btn" id="btn-n8n-connect" style="display: none">Connect n8n</button>
+              <button class="btn danger" id="btn-n8n-disconnect" style="display: none">
+                Disconnect n8n
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-header"><h2>Environment</h2></div>
+          <div class="card" id="env-card">Loading…</div>
+        </div>
+
+        <div class="section" id="skills-section" hidden>
+          <div class="section-header"><h2>Skills</h2></div>
+          <div class="card" id="skills-wrap"></div>
+        </div>
+
+        <div class="section" id="agents-section" hidden>
+          <div class="section-header"><h2>Agents</h2></div>
+          <div class="card" id="agents-wrap"></div>
+        </div>
+      </section>
     </main>
 
     <!-- Read-only detail panel -->
@@ -536,7 +731,9 @@
 
     <div id="flash"></div>
 
-    <script>
+    <script type="module">
+      import { parseHash, hashFor } from "/ui-route.js";
+
       // ── DOM helpers ────────────────────────────────────────────────────────
 
       /** Escape HTML entities. All untrusted data reaching the DOM goes through this. */
@@ -570,14 +767,11 @@
 
       // ── Detail panel ───────────────────────────────────────────────────────
 
+      // The sliding panel now serves only the workflow "View" action; the run
+      // details moved into their own view (spec 034 D3).
       const detailPanel = document.getElementById("detail-panel");
-      document.getElementById("btn-close-detail").onclick = () => {
-        if (activeRunEs) {
-          activeRunEs.close();
-          activeRunEs = null;
-        }
+      document.getElementById("btn-close-detail").onclick = () =>
         detailPanel.classList.remove("open");
-      };
 
       function showDetail(title, steps, inputs, description) {
         document.getElementById("detail-title").textContent = title;
@@ -621,6 +815,9 @@
         const badge = document.getElementById("n8n-status-badge");
         const btnConnect = document.getElementById("btn-n8n-connect");
         const btnDisconnect = document.getElementById("btn-n8n-disconnect");
+        const baseUrlEl = document.getElementById("n8n-base-url");
+        const saveBtn = document.getElementById("btn-save-from-n8n");
+        const tmplHint = document.getElementById("templates-n8n-hint");
         try {
           const s = await api("GET", "/api/n8n/status");
           if (s.configured) {
@@ -628,21 +825,28 @@
             n8nFromEnv = s.source === "environment";
             badge.textContent = n8nFromEnv ? "n8n: via environment" : "n8n: connected";
             badge.style.color = "var(--ok)";
+            // The API key is never requested and never rendered (D6).
+            baseUrlEl.textContent = s.baseUrl || "—";
             // When env vars supply the config, writing a file would be ignored —
             // hide the disconnect action so the user doesn't expect it to work.
             btnConnect.style.display = "none";
             btnDisconnect.style.display = n8nFromEnv ? "none" : "";
             document.getElementById("btn-new-in-n8n").style.display = "";
-            document.getElementById("btn-save-from-n8n").style.display = "";
+            saveBtn.style.display = "";
+            tmplHint.hidden = true;
           } else {
             n8nBaseUrl = null;
             n8nFromEnv = false;
             badge.textContent = "n8n: not configured";
             badge.style.color = "";
+            baseUrlEl.textContent = "—";
             btnConnect.style.display = "";
             btnDisconnect.style.display = "none";
             document.getElementById("btn-new-in-n8n").style.display = "none";
-            document.getElementById("btn-save-from-n8n").style.display = "none";
+            // The template list stays usable without n8n — only the
+            // save-from-n8n action is gated, with a hint in its place (D5).
+            saveBtn.style.display = "none";
+            tmplHint.hidden = false;
           }
         } catch {
           badge.textContent = "n8n: error";
@@ -680,7 +884,13 @@
           const env = await api("GET", "/api/environment");
           const installed = env.installed || [];
           if (!installed.length) {
-            wrap.innerHTML = `<p class="empty">No workflows installed in this project.</p>`;
+            // FR-005: say what is being served instead, so an empty section does
+            // not read as "no workflows available".
+            const note =
+              env.pipelinesSource === "bundled"
+                ? "No workflows installed in this project — the bundled workflows below are being served."
+                : "No workflows installed in this project.";
+            wrap.innerHTML = `<p class="empty">${escH(note)}</p>`;
             return;
           }
           let html = `<table><thead><tr>
@@ -826,8 +1036,10 @@
           const available = env.available || [];
           if (!available.length) {
             wrap.innerHTML = `<p class="empty">No bundled workflows found.</p>`;
+            document.getElementById("btn-install-all").hidden = true;
             return;
           }
+          document.getElementById("btn-install-all").hidden = false;
           let html = `<table><thead><tr>
             <th>ID</th><th>Tier</th><th>Actions</th>
           </tr></thead><tbody>`;
@@ -857,6 +1069,19 @@
               }
             };
           });
+
+          // FR-005: one POST carrying every bundled id, not one per row.
+          document.getElementById("btn-install-all").onclick = async () => {
+            if (!confirm(`Install all ${available.length} bundled workflows into this project?`))
+              return;
+            try {
+              const r = await api("POST", "/api/install", { ids: available, overwrite: false });
+              flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
+              loadProjectTier();
+            } catch (e) {
+              flash(e.message, true);
+            }
+          };
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
@@ -983,54 +1208,122 @@
         return "";
       }
 
+      /** Which chip is selected in the Runs view (D2). "active" is the default. */
+      let _runsFilter = "active";
+
+      /** Statuses counted as active by the Active chip and the poller. */
+      const ACTIVE_STATUSES = new Set(["running", "started", "awaiting_approval"]);
+
+      /**
+       * Span between two ISO timestamps as a short human string; `endIso`
+       * defaults to now, which is what an in-flight run needs.
+       * Returns "—" for anything unparseable rather than "NaNs".
+       */
+      function fmtElapsed(startIso, endIso) {
+        const startedMs = new Date(startIso).getTime();
+        const endedMs = endIso === undefined ? Date.now() : new Date(endIso).getTime();
+        if (!Number.isFinite(startedMs) || !Number.isFinite(endedMs)) return "—";
+        const total = Math.max(0, Math.round((endedMs - startedMs) / 1000));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const sec = total % 60;
+        if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+        if (m > 0) return `${m}m ${String(sec).padStart(2, "0")}s`;
+        return `${sec}s`;
+      }
+
       async function loadRuns() {
         const wrap = document.getElementById("runs-table-wrap");
         try {
           const data = await api("GET", "/api/runs");
-          const runs = data.runs || [];
-          if (!runs.length) {
-            wrap.innerHTML = `<p class="empty">No active runs.</p>`;
-            return;
-          }
-          const awaitingApproval = runs.filter((r) => r.status === "awaiting_approval");
-          let html = "";
-          if (awaitingApproval.length) {
-            const noun = awaitingApproval.length === 1 ? "run" : "runs";
-            html += `<div class="gate-box" style="margin-bottom:10px">
-              <p><strong>${escH(String(awaitingApproval.length))} ${noun} awaiting your approval.</strong></p>
-            </div>`;
-          }
-          const activeCount = runs.filter(
-            (r) =>
-              r.status === "running" || r.status === "started" || r.status === "awaiting_approval"
-          ).length;
-          if (activeCount > 0) {
-            html += `<p style="font-size:12px;color:var(--muted);margin-bottom:6px">${escH(String(activeCount))} active, ${escH(String(runs.length))} total</p>`;
-          }
-          html += `<table><thead><tr>
-            <th>Run ID</th><th>Pipeline</th><th>Status</th><th>Started</th><th>Actions</th>
-          </tr></thead><tbody>`;
-          for (const r of runs) {
-            const sc = statusClass(r.status);
-            html += `<tr>
-              <td class="pipeline-id">${escH(r.runId)}</td>
-              <td class="pipeline-desc">${escH(r.pipelineId)}</td>
-              <td><span class="run-status ${escH(sc)}">${escH(r.status)}</span></td>
-              <td style="font-size:12px;color:var(--muted)">${escH(fmtTime(r.createdAt))}</td>
-              <td class="actions">
-                <button class="btn" data-attach-run="${escH(r.runId)}">Attach</button>
-              </td>
-            </tr>`;
-          }
-          html += "</tbody></table>";
-          wrap.innerHTML = html;
-
-          wrap.querySelectorAll("[data-attach-run]").forEach((btn) => {
-            btn.onclick = () => attachToRun(btn.dataset.attachRun);
-          });
+          renderRuns(data.runs || [], wrap);
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
+      }
+
+      /**
+       * Render the runs table from an already-fetched list. The chips filter this
+       * list client-side (FR-002) — switching chips costs no request.
+       */
+      function renderRuns(runs, wrap) {
+        for (const chip of document.querySelectorAll("[data-runs-filter]")) {
+          chip.classList.toggle("active", chip.dataset.runsFilter === _runsFilter);
+        }
+
+        const shown = runs.filter((r) => {
+          if (_runsFilter === "all") return true;
+          const isActive = ACTIVE_STATUSES.has(r.status);
+          return _runsFilter === "active" ? isActive : !isActive;
+        });
+
+        const awaitingApproval = runs.filter((r) => r.status === "awaiting_approval");
+        let html = "";
+        if (awaitingApproval.length) {
+          const noun = awaitingApproval.length === 1 ? "run" : "runs";
+          html += `<div class="gate-box" style="margin-bottom:10px">
+            <p><strong>${escH(String(awaitingApproval.length))} ${noun} awaiting your approval.</strong></p>
+          </div>`;
+        }
+        const activeCount = runs.filter((r) => ACTIVE_STATUSES.has(r.status)).length;
+        html += `<p style="font-size:12px;color:var(--muted);margin-bottom:6px">${escH(String(activeCount))} active, ${escH(String(runs.length))} total</p>`;
+
+        if (!shown.length) {
+          wrap.innerHTML = `${html}<p class="empty">No ${escH(_runsFilter)} runs.</p>`;
+          wireRunsTable(wrap);
+          return;
+        }
+
+        html += `<table><thead><tr>
+          <th>Status</th><th>Workflow</th><th>Started</th><th>Duration</th><th>Actions</th>
+        </tr></thead><tbody>`;
+        for (const r of shown) {
+          const sc = statusClass(r.status);
+          const isActive = ACTIVE_STATUSES.has(r.status);
+          // Active rows tick along with the poller; a settled run shows the fixed
+          // span it actually took. A run settled before settledAt was recorded
+          // has no end to measure to, so it shows no duration rather than a
+          // still-growing elapsed.
+          const elapsed = isActive
+            ? `<span title="running since ${escH(fmtTime(r.createdAt))}">${escH(fmtElapsed(r.createdAt))}</span>`
+            : r.settledAt !== undefined
+              ? `<span title="settled ${escH(fmtTime(r.settledAt))}">${escH(fmtElapsed(r.createdAt, r.settledAt))}</span>`
+              : `<span title="no settle time recorded for this run">—</span>`;
+          html += `<tr data-run-row="${escH(r.runId)}"${r.status === "awaiting_approval" ? ' class="awaiting"' : ""}>
+            <td><span class="run-status ${escH(sc)}">${escH(r.status)}</span></td>
+            <td class="pipeline-id">${escH(r.pipelineId)}</td>
+            <td style="font-size:12px;color:var(--muted)">${escH(fmtTime(r.createdAt))}</td>
+            <td style="font-size:12px;color:var(--muted)">${elapsed}</td>
+            <td class="actions">
+              <button class="btn" data-run-details="${escH(r.runId)}">Details</button>
+            </td>
+          </tr>`;
+        }
+        html += "</tbody></table>";
+        wrap.innerHTML = html;
+        wireRunsTable(wrap);
+      }
+
+      /** Row and Details clicks both navigate to the run view (FR-002). */
+      function wireRunsTable(wrap) {
+        wrap.querySelectorAll("[data-run-details]").forEach((btn) => {
+          btn.onclick = (ev) => {
+            ev.stopPropagation();
+            location.hash = hashFor("run", btn.dataset.runDetails);
+          };
+        });
+        wrap.querySelectorAll("[data-run-row]").forEach((row) => {
+          row.onclick = () => {
+            location.hash = hashFor("run", row.dataset.runRow);
+          };
+        });
+      }
+
+      for (const chip of document.querySelectorAll("[data-runs-filter]")) {
+        chip.onclick = () => {
+          _runsFilter = chip.dataset.runsFilter;
+          loadRuns();
+        };
       }
 
       document.getElementById("btn-refresh-runs").onclick = () => loadRuns();
@@ -1042,38 +1335,53 @@
       function startRunsPoller() {
         if (_runsPoller !== null) return;
         _runsPoller = setInterval(() => {
-          // Skip when tab is hidden or an SSE stream is delivering live updates.
+          // Poll only while the runs list is on screen: a hidden tab, another
+          // view, or a live SSE stream all make the request pure waste.
           if (document.hidden || activeRunEs !== null) return;
+          if (document.getElementById("view-runs").hidden) return;
           loadRuns();
         }, 4000);
       }
 
       // Refresh immediately when the tab becomes visible again.
       document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && activeRunEs === null) loadRuns();
+        if (
+          !document.hidden &&
+          activeRunEs === null &&
+          !document.getElementById("view-runs").hidden
+        )
+          loadRuns();
       });
 
       /**
-       * Open the detail panel for a run and follow it live via SSE.
-       * Closes any previously-open SSE connection first.
+       * SSE bookkeeping for tests (spec 034 FR-004). A browser test cannot hold a
+       * live stream open, so the page counts opens and closes instead and the
+       * assertion becomes "one open and one close per visit to a run view".
        */
-      async function attachToRun(runId) {
-        // Close any existing SSE connection for a previously watched run.
-        if (activeRunEs) {
-          activeRunEs.close();
-          activeRunEs = null;
-        }
+      window.__afDebug = { sseOpens: 0, sseCloses: 0, openStreams: 0 };
 
-        const panel = document.getElementById("detail-panel");
-        const titleEl = document.getElementById("detail-title");
-        const body = document.getElementById("detail-body");
+      /** Close the run stream, if any. Idempotent — leaving a view calls it blindly. */
+      function closeRunStream() {
+        if (!activeRunEs) return;
+        activeRunEs.close();
+        activeRunEs = null;
+        window.__afDebug.sseCloses += 1;
+        window.__afDebug.openStreams = window.__afDebug.sseOpens - window.__afDebug.sseCloses;
+      }
 
-        // Show the panel with a loading state.
-        titleEl.textContent = runId; // plain text assignment — safe
-        body.innerHTML = `<p style="color:var(--muted);font-size:13px">Connecting…</p>`;
-        panel.classList.add("open");
+      /**
+       * Render the run details view and follow the run live via SSE (D3/FR-004).
+       * The stream is opened here — only while #/runs/<id> is the active view —
+       * and closed by the router on the way out.
+       */
+      async function openRunView(runId) {
+        _activeRunId = runId;
+        closeRunStream();
 
-        // Fetch the current snapshot synchronously so we have a starting state.
+        const body = document.getElementById("run-view-body");
+        body.innerHTML = `<p style="color:var(--muted);font-size:13px">Loading…</p>`;
+
+        // Fetch the current snapshot first so the view has a starting state.
         let snapshot;
         try {
           snapshot = await api("GET", `/api/runs/${encodeURIComponent(runId)}`);
@@ -1082,12 +1390,17 @@
           return;
         }
 
-        // Render the snapshot and wire the gate actions if suspended.
+        // The router may have moved on while the snapshot was in flight; opening
+        // a stream for a run the operator already left is exactly the leak
+        // FR-004 is about.
+        if (parseHash(location.hash).runId !== runId) return;
+
         renderRunDetail(runId, snapshot, body);
 
-        // Subscribe to live SSE events for subsequent updates.
         const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
         activeRunEs = es;
+        window.__afDebug.sseOpens += 1;
+        window.__afDebug.openStreams = window.__afDebug.sseOpens - window.__afDebug.sseCloses;
 
         es.addEventListener("snapshot", (ev) => {
           let data;
@@ -1110,10 +1423,146 @@
         });
 
         es.onerror = () => {
-          // Silently stop — the panel still shows last-known state.
-          es.close();
-          if (activeRunEs === es) activeRunEs = null;
+          // Silently stop — the view still shows last-known state.
+          if (activeRunEs === es) closeRunStream();
+          else es.close();
         };
+      }
+
+      // ── Run detail: invocation and per-step introspection (spec 033 D6) ────
+
+      /** Run id of the currently attached run, needed by the live step updater. */
+      let _activeRunId = null;
+
+      /**
+       * Text handed to each copy button, by index. Prompts and commands are far
+       * too large to round-trip through a data- attribute, so the markup carries
+       * only the index and the payload stays in JS.
+       */
+      let _copyPayloads = [];
+
+      /** True while the operator has expanded the collapsed invocation inputs. */
+      let _invExpanded = false;
+
+      /** Input values longer than this render collapsed in the invocation block (FR-020). */
+      const INPUT_COLLAPSE_LIMIT = 400;
+
+      /** Register a copy payload and return the markup for its button. */
+      function copyButton(text, label) {
+        const idx = _copyPayloads.push(text) - 1;
+        return `<button class="btn copy-btn" data-copy-idx="${idx}">${escH(label || "Copy")}</button>`;
+      }
+
+      /** Wire every copy button inside root to its registered payload. */
+      function wireCopyButtons(root) {
+        root.querySelectorAll("[data-copy-idx]").forEach((btn) => {
+          btn.onclick = () => {
+            const text = _copyPayloads[Number(btn.dataset.copyIdx)];
+            if (text === undefined) return;
+            navigator.clipboard.writeText(text).then(
+              () => flash("Copied"),
+              () => flash("Copy failed", true)
+            );
+          };
+        });
+      }
+
+      /** Replace long string inputs with a truncated marker (FR-020). */
+      function collapseInputs(inputs) {
+        const out = {};
+        for (const [k, v] of Object.entries(inputs || {})) {
+          out[k] =
+            typeof v === "string" && v.length > INPUT_COLLAPSE_LIMIT
+              ? `${v.slice(0, INPUT_COLLAPSE_LIMIT)}… (${v.length} chars)`
+              : v;
+        }
+        return out;
+      }
+
+      function hasLongInput(inputs) {
+        return Object.values(inputs || {}).some(
+          (v) => typeof v === "string" && v.length > INPUT_COLLAPSE_LIMIT
+        );
+      }
+
+      /**
+       * The two reproduction commands for an invocation: the chat tool call and
+       * the equivalent curl. `expanded` controls only what is shown — the copy
+       * buttons always carry the full, runnable text.
+       */
+      function invocationTexts(inv, expanded) {
+        const args = {
+          pipeline: inv.pipeline,
+          inputs: expanded ? inv.inputs || {} : collapseInputs(inv.inputs),
+        };
+        if (inv.models !== undefined) args.models = inv.models;
+        if (inv.gateMode !== undefined) args.gateMode = inv.gateMode;
+        if (inv.artifactPath !== undefined) args.artifactPath = inv.artifactPath;
+        const curlBody = JSON.stringify(args);
+        return {
+          chat: `run_pipeline(${JSON.stringify(args, null, 2)})`,
+          curl:
+            `curl -X POST http://${location.host}/api/runs \\\n` +
+            `  -H 'Content-Type: application/json' \\\n` +
+            `  -d '${curlBody}'`,
+        };
+      }
+
+      /** Markup for the "How it was run" block (FR-020). */
+      function invocationHtml(inv) {
+        const shown = invocationTexts(inv, _invExpanded);
+        const full = invocationTexts(inv, true);
+        const toggle = hasLongInput(inv.inputs)
+          ? `<button class="btn copy-btn" id="btn-toggle-inputs">${_invExpanded ? "[collapse]" : "[expand]"}</button>`
+          : "";
+        return `<div id="run-invocation">
+          <div class="block-head">HOW IT WAS RUN ${toggle}</div>
+          <div class="block-head">Chat ${copyButton(full.chat)}</div>
+          <pre class="code-block" id="run-invocation-chat">${escH(shown.chat)}</pre>
+          <div class="block-head">curl ${copyButton(full.curl)}</div>
+          <pre class="code-block" id="run-invocation-curl">${escH(shown.curl)}</pre>
+        </div>`;
+      }
+
+      /** Wire the expand/collapse toggle inside the invocation block. */
+      function wireInvocation(body, inv) {
+        const container = body.querySelector("#run-invocation");
+        if (!container) return;
+        wireCopyButtons(container);
+        const toggle = container.querySelector("#btn-toggle-inputs");
+        if (!toggle) return;
+        toggle.onclick = () => {
+          _invExpanded = !_invExpanded;
+          container.outerHTML = invocationHtml(inv);
+          wireInvocation(body, inv);
+        };
+      }
+
+      /**
+       * Markup for one step row: id, status, model, output excerpt and the
+       * collapsed prompt/command block (FR-021).
+       */
+      function stepRowHtml(sid, st) {
+        const stClass = statusClass(st.status || "");
+        let html = `<div class="step-row" data-step-id="${escH(sid)}">
+          <span class="step-id">${escH(sid)}</span>
+          <span class="run-status ${escH(stClass)}" style="margin-left:6px">${escH(st.status || "pending")}</span>`;
+        if (st.model) html += `<span class="step-model">${escH(st.model)}</span>`;
+        if (st.outputExcerpt) {
+          // step output is untrusted model-produced text — use escH
+          html += `<div class="step-output">${escH(st.outputExcerpt)}</div>`;
+        }
+        const detail =
+          st.prompt !== undefined ? "Prompt" : st.command !== undefined ? "Command" : null;
+        if (detail !== null) {
+          const text = detail === "Prompt" ? st.prompt : st.command;
+          html += `<details class="step-detail">
+            <summary>${detail} (${escH(String(text.length))} chars)</summary>
+            <div class="block-head">${copyButton(text)}</div>
+            <pre class="code-block">${escH(text)}</pre>
+          </details>`;
+        }
+        return html + `</div>`;
       }
 
       /**
@@ -1123,9 +1572,18 @@
       function renderRunDetail(runId, snapshot, body) {
         const status = snapshot.status || "unknown";
         const sc = statusClass(status);
-        let html = `<div style="margin-bottom:10px">
+        const inv = snapshot.invocation;
+        _copyPayloads = [];
+
+        // FR-019: the workflow name leads, the run id and start time sit under it.
+        let html = `<h2 id="run-detail-title">${escH(snapshot.pipelineId || "run")}
           <span class="run-status ${escH(sc)}">${escH(status)}</span>
-        </div>`;
+        </h2>
+        <div id="run-detail-id">Run <code>${escH(runId)}</code> ${copyButton(runId)}${
+          inv && inv.startedAt ? ` · started ${escH(fmtTime(inv.startedAt))}` : ""
+        }</div>`;
+
+        if (inv) html += invocationHtml(inv);
 
         // Gate controls — shown only when the run is awaiting approval.
         if (status === "awaiting_approval" && snapshot.gateMessage) {
@@ -1151,22 +1609,15 @@
         if (stepIds.length) {
           html += `<div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px">STEPS</div>`;
           for (const sid of stepIds) {
-            const st = steps[sid];
-            const stClass = statusClass(st.status || "");
-            html += `<div class="step-row" data-step-id="${escH(sid)}">
-              <span class="step-id">${escH(sid)}</span>
-              <span class="run-status ${escH(stClass)}" style="margin-left:6px">${escH(st.status || "pending")}</span>`;
-            if (st.outputExcerpt) {
-              // step output is untrusted model-produced text — use escH
-              html += `<div class="step-output">${escH(st.outputExcerpt)}</div>`;
-            }
-            html += `</div>`;
+            html += stepRowHtml(sid, steps[sid]);
           }
         } else {
           html += `<p style="color:var(--muted);font-size:13px;margin-top:8px">No steps recorded yet.</p>`;
         }
 
         body.innerHTML = html;
+        wireCopyButtons(body);
+        if (inv) wireInvocation(body, inv);
 
         // Wire approve/reject/cancel after setting innerHTML.
         const approveBtn = body.querySelector("#btn-approve-run");
@@ -1216,6 +1667,11 @@
       /**
        * Update a single step row in-place when a live SSE step event arrives.
        * Falls back to a full re-render if the step is new (not yet in the DOM).
+       *
+       * The SSE payload carries no prompt or command (spec 033 D6 keeps the
+       * stream light), so a row that has no introspection block yet is re-rendered
+       * from a fresh GET /api/runs/:id — that is where the step's prompt appears
+       * once its execute has run.
        */
       function updateStepRow(data) {
         const { stepId, status, outputExcerpt } = data;
@@ -1226,6 +1682,8 @@
           // Step not yet in panel — trigger a full re-fetch to pick it up.
           return;
         }
+
+        if (!row.querySelector(".step-detail")) refreshStepDetail(stepId);
 
         // Update status badge.
         const badge = row.querySelector(".run-status");
@@ -1247,25 +1705,144 @@
         }
       }
 
-      // ── Boot ───────────────────────────────────────────────────────────────
+      /**
+       * Re-render one step row from the daemon's current state so its prompt or
+       * command block appears as soon as the step records it (FR-021).
+       */
+      async function refreshStepDetail(stepId) {
+        const runId = _activeRunId;
+        if (!runId) return;
+        let snapshot;
+        try {
+          snapshot = await api("GET", `/api/runs/${encodeURIComponent(runId)}`);
+        } catch {
+          return; // last-known state stays on screen
+        }
+        const st = (snapshot.steps || {})[stepId];
+        if (!st || (st.prompt === undefined && st.command === undefined)) return;
+        const row = document.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
+        if (!row) return;
+        row.outerHTML = stepRowHtml(stepId, st);
+        const fresh = document.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
+        if (fresh) wireCopyButtons(fresh);
+      }
 
-      // Spec 032 FR-011: show where machine-local state for this project lives.
-      async function loadStateDir() {
-        const el = document.getElementById("state-dir");
+      // ── Settings view (D6) ─────────────────────────────────────────────────
+
+      /** Render the environment card plus the Skills/Agents lists (FR-007). */
+      async function loadEnvironment() {
+        const card = document.getElementById("env-card");
         try {
           const env = await api("GET", "/api/environment");
-          if (!env.stateDir) return;
-          el.textContent = `state: ${env.stateDir}`;
-          el.title = env.stateDir;
-        } catch {
-          // Environment unreachable — leave the header label empty.
+          const rows = [
+            ["Project dir", env.projectDir],
+            ["Pipelines source", env.pipelinesSource],
+            ["Pipelines dir", env.pipelinesDir],
+            ["State dir", env.stateDir],
+            ["Runs dir", env.runsDir],
+            ["Database", env.dbPath],
+            ["Port", env.port],
+            ["Provider profile", env.profile],
+          ];
+          card.innerHTML = rows
+            .map(
+              ([k, v]) =>
+                `<div class="kv"><span>${escH(k)}</span><code>${escH(v ?? "—")}</code></div>`
+            )
+            .join("");
+
+          renderNameList("skills", env.skills || []);
+          renderNameList("agents", env.agents || []);
+        } catch (e) {
+          card.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
       }
 
+      /** Show a names-only list (skills, agents); the section hides when empty. */
+      function renderNameList(kind, names) {
+        document.getElementById(`${kind}-section`).hidden = names.length === 0;
+        document.getElementById(`${kind}-wrap`).innerHTML = names
+          .map(
+            (n) =>
+              `<code style="font-size:12px;background:var(--sunk);padding:1px 5px;border-radius:3px;margin-right:6px">${escH(n)}</code>`
+          )
+          .join("");
+      }
+
+      // Spec 032 FR-011: show where this project and its machine-local state live.
+      async function loadHeaderContext() {
+        try {
+          const env = await api("GET", "/api/environment");
+          const nameEl = document.getElementById("project-name");
+          if (env.projectDir) {
+            const base = env.projectDir.replace(/\/+$/u, "").split("/").pop() || env.projectDir;
+            nameEl.textContent = base;
+            nameEl.title = env.projectDir;
+          }
+          const stateEl = document.getElementById("state-dir");
+          if (env.stateDir) {
+            stateEl.textContent = `state: ${env.stateDir}`;
+            stateEl.title = env.stateDir;
+          }
+        } catch {
+          // Environment unreachable — leave the header labels empty.
+        }
+      }
+
+      // ── Router (spec 034 D1/D7) ────────────────────────────────────────────
+
+      const VIEW_IDS = ["runs", "run", "workflows", "templates", "settings"];
+      const TAB_IDS = ["runs", "workflows", "templates", "settings"];
+
+      /**
+       * Show the view named by the current hash and load its data.
+       *
+       * The run stream is closed on every route change before the new view is
+       * shown, so leaving #/runs/<id> by any means — tab, Back, Escape, a typed
+       * hash — releases it (FR-004).
+       */
+      function route() {
+        const { view, runId } = parseHash(location.hash);
+        if (view !== "run" || runId !== _activeRunId) closeRunStream();
+
+        for (const id of VIEW_IDS) {
+          document.getElementById(`view-${id}`).hidden = id !== view;
+        }
+        // The run details view belongs to the Runs tab.
+        const activeTab = view === "run" ? "runs" : view;
+        for (const id of TAB_IDS) {
+          document.getElementById(`tab-${id}`).classList.toggle("active", id === activeTab);
+        }
+
+        if (view === "runs") {
+          loadRuns();
+        } else if (view === "run") {
+          openRunView(runId);
+        } else if (view === "workflows") {
+          loadProjectTier();
+          loadBundledTier();
+        } else if (view === "templates") {
+          loadTemplateTier();
+        } else if (view === "settings") {
+          loadEnvironment();
+        }
+      }
+
+      window.addEventListener("hashchange", route);
+
+      // FR-009: Escape leaves the run details view.
+      document.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Escape") return;
+        if (parseHash(location.hash).view !== "run") return;
+        location.hash = hashFor("runs");
+      });
+
+      // ── Boot ───────────────────────────────────────────────────────────────
+
       (async () => {
+        loadHeaderContext();
         await loadN8nStatus();
-        loadStateDir();
-        await Promise.all([loadProjectTier(), loadTemplateTier(), loadBundledTier(), loadRuns()]);
+        route();
         startRunsPoller();
       })();
     </script>

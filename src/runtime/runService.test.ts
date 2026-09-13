@@ -10,10 +10,13 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { buildLlmStep } from "../bindings/mastra/buildSteps.js";
 import { ModelRegistry } from "../canon/registry.js";
 import { RunService } from "./runService.js";
+import { getRun as getStepIntrospection } from "./stepIntrospection.js";
 import type { JudgeDeps, MastraLike, StepEvent } from "./runService.js";
 import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
+import type { StepDef } from "../canon/types.js";
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -1994,5 +1997,229 @@ describe("RunService.cancel — V1: cancelling one run leaves a concurrent run u
     const settledB = await service.waitForSettled(b.runId);
     assert.equal(settledB?.status, "succeeded", "run B must complete after A was cancelled");
     assert.equal(service.get(b.runId)?.status, "succeeded");
+  });
+});
+
+// ── Spec 033 D6/FR-016..FR-018: invocation and per-step introspection ─────────
+
+describe("RunService — invocation is recorded once and round-trips (FR-016)", () => {
+  it("get() and the artifact both carry the invocation as issued", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-invocation-"));
+    try {
+      const run = makeMockRun("invocation-run-01", successResult(), successResult());
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const started = await service.start(
+        "test-pipeline",
+        { request: "ship it", models: { "test.step": "sonnet" } },
+        { gateMode: "auto", artifactPath: "runs/prev/spec-creation.json" }
+      );
+      await service.waitForSettled(started.runId);
+
+      const invocation = service.get(started.runId)?.invocation;
+      assert.deepEqual(invocation, {
+        pipeline: "test-pipeline",
+        inputs: { request: "ship it" },
+        models: { "test.step": "sonnet" },
+        gateMode: "auto",
+        artifactPath: "runs/prev/spec-creation.json",
+        startedAt: invocation?.startedAt,
+        source: "http",
+      });
+      assert.ok(
+        typeof invocation?.startedAt === "string" && invocation.startedAt.endsWith("Z"),
+        `startedAt must be an ISO timestamp; got ${JSON.stringify(invocation?.startedAt)}`
+      );
+
+      const raw = await waitForFile(join(runsDir, started.runId, "test-pipeline.json"));
+      assert.ok(raw !== undefined, "a settled run must persist an artifact");
+      const artifact = JSON.parse(raw) as { invocation?: Record<string, unknown> };
+      assert.deepEqual(
+        artifact.invocation,
+        invocation as unknown as Record<string, unknown>,
+        "the artifact must carry the invocation verbatim — FR-018"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("RunService — step introspection reaches the run state (FR-017)", () => {
+  // Drives the REAL buildLlmStep so the test covers the recording call site, not
+  // a restatement of it: a step that stopped recording its prompt would still
+  // pass a test that wrote into stepIntrospection directly.
+  const stepDef: StepDef = {
+    id: "investigate.survey",
+    kind: "llm",
+    prompt: "prompts/survey.md",
+    model: "sonnet",
+  };
+  const prompts = { "investigate.survey": "Survey this: {{request}}" };
+
+  function makeRecordingStep(): { step: ReturnType<typeof buildLlmStep>; registry: ModelRegistry } {
+    const registry = new ModelRegistry([
+      { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "claude-sonnet" } },
+    ]);
+    const runner = (async () => "done") as unknown as JudgeDeps["runner"];
+    const step = buildLlmStep(
+      stepDef,
+      prompts,
+      { registry, store: {} as never, runner, profile: stubProfile },
+      undefined
+    );
+    return { step, registry };
+  }
+
+  async function execStep(
+    step: ReturnType<typeof buildLlmStep>,
+    runId: string,
+    inputData: Record<string, unknown>
+  ): Promise<void> {
+    await (step as unknown as { execute: (p: unknown) => Promise<unknown> }).execute({
+      inputData,
+      runId,
+      suspend: () => undefined as never,
+    });
+  }
+
+  it("a rendered prompt and resolved model appear in get().steps", async () => {
+    const run = makeMockRun("introspect-run-01", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const started = await service.start("test-pipeline", { request: "the auth bug" });
+
+    const { step } = makeRecordingStep();
+    await execStep(step, started.runId, { request: "the auth bug" });
+
+    const state = service.get(started.runId)?.steps["investigate.survey"];
+    assert.equal(state?.prompt, "Survey this: the auth bug");
+    assert.equal(state?.model, "sonnet (cli:claude)");
+  });
+
+  it("two runs on one built step keep separate prompts", async () => {
+    const runA = makeMockRun("introspect-a", successResult(), successResult());
+    const runB = makeMockRun("introspect-b", successResult(), successResult());
+    const queue = [runA, runB];
+    const mastra: MastraLike = {
+      getWorkflow: (_id) => ({
+        createRun: async () =>
+          queue.shift() as unknown as Awaited<
+            ReturnType<ReturnType<MastraLike["getWorkflow"]>["createRun"]>
+          >,
+      }),
+    };
+    const service = new RunService(mastra);
+    const a = await service.start("test-pipeline", { request: "input A" });
+    const b = await service.start("test-pipeline", { request: "input B" });
+
+    const { step } = makeRecordingStep();
+    await execStep(step, a.runId, { request: "input A" });
+    await execStep(step, b.runId, { request: "input B" });
+
+    assert.equal(
+      service.get(a.runId)?.steps["investigate.survey"]?.prompt,
+      "Survey this: input A",
+      "run A must keep its own prompt — a build-time channel would mix the two"
+    );
+    assert.equal(service.get(b.runId)?.steps["investigate.survey"]?.prompt, "Survey this: input B");
+  });
+
+  it("settling copies the introspection into the record and clears the map", async () => {
+    let finishRun!: (r: Record<string, unknown>) => void;
+    const watchers: WatchCallback[] = [];
+    const run = {
+      runId: "introspect-settle",
+      start: () =>
+        new Promise<Record<string, unknown>>((resolve) => {
+          finishRun = resolve;
+        }),
+      resume: async () => successResult(),
+      watch: (cb: WatchCallback) => {
+        watchers.push(cb);
+        return () => undefined;
+      },
+    };
+    const service = new RunService(makeMastra(run as unknown as MockRun));
+    const started = await service.start("test-pipeline", { request: "the auth bug" });
+
+    const { step } = makeRecordingStep();
+    await execStep(step, started.runId, { request: "the auth bug" });
+    assert.ok(
+      getStepIntrospection(started.runId) !== undefined,
+      "map holds the run while in flight"
+    );
+
+    finishRun(successResult());
+    await service.waitForSettled(started.runId);
+
+    assert.equal(
+      getStepIntrospection(started.runId),
+      undefined,
+      "a settled run must not keep its prompts in the process-global map"
+    );
+    assert.equal(
+      service.get(started.runId)?.steps["investigate.survey"]?.prompt,
+      "Survey this: the auth bug",
+      "the record must own the prompt after the map is cleared"
+    );
+  });
+});
+
+// ── Spec 034 FR-002: settle time on the run list ─────────────────────────────
+
+describe("RunService.list — settledAt appears only once the run settles", () => {
+  it("is absent while running, present and stable after the run settles", async () => {
+    let finishRun!: (r: Record<string, unknown>) => void;
+    const run = {
+      runId: "settled-at-run",
+      start: () =>
+        new Promise<Record<string, unknown>>((resolve) => {
+          finishRun = resolve;
+        }),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+    const service = new RunService(makeMastra(run as unknown as MockRun));
+    const started = await service.start("test-pipeline", { request: "x" });
+
+    const before = service.list().find((r) => r.runId === started.runId);
+    assert.equal(before?.status, "running");
+    assert.equal(
+      before?.settledAt,
+      undefined,
+      "a run still in flight has not settled — a duration column must not fabricate one"
+    );
+
+    finishRun(successResult());
+    await service.waitForSettled(started.runId);
+
+    const after = service.list().find((r) => r.runId === started.runId);
+    assert.ok(
+      typeof after?.settledAt === "string" && after.settledAt.endsWith("Z"),
+      `settledAt must be an ISO timestamp after settling; got ${JSON.stringify(after?.settledAt)}`
+    );
+    assert.ok(
+      Date.parse(after.settledAt) >= Date.parse(after.createdAt),
+      "settledAt must not precede createdAt"
+    );
+    assert.equal(
+      service.list().find((r) => r.runId === started.runId)?.settledAt,
+      after.settledAt,
+      "settledAt must be stamped once, not recomputed on every list()"
+    );
+  });
+
+  it("a cancelled run carries a settledAt too", async () => {
+    const run = makeCancellableRun("settled-at-cancel", "test.check");
+    const service = new RunService(makeMastra(run));
+    const started = await service.start("test-pipeline", { request: "x" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await service.cancel(started.runId, "enough");
+
+    const summary = service.list().find((r) => r.runId === started.runId);
+    assert.equal(summary?.status, "cancelled");
+    assert.ok(
+      typeof summary?.settledAt === "string",
+      "a cancelled run is terminal and must report when it stopped"
+    );
   });
 });

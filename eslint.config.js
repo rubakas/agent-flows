@@ -121,6 +121,20 @@ export default tseslint.config(
     },
   },
 
+  // ── Browser-served plain JS ───────────────────────────────────────────────
+  // src/serve/ui-route.js ships to the browser unbuilt (spec 034 D7), so it is
+  // deliberately outside tsconfig's TS program. Type-aware linting cannot run on
+  // a file the project service does not know; its types live in ui-route.d.ts
+  // and its behaviour is covered by ui-route.test.ts.
+  {
+    files: ["src/serve/*.js"],
+    languageOptions: {
+      parserOptions: { projectService: false, project: false },
+      globals: { console: "readonly" },
+    },
+    ...tseslint.configs.disableTypeChecked,
+  },
+
   // ── Prettier LAST — disables all formatting-conflicting rules ────────────
   prettier
 );

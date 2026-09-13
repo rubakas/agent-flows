@@ -68,6 +68,10 @@ export interface RunStepView {
   finishedAt?: string;
   outputExcerpt?: string;
   error?: string;
+  /** Resolved model for llm steps (spec 033 D6). */
+  model?: string;
+  /** Shell command for check steps (spec 033 D6). */
+  command?: string;
 }
 
 interface DaemonStepState {
@@ -76,6 +80,10 @@ interface DaemonStepState {
   finishedAt?: string;
   outputExcerpt?: string;
   error?: string;
+  /** Rendered prompt — deliberately never forwarded to chat (spec 033 D6). */
+  prompt?: string;
+  model?: string;
+  command?: string;
 }
 
 interface DaemonRunState {
@@ -86,11 +94,18 @@ interface DaemonRunState {
   gateMessage?: string;
   spec?: unknown;
   artifactPath?: string;
+  invocation?: unknown;
   steps?: Record<string, DaemonStepState>;
   cancelled?: { at: string; reason?: string };
 }
 
-/** Flatten the daemon's `steps` map into an array the chat client can print. */
+/**
+ * Flatten the daemon's `steps` map into an array the chat client can print.
+ *
+ * `prompt` is dropped on purpose (spec 033 D6): a rendered prompt can be tens of
+ * thousands of characters and would drown the chat transcript. It stays
+ * available on the page and in the run artifact.
+ */
 function toStepViews(steps: Record<string, DaemonStepState> | undefined): RunStepView[] {
   if (!steps) return [];
   return Object.entries(steps).map(([id, state]) => ({
@@ -100,6 +115,8 @@ function toStepViews(steps: Record<string, DaemonStepState> | undefined): RunSte
     ...(state.finishedAt !== undefined ? { finishedAt: state.finishedAt } : {}),
     ...(state.outputExcerpt !== undefined ? { outputExcerpt: state.outputExcerpt } : {}),
     ...(state.error !== undefined ? { error: state.error } : {}),
+    ...(state.model !== undefined ? { model: state.model } : {}),
+    ...(state.command !== undefined ? { command: state.command } : {}),
   }));
 }
 
@@ -174,6 +191,7 @@ export async function getRunState(runId: string): Promise<Record<string, unknown
     result: got.result,
     gateMessage: got.gateMessage,
     spec: got.spec,
+    ...(got.invocation !== undefined ? { invocation: got.invocation } : {}),
     steps: toStepViews(got.steps),
     ...(got.cancelled !== undefined ? { cancelled: got.cancelled } : {}),
   };

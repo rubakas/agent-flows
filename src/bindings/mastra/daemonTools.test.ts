@@ -118,6 +118,46 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
     const out = (await getRunState("run-4")) as { steps: unknown[] };
     assert.deepEqual(out.steps, []);
   });
+
+  it("carries the invocation and per-step model/command, but never the prompt (D6)", async () => {
+    handler = (_req, res) => {
+      respondJson(res, 200, {
+        runId: "run-5",
+        pipelineId: "develop",
+        status: "succeeded",
+        invocation: {
+          pipeline: "develop",
+          inputs: { plan: "ship it" },
+          gateMode: "manual",
+          startedAt: "2026-09-13T10:00:00.000Z",
+          source: "http",
+        },
+        steps: {
+          "develop.code": {
+            status: "succeeded",
+            model: "sonnet (cli:claude)",
+            prompt: "a very long rendered prompt",
+          },
+          "develop.check": { status: "succeeded", command: "echo hello" },
+        },
+      });
+    };
+
+    const out = (await getRunState("run-5")) as {
+      invocation?: Record<string, unknown>;
+      steps: Record<string, unknown>[];
+    };
+    assert.equal(out.invocation?.pipeline, "develop");
+    assert.deepEqual(out.invocation?.inputs, { plan: "ship it" });
+    assert.deepEqual(out.steps, [
+      { id: "develop.code", status: "succeeded", model: "sonnet (cli:claude)" },
+      { id: "develop.check", status: "succeeded", command: "echo hello" },
+    ]);
+    assert.ok(
+      !JSON.stringify(out).includes("rendered prompt"),
+      "get_run must never forward prompt text to chat — D6"
+    );
+  });
 });
 
 describe("run_pipeline polling — 'cancelled' is terminal (FR-010)", () => {

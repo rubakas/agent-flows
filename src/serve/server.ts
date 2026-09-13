@@ -128,8 +128,14 @@ function readProjectN8nMap(state: ProjectState, projectDir: string): Record<stri
 }
 
 function writeProjectN8nMap(state: ProjectState, map: Record<string, string>): void {
-  mkdirSync(state.dir, { recursive: true });
-  writeFileSync(state.n8nMapPath, JSON.stringify({ workflows: map }, null, 2), "utf8");
+  // Owner-only, matching every other file under the state dir (projectState.ts,
+  // routes/n8n.ts): the map names this machine's workflows and has no business
+  // being group- or world-readable.
+  mkdirSync(state.dir, { recursive: true, mode: 0o700 });
+  writeFileSync(state.n8nMapPath, JSON.stringify({ workflows: map }, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 }
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
@@ -663,6 +669,25 @@ async function handleRequest(
     return;
   }
 
+  // GET /ui-route.js — the page's hash router, kept as a real module file so it
+  // can be unit-tested without a DOM (spec 034 D7/V2). Served from the same
+  // directory as ui.html; no build step.
+  if (method === "GET" && pathname === "/ui-route.js") {
+    const routePath = join(dirname(ctx.uiPath), "ui-route.js");
+    if (!existsSync(routePath)) {
+      res.writeHead(503, { "Content-Type": "text/plain" });
+      res.end("UI router absent: src/serve/ui-route.js is missing");
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+    });
+    res.end(readFileSync(routePath, "utf8"));
+    return;
+  }
+
   // GET /api/pipelines
   if (method === "GET" && pathname === "/api/pipelines") {
     let files: string[];
@@ -1146,6 +1171,7 @@ async function handleRequest(
       gateMode: gateMode ?? "manual",
       ...(pipelineEntry !== undefined ? { pipelineSteps: pipelineEntry.loaded.def.steps } : {}),
       ...(chainArtifactDir !== undefined ? { chainArtifactDir } : {}),
+      ...(typeof artifactPath === "string" ? { artifactPath } : {}),
     });
     json(res, 200, result);
     return;
@@ -1422,6 +1448,16 @@ async function handleRequest(
 
     const isBundled = resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir);
 
+    // spec 034 D6: the Settings view reports which provider profile is in force.
+    // A profile that cannot be resolved is reported as "unknown" rather than
+    // failing the whole environment response.
+    let profile: string;
+    try {
+      profile = getActiveProfile().id;
+    } catch {
+      profile = "unknown";
+    }
+
     json(res, 200, {
       projectDir: ctx.projectDir,
       stateDir: ctx.state.dir,
@@ -1429,6 +1465,8 @@ async function handleRequest(
       dbPath: ctx.dbPath,
       pipelinesSource: isBundled ? "bundled" : "project",
       pipelinesDir: ctx.pipelinesDir,
+      port: ctx.boundPort,
+      profile,
       installed: listInstalled(ctx.projectDir),
       available: listAvailable(ctx.bundledPipelinesDir),
       skills,

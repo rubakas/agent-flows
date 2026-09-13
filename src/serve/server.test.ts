@@ -31,6 +31,7 @@ import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { ModelRegistry } from "../canon/registry.js";
 import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
+import { clearRun, recordStep } from "../runtime/stepIntrospection.js";
 import {
   startServer,
   readAgentFlowsConfig,
@@ -2065,8 +2066,8 @@ describe("GET / — run observability wired in served HTML (FR-003/FR-004/FR-006
       'served HTML must contain "loadRuns" — run list function is missing'
     );
     assert.ok(
-      html.includes("Active Runs"),
-      'served HTML must contain "Active Runs" — run observability section heading is missing'
+      html.includes('id="view-runs"'),
+      'served HTML must contain the "view-runs" container — the runs view is missing'
     );
   });
 
@@ -2078,8 +2079,8 @@ describe("GET / — run observability wired in served HTML (FR-003/FR-004/FR-006
       'served HTML must reference the SSE "/events" path — live run attachment is missing'
     );
     assert.ok(
-      html.includes("attachToRun"),
-      'served HTML must contain "attachToRun" — live attachment function is missing'
+      html.includes("openRunView"),
+      'served HTML must contain "openRunView" — live run attachment is missing'
     );
   });
 
@@ -2112,6 +2113,257 @@ describe("GET / — run observability wired in served HTML (FR-003/FR-004/FR-006
     assert.ok(
       !html.includes('=== "success"'),
       'served HTML must not compare against "success" status string (FR-005); use "succeeded"'
+    );
+  });
+});
+
+// ── Spec 033 D6: run details on the route and in the served page ─────────────
+
+describe("GET /api/runs/:id — invocation and step introspection (FR-016/FR-017)", () => {
+  let srv: ServeHandle;
+  let runId: string;
+
+  before(async () => {
+    const mockRun = makeMockRun("details-run-01", successResult(), successResult());
+    const svc = new RunService(makeMastra(mockRun));
+    const start = await svc.start(
+      "test-pipeline",
+      { request: "fix the auth bug" },
+      { gateMode: "auto" }
+    );
+    runId = start.runId;
+    // Stand in for an executing step: buildLlmStep's own recording call is
+    // covered by runService.test.ts; this test owns the route contract.
+    recordStep(runId, "investigate.survey", {
+      prompt: "Survey this: fix the auth bug",
+      model: "sonnet (cli:claude)",
+    });
+    recordStep(runId, "develop.check", { command: "echo hello" });
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: svc,
+    });
+  });
+  after(async () => {
+    clearRun(runId);
+    await srv.close();
+  });
+
+  it("returns the invocation and per-step prompt/model/command", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      invocation?: { pipeline?: string; inputs?: Record<string, unknown>; gateMode?: string };
+      steps: Record<string, { prompt?: string; model?: string; command?: string }>;
+    };
+    assert.equal(body.invocation?.pipeline, "test-pipeline", "invocation must reach the route");
+    assert.deepEqual(body.invocation?.inputs, { request: "fix the auth bug" });
+    assert.equal(body.invocation?.gateMode, "auto");
+    assert.equal(body.steps["investigate.survey"]?.prompt, "Survey this: fix the auth bug");
+    assert.equal(body.steps["investigate.survey"]?.model, "sonnet (cli:claude)");
+    assert.equal(body.steps["develop.check"]?.command, "echo hello");
+  });
+
+  it("GET /api/runs summaries stay light — no invocation or step data", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs`);
+    const body = (await res.json()) as { runs: Record<string, unknown>[] };
+    const summary = body.runs.find((r) => r.runId === runId);
+    assert.ok(summary !== undefined, "the run must appear in the list");
+    assert.equal(summary.invocation, undefined, "summaries must not carry the invocation");
+    assert.equal(summary.steps, undefined, "summaries must not carry step state");
+  });
+});
+
+describe("GET / — run details panel wired in served HTML (FR-019/FR-020/FR-021)", () => {
+  let srv: ServeHandle;
+  let html: string;
+
+  before(async () => {
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+    html = await (await fetch(`http://127.0.0.1:${srv.port}/`)).text();
+  });
+  after(async () => srv.close());
+
+  it('the run-list button reads "Details", not "Attach"', () => {
+    assert.ok(html.includes(">Details<"), 'run list button must read "Details" — FR-019');
+    assert.ok(!html.includes(">Attach<"), 'the old "Attach" button label must be gone — FR-019');
+    assert.ok(html.includes("data-run-details"), "the Details button must carry data-run-details");
+  });
+
+  it("the detail panel carries the run-id, invocation and step-detail elements", () => {
+    for (const id of [
+      "run-detail-title",
+      "run-detail-id",
+      "run-invocation-chat",
+      "run-invocation-curl",
+      "step-detail",
+    ]) {
+      assert.ok(html.includes(id), `served HTML must contain the "${id}" element — FR-019/FR-020`);
+    }
+    assert.ok(
+      html.includes("HOW IT WAS RUN"),
+      'served HTML must contain the "How it was run" block'
+    );
+    assert.ok(html.includes("run_pipeline("), "served HTML must render the chat call — FR-020");
+    assert.ok(html.includes("curl -X POST"), "served HTML must render the curl call — FR-020");
+  });
+});
+
+describe("GET /api/runs — summaries carry settledAt once terminal (spec 034 FR-002)", () => {
+  let srv: ServeHandle;
+  let runId: string;
+
+  before(async () => {
+    const svc = new RunService(
+      makeMastra(makeMockRun("summary-settled", successResult(), successResult()))
+    );
+    const start = await svc.start("test-pipeline", {});
+    runId = start.runId;
+    await svc.waitForSettled(runId);
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: svc,
+    });
+  });
+  after(async () => srv.close());
+
+  it("the list route reports createdAt and settledAt for a finished run", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      runs: { runId: string; createdAt: string; settledAt?: string }[];
+    };
+    const summary = body.runs.find((r) => r.runId === runId);
+    assert.ok(summary !== undefined, "the run must appear in the list");
+    assert.ok(
+      typeof summary.settledAt === "string",
+      `GET /api/runs must carry settledAt for a settled run; got ${JSON.stringify(summary)}`
+    );
+    assert.ok(
+      Date.parse(summary.settledAt) >= Date.parse(summary.createdAt),
+      "settledAt must not precede createdAt"
+    );
+  });
+});
+
+// ── Spec 034: hash-routed views ──────────────────────────────────────────────
+
+describe("GET / — four views, tabs and router wired in served HTML (V1)", () => {
+  let srv: ServeHandle;
+  let html: string;
+
+  before(async () => {
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+    html = await (await fetch(`http://127.0.0.1:${srv.port}/`)).text();
+  });
+  after(async () => srv.close());
+
+  it("carries every view container and tab id", () => {
+    for (const id of ["view-runs", "view-run", "view-workflows", "view-templates", "view-settings"])
+      assert.ok(html.includes(`id="${id}"`), `served HTML must contain the "${id}" container`);
+    for (const id of ["tab-runs", "tab-workflows", "tab-templates", "tab-settings"])
+      assert.ok(html.includes(`id="${id}"`), `served HTML must contain the "${id}" tab`);
+    assert.ok(!html.includes(">Attach<"), 'the old "Attach" button label must be gone');
+  });
+
+  it("imports the router module and routes every tab by hash", () => {
+    assert.ok(html.includes('from "/ui-route.js"'), "the page must import the shared router");
+    for (const hash of ["#/runs", "#/workflows", "#/templates", "#/settings"])
+      assert.ok(html.includes(`href="${hash}"`), `the ${hash} tab link is missing`);
+  });
+
+  it("the n8n connect/disconnect buttons live inside the settings view", () => {
+    const settingsStart = html.indexOf('id="view-settings"');
+    const settingsEnd = html.indexOf("</main>", settingsStart);
+    assert.ok(settingsStart !== -1 && settingsEnd > settingsStart, "settings view not found");
+    const settings = html.slice(settingsStart, settingsEnd);
+    for (const id of ["btn-n8n-connect", "btn-n8n-disconnect", "n8n-status-badge"])
+      assert.ok(id.length > 0 && settings.includes(id), `"${id}" must sit in the settings view`);
+
+    // FR-008: and nowhere before it — the header must be free of n8n controls.
+    const header = html.slice(0, settingsStart);
+    assert.ok(
+      !header.includes("btn-n8n-connect"),
+      "the n8n connect button must not appear before the settings view (FR-008)"
+    );
+  });
+
+  it("hosts Save-from-n8n in Templates and New-in-n8n in Workflows (FR-008)", () => {
+    const wfStart = html.indexOf('id="view-workflows"');
+    const tmplStart = html.indexOf('id="view-templates"');
+    const setStart = html.indexOf('id="view-settings"');
+    assert.ok(wfStart !== -1 && tmplStart > wfStart && setStart > tmplStart, "view order");
+    assert.ok(
+      html.slice(wfStart, tmplStart).includes("btn-new-in-n8n"),
+      "New in n8n belongs to the Workflows view"
+    );
+    assert.ok(
+      html.slice(tmplStart, setStart).includes("btn-save-from-n8n"),
+      "Save from n8n… belongs to the Templates view"
+    );
+  });
+});
+
+describe("GET /ui-route.js — the router module is served next to the page (D7)", () => {
+  let srv: ServeHandle;
+
+  before(async () => {
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => srv.close());
+
+  it("serves the module with a JavaScript content type", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ui-route.js`);
+    assert.equal(res.status, 200);
+    const ctype = res.headers.get("content-type") ?? "";
+    assert.match(ctype, /javascript/u, `expected a JS content type, got "${ctype}"`);
+    const body = await res.text();
+    assert.ok(body.includes("export function parseHash"), "the module must export parseHash");
+  });
+});
+
+describe("GET /api/environment — port and provider profile (D6/FR-007)", () => {
+  let srv: ServeHandle;
+
+  before(async () => {
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => srv.close());
+
+  it("reports the bound port and the active profile id", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/environment`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { port?: number; profile?: string };
+    assert.equal(body.port, srv.port, "port must be the actually-bound port, not the requested 0");
+    assert.ok(
+      typeof body.profile === "string" && body.profile.length > 0,
+      `profile must be a non-empty string; got ${JSON.stringify(body.profile)}`
     );
   });
 });

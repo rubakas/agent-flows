@@ -12,6 +12,7 @@ import { getActiveProfile, resolveStepModel } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
 import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
+import { recordStep } from "../../runtime/stepIntrospection.js";
 import type { ModelRegistry, ProviderProfile } from "../../canon/registry.js";
 import type { StepRunnerDeps } from "../../canon/runStep.js";
 import type { HardenedSpec, LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
@@ -217,7 +218,7 @@ export function buildLlmStep(
     id: step.id,
     inputSchema: ctx,
     outputSchema: ctx,
-    execute: async ({ inputData, abortSignal }) => {
+    execute: async ({ inputData, abortSignal, runId }) => {
       assertNotCancelled(step.id, abortSignal);
       const rawCtx = inputData as Ctx;
       const ctxData: Ctx = visibleKeys
@@ -254,6 +255,14 @@ export function buildLlmStep(
       if (step.skills?.length) {
         prompt += `\n\nAvailable skills: ${step.skills.join(", ")}. Invoke with /skill-name.`;
       }
+
+      // D6: hand the prompt and resolved model to the per-run introspection
+      // channel keyed by Mastra's runId — never onto BuildDeps, which is shared
+      // by every concurrent run on this workflow.
+      recordStep(runId, step.id, {
+        prompt,
+        model: `${entry.id} (${entry.transport}${entry.cli?.bin ? ":" + entry.cli.bin : ""})`,
+      });
 
       // Thread per-step and pipeline-level timeouts into the runner deps.
       // runLlmStep resolves the effective timeout as: timeoutMs ?? defaultTimeoutMs.
@@ -511,9 +520,11 @@ export function buildCheckStep(
     id: step.id,
     inputSchema: ctx,
     outputSchema: ctx,
-    execute: async ({ inputData, abortSignal }) => {
+    execute: async ({ inputData, abortSignal, runId }) => {
       assertNotCancelled(step.id, abortSignal);
       const rawCtx = inputData as Ctx;
+      // D6: record the command actually executed, per run (see buildLlmStep).
+      recordStep(runId, step.id, { command: resolvedCommand });
       // FR-013: per-run signal from the execute params, combined with any
       // build-time one; BuildDeps.runnerDeps must not carry a per-run signal.
       const signal = combineSignals(deps.runnerDeps?.signal, abortSignal);
