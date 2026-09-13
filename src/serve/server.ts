@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  realpathSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -19,7 +20,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parse, stringify } from "yaml";
@@ -285,27 +286,91 @@ function isHardenedSpec(v: Record<string, unknown>): boolean {
  * projectDir; the same containment principle as assertSafePath (install/paths.ts)
  * applies but adapted for the absolute-path cross-project use case.
  */
+/**
+ * The state root this daemon writes under: `AGENT_FLOWS_HOME ?? ~/.agent-flows`.
+ *
+ * Derived from the resolved ProjectState rather than the environment, because
+ * the daemon is handed its state explicitly and a test's isolated state home
+ * never reaches process.env (`resolveProjectState(dir, { AGENT_FLOWS_HOME })`).
+ * `state.dir` is `<root>/projects/<key>` by construction (projectState.ts).
+ */
+function stateRootOf(state: ProjectState): string {
+  return dirname(dirname(state.dir));
+}
+
+/**
+ * `candidate` with every symlink on its existing prefix resolved, keeping the
+ * components that do not exist yet.
+ *
+ * The candidate itself usually does not exist (a chain writes new artifacts
+ * beside the one it was handed), so realpath cannot be called on it directly.
+ * The missing components must be carried over rather than dropped: returning
+ * the nearest existing ancestor alone would shorten a not-yet-created state
+ * root to its parent directory — and a containment check against a parent
+ * accepts everything beside it. That bug was live in this function for one
+ * commit-sized moment and is exactly what the "/tmp/x is rejected" test pins.
+ */
+function realpathish(candidate: string): string {
+  const abs = resolve(candidate);
+  let current = abs;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync(current);
+      return missing.length > 0 ? join(real, ...missing.reverse()) : real;
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return abs;
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Resolve an artifact path supplied by an HTTP request (or the MCP tools, which
+ * proxy through the same route).
+ *
+ * The path decides where the *next* stage's artifacts are written
+ * (`chainArtifactDir`, `runService.ts`), so an unconstrained value turns
+ * "continue this chain" into "write JSON anywhere this daemon can reach" and
+ * "read any JSON file on the machine". Every artifact this daemon produces
+ * lives under the state root (spec 032 D2), so that root is the boundary:
+ * cross-*project* handoff still works — every project's state lives under the
+ * same root — while paths outside it are refused.
+ *
+ * A symlink is resolved before the check, so a link planted inside the state
+ * root cannot be used to step outside it.
+ */
 function resolveArtifactPath(
   projectDir: string,
-  artifactPath: string
+  artifactPath: string,
+  stateRoot: string
 ): { ok: true; resolved: string } | { ok: false; error: string } {
   if (!artifactPath || artifactPath.includes("\0")) {
     return { ok: false, error: `Invalid artifact path: ${JSON.stringify(artifactPath)}` };
   }
-  // Absolute paths are passed through — the operator is explicitly choosing to
-  // cross project boundaries, which is the point of the feature.
+
+  let resolved: string;
   if (isAbsolute(artifactPath)) {
-    return { ok: true, resolved: artifactPath };
+    resolved = resolve(artifactPath);
+  } else {
+    // Relative paths: resolve from projectDir and verify containment there first,
+    // so a traversal attempt is reported as what it is.
+    // path.join strips leading slashes from non-first args, so absolute-looking
+    // relative paths (e.g. the empty string after stripping) cannot escape here.
+    resolved = resolve(join(projectDir, artifactPath));
+    if (!isContained(projectDir, resolved)) {
+      return {
+        ok: false,
+        error: `Artifact path ${JSON.stringify(artifactPath)} escapes the project directory — rejected`,
+      };
+    }
   }
-  // Relative paths: resolve from projectDir and verify containment.
-  // path.join strips leading slashes from non-first args, so absolute-looking
-  // relative paths (e.g. the empty string after stripping) cannot escape here.
-  const resolved = resolve(join(projectDir, artifactPath));
-  if (!isContained(projectDir, resolved)) {
-    return {
-      ok: false,
-      error: `Artifact path ${JSON.stringify(artifactPath)} escapes the project directory — rejected`,
-    };
+
+  const realRoot = realpathish(stateRoot);
+  if (!isContained(realRoot, realpathish(resolved))) {
+    return { ok: false, error: `artifactPath must be under ${realRoot}` };
   }
   return { ok: true, resolved };
 }
@@ -967,7 +1032,7 @@ async function handleRequest(
 
       // Resolve and contain the path — absolute paths cross project boundaries
       // (allowed by design), relative paths must stay inside projectDir.
-      const pathResult = resolveArtifactPath(ctx.projectDir, artifactPath);
+      const pathResult = resolveArtifactPath(ctx.projectDir, artifactPath, stateRootOf(ctx.state));
       if (!pathResult.ok) {
         json(res, 400, { error: pathResult.error });
         return;
@@ -1161,7 +1226,7 @@ async function handleRequest(
     // The chain dir is the directory that contains the source artifact file.
     let chainArtifactDir: string | undefined;
     if (artifactPath !== undefined && typeof artifactPath === "string") {
-      const pathResult = resolveArtifactPath(ctx.projectDir, artifactPath);
+      const pathResult = resolveArtifactPath(ctx.projectDir, artifactPath, stateRootOf(ctx.state));
       if (pathResult.ok) {
         chainArtifactDir = dirname(pathResult.resolved);
       }

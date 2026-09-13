@@ -107,8 +107,13 @@ export async function writeRunArtifact(
   const artifactPath = join(artifactDir, `${pipelineId}.json`);
 
   try {
-    await mkdir(artifactDir, { recursive: true });
-    await writeFile(artifactPath, JSON.stringify(artifactData, null, 2), "utf8");
+    // Owner-only: an artifact holds rendered prompts and step output, i.e. the
+    // repository's content. Same modes as everything else under the state dir.
+    await mkdir(artifactDir, { recursive: true, mode: 0o700 });
+    await writeFile(artifactPath, JSON.stringify(artifactData, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
     return artifactPath;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -183,7 +188,10 @@ export async function upsertManifestEntry(
   manifest.status = deriveChainStatus(manifest.stages);
 
   try {
-    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[agent-flows] manifest write failed at ${manifestPath}: ${msg}`);

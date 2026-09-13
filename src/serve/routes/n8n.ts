@@ -44,9 +44,20 @@ export function readN8nConfig(): N8nConfig | null {
   const envUrl = process.env.AGENT_FLOWS_N8N_URL;
   const envKey = process.env.AGENT_FLOWS_N8N_API_KEY;
   if (envUrl && envKey) {
+    // POST /api/n8n/configure validates the URL before storing it, but the env
+    // and file branches used to skip that check — so a "javascript:" or "file:"
+    // base URL could reach the page and be handed to window.open. An invalid
+    // value counts as not configured, with the reason logged (never the key).
+    const envValidation = validateN8nBaseUrl(envUrl);
+    if (!envValidation.ok) {
+      console.warn(
+        `[agent-flows] ignoring AGENT_FLOWS_N8N_URL: ${envValidation.error} — n8n reported as not configured`
+      );
+      return null;
+    }
     return {
       configured: true,
-      baseUrl: envUrl.replace(/\/+$/u, ""),
+      baseUrl: envValidation.normalized,
       apiKey: envKey,
       source: "environment",
     };
@@ -55,10 +66,17 @@ export function readN8nConfig(): N8nConfig | null {
   if (!existsSync(configPath)) return null;
   try {
     const raw = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
-    const baseUrl = typeof raw.baseUrl === "string" ? raw.baseUrl.replace(/\/+$/u, "") : undefined;
+    const rawBaseUrl = typeof raw.baseUrl === "string" ? raw.baseUrl : undefined;
     const apiKey = typeof raw.apiKey === "string" ? raw.apiKey : undefined;
-    if (!baseUrl || !apiKey) return null;
-    return { configured: true, baseUrl, apiKey, source: "file" };
+    if (!rawBaseUrl || !apiKey) return null;
+    const fileValidation = validateN8nBaseUrl(rawBaseUrl);
+    if (!fileValidation.ok) {
+      console.warn(
+        `[agent-flows] ignoring baseUrl in ${configPath}: ${fileValidation.error} — n8n reported as not configured`
+      );
+      return null;
+    }
+    return { configured: true, baseUrl: fileValidation.normalized, apiKey, source: "file" };
   } catch {
     return null;
   }

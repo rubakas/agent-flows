@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   existsSync,
   mkdtempSync,
+  statSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -24,6 +25,8 @@ import {
   listPersistedRuns,
   readManifest,
   readPersistedRun,
+  upsertManifestEntry,
+  writeRunArtifact,
 } from "./artifactStore.js";
 import { ensureProjectState, resolveProjectState } from "./projectState.js";
 import { RunService } from "./runService.js";
@@ -1202,6 +1205,43 @@ describe("listPersistedRuns / readPersistedRun — runs survive the daemon", () 
       assert.equal(listPersistedRuns(runsDir).length, 1, "one directory is one listed run");
     } finally {
       rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Audit: artifacts are owner-only ──────────────────────────────────────────
+
+describe("writeRunArtifact / upsertManifestEntry — owner-only modes", () => {
+  it("creates the run dir 0700 and writes artifact and manifest 0600", async () => {
+    const root = mkdtempSync(join(tmpdir(), "af-modes-"));
+    try {
+      const artifactDir = join(root, "run-modes-01");
+      const artifactPath = await writeRunArtifact(artifactDir, "run-modes-01", "test", {
+        status: "succeeded",
+      });
+      assert.ok(artifactPath !== undefined, "the artifact must be written");
+      await upsertManifestEntry(artifactDir, new Date().toISOString(), {
+        stageId: "test",
+        artifactPath,
+        profileId: "anthropic",
+        status: "succeeded",
+        settledAt: new Date().toISOString(),
+      });
+
+      // An artifact holds rendered prompts and step output — repository content.
+      assert.equal(
+        statSync(artifactDir).mode & 0o777,
+        0o700,
+        "the run directory must not be group- or world-readable"
+      );
+      assert.equal(statSync(artifactPath).mode & 0o777, 0o600, "artifact must be 0600");
+      assert.equal(
+        statSync(join(artifactDir, "manifest.json")).mode & 0o777,
+        0o600,
+        "manifest must be 0600"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

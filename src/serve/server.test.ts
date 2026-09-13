@@ -19,12 +19,13 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { request as httpRequest, type IncomingMessage, type RequestOptions } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import { Mastra } from "@mastra/core";
@@ -2485,6 +2486,162 @@ describe("A restart keeps a real run visible (spec 034 V5)", () => {
   });
 });
 
+// ── Audit: artifactPath must stay under the state root ───────────────────────
+//
+// artifactPath decides where the NEXT stage's artifacts are written
+// (chainArtifactDir), so an unconstrained value is an arbitrary-write primitive.
+
+describe("POST /api/runs — artifactPath is confined to the state root", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+  let stateRunsDir: string;
+
+  function writeArtifactAt(path: string): void {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      path,
+      JSON.stringify({
+        runId: "src-run",
+        pipelineId: "spec-creation",
+        status: "succeeded",
+        gateMode: "manual",
+        spec: { title: "T", description: "D" },
+        steps: {},
+        gateDecisions: [],
+      }),
+      "utf8"
+    );
+  }
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-artifact-root-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    stateRunsDir = makeState(projectDir).runsDir;
+    srv = await startServer({
+      state: makeState(projectDir),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      runService: new RunService(
+        makeMastra(makeMockRun("artifact-root-run", successResult(), successResult()))
+      ),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("accepts a path inside the state root", async () => {
+    const inside = join(stateRunsDir, "inside-run", "spec-creation.json");
+    writeArtifactAt(inside);
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: inside,
+    });
+    const body = (await res.json()) as { error?: string };
+    assert.ok(
+      !body.error?.includes("must be under"),
+      `a path under the state root must be accepted; got: ${JSON.stringify(body)}`
+    );
+  });
+
+  it("rejects an absolute path outside the state root with 400", async () => {
+    const outside = join(tmpDir, "elsewhere", "spec-creation.json");
+    writeArtifactAt(outside);
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: outside,
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /artifactPath must be under /u);
+  });
+
+  it("rejects /tmp/x — a path the daemon never writes to", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: "/tmp/x",
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error as string, /artifactPath must be under /u);
+  });
+
+  it("rejects <stateRoot>/../x — traversal out of the root", async () => {
+    const escaped = join(stateRunsDir, "..", "..", "..", "..", "x.json");
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: escaped,
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error as string, /artifactPath must be under /u);
+  });
+
+  it("rejects a symlink inside the root that points outside it", async () => {
+    const target = join(tmpDir, "linked-target");
+    mkdirSync(target, { recursive: true });
+    writeArtifactAt(join(target, "spec-creation.json"));
+    const link = join(stateRunsDir, "link-out");
+    mkdirSync(dirname(link), { recursive: true });
+    try {
+      symlinkSync(target, link, "dir");
+    } catch {
+      return; // symlinks unavailable — nothing to assert
+    }
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "build",
+      artifactPath: join(link, "spec-creation.json"),
+    });
+    assert.equal(res.status, 400, "a symlink must not be a way out of the state root");
+    assert.match((await res.json()).error as string, /artifactPath must be under /u);
+  });
+});
+
+// ── Audit: an invalid n8n base URL counts as not configured ──────────────────
+
+describe("GET /api/n8n/status — a non-http base URL is not a configuration", () => {
+  let srv: ServeHandle;
+  let savedUrl: string | undefined;
+  let savedKey: string | undefined;
+
+  before(async () => {
+    savedUrl = process.env.AGENT_FLOWS_N8N_URL;
+    savedKey = process.env.AGENT_FLOWS_N8N_API_KEY;
+    // The page hands baseUrl to window.open; a javascript: URL there would run
+    // in the page's own origin.
+    process.env.AGENT_FLOWS_N8N_URL = "javascript:alert(1)//";
+    process.env.AGENT_FLOWS_N8N_API_KEY = "irrelevant";
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    if (savedUrl === undefined) delete process.env.AGENT_FLOWS_N8N_URL;
+    else process.env.AGENT_FLOWS_N8N_URL = savedUrl;
+    if (savedKey === undefined) delete process.env.AGENT_FLOWS_N8N_API_KEY;
+    else process.env.AGENT_FLOWS_N8N_API_KEY = savedKey;
+  });
+
+  it("reports not configured and never echoes the rejected URL as a base URL", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/n8n/status`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.configured, false, "an unusable base URL is not a configuration");
+    assert.equal(body.baseUrl, undefined);
+    assert.ok(
+      !JSON.stringify(body).includes("javascript:"),
+      "the rejected scheme must not reach the page"
+    );
+  });
+});
+
 // ── Spec 034: hash-routed views ──────────────────────────────────────────────
 
 describe("GET / — four views, tabs and router wired in served HTML (V1)", () => {
@@ -2529,6 +2686,43 @@ describe("GET / — four views, tabs and router wired in served HTML (V1)", () =
     assert.ok(
       !header.includes("btn-n8n-connect"),
       "the n8n connect button must not appear before the settings view (FR-008)"
+    );
+  });
+
+  it("carries the split-view containers and the settings reader (D9/FR-013/FR-014)", () => {
+    for (const id of [
+      "runs-split",
+      "runs-pane-list",
+      "runs-pane-detail",
+      "settings-split",
+      "settings-pane-list",
+      "settings-reader",
+    ])
+      assert.ok(html.includes(`id="${id}"`), `served HTML must contain the "${id}" pane — D9`);
+    assert.ok(
+      html.includes('matchMedia("(min-width: 1200px)")'),
+      "the page must watch the 1200px breakpoint so a resize re-lays-out the panes"
+    );
+    assert.ok(
+      html.includes("@media (min-width: 1200px)"),
+      "the split layout must be a media query, not a JS-only layout"
+    );
+  });
+
+  it("keeps the stream rule and the no-double-escape rule (FR-004, audit)", () => {
+    assert.ok(html.includes("__afDebug"), "the SSE open/close counters must stay observable");
+    assert.ok(html.includes("sseOpens") && html.includes("sseCloses"), "both counters must exist");
+    assert.ok(
+      html.includes("closeRunStream"),
+      "the stream must still be closed explicitly on selection change"
+    );
+    assert.ok(
+      !html.includes("textContent = escH("),
+      "textContent escapes on assignment — escaping first double-escapes the text"
+    );
+    assert.ok(
+      html.includes('["http:", "https:"].includes(parsed.protocol)'),
+      "every externally-supplied URL must be scheme-checked before window.open"
     );
   });
 
@@ -2875,7 +3069,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
   //   result — the run's accumulated context keyed by step id, matching what Mastra
   //            returns as r.result. The "findings" step output is at result.findings.
   function writeArtifact(dir: string, overrides: Record<string, unknown> = {}): string {
-    const runsDir = join(dir, ".agent-flows", "runs", "run-handoff-src");
+    const runsDir = join(makeState(dir).runsDir, "run-handoff-src");
     mkdirSync(runsDir, { recursive: true });
     const artifactPath = join(runsDir, "spec-creation.json");
     const artifact = {
@@ -3049,7 +3243,8 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
   });
 
   it("returns 400 for a file that is not valid JSON", async () => {
-    const badPath = join(projectDir, "bad-artifact.json");
+    const badPath = join(makeState(projectDir).runsDir, "bad-artifact.json");
+    mkdirSync(dirname(badPath), { recursive: true });
     writeFileSync(badPath, "not json {{{", "utf8");
     const res = await mutate(srv.port, "POST", "/api/runs", {
       pipeline: "build",
@@ -3079,7 +3274,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
 
   it("returns 400 when a required input cannot be resolved from the artifact (unresolvable guard)", async () => {
     // Write an artifact that has neither spec nor result — no mappable fields.
-    const runsDir = join(projectDir, ".agent-flows", "runs", "run-no-mappable");
+    const runsDir = join(makeState(projectDir).runsDir, "run-no-mappable");
     mkdirSync(runsDir, { recursive: true });
     const noMappablePath = join(runsDir, "empty.json");
     writeFileSync(
@@ -3122,7 +3317,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
     // (keyed by step id) but the target input name does not appear as a key.
     // Silently passing the object into z.string() produces a zod failure deep
     // in the workflow engine — the guard must catch it at the HTTP boundary instead.
-    const runsDir = join(projectDir, ".agent-flows", "runs", "run-no-findings-key");
+    const runsDir = join(makeState(projectDir).runsDir, "run-no-findings-key");
     mkdirSync(runsDir, { recursive: true });
     const noFindingsKeyPath = join(runsDir, "investigate.json");
     writeFileSync(
@@ -3285,7 +3480,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
       securityFindings: [],
     };
 
-    const runsDir = join(projectDir, ".agent-flows", "runs", "run-structured-spec");
+    const runsDir = join(makeState(projectDir).runsDir, "run-structured-spec");
     mkdirSync(runsDir, { recursive: true });
     const artifactPath = join(runsDir, "spec-creation.json");
     writeFileSync(
@@ -3424,24 +3619,28 @@ describe("FR-003: artifactPath traversal outside project directory is rejected",
     );
   });
 
-  it("allows an absolute path that points outside the project (cross-project use case)", async () => {
-    // Absolute paths are the operator's explicit choice for cross-project handoffs (FR-003).
-    // The artifact has status "succeeded" but no resolvable inputs for "build", so this
-    // returns 400 for the unresolvable-input reason — not for path containment.
-    const outsidePath = join(tmpDir, "outside.json");
+  it("allows an absolute path under the state root (cross-project handoff)", async () => {
+    // Cross-project handoff is still the point of absolute paths (FR-003), and it
+    // still works: every project's artifacts live under the one state root, so a
+    // path there passes the guard. The request may then fail for the unresolvable
+    // 'plan' input — that is a different error, and the assertion below says so.
+    const insidePath = join(makeState(projectDir).runsDir, "other-project", "spec-creation.json");
+    mkdirSync(dirname(insidePath), { recursive: true });
+    writeFileSync(
+      insidePath,
+      '{"status":"succeeded","runId":"x","pipelineId":"x","gateMode":"manual","steps":{},"gateDecisions":[]}',
+      "utf8"
+    );
     const res = await mutate(srv.port, "POST", "/api/runs", {
       pipeline: "build",
-      artifactPath: outsidePath,
+      artifactPath: insidePath,
     });
-    // Must NOT return 400 for path traversal — the path guard must not fire.
-    // It may return 400 for the unresolvable 'plan' input (outside.json lacks spec),
-    // or 200 if the run starts. Both are acceptable — containment was not the blocker.
     const body = (await res.json()) as { error?: string };
     if (body.error !== undefined) {
       assert.ok(
-        !body.error.toLowerCase().includes("escapes") &&
-          !body.error.toLowerCase().includes("project directory"),
-        `absolute path must pass the containment guard; got: ${body.error}`
+        !body.error.toLowerCase().includes("must be under") &&
+          !body.error.toLowerCase().includes("escapes"),
+        `a path under the state root must pass the containment guard; got: ${body.error}`
       );
     }
   });
@@ -3464,7 +3663,7 @@ describe("FR-004: artifact from a different provider profile starts a new run un
 
   it("accepts an artifact produced by a different profile and starts the run", async () => {
     // Write an artifact with profileId "anthropic".
-    const runsDir = join(projectDir, ".agent-flows", "runs", "run-cross-profile");
+    const runsDir = join(makeState(projectDir).runsDir, "run-cross-profile");
     mkdirSync(runsDir, { recursive: true });
     const artifactPath = join(runsDir, "spec-creation.json");
     writeFileSync(
@@ -3626,7 +3825,7 @@ describe("FR-005: POST /api/runs/decide — entry-point decision route", () => {
 
   it("artifact with spec+gateDecisions → develop", async () => {
     // Write a synthetic artifact file with the artifact signature.
-    const artifactDir = join(projectDir, ".agent-flows", "runs", "decide-src-001");
+    const artifactDir = join(makeState(projectDir).runsDir, "decide-src-001");
     mkdirSync(artifactDir, { recursive: true });
     const artifactPath = join(artifactDir, "spec-creation.json");
     writeFileSync(
