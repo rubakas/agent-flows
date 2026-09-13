@@ -189,6 +189,31 @@ The owner named this the mechanism: ask these questions, implement what they fin
 
 Questions 1, 2, 3 and 7 each found real defects today. Question 8 is what spec 026 exists to answer.
 
+## 2026-09-14 — web page
+
+Spec 033 amendment plus spec 034, all committed; 1361 tests green.
+
+**DONE:** Run details (Attach → Details) header shows workflow name + run id, with a "How it was
+run" panel (chat call and curl); per-step prompt/command/model recorded via
+`src/runtime/stepIntrospection.ts` keyed on Mastra's execute-context `runId`, read-through in
+`RunService.get()`, persisted in the artifact; `get_run` returns invocation + model/command, never
+prompts. Page split into hash-routed views (`src/serve/ui-route.js`): Runs, run view, Workflows,
+Templates, Settings; split layout ≥1200px for Runs and Settings. `GET /api/runs` lists persisted
+runs from `<stateDir>/runs/*` after a restart; `GET /api/runs/:id` opens them from the artifact;
+cancel/approve return 409; proven by a restart test. n8n runtime card: `GET /api/n8n/runtime`
+(`/healthz` probe, 2 s timeout, no credentials sent), `POST /api/n8n/start`/`stop` (detached
+npx/PATH launch, `n8n.pid` 0600, only kills our own owned pid), Connect prefill opens
+`<baseUrl>/settings/api` — the key is still pasted once by the owner. Security review: XSS surface
+closed (escaped or `textContent`), artifact paths 0700/0600 and containment-checked, n8n base URL
+validated and scheme-checked before `window.open`.
+
+**ACCEPTED RISK:** the loopback API serves prompts/inputs to any local process without auth,
+accepted on a single-user 0700-state-dir machine; a token would not stop a same-user process.
+
+**OPEN:** V3/V8 visual pass is the owner's (extension can't render an open event stream); a
+"Run…" form on workflow rows; n8n-through-daemon still needs the 2026-09-13 ADR; the `projectState`
+review's 7 minors are all fixed, none outstanding (2ae2140).
+
 ## Immediate next steps
 
 1. Implement spec 026, starting with cancellation (FR-001 … FR-007) — it is the largest control gap.
