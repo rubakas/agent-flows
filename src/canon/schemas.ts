@@ -23,7 +23,57 @@ export const SEC_SCHEMA = {
   additionalProperties: false,
 };
 
+export const CODE_REVIEW_FINDING = {
+  type: "object",
+  properties: {
+    claim: { type: "string" },
+    file: { type: "string" },
+    line: { type: ["string", "number"] },
+    quote: { type: "string" },
+    verdict: { type: "string", enum: ["CONFIRMED", "PARTIAL", "DECLINED"] },
+    citationAccurate: { type: "boolean" },
+    scope: { type: "string", enum: ["introduced", "pre-existing", "undetermined"] },
+    kind: { type: "string", enum: ["defect", "business-decision", "external-confirmation"] },
+    severity: { type: "string", enum: ["blocking", "major", "minor"] },
+    probes: {
+      type: "object",
+      properties: {
+        guard: { type: "string" },
+        reachability: { type: "string" },
+        remedy: { type: "string" },
+        callers: { type: "string" },
+        scope: { type: "string" },
+      },
+      required: ["guard", "reachability", "remedy", "callers", "scope"],
+      additionalProperties: false,
+    },
+    correctedWording: { type: "string" },
+  },
+  required: [
+    "claim",
+    "file",
+    "line",
+    "quote",
+    "verdict",
+    "citationAccurate",
+    "scope",
+    "kind",
+    "severity",
+    "probes",
+    "correctedWording",
+  ],
+  additionalProperties: false,
+};
+
+export const CODE_REVIEW_SCHEMA = {
+  type: "object",
+  properties: { codeReviewFindings: { type: "array", items: CODE_REVIEW_FINDING } },
+  required: ["codeReviewFindings"],
+  additionalProperties: false,
+};
+
 export const canonSchemas = {
   weaknesses: WEAK_SCHEMA,
   securityFindings: SEC_SCHEMA,
+  codeReviewFindings: CODE_REVIEW_SCHEMA,
 };
