@@ -347,3 +347,148 @@ describe("generateWorkflowScript — dependsOn path", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// schema emission — parallel AND sequential
+// ---------------------------------------------------------------------------
+
+describe("generateWorkflowScript — schema arg", () => {
+  it("emits schema: on a schema-gated step that is alone in its level", () => {
+    // verify depends on both roots, so it is the only step in its level and takes
+    // the sequential emit path — it must still be schema-gated.
+    const loaded: LoadedPipeline = {
+      def: {
+        id: "lone-schema",
+        version: 1,
+        description: "schema step alone in its level",
+        inputs: [],
+        steps: [
+          { id: "correctness", kind: "llm" as const, role: "worker" as const, prompt: "p.md" },
+          { id: "security", kind: "llm" as const, role: "worker" as const, prompt: "p.md" },
+          {
+            id: "verify",
+            kind: "llm" as const,
+            role: "reasoner" as const,
+            prompt: "p.md",
+            dependsOn: ["correctness", "security"],
+            schema: "codeReviewFindings" as const,
+          },
+        ],
+      },
+      prompts: { correctness: "a", security: "b", verify: "c" },
+    };
+    const s = generateWorkflowScript(loaded);
+
+    assert.ok(s.includes("const r_verify ="), "verify must take the sequential path");
+    assert.ok(
+      s.includes("label: 'verify'") && /label: 'verify'[^\n]*schema: CODE_REVIEW_SCHEMA/.test(s),
+      "sequential schema-gated step must emit schema: CODE_REVIEW_SCHEMA"
+    );
+  });
+
+  it("still emits schema: on schema-gated steps inside a parallel level", () => {
+    const loaded: LoadedPipeline = {
+      def: {
+        id: "parallel-schema",
+        version: 1,
+        description: "schema steps in a parallel level",
+        inputs: [],
+        steps: [
+          {
+            id: "critic",
+            kind: "llm" as const,
+            role: "worker" as const,
+            prompt: "p.md",
+            schema: "weaknesses" as const,
+          },
+          {
+            id: "security",
+            kind: "llm" as const,
+            role: "worker" as const,
+            prompt: "p.md",
+            schema: "securityFindings" as const,
+          },
+        ],
+      },
+      prompts: { critic: "a", security: "b" },
+    };
+    const s = generateWorkflowScript(loaded);
+
+    assert.ok(/label: 'critic'[^\n]*schema: WEAK_SCHEMA/.test(s), "critic schema missing");
+    assert.ok(/label: 'security'[^\n]*schema: SEC_SCHEMA/.test(s), "security schema missing");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// return block — with and without an assemble-spec step
+// ---------------------------------------------------------------------------
+
+function returnBlockOf(script: string): string {
+  const idx = script.lastIndexOf("return {");
+  assert.notEqual(idx, -1, "generated script has no return block");
+  return script.slice(idx);
+}
+
+describe("generateWorkflowScript — return block", () => {
+  it("a pipeline without an assemble-spec step never references spec or blocking", () => {
+    const loaded = makeLoaded([
+      { id: "correctness" },
+      { id: "security" },
+      { id: "verify", dependsOn: ["correctness", "security"] },
+      { id: "synthesis", dependsOn: ["verify"] },
+    ]);
+    const s = generateWorkflowScript(loaded);
+
+    // `spec` / `blocking` are only declared by an assemble-spec step. Referencing
+    // them here would make the script throw on an undefined identifier.
+    assert.ok(!/\bconst spec\b/.test(s), "no assemble-spec step should declare spec");
+    assert.ok(!/\bspec\b/.test(s), `generated script references undefined spec:\n${s}`);
+    assert.ok(!/\bblocking\b/.test(s), "generated script references undefined blocking");
+
+    const ret = returnBlockOf(s);
+    assert.ok(ret.includes("synthesis: r_synthesis,"), "final step output must be returned");
+    assert.ok(
+      ret.includes("steps: ['correctness', 'security', 'verify', 'synthesis'],"),
+      `summary must list the step ids that ran, got:\n${ret}`
+    );
+    assert.ok(ret.includes("finalStep: 'synthesis',"), "summary must name the final step");
+  });
+
+  it("a pipeline with an assemble-spec step emits the spec/summary return block unchanged", () => {
+    const loaded: LoadedPipeline = {
+      def: {
+        id: "with-assemble",
+        version: 1,
+        description: "pipeline with an assemble-spec step",
+        inputs: [],
+        steps: [
+          { id: "intake", kind: "llm" as const, role: "worker" as const, prompt: "p.md" },
+          {
+            id: "assemble",
+            kind: "assemble-spec" as const,
+            dependsOn: ["intake"],
+          },
+        ],
+      },
+      prompts: { intake: "a" },
+    };
+    const s = generateWorkflowScript(loaded);
+
+    assert.equal(
+      returnBlockOf(s),
+      [
+        "return {",
+        "  spec,",
+        "  summary: {",
+        "    title: spec.title,",
+        "    requirements: spec.requirements.length,",
+        "    acceptanceCriteria: spec.acceptanceCriteria.length,",
+        "    weaknesses: spec.weaknesses.length,",
+        "    securityFindings: spec.securityFindings.length,",
+        "    blocking,",
+        "  },",
+        "}",
+      ].join("\n")
+    );
+  });
+});

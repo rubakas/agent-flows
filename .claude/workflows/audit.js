@@ -148,13 +148,10 @@ End with a verdict line: "Plan is ready to develop" if there are no blocking fin
 
 
 return {
-  spec,
+  synthesis: r_synthesis,
   summary: {
-    title: spec.title,
-    requirements: spec.requirements.length,
-    acceptanceCriteria: spec.acceptanceCriteria.length,
-    weaknesses: spec.weaknesses.length,
-    securityFindings: spec.securityFindings.length,
-    blocking,
+    pipeline: 'audit',
+    steps: ['correctness', 'security', 'synthesis'],
+    finalStep: 'synthesis',
   },
 }

@@ -7,11 +7,19 @@ import {
   type ModelRegistry,
   type ProviderProfile,
 } from "../canon/registry.js";
-import { FINDING } from "../canon/schemas.js";
+import { CODE_REVIEW_FINDING, FINDING } from "../canon/schemas.js";
 import type { LoadedPipeline, StepDef, StepKind } from "../canon/types.js";
 
 // Step kinds that Binding A can fully execute. All others produce a loud refusal.
 const SUPPORTED_STEP_KINDS = new Set<StepKind>(["llm", "assemble-spec"]);
+
+// Canon schema name → the JS constant name emitted into the generated script.
+// Keep in sync with canonSchemas; a missing entry would silently emit `undefined`.
+const SCHEMA_CONST_BY_NAME: Record<NonNullable<StepDef["schema"]>, string> = {
+  weaknesses: "WEAK_SCHEMA",
+  securityFindings: "SEC_SCHEMA",
+  codeReviewFindings: "CODE_REVIEW_SCHEMA",
+};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -26,6 +34,11 @@ function sq(s: string): string {
   return "'" + s.replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
 }
 
+/** Emit an object key: bare when the id is a valid identifier, quoted otherwise. */
+function objKey(id: string): string {
+  return /^[A-Za-z_$][\w$]*$/.test(id) ? id : sq(id);
+}
+
 /** Convert a dotted step id (e.g. "verify.synthesis") to a valid JS identifier segment. */
 function safeId(id: string): string {
   return id.replace(/\./g, "_");
@@ -33,6 +46,15 @@ function safeId(id: string): string {
 
 function modelVar(id: string): string {
   return "m" + id.split(".").map(capitalize).join("");
+}
+
+/**
+ * The `, schema: X` fragment for a step's agent() options, or "" when the step
+ * declares no schema. Shared by the parallel and sequential emit paths — a step
+ * alone in its dependency level must be schema-gated exactly like a parallel one.
+ */
+function schemaArg(step: StepDef): string {
+  return step.schema ? `, schema: ${SCHEMA_CONST_BY_NAME[step.schema]}` : "";
 }
 
 /**
@@ -173,14 +195,27 @@ export function generateWorkflowScript(
       out.push("}");
     }
 
+    if (usedSchemas.has("codeReviewFindings")) {
+      out.push(`const CODE_REVIEW_FINDING = ${JSON.stringify(CODE_REVIEW_FINDING, null, 2)}`);
+      out.push("const CODE_REVIEW_SCHEMA = {");
+      out.push("  type: 'object',");
+      out.push(
+        "  properties: { codeReviewFindings: { type: 'array', items: CODE_REVIEW_FINDING } },"
+      );
+      out.push("  required: ['codeReviewFindings'],");
+      out.push("  additionalProperties: false,");
+      out.push("}");
+    }
+
     out.push("");
   }
 
   // ── steps ─────────────────────────────────────────────────────────────────
+  const stepVarNames = new Map<string, string>(); // step id → JS result variable name
+  const emittedLlmIds: string[] = []; // llm step ids in emission order
   {
     // dependsOn path: derive step groups from pipelineLevels, emit one phase() per level.
     const stepById = new Map(def.steps.map((s) => [s.id, s]));
-    const stepVarNames = new Map<string, string>(); // step id → JS result variable name
     let isFirstSingleLlm = true; // null-guard only on the first single-step llm level
 
     for (const level of dependsOnLevels) {
@@ -199,20 +234,20 @@ export function generateWorkflowScript(
         if (llmInLevel.length > 1) {
           // Parallel block — mirrors the existing phase-path parallel block exactly.
           const resultVars = llmInLevel.map((gs) => `${safeId(gs.id)}Res`);
-          for (const gs of llmInLevel) stepVarNames.set(gs.id, `${safeId(gs.id)}Res`);
+          for (const gs of llmInLevel) {
+            stepVarNames.set(gs.id, `${safeId(gs.id)}Res`);
+            emittedLlmIds.push(gs.id);
+          }
 
           out.push(`const [${resultVars.join(", ")}] = await parallel([`);
           for (const gs of llmInLevel) {
             const converted = convertPromptTemplate(prompts[gs.id], inputVars);
-            const schemaArg = gs.schema
-              ? `, schema: ${gs.schema === "weaknesses" ? "WEAK_SCHEMA" : "SEC_SCHEMA"}`
-              : "";
             const skillsArg = gs.skills?.length ? `, skills: ${JSON.stringify(gs.skills)}` : "";
             out.push("  () =>");
             out.push("    agent(");
             out.push("      `" + converted + "`,");
             out.push(
-              `      { label: '${gs.id}', phase: '${phaseTitle}', model: ${modelVar(gs.id)}${schemaArg}${skillsArg} },`
+              `      { label: '${gs.id}', phase: '${phaseTitle}', model: ${modelVar(gs.id)}${schemaArg(gs)}${skillsArg} },`
             );
             out.push("    ),");
           }
@@ -235,12 +270,13 @@ export function generateWorkflowScript(
           const step = llmInLevel[0];
           const stepVar = `r_${safeId(step.id)}`;
           stepVarNames.set(step.id, stepVar);
+          emittedLlmIds.push(step.id);
           const converted = convertPromptTemplate(prompts[step.id], inputVars);
           const skillsArg = step.skills?.length ? `, skills: ${JSON.stringify(step.skills)}` : "";
           out.push(`const ${stepVar} = await agent(`);
           out.push("  `" + converted + "`,");
           out.push(
-            `  { label: '${step.id}', phase: '${phaseTitle}', model: ${modelVar(step.id)}${skillsArg} },`
+            `  { label: '${step.id}', phase: '${phaseTitle}', model: ${modelVar(step.id)}${schemaArg(step)}${skillsArg} },`
           );
           out.push(")");
           if (isFirstSingleLlm) {
@@ -282,17 +318,38 @@ export function generateWorkflowScript(
   }
 
   // ── return ────────────────────────────────────────────────────────────────
+  // `spec` and `blocking` are only declared by an assemble-spec step. A pipeline
+  // without one must not reference them — the script would throw on an undefined
+  // identifier before any step ran.
+  const hasAssembleSpec = def.steps.some((s) => s.kind === "assemble-spec");
+
   out.push("");
   out.push("return {");
-  out.push("  spec,");
-  out.push("  summary: {");
-  out.push("    title: spec.title,");
-  out.push("    requirements: spec.requirements.length,");
-  out.push("    acceptanceCriteria: spec.acceptanceCriteria.length,");
-  out.push("    weaknesses: spec.weaknesses.length,");
-  out.push("    securityFindings: spec.securityFindings.length,");
-  out.push("    blocking,");
-  out.push("  },");
+  if (hasAssembleSpec) {
+    out.push("  spec,");
+    out.push("  summary: {");
+    out.push("    title: spec.title,");
+    out.push("    requirements: spec.requirements.length,");
+    out.push("    acceptanceCriteria: spec.acceptanceCriteria.length,");
+    out.push("    weaknesses: spec.weaknesses.length,");
+    out.push("    securityFindings: spec.securityFindings.length,");
+    out.push("    blocking,");
+    out.push("  },");
+  } else {
+    // No assembler: the honest result is the last step's own output, plus the
+    // step ids that produced it. Nothing else is known at this layer.
+    const finalId = emittedLlmIds[emittedLlmIds.length - 1];
+    if (finalId !== undefined) {
+      out.push(`  ${objKey(finalId)}: ${stepVarNames.get(finalId)!},`);
+    }
+    out.push("  summary: {");
+    out.push(`    pipeline: ${sq(def.id)},`);
+    out.push(`    steps: [${emittedLlmIds.map(sq).join(", ")}],`);
+    if (finalId !== undefined) {
+      out.push(`    finalStep: ${sq(finalId)},`);
+    }
+    out.push("  },");
+  }
   out.push("}");
 
   return out.join("\n");

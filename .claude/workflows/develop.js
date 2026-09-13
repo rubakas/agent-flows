@@ -61,13 +61,10 @@ if (!r_implement) throw new Error('implement agent failed')
 
 
 return {
-  spec,
+  implement: r_implement,
   summary: {
-    title: spec.title,
-    requirements: spec.requirements.length,
-    acceptanceCriteria: spec.acceptanceCriteria.length,
-    weaknesses: spec.weaknesses.length,
-    securityFindings: spec.securityFindings.length,
-    blocking,
+    pipeline: 'develop',
+    steps: ['implement'],
+    finalStep: 'implement',
   },
 }

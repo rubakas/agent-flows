@@ -64,13 +64,10 @@ if (!r_revise) throw new Error('revise agent failed')
 
 
 return {
-  spec,
+  revise: r_revise,
   summary: {
-    title: spec.title,
-    requirements: spec.requirements.length,
-    acceptanceCriteria: spec.acceptanceCriteria.length,
-    weaknesses: spec.weaknesses.length,
-    securityFindings: spec.securityFindings.length,
-    blocking,
+    pipeline: 'correct-plan',
+    steps: ['revise'],
+    finalStep: 'revise',
   },
 }

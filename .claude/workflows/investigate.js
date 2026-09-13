@@ -90,13 +90,10 @@ A findings brief is done when a developer reading it can write an implementation
 
 
 return {
-  spec,
+  findings: r_findings,
   summary: {
-    title: spec.title,
-    requirements: spec.requirements.length,
-    acceptanceCriteria: spec.acceptanceCriteria.length,
-    weaknesses: spec.weaknesses.length,
-    securityFindings: spec.securityFindings.length,
-    blocking,
+    pipeline: 'investigate',
+    steps: ['survey', 'findings'],
+    finalStep: 'findings',
   },
 }
