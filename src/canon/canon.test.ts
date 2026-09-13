@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -622,38 +623,6 @@ steps:
     );
   });
 
-  it("rejects permissions.allow without permissions.contents", () => {
-    const yaml = `
-id: test
-version: 1
-description: test
-inputs:
-  - request
-steps:
-  - id: s1
-    kind: llm
-    model: sonnet
-    prompt: prompts/intake.md
-    permissions:
-      allow:
-        - "**/*.pem"
-`;
-    assert.throws(
-      () =>
-        loadPipeline("/fake/pipelines/test.yaml", {
-          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
-        }),
-      (err: Error) => {
-        assert.ok(err.message.includes("s1"), `error must name step id; got: ${err.message}`);
-        assert.ok(
-          err.message.includes("allow") && err.message.includes("contents"),
-          `error must mention allow and contents; got: ${err.message}`
-        );
-        return true;
-      }
-    );
-  });
-
   it("rejects permissions.deny without permissions.contents", () => {
     const yaml = `
 id: test
@@ -686,31 +655,6 @@ steps:
     );
   });
 
-  it("rejects permissions.allow that is an empty array", () => {
-    const yaml = `
-id: test
-version: 1
-description: test
-inputs:
-  - request
-steps:
-  - id: s1
-    kind: llm
-    model: sonnet
-    prompt: prompts/intake.md
-    permissions:
-      contents: read
-      allow: []
-`;
-    assert.throws(
-      () =>
-        loadPipeline("/fake/pipelines/test.yaml", {
-          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
-        }),
-      /s1.*allow|allow.*s1/
-    );
-  });
-
   it("rejects permissions.deny that is an empty array", () => {
     const yaml = `
 id: test
@@ -736,7 +680,7 @@ steps:
     );
   });
 
-  it("rejects permissions.allow with a blank string entry", () => {
+  it("accepts permissions.deny on an llm step and preserves it in the definition", () => {
     const yaml = `
 id: test
 version: 1
@@ -750,34 +694,6 @@ steps:
     prompt: prompts/intake.md
     permissions:
       contents: read
-      allow:
-        - "  "
-`;
-    assert.throws(
-      () =>
-        loadPipeline("/fake/pipelines/test.yaml", {
-          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
-        }),
-      /s1.*allow|allow.*s1/
-    );
-  });
-
-  it("accepts permissions.allow and .deny on an llm step and preserves them in the definition", () => {
-    const yaml = `
-id: test
-version: 1
-description: test
-inputs:
-  - request
-steps:
-  - id: s1
-    kind: llm
-    model: sonnet
-    prompt: prompts/intake.md
-    permissions:
-      contents: read
-      allow:
-        - "**/*.pem"
       deny:
         - "src/internal/**"
 `;
@@ -786,7 +702,6 @@ steps:
     });
     assert.deepEqual(def.steps[0].permissions, {
       contents: "read",
-      allow: ["**/*.pem"],
       deny: ["src/internal/**"],
     });
   });
@@ -1764,10 +1679,12 @@ steps:
 });
 
 // ---------------------------------------------------------------------------
-// permissions.allow matchability validation
+// V7 / FR-009: permissions.allow is removed
 // ---------------------------------------------------------------------------
 
-describe("loadPipeline — permissions.allow matchability", () => {
+describe("loadPipeline — permissions.allow is rejected (FR-009)", () => {
+  const REMOVED_MESSAGE = "permissions.allow was removed (spec 031); deny is narrowing-only";
+
   function makeLlmYaml(permissionsBlock: string): string {
     return `
 id: test
@@ -1785,58 +1702,42 @@ ${permissionsBlock}
 `;
   }
 
-  it("throws when an allow entry matches no deny pattern, naming step, entry, and hint", () => {
-    const yaml = makeLlmYaml(
-      "      contents: read\n      allow:\n        - totally-unknown-file.xyz"
-    );
-    assert.throws(
-      () =>
-        loadPipeline("/fake/pipelines/test.yaml", {
-          readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
-        }),
-      (err: Error) => {
-        assert.ok(err.message.includes("s1"), `error must name the step; got: ${err.message}`);
-        assert.ok(
-          err.message.includes("totally-unknown-file.xyz"),
-          `error must name the entry; got: ${err.message}`
-        );
-        assert.ok(
-          err.message.includes("did you mean") || err.message.includes("available patterns"),
-          `error must include a hint; got: ${err.message}`
-        );
-        return true;
-      }
-    );
-  });
-
-  it("loads fine when an allow entry exactly matches a project-default deny pattern", () => {
-    const yaml = makeLlmYaml('      contents: read\n      allow:\n        - "**/.env.local"');
-    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+  function loadWith(yaml: string) {
+    return loadPipeline("/fake/pipelines/test.yaml", {
       readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
     });
-    assert.deepEqual(def.steps[0].permissions?.allow, ["**/.env.local"]);
-  });
+  }
 
-  it("loads fine when an allow entry matches the step's own deny entry", () => {
-    const yaml = makeLlmYaml(
-      "      contents: read\n      deny:\n        - src/private/**\n      allow:\n        - src/private/**"
+  const shapes: [string, string][] = [
+    ["alongside contents", '      contents: read\n      allow:\n        - "**/package.json"'],
+    ["without contents", '      allow:\n        - "**/*.pem"'],
+    ["as an empty array", "      contents: read\n      allow: []"],
+    [
+      "alongside a deny entry",
+      "      contents: read\n      deny:\n        - src/private/**\n      allow:\n        - src/private/**",
+    ],
+  ];
+
+  for (const [label, block] of shapes) {
+    it(`rejects allow ${label} with the exact removal message`, () => {
+      assert.throws(
+        () => loadWith(makeLlmYaml(block)),
+        (err: Error) => {
+          assert.equal(err.message, REMOVED_MESSAGE);
+          return true;
+        }
+      );
+    });
+  }
+
+  it("still accepts a step declaring only deny", () => {
+    const { def } = loadWith(
+      makeLlmYaml("      contents: read\n      deny:\n        - src/private/**")
     );
-    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
-      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    assert.deepEqual(def.steps[0].permissions, {
+      contents: "read",
+      deny: ["src/private/**"],
     });
-    assert.deepEqual(def.steps[0].permissions?.allow, ["src/private/**"]);
-  });
-
-  it("convenient form: .env.local matches **/.env.local and loads fine (no ** prefix needed)", () => {
-    // Operators should not need to know the exact glob prefix; the trailing-segment
-    // match accepts ".env.local" as equivalent to "**/.env.local". This is safe
-    // because the removal is bounded to that exact deny pattern — no broader access
-    // is silently granted than the operator intended.
-    const yaml = makeLlmYaml("      contents: read\n      allow:\n        - .env.local");
-    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
-      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
-    });
-    assert.deepEqual(def.steps[0].permissions?.allow, [".env.local"]);
   });
 });
 
@@ -2410,5 +2311,211 @@ describe("FR-014: ship.yaml approve step declares manualOnly: true", () => {
       true,
       "ship.approve must declare manualOnly: true (FR-014)"
     );
+  });
+});
+
+// ── spec 030 — code-review.yaml structure ────────────────────────────────────
+
+describe("code-review.yaml — structure (spec 030)", () => {
+  const codeReviewYaml = join(repoRoot, "pipelines", "code-review.yaml");
+  const STEP_IDS = ["correctness", "security", "verify", "synthesis"] as const;
+
+  it("loads and defines exactly four steps", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    assert.equal(def.id, "code-review");
+    assert.equal(
+      def.steps.length,
+      4,
+      `code-review must define exactly 4 steps (FR-001); got ${def.steps.length.toString()}: ${def.steps
+        .map((s) => s.id)
+        .join(", ")}`
+    );
+    assert.deepEqual(
+      def.steps.map((s) => s.id),
+      [...STEP_IDS],
+      "step ids must be correctness, security, verify, synthesis"
+    );
+  });
+
+  it("dependency levels are [[correctness, security], [verify], [synthesis]]", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    assert.deepEqual(
+      pipelineLevels(def.steps),
+      [["correctness", "security"], ["verify"], ["synthesis"]],
+      "verification must be its own level between the two workers and synthesis (FR-001)"
+    );
+  });
+
+  for (const id of STEP_IDS) {
+    it(`step "${id}" declares permissions.contents: read`, () => {
+      const { def } = loadPipeline(codeReviewYaml);
+      const step = def.steps.find((s) => s.id === id);
+      assert.ok(step, `step "${id}" must exist`);
+      assert.equal(
+        step.permissions?.contents,
+        "read",
+        `step "${id}" must declare permissions.contents: "read". ` +
+          (id === "synthesis"
+            ? "synthesis is the deliberate difference from audit (FR-002): it pins a workspace " +
+              "cwd so it can open a cited file instead of reconciling text blobs blind."
+            : "verification is read-only for every step in this pipeline.")
+      );
+    });
+  }
+
+  it("verify is schema-gated on codeReviewFindings", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    const verify = def.steps.find((s) => s.id === "verify");
+    assert.ok(verify, "verify step must exist");
+    assert.equal(
+      verify.schema,
+      "codeReviewFindings",
+      "verify must declare schema: codeReviewFindings so verdicts are machine-checkable"
+    );
+  });
+
+  it("declares inputs [plan, baseline, introducedCommits] with the last two optional", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    assert.deepEqual(def.inputs, ["plan", "baseline", "introducedCommits"], "FR-006 inputs");
+    assert.deepEqual(
+      def.optionalInputs,
+      ["baseline", "introducedCommits"],
+      "FR-006 optionalInputs"
+    );
+  });
+
+  it("loads a non-empty prompt for every step", () => {
+    const { prompts } = loadPipeline(codeReviewYaml);
+    for (const id of STEP_IDS) {
+      assert.ok(id in prompts, `prompts["${id}"] should be loaded`);
+      assert.ok(prompts[id].length > 0, `prompts["${id}"] should be non-empty`);
+    }
+  });
+});
+
+// ── spec 030 non-goal — audit and its prompts are not modified by code-review ─
+
+describe("audit is unchanged by spec 030 (immutability guard)", () => {
+  // git blob SHA-1 of each protected file: sha1("blob " + byteLength + "\0" + bytes).
+  // Regenerate with: git hash-object pipelines/audit.yaml prompts/audit-correctness.md \
+  //   prompts/audit-security.md prompts/audit-synthesis.md
+  const PROTECTED: Record<string, string> = {
+    "pipelines/audit.yaml": "2db98adee3f717d0f2d670a66a4ce8c292ce3971",
+    "prompts/audit-correctness.md": "f2acb2d6f2a1396ac0f949c53d8e086f34675bb9",
+    "prompts/audit-security.md": "1200ef6111d2ed8f898d8b61da6eed69c8cc46fc",
+    "prompts/audit-synthesis.md": "051d6eede31ae462d2a166089de111854a5449e5",
+  };
+
+  const gitBlobSha1 = (bytes: Buffer): string =>
+    createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+
+  for (const [relPath, expected] of Object.entries(PROTECTED)) {
+    it(`${relPath} is byte-identical to its recorded blob hash`, () => {
+      const actual = gitBlobSha1(readFileSync(join(repoRoot, ...relPath.split("/"))));
+      assert.equal(
+        actual,
+        expected,
+        `${relPath} CHANGED (git blob ${actual}, expected ${expected}). ` +
+          'Spec 030\'s non-goal — "audit is not modified by this spec" — forbids editing ' +
+          "audit.yaml or its prompts; code-review is a separate pipeline precisely so audit " +
+          `stays byte-identical. Confirm with: git hash-object ${relPath}. If the change was ` +
+          "deliberate, updating this constant is not enough — spec 030's acceptance criterion 6 " +
+          '("byte-identical to what they were before") no longer holds and must be revisited.'
+      );
+    });
+  }
+
+  it("still defines exactly three steps", () => {
+    const { def } = loadPipeline(join(repoRoot, "pipelines", "audit.yaml"));
+    assert.equal(def.steps.length, 3);
+    assert.deepEqual(
+      def.steps.map((s) => s.id),
+      ["correctness", "security", "synthesis"]
+    );
+  });
+
+  it("its synthesis step still declares NO permissions block", () => {
+    const raw = readFileSync(join(repoRoot, "pipelines", "audit.yaml"), "utf8");
+    const doc = parse(raw) as { steps: { id: string; permissions?: unknown }[] };
+    const synthesis = doc.steps.find((s) => s.id === "synthesis");
+    assert.ok(synthesis, "audit.synthesis step is gone");
+    assert.ok(
+      !("permissions" in synthesis),
+      "audit.synthesis gained a permissions key — contents: read on synthesis belongs to code-review.yaml only (FR-002)."
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deadlines must be positive: `0` used to mean "no deadline"
+// ---------------------------------------------------------------------------
+
+describe("loadPipeline — timeoutMs and defaultTimeoutMs must be positive integers", () => {
+  function stepYaml(extra: string): string {
+    return `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+${extra}
+`;
+  }
+
+  function loadWith(yaml: string) {
+    return loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+  }
+
+  for (const [label, value] of [
+    ["zero", "0"],
+    ["negative", "-1"],
+    ["fractional", "1.5"],
+    ["a string", '"600000"'],
+  ] as const) {
+    it(`rejects a step timeoutMs of ${label}`, () => {
+      assert.throws(
+        () => loadWith(stepYaml(`    timeoutMs: ${value}`)),
+        (err: Error) => {
+          assert.match(err.message, /s1/);
+          assert.match(err.message, /timeoutMs must be a positive integer/);
+          return true;
+        }
+      );
+    });
+  }
+
+  it("rejects a pipeline defaultTimeoutMs of zero", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+defaultTimeoutMs: 0
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/intake.md
+`;
+    assert.throws(
+      () => loadWith(yaml),
+      (err: Error) => {
+        assert.match(err.message, /defaultTimeoutMs must be a positive integer/);
+        return true;
+      }
+    );
+  });
+
+  it("accepts a positive timeoutMs", () => {
+    const { def } = loadWith(stepYaml("    timeoutMs: 1200000"));
+    assert.equal(def.steps[0].timeoutMs, 1_200_000);
   });
 });

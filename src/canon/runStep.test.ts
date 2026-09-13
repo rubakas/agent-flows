@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 import { StepBudgetExceededError } from "./runClaudeCli.js";
@@ -11,7 +14,6 @@ import {
   StepWatchdogError,
   WATCHDOG_DIGEST_OPEN,
   WATCHDOG_DIGEST_CLOSE,
-  normalisePattern,
   runCheckStep,
   runLlmStep,
 } from "./runStep.js";
@@ -84,7 +86,7 @@ describe("runLlmStep — codex CLI", () => {
     cli: { bin: "codex", model: "o4-mini" },
   };
 
-  it("passes exec --ephemeral --json -s read-only -m <model> args to codex", async () => {
+  it("passes exec --ephemeral --json -m <model> args to codex, and never -s", async () => {
     const { spawn, capturedArgs } = makeFakeSpawn({
       stdoutChunks: [makeCodexJsonlOutput("OK")],
     });
@@ -94,6 +96,9 @@ describe("runLlmStep — codex CLI", () => {
     assert.ok(capturedArgs[0].includes("--json"), "should pass --json");
     assert.ok(capturedArgs[0].includes("-m"), "should pass -m");
     assert.ok(capturedArgs[0].includes("o4-mini"), "should pass model");
+    // Spec 031 D2: `-s` does not confine reads and cannot be combined with
+    // default_permissions; the composed profile replaces it.
+    assert.ok(!capturedArgs[0].includes("-s"), "must not pass -s");
   });
 
   it("extracts agent_message text from JSONL output", async () => {
@@ -349,9 +354,12 @@ describe("runLlmStep — deadline enforcement", () => {
     );
   });
 
-  it("timeoutMs: 0 is an explicit escape hatch that disables the deadline", async () => {
+  it("timeoutMs: 0 disables the deadline on claude, whose watchdog supervises", async () => {
     // Without the escape hatch, a 0ms timeout would fire immediately, aborting
-    // even a fast step before it completes. timeoutMs: 0 must mean "no deadline".
+    // even a fast step before it completes. On claude, timeoutMs: 0 means "no
+    // deadline" and the progress watchdog remains the supervisor; on codex and
+    // api it is clamped back to the built-in fallback (withDeadline), because
+    // there it would mean no supervision at all.
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("done")] });
     const result = await runLlmStep(entry, "hi", { spawn, timeoutMs: 0 });
     assert.equal(result, "done", "step with timeoutMs:0 must complete without being aborted");
@@ -763,7 +771,7 @@ describe("runLlmStep — FR-007 budget wiring", () => {
 const repoRoot = new URL("../../..", import.meta.url).pathname.replace(/\/$/, "");
 
 describe('runLlmStep — workspace: "read"', () => {
-  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob --allowedTools Read,Glob and cwd=workspaceDir when contentsAccess is "read"', async () => {
+  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob,Grep --allowedTools Read,Glob,Grep and cwd=workspaceDir when contentsAccess is "read"', async () => {
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -794,12 +802,16 @@ describe('runLlmStep — workspace: "read"', () => {
     // Both flags must carry exactly the same restricted set.
     const toolsIdx = capturedArgs.indexOf("--tools");
     const allowedIdx = capturedArgs.indexOf("--allowedTools");
-    assert.equal(capturedArgs[toolsIdx + 1], "Read,Glob", "--tools must be Read,Glob");
-    assert.equal(capturedArgs[allowedIdx + 1], "Read,Glob", "--allowedTools must be Read,Glob");
+    assert.equal(capturedArgs[toolsIdx + 1], "Read,Glob,Grep", "--tools must be Read,Glob,Grep");
+    assert.equal(
+      capturedArgs[allowedIdx + 1],
+      "Read,Glob,Grep",
+      "--allowedTools must be Read,Glob,Grep"
+    );
     assert.equal(capturedCwd, repoRoot, "must set cwd to workspaceDir");
   });
 
-  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob,Edit,Write --allowedTools Read,Glob,Edit,Write and cwd=workspaceDir when contentsAccess is "write"', async () => {
+  it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob,Grep,Edit,Write --allowedTools Read,Glob,Grep,Edit,Write and cwd=workspaceDir when contentsAccess is "write"', async () => {
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -831,13 +843,13 @@ describe('runLlmStep — workspace: "read"', () => {
     const allowedIdx = capturedArgs.indexOf("--allowedTools");
     assert.equal(
       capturedArgs[toolsIdx + 1],
-      "Read,Glob,Edit,Write",
-      "--tools must be Read,Glob,Edit,Write"
+      "Read,Glob,Grep,Edit,Write",
+      "--tools must be Read,Glob,Grep,Edit,Write"
     );
     assert.equal(
       capturedArgs[allowedIdx + 1],
-      "Read,Glob,Edit,Write",
-      "--allowedTools must be Read,Glob,Edit,Write"
+      "Read,Glob,Grep,Edit,Write",
+      "--allowedTools must be Read,Glob,Grep,Edit,Write"
     );
     // Bash must not appear in the tool set.
     assert.ok(!capturedArgs.includes("Bash"), "Bash must not be granted in write mode");
@@ -949,24 +961,36 @@ describe('runLlmStep — workspace: "read"', () => {
     assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
   });
 
-  it('codex: rejects when contentsAccess is "read" (no file-deny mechanism; credential files cannot be excluded)', async () => {
-    // This MUST FAIL before the codex+read rejection fix:
-    // the current code allows codex + read and sets cwd, so the promise resolves
-    // instead of rejecting, causing assert.rejects to fail.
+  it('codex: contents "read" runs against a sanitized copy, never the real repo', async () => {
+    // Spec 031 D2: the copy plus the composed permission profile replaced the
+    // blanket refusal. Lifecycle and flag assertions live in adapters/codex.test.ts.
     const entry: ModelEntry = {
       id: "codex-test",
       transport: "cli",
       cli: { bin: "codex", model: "o4-mini" },
     };
-    const { spawn } = makeFakeSpawn({ stdoutChunks: [makeCodexJsonlOutput("irrelevant")] });
+    const { child } = makeFakeChild({ stdoutChunks: [makeCodexJsonlOutput("answer")] });
+    let capturedCwd: string | undefined;
+    const spawn = ((_cmd: string, _args: string[], opts: { cwd?: string }) => {
+      capturedCwd = opts.cwd;
+      return child;
+    }) as unknown as SpawnFn;
 
-    await assert.rejects(
-      runLlmStep(entry, "analyze", { spawn, contentsAccess: "read", workspaceDir: repoRoot }),
-      /codex.*credential|codex.*deny|codex.*read|contents.*codex/i
-    );
+    // The sanitizer shells out to `git ls-files`, so this needs the real repo —
+    // `repoRoot` above is its parent and is not a git work tree.
+    const gitRoot = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
+    const result = await runLlmStep(entry, "analyze", {
+      spawn,
+      contentsAccess: "read",
+      workspaceDir: gitRoot,
+    });
+
+    assert.equal(result, "answer");
+    assert.ok(capturedCwd !== undefined, "the step must run in a grant directory");
+    assert.notEqual(capturedCwd, gitRoot, "the step must never run in the real repo");
   });
 
-  it("codex: no cwd when contentsAccess is not set", async () => {
+  it("codex: a step with no workspace still runs confined, in a throwaway grant dir", async () => {
     const entry: ModelEntry = {
       id: "codex-test",
       transport: "cli",
@@ -981,7 +1005,11 @@ describe('runLlmStep — workspace: "read"', () => {
 
     await runLlmStep(entry, "hello", { spawn });
 
-    assert.equal(capturedCwd, undefined, "must not set cwd when no workspace declared");
+    // A text-only step must not be able to read the disk either, so it gets an
+    // empty grant rather than the daemon's working directory.
+    assert.ok(capturedCwd !== undefined, "must run in a grant directory");
+    assert.notEqual(capturedCwd, process.cwd(), "must not run in the daemon's cwd");
+    assert.notEqual(capturedCwd, repoRoot, "must not run in the repo");
   });
 
   it('codex: rejects when contentsAccess is "write" (codex always runs read-only)', async () => {
@@ -1154,7 +1182,7 @@ describe("runLlmStep — skills", () => {
     assert.ok(!capturedArgs.includes("Bash"), "Bash must never be granted");
   });
 
-  it("step with skills and permissions: read appends Skill to Read,Glob", async () => {
+  it("step with skills and permissions: read appends Skill to Read,Glob,Grep", async () => {
     const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
@@ -1172,16 +1200,20 @@ describe("runLlmStep — skills", () => {
 
     const toolsIdx = capturedArgs.indexOf("--tools");
     const allowedIdx = capturedArgs.indexOf("--allowedTools");
-    assert.equal(capturedArgs[toolsIdx + 1], "Read,Glob,Skill", "--tools must be Read,Glob,Skill");
+    assert.equal(
+      capturedArgs[toolsIdx + 1],
+      "Read,Glob,Grep,Skill",
+      "--tools must be Read,Glob,Grep,Skill"
+    );
     assert.equal(
       capturedArgs[allowedIdx + 1],
-      "Read,Glob,Skill",
-      "--allowedTools must be Read,Glob,Skill"
+      "Read,Glob,Grep,Skill",
+      "--allowedTools must be Read,Glob,Grep,Skill"
     );
     assert.ok(!capturedArgs.includes("Bash"), "Bash must never be granted");
   });
 
-  it("step with skills and permissions: write appends Skill to Read,Glob,Edit,Write", async () => {
+  it("step with skills and permissions: write appends Skill to Read,Glob,Grep,Edit,Write", async () => {
     const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
@@ -1201,13 +1233,13 @@ describe("runLlmStep — skills", () => {
     const allowedIdx = capturedArgs.indexOf("--allowedTools");
     assert.equal(
       capturedArgs[toolsIdx + 1],
-      "Read,Glob,Edit,Write,Skill",
-      "--tools must be Read,Glob,Edit,Write,Skill"
+      "Read,Glob,Grep,Edit,Write,Skill",
+      "--tools must be Read,Glob,Grep,Edit,Write,Skill"
     );
     assert.equal(
       capturedArgs[allowedIdx + 1],
-      "Read,Glob,Edit,Write,Skill",
-      "--allowedTools must be Read,Glob,Edit,Write,Skill"
+      "Read,Glob,Grep,Edit,Write,Skill",
+      "--allowedTools must be Read,Glob,Grep,Edit,Write,Skill"
     );
     assert.ok(!capturedArgs.includes("Bash"), "Bash must never be granted");
   });
@@ -1279,6 +1311,45 @@ describe("runLlmStep — credential deny list", () => {
     assert.ok(
       !disallowedValue.includes("Write("),
       "--disallowedTools must not include Write() — Edit covers all file-editing tools"
+    );
+  });
+
+  it("no-workspace step: --disallowedTools covers Read AND Grep for every credential pattern", async () => {
+    // The no-workspace branch has its own deny-entry construction, and every
+    // other test in this file declares contentsAccess + workspaceDir — so this
+    // branch was unguarded: widening the no-permissions fallback to include Grep
+    // would have leaked credential file contents with no test turning red.
+    // A step that declares nothing still receives the hardened Read,Glob grant.
+    const { child } = makeStreamJsonChild("ok");
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    // env without HOME: operatorDenyRules() finds no user settings file, so this
+    // asserts on agent-flows' own deny construction rather than on whatever
+    // permissions.deny the machine running the suite happens to have configured.
+    await runLlmStep(entry, "analyze", { spawn, env: {} });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "a step with no workspace must still emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+    assert.ok(typeof disallowedValue === "string", "--disallowedTools must have a value");
+
+    for (const pattern of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        disallowedValue.includes(`Read(${pattern})`),
+        `no-workspace deny must include Read(${pattern}); got: ${disallowedValue.slice(0, 200)}`
+      );
+      assert.ok(
+        disallowedValue.includes(`Grep(${pattern})`),
+        `no-workspace deny must include Grep(${pattern}); got: ${disallowedValue.slice(0, 200)}`
+      );
+    }
+    assert.ok(
+      !disallowedValue.includes("Edit("),
+      "no workspace means no Edit grant, so Edit denials are not emitted"
     );
   });
 
@@ -1499,7 +1570,9 @@ describe("runLlmStep — credential deny list", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "hello", { spawn });
+    // env without HOME so the operator's own settings deny rules (which may contain
+    // Edit(...) entries) cannot influence the Edit-absence assertion below.
+    await runLlmStep(entry, "hello", { spawn, env: {} });
 
     assert.ok(
       capturedArgs.includes("--disallowedTools"),
@@ -1635,25 +1708,9 @@ describe("runCheckStep — environment allowlist", () => {
   });
 });
 
-// ── per-step allow/deny patterns ──────────────────────────────────────────────
+// ── per-step deny patterns ────────────────────────────────────────────────────
 
-describe("normalisePattern", () => {
-  it("strips leading ./", () => {
-    assert.equal(normalisePattern("./fixtures/sample.pem"), "fixtures/sample.pem");
-  });
-  it("converts backslashes to forward-slashes", () => {
-    assert.equal(normalisePattern("fixtures\\sample.pem"), "fixtures/sample.pem");
-  });
-  it("trims surrounding whitespace", () => {
-    assert.equal(normalisePattern("  **/*.pem  "), "**/*.pem");
-  });
-  it("leaves already-normal patterns unchanged", () => {
-    assert.equal(normalisePattern("**/*.pem"), "**/*.pem");
-    assert.equal(normalisePattern("fixtures/sample.pem"), "fixtures/sample.pem");
-  });
-});
-
-describe("runLlmStep — per-step allow/deny patterns", () => {
+describe("runLlmStep — per-step deny patterns", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -1678,7 +1735,7 @@ describe("runLlmStep — per-step allow/deny patterns", () => {
     return disallowed;
   }
 
-  it("no allow/deny: emits exactly the default deny list (regression guard)", async () => {
+  it("no step deny: emits exactly the default deny list (regression guard)", async () => {
     const disallowed = await captureDisallowed({});
     for (const pat of CREDENTIAL_DENY_PATTERNS) {
       assert.ok(
@@ -1694,26 +1751,15 @@ describe("runLlmStep — per-step allow/deny patterns", () => {
     }
   });
 
-  it("allowPatterns removes exactly the matching deny pattern and nothing else", async () => {
-    const patternToRemove = "**/*.pem";
-    const disallowed = await captureDisallowed({ allowPatterns: [patternToRemove] });
-
-    // The removed pattern must not appear for either Read or Edit.
-    assert.ok(
-      !disallowed.includes(`Read(${patternToRemove})`),
-      `Read(${patternToRemove}) should be absent after allow`
-    );
-    assert.ok(
-      !disallowed.includes(`Edit(${patternToRemove})`),
-      `Edit(${patternToRemove}) should be absent after allow`
-    );
-
-    // Every other credential deny pattern must remain.
+  // Grep is granted to read steps, so a Read-only deny list leaks: content search
+  // returns matching lines from inside a file the step may not open. Every deny
+  // pattern must therefore be emitted as a Grep entry too.
+  it("read step denies Grep for every credential pattern, not just Read", async () => {
+    const disallowed = await captureDisallowed({});
     for (const pat of CREDENTIAL_DENY_PATTERNS) {
-      if (pat === patternToRemove) continue;
       assert.ok(
-        disallowed.includes(`Read(${pat})`),
-        `Read(${pat}) must remain when only ${patternToRemove} was allowed`
+        disallowed.includes(`Grep(${pat})`),
+        `default deny must include Grep(${pat}); got: ${disallowed.slice(0, 200)}`
       );
     }
   });
@@ -1736,23 +1782,28 @@ describe("runLlmStep — per-step allow/deny patterns", () => {
     assert.ok(disallowed.includes("Read(**/.env)"), "default Read(**/.env) must remain");
   });
 
-  it("allowPatterns with normalised form: leading ./ is stripped before comparison", async () => {
-    // Add a step-only pattern then allow it with a leading ./ prefix.
-    // Naive string equality would leave the deny intact; normalisation removes it.
+  // D5/FR-009: deny is narrowing-only. Whatever a step declares, every project
+  // default must still be emitted — there is no subtraction path left.
+  it("a step deny naming a project default leaves the whole default list intact", async () => {
     const disallowed = await captureDisallowed({
-      denyPatterns: ["fixtures/sample.pem"],
-      allowPatterns: ["./fixtures/sample.pem"],
+      denyPatterns: ["**/*.pem", "**/package.json"],
     });
 
-    assert.ok(
-      !disallowed.includes("Read(fixtures/sample.pem)"),
-      "normalised allow (./fixtures/sample.pem → fixtures/sample.pem) must remove the deny entry"
-    );
-    // Default patterns must be unaffected.
-    assert.ok(disallowed.includes("Read(**/.env)"), "default Read(**/.env) must remain");
+    for (const pat of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        disallowed.includes(`Read(${pat})`),
+        `Read(${pat}) must remain regardless of what the step declares`
+      );
+    }
+    for (const pat of BUILD_CONFIG_DENY_PATTERNS) {
+      assert.ok(
+        disallowed.includes(`Edit(${pat})`),
+        `Edit(${pat}) must remain regardless of what the step declares`
+      );
+    }
   });
 
-  it("allow cannot widen contentsAccess: read step with allowPatterns still gets only Read,Glob tools", async () => {
+  it("step deny cannot widen contentsAccess: a read step still gets only Read,Glob,Grep", async () => {
     const { child } = makeStreamJsonChild("ok");
     let capturedArgs: string[] = [];
     const spawn = ((_cmd: string, args: string[]) => {
@@ -1764,60 +1815,66 @@ describe("runLlmStep — per-step allow/deny patterns", () => {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
-      allowPatterns: ["**/*.pem"],
+      denyPatterns: ["**/*.pem"],
     });
 
     const toolsIdx = capturedArgs.indexOf("--tools");
     assert.equal(
       capturedArgs[toolsIdx + 1],
-      "Read,Glob",
-      "allow must not widen --tools beyond contentsAccess"
+      "Read,Glob,Grep",
+      "a step deny must not change --tools"
     );
     const allowedIdx = capturedArgs.indexOf("--allowedTools");
     assert.equal(
       capturedArgs[allowedIdx + 1],
-      "Read,Glob",
-      "allow must not widen --allowedTools beyond contentsAccess"
+      "Read,Glob,Grep",
+      "a step deny must not change --allowedTools"
     );
   });
+});
 
-  it("denyPatterns entry is subtractive: an allow covering it removes it", async () => {
-    const pat = "src/private/**";
-    const disallowed = await captureDisallowed({
-      denyPatterns: [pat],
-      allowPatterns: [pat],
+// ── Fix 2: pipeline definitions are Edit-denied ───────────────────────────────
+//
+// A contents: write step that can edit a pipeline can rewrite what a later run is
+// permitted to do — its permissions, its model, its deny entries. Edit-only by
+// design: steps must still be able to read pipeline definitions to reason about
+// the system.
+describe("runLlmStep — pipeline definitions are edit-denied", () => {
+  const entry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+
+  it("write step denies Edit for **/pipelines/** and does NOT deny Read for it", async () => {
+    const { child } = makeStreamJsonChild("ok");
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    await runLlmStep(entry, "edit", {
+      spawn,
+      contentsAccess: "write",
+      workspaceDir: repoRoot,
+      env: {},
     });
 
-    // Pattern was added by denyPatterns and then removed by allowPatterns.
-    assert.ok(
-      !disallowed.includes(`Read(${pat})`),
-      "allow should cancel a step-level deny added by denyPatterns"
-    );
-  });
-
-  // Fix 2 regression: shorthand allow entry must reach --disallowedTools.
-  // Before the fix, allowPatterns uses exact string equality so ".env.local"
-  // does NOT remove "**/.env.local" — the entry validates at load time but is
-  // silently dropped at runtime. The test exercises the shorthand form all the
-  // way to --disallowedTools, which is exactly the assertion that was missing.
-  //
-  // This test MUST FAIL before the runStep.ts allowEntryRemoves() fix.
-  it("shorthand allow (.env.local) removes **/.env.local from --disallowedTools", async () => {
-    const disallowed = await captureDisallowed({ allowPatterns: [".env.local"] });
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    const disallowed = capturedArgs[disallowedIdx + 1] ?? "";
 
     assert.ok(
-      !disallowed.includes("Read(**/.env.local)"),
-      "shorthand allow '.env.local' must remove Read(**/.env.local) from --disallowedTools — " +
-        "fails before fix because exact-equality allowSet does not match the trailing-segment shorthand"
+      disallowed.includes("Edit(**/pipelines/**)"),
+      "a write step must not be able to edit pipeline definitions"
     );
     assert.ok(
-      !disallowed.includes("Edit(**/.env.local)"),
-      "shorthand allow '.env.local' must remove Edit(**/.env.local) from --disallowedTools"
+      disallowed.includes("Edit(**/Pipelines/**)"),
+      "the case-varied spelling must be denied too (case-insensitive filesystems)"
     );
-    // Other credential patterns must remain.
     assert.ok(
-      disallowed.includes("Read(**/.env)"),
-      "Read(**/.env) must remain — only **/.env.local was allowed"
+      !disallowed.includes("Read(**/pipelines/**)"),
+      "Read must stay allowed — pipeline definitions are readable by design"
     );
   });
 });
@@ -1846,7 +1903,9 @@ describe("runLlmStep — credential Read denials emitted for no-permissions step
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "hello", { spawn }); // no contentsAccess
+    // env without HOME: the operator's own settings deny rules are appended to the
+    // same list and would otherwise decide the Edit-absence assertions below.
+    await runLlmStep(entry, "hello", { spawn, env: {} }); // no contentsAccess
 
     const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
     assert.ok(
@@ -1892,18 +1951,23 @@ describe("runLlmStep — credential Read denials emitted for no-permissions step
 // references to the constants.
 
 describe("deny-list content snapshot", () => {
-  it("CREDENTIAL_DENY_PATTERNS exactly equals the 34-entry snapshot", () => {
+  it("CREDENTIAL_DENY_PATTERNS exactly equals the 92-entry snapshot", () => {
     const expected: readonly string[] = [
-      // Environment files (8)
+      // Environment files (13)
       "**/.env",
       "**/.env.ci",
       "**/.env.docker",
       "**/.env.production",
+      "**/.env.prod",
       "**/.env.staging",
+      "**/.env.stage",
+      "**/.env.preview",
       "**/.env.local",
       "**/.env.development",
+      "**/.env.dev",
       "**/.env.test",
-      // Named credential and secret files (15)
+      "**/.envrc",
+      // Named credential, secret and token files (28)
       "**/aws.json",
       "**/credentials",
       "**/credentials.production",
@@ -1911,27 +1975,84 @@ describe("deny-list content snapshot", () => {
       "**/credentials.json",
       "**/credentials.toml",
       "**/credentials.yaml",
+      "**/credentials.yml",
+      "**/credentials.ini",
       "**/secrets.json",
       "**/secrets.yaml",
       "**/secrets.yml",
+      "**/secrets.toml",
+      "**/secrets.ini",
+      "**/secret.json",
+      "**/secret.yaml",
+      "**/token.json",
+      "**/token.yaml",
+      "**/token.yml",
+      "**/tokens.json",
       "**/service-account*.json",
       "**/terraform.tfvars",
       "**/terraform.tfvars.json",
+      "**/secrets.tfvars",
+      "**/*.auto.tfvars",
+      "**/*.auto.tfvars.json",
       "**/*.tfstate",
       "**/*.tfstate.backup",
-      // Key material by extension (7)
+      // Tool auth files (6)
+      "**/.npmrc",
+      "**/.netrc",
+      "**/_netrc",
+      "**/.pgpass",
+      "**/.htpasswd",
+      "**/htpasswd",
+      // Cloud provider and cluster credentials (6)
+      "**/.aws/**",
+      "**/.azure/**",
+      "**/.config/gcloud/**",
+      "**/application_default_credentials.json",
+      "**/.kube/config",
+      "**/kubeconfig",
+      // Key material by extension (15)
       "**/*.key",
       "**/*.pem",
+      "**/*.der",
+      "**/*.crt",
+      "**/*.cer",
+      "**/*.p8",
       "**/*.p12",
       "**/*.pfx",
       "**/*.jks",
       "**/*.keystore",
       "**/*.truststore",
+      "**/*.ppk",
+      "**/*.gpg",
+      "**/*.asc",
+      "**/*.pgp",
+      // Key material by location (2)
+      "**/.ssh/**",
+      "**/.gnupg/**",
       // SSH private keys without extension (4)
       "**/id_rsa*",
       "**/id_ed25519*",
       "**/id_ecdsa*",
       "**/id_dsa*",
+      // Case-varied duplicates (18)
+      "**/*.KEY",
+      "**/*.PEM",
+      "**/*.DER",
+      "**/*.CRT",
+      "**/*.CER",
+      "**/*.P8",
+      "**/*.P12",
+      "**/*.PFX",
+      "**/*.JKS",
+      "**/*.PPK",
+      "**/*.GPG",
+      "**/*.ASC",
+      "**/*.PGP",
+      "**/.Ssh/**",
+      "**/.Gnupg/**",
+      "**/.Aws/**",
+      "**/.Azure/**",
+      "**/.Kube/config",
     ];
     assert.deepEqual(
       [...CREDENTIAL_DENY_PATTERNS],
@@ -1940,7 +2061,7 @@ describe("deny-list content snapshot", () => {
     );
   });
 
-  it("BUILD_CONFIG_DENY_PATTERNS exactly equals the 8-entry snapshot", () => {
+  it("BUILD_CONFIG_DENY_PATTERNS exactly equals the 10-entry snapshot", () => {
     const expected: readonly string[] = [
       "**/package.json",
       "**/Makefile",
@@ -1950,6 +2071,8 @@ describe("deny-list content snapshot", () => {
       "**/*.config.*",
       "**/.agent-flows/**",
       "**/.Agent-flows/**",
+      "**/pipelines/**",
+      "**/Pipelines/**",
     ];
     assert.deepEqual(
       [...BUILD_CONFIG_DENY_PATTERNS],
@@ -1958,10 +2081,10 @@ describe("deny-list content snapshot", () => {
     );
   });
 
-  it("write-mode argv entry count equals CREDENTIAL_DENY_PATTERNS.length * 2 + BUILD_CONFIG_DENY_PATTERNS.length", async () => {
-    // Each credential pattern contributes Read(pat) + Edit(pat) = 2 entries.
+  it("write-mode argv entry count equals CREDENTIAL_DENY_PATTERNS.length * 3 + BUILD_CONFIG_DENY_PATTERNS.length", async () => {
+    // Each credential pattern contributes Read(pat) + Grep(pat) + Edit(pat) = 3 entries.
     // Each build-config pattern contributes Edit(pat) = 1 entry.
-    // Total expected with empty allow/deny overrides: 34*2 + 8 = 76.
+    // Total expected with empty allow/deny overrides: 92*3 + 10 = 286.
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
@@ -1974,10 +2097,13 @@ describe("deny-list content snapshot", () => {
       return child;
     }) as unknown as SpawnFn;
 
+    // env without HOME: operator deny rules are appended to the same list and would
+    // otherwise make this count depend on the machine's user settings.
     await runLlmStep(entry, "edit file", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
+      env: {},
     });
 
     const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
@@ -1986,11 +2112,407 @@ describe("deny-list content snapshot", () => {
     assert.ok(typeof disallowedValue === "string", "--disallowedTools must have a value");
 
     const entryCount = disallowedValue.split(",").length;
-    const expectedCount = CREDENTIAL_DENY_PATTERNS.length * 2 + BUILD_CONFIG_DENY_PATTERNS.length;
+    const expectedCount = CREDENTIAL_DENY_PATTERNS.length * 3 + BUILD_CONFIG_DENY_PATTERNS.length;
     assert.equal(
       entryCount,
       expectedCount,
-      `--disallowedTools entry count must be ${expectedCount} (${CREDENTIAL_DENY_PATTERNS.length} credential patterns × 2 + ${BUILD_CONFIG_DENY_PATTERNS.length} build-config patterns × 1); got ${entryCount}`
+      `--disallowedTools entry count must be ${expectedCount} (${CREDENTIAL_DENY_PATTERNS.length} credential patterns × 3 + ${BUILD_CONFIG_DENY_PATTERNS.length} build-config patterns × 1); got ${entryCount}`
     );
+  });
+});
+
+// ── Credential deny-list coverage ─────────────────────────────────────────────
+//
+// The snapshot test above pins membership; this one pins REACH. It names a
+// representative path for every form of secret the owner's rule covers ("no
+// agent may read credentials, ssh keys or certs") and asserts each path is
+// matched by at least one pattern. Remove a pattern and the example it was the
+// only match for goes red, naming the uncovered path.
+//
+// Matching is done by a local glob-to-regex translation rather than a
+// dependency: the repo has no glob matcher, and the only constructs used by
+// the deny lists are `**/` (zero or more leading segments), a trailing `**`
+// (rest of the path) and `*` (any run of non-separator characters).
+
+function globToRegExp(pattern: string): RegExp {
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "*") {
+      if (pattern[i + 1] === "*") {
+        if (pattern[i + 2] === "/") {
+          re += "(?:[^/]+/)*";
+          i += 2;
+        } else {
+          re += ".*";
+          i += 1;
+        }
+      } else {
+        re += "[^/]*";
+      }
+      continue;
+    }
+    re += ch.replace(/[.+^${}()|[\]\\?]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`);
+}
+
+function matchingPatterns(path: string): string[] {
+  return CREDENTIAL_DENY_PATTERNS.filter((p) => globToRegExp(p).test(path));
+}
+
+const SSH_AND_KEY_MATERIAL: readonly string[] = [
+  "home/dev/.ssh/id_rsa",
+  "home/dev/.ssh/id_rsa.pub",
+  "home/dev/.ssh/id_ed25519",
+  "home/dev/.ssh/id_ecdsa",
+  "home/dev/.ssh/id_dsa",
+  "home/dev/.ssh/deploy_key",
+  "home/dev/.ssh/authorized_keys",
+  "home/dev/.ssh/config",
+  "home/dev/.Ssh/id_rsa",
+  "keys/server.ppk",
+  "keys/SERVER.PPK",
+  "home/dev/.gnupg/secring.gpg",
+  "home/dev/.Gnupg/pubring.kbx",
+  "keys/private.asc",
+  "keys/private.pgp",
+  "keys/PRIVATE.ASC",
+];
+
+const CERTIFICATES_AND_KEYSTORES: readonly string[] = [
+  "certs/server.pem",
+  "certs/server.der",
+  "certs/server.crt",
+  "certs/server.cer",
+  "certs/server.key",
+  "certs/bundle.p12",
+  "certs/bundle.pfx",
+  "certs/private.p8",
+  "certs/app.jks",
+  "certs/app.keystore",
+  "certs/app.truststore",
+  "certs/CERT.PEM",
+  "certs/SERVER.KEY",
+  "certs/KEYSTORE.JKS",
+];
+
+const CREDENTIALS_AND_TOKENS: readonly string[] = [
+  ".env",
+  "services/api/.env.production",
+  "services/api/.env.local",
+  "services/api/.envrc",
+  "config/credentials.json",
+  "config/credentials.yaml",
+  "config/credentials.yml",
+  "config/credentials.toml",
+  "config/credentials.ini",
+  "config/secrets.json",
+  "config/secrets.yaml",
+  "config/secrets.toml",
+  "config/secrets.ini",
+  "config/token.json",
+  "config/tokens.json",
+  "home/dev/.npmrc",
+  "home/dev/.netrc",
+  "home/dev/_netrc",
+  "home/dev/.pgpass",
+  "home/dev/.aws/credentials",
+  "home/dev/.config/gcloud/application_default_credentials.json",
+  "gcp/service-account-prod.json",
+  "home/dev/.azure/accessTokens.json",
+  "home/dev/.kube/config",
+  "deploy/kubeconfig",
+  "nginx/.htpasswd",
+  "infra/terraform.tfvars",
+  "infra/prod.auto.tfvars",
+];
+
+// Paths that must stay readable. Their presence is what makes the coverage
+// assertions meaningful: a pattern broad enough to match everything would
+// satisfy the lists above while failing here.
+const MUST_STAY_READABLE: readonly string[] = [
+  "src/tokenizer.ts",
+  "src/keyboard.ts",
+  "src/secretsManager.ts",
+  "services/api/.env.example",
+  "services/api/.env.template",
+  "package.json",
+  "docs/certificates.md",
+];
+
+describe("credential deny-list coverage", () => {
+  for (const [category, paths] of [
+    ["ssh and key material", SSH_AND_KEY_MATERIAL],
+    ["certificates and keystores", CERTIFICATES_AND_KEYSTORES],
+    ["credentials and tokens", CREDENTIALS_AND_TOKENS],
+  ] as const) {
+    it(`denies every representative ${category} path`, () => {
+      for (const path of paths) {
+        assert.ok(
+          matchingPatterns(path).length > 0,
+          `${path} (${category}) is matched by no CREDENTIAL_DENY_PATTERNS entry`
+        );
+      }
+    });
+  }
+
+  it("leaves ordinary source and template files readable", () => {
+    for (const path of MUST_STAY_READABLE) {
+      assert.deepEqual(
+        matchingPatterns(path),
+        [],
+        `${path} must stay readable; matched by ${matchingPatterns(path).join(", ")}`
+      );
+    }
+  });
+
+  it("the local glob matcher distinguishes matches from non-matches", () => {
+    assert.ok(globToRegExp("**/*.pem").test("a/b/c.pem"));
+    assert.ok(!globToRegExp("**/*.pem").test("a/b/c.ts"));
+    assert.ok(globToRegExp("**/.ssh/**").test("home/dev/.ssh/nested/key"));
+    assert.ok(!globToRegExp("**/.ssh/**").test("home/dev/sshconfig"));
+    assert.ok(!globToRegExp("**/id_rsa*").test("home/dev/rsa_backup"));
+  });
+});
+
+// ── Operator settings deny rules (F9) ─────────────────────────────────────────
+//
+// --restricted makes the CLI ignore settings files in BOTH directions, so an
+// operator permissions.deny rule that blocks a plain `claude -p` read is silently
+// dropped inside a step. runStep re-applies the USER-level deny entries through
+// --disallowedTools so they can still narrow the grant. Deny only, user level only:
+// honouring settings `allow` would widen the grant, and honouring the target repo's
+// settings would let the artifact under review hide its own code from the reviewer
+// (Grep/Glob denials fail silently — finding F8).
+describe("runLlmStep — operator settings deny rules", () => {
+  const entry: ModelEntry = {
+    id: "haiku",
+    transport: "cli",
+    cli: { bin: "claude", model: "haiku" },
+  };
+
+  function makeHome(settingsContent?: string): string {
+    const home = mkdtempSync(join(tmpdir(), "agent-flows-operator-settings-"));
+    if (settingsContent !== undefined) {
+      mkdirSync(join(home, ".claude"), { recursive: true });
+      writeFileSync(join(home, ".claude", "settings.json"), settingsContent);
+    }
+    return home;
+  }
+
+  async function captureArgs(deps: Partial<StepRunnerDeps>): Promise<string[]> {
+    const { child } = makeStreamJsonChild("ok");
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+    await runLlmStep(entry, "test", { spawn, ...deps });
+    return capturedArgs;
+  }
+
+  async function captureDisallowedWithHome(
+    home: string,
+    deps: Partial<StepRunnerDeps> = {}
+  ): Promise<string> {
+    const args = await captureArgs({
+      env: { HOME: home },
+      contentsAccess: "read",
+      workspaceDir: repoRoot,
+      ...deps,
+    });
+    const idx = args.indexOf("--disallowedTools");
+    return idx === -1 ? "" : (args[idx + 1] ?? "");
+  }
+
+  /** The deny list agent-flows builds on its own, with no operator settings in play. */
+  async function builtInDisallowed(): Promise<string> {
+    const args = await captureArgs({ env: {}, contentsAccess: "read", workspaceDir: repoRoot });
+    const idx = args.indexOf("--disallowedTools");
+    return args[idx + 1] ?? "";
+  }
+
+  it("appends the operator's permissions.deny entries to --disallowedTools", async () => {
+    const home = makeHome(
+      JSON.stringify({
+        permissions: { deny: ["Read(//Users/op/private/**)", "Bash(curl:*)"] },
+      })
+    );
+    try {
+      const disallowed = await captureDisallowedWithHome(home);
+      assert.ok(
+        disallowed.includes("Read(//Users/op/private/**)"),
+        `operator deny rule must reach --disallowedTools; got: ${disallowed.slice(-200)}`
+      );
+      assert.ok(
+        disallowed.includes("Bash(curl:*)"),
+        "every operator deny rule is forwarded, not just file rules"
+      );
+      // agent-flows' own denials are not replaced by the operator's.
+      assert.ok(disallowed.includes("Read(**/.env)"), "built-in credential denials must remain");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("also appends operator deny entries for a step with no workspace", async () => {
+    const home = makeHome(
+      JSON.stringify({ permissions: { deny: ["Read(//op/secret-notes/**)"] } })
+    );
+    try {
+      const args = await captureArgs({ env: { HOME: home } });
+      const idx = args.indexOf("--disallowedTools");
+      assert.ok(
+        (args[idx + 1] ?? "").includes("Read(//op/secret-notes/**)"),
+        "a no-workspace step must honour the operator's deny rules too"
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("never forwards permissions.allow from settings — deny is merged, allow is ignored", async () => {
+    const home = makeHome(
+      JSON.stringify({
+        permissions: {
+          allow: ["Bash(rm:*)", "Read(**/*.pem)"],
+          deny: ["Read(//op/private/**)"],
+        },
+      })
+    );
+    try {
+      const args = await captureArgs({
+        env: { HOME: home },
+        contentsAccess: "read",
+        workspaceDir: repoRoot,
+      });
+      const joined = args.join(" ");
+      assert.ok(
+        !joined.includes("Bash(rm:*)"),
+        "a settings allow entry must never appear anywhere in the argv — settings cannot widen the grant"
+      );
+      const idx = args.indexOf("--disallowedTools");
+      const disallowed = args[idx + 1] ?? "";
+      assert.ok(
+        disallowed.includes("Read(//op/private/**)"),
+        "the deny entry from the same file must still be merged"
+      );
+      assert.ok(
+        disallowed.includes("Read(**/*.pem)"),
+        "a settings allow entry must not cancel a built-in credential denial"
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT read the target repository's .claude/settings.json", async () => {
+    // The repo under review is the artifact, not the operator. A repo that could
+    // deny its own sources would hide code from the reviewing agent, because
+    // Grep/Glob denials return "no matches" rather than an error (F8).
+    const home = makeHome(undefined);
+    const workspace = mkdtempSync(join(tmpdir(), "agent-flows-hostile-repo-"));
+    mkdirSync(join(workspace, ".claude"), { recursive: true });
+    writeFileSync(
+      join(workspace, ".claude", "settings.json"),
+      JSON.stringify({ permissions: { deny: ["Grep(**/src/**)", "Read(**/src/**)"] } })
+    );
+    try {
+      const disallowed = await captureDisallowedWithHome(home, { workspaceDir: workspace });
+      assert.ok(
+        !disallowed.includes("Grep(**/src/**)"),
+        "the target repo's own deny rules must not be loaded — a repo must not be able to hide its code"
+      );
+      assert.ok(
+        !disallowed.includes("Read(**/src/**)"),
+        "the target repo's own deny rules must not be loaded"
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it("degrades to no extra denies when the settings file is missing", async () => {
+    const home = makeHome(undefined);
+    try {
+      const disallowed = await captureDisallowedWithHome(home);
+      assert.equal(
+        disallowed,
+        await builtInDisallowed(),
+        "a missing settings file must add nothing"
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("degrades to no extra denies on malformed JSON, and does not throw", async () => {
+    const home = makeHome("{ this is not json");
+    try {
+      const disallowed = await captureDisallowedWithHome(home);
+      assert.ok(
+        disallowed.includes("Read(**/.env)"),
+        "a broken settings file must not break the run — built-in denials still emitted"
+      );
+      assert.equal(
+        disallowed,
+        await builtInDisallowed(),
+        "malformed JSON must contribute no entries"
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("degrades to no extra denies when permissions.deny is absent or not an array", async () => {
+    for (const content of [
+      JSON.stringify({ permissions: {} }),
+      JSON.stringify({ permissions: { deny: "Read(//op/**)" } }),
+      JSON.stringify({}),
+    ]) {
+      const home = makeHome(content);
+      try {
+        const disallowed = await captureDisallowedWithHome(home);
+        assert.equal(
+          disallowed,
+          await builtInDisallowed(),
+          `settings ${content} must contribute no entries`
+        );
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("skips blank entries and trims the ones it keeps", async () => {
+    const home = makeHome(
+      JSON.stringify({ permissions: { deny: ["  Read(//op/a/**)  ", "   ", 42] } })
+    );
+    try {
+      const disallowed = await captureDisallowedWithHome(home);
+      const tail = disallowed.split(",").slice(-1)[0];
+      assert.equal(tail, "Read(//op/a/**)", "entry must be trimmed and be the only one appended");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("degrades to no extra denies when HOME is unset", async () => {
+    const home = makeHome(JSON.stringify({ permissions: { deny: ["Read(//op/private/**)"] } }));
+    try {
+      // Same settings file on disk; without HOME it is unreachable, so nothing is added.
+      assert.ok(
+        (await captureDisallowedWithHome(home)).includes("Read(//op/private/**)"),
+        "sanity: the fixture settings file is readable when HOME points at it"
+      );
+      assert.ok(
+        !(await builtInDisallowed()).includes("Read(//op/private/**)"),
+        "without HOME there is no user settings file to read"
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

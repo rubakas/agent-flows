@@ -7,6 +7,7 @@ import { z } from "zod";
 import { assembleSpec } from "../../canon/assemble.js";
 import { writeSpecKitSpec } from "../../canon/exportSpec.js";
 import { persistTicket } from "../../canon/persistTicket.js";
+import { checkPortability } from "../../canon/portability.js";
 import { getActiveProfile, resolveStepModel } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
 import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
@@ -194,6 +195,16 @@ export function buildLlmStep(
       const entry = override
         ? deps.registry.resolve(override)
         : resolveStepModel(step, profile, deps.registry);
+
+      // D3: refuse an unportable step before any model call. The adapters throw
+      // for the same combinations, but only after a subprocess has been shaped.
+      const portability = checkPortability(step, entry, profile.id, {
+        ...(deps.defaultMaxBudgetUsd !== undefined
+          ? { defaultMaxBudgetUsd: deps.defaultMaxBudgetUsd }
+          : {}),
+      });
+      if (!portability.ok) throw new Error(portability.reason);
+
       let prompt = renderPrompt(prompts[step.id], ctxVars(ctxData));
 
       // For schema-gated steps: append a strict JSON format instruction so the
@@ -220,19 +231,23 @@ export function buildLlmStep(
       // skills travel the same way — a canon declaration dropped here is the exact
       // bug class this project has hit before.
       const contentsValue = step.permissions?.contents;
+      const hasContentsAccess = contentsValue !== undefined && contentsValue !== "none";
       const runnerDeps: StepRunnerDeps = {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
-        ...(contentsValue && contentsValue !== "none"
+        ...(hasContentsAccess
           ? {
               contentsAccess: contentsValue,
               ...(deps.cwd !== undefined ? { workspaceDir: deps.cwd } : {}),
             }
           : {}),
         ...(step.skills?.length ? { skills: step.skills } : {}),
-        // allowPatterns and denyPatterns travel the same path as contentsAccess —
-        // a canon declaration dropped here is the bug class this project has hit before.
-        ...(step.permissions?.allow?.length ? { allowPatterns: step.permissions.allow } : {}),
-        ...(step.permissions?.deny?.length ? { denyPatterns: step.permissions.deny } : {}),
+        // denyPatterns travels the same path as contentsAccess — a canon
+        // declaration dropped here is the bug class this project has hit before.
+        // It is gated on the SAME condition: a deny list for a step that declared
+        // no file access is a silent no-op.
+        ...(hasContentsAccess && step.permissions?.deny?.length
+          ? { denyPatterns: step.permissions.deny }
+          : {}),
       };
 
       // FR-007: wrap any runner error with the step id so the failure surface

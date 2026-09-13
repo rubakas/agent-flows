@@ -10,11 +10,11 @@ import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ModelRegistry } from "../../canon/registry.js";
-import { StepTimeoutError } from "../../canon/runStep.js";
-import { makeFakeChild } from "../../canon/testing/fakeSpawn.js";
+import { CREDENTIAL_DENY_PATTERNS, StepTimeoutError, runLlmStep } from "../../canon/runStep.js";
+import { makeFakeChild, makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
 import { DEFAULT_CHECK_COMMAND, buildCheckStep, buildLlmStep } from "./buildSteps.js";
+import type { ModelEntry } from "../../canon/registry.js";
 import type { SpawnFn } from "../../canon/runClaudeCli.js";
-import type { runLlmStep } from "../../canon/runStep.js";
 import type { StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
 
@@ -476,5 +476,105 @@ describe("buildLlmStep — workspace report on write step schema-retry failure (
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ─── a contents: none step still gets the full credential deny list ───────────
+
+describe("buildLlmStep — permissions.contents none", () => {
+  it("keeps the credential denial for a step that declares no file access", async () => {
+    // A step declaring `contents: none` still receives the hardened Read,Glob
+    // fallback in the claude adapter, so its credential denials must be emitted
+    // regardless of what else the step declares.
+    const secretFile = "credentials.toml";
+    const step: StepDef = {
+      id: "review.synthesis",
+      kind: "llm",
+      prompt: "prompts/synthesis.md",
+      permissions: { contents: "none" },
+    };
+
+    const entry: ModelEntry = {
+      id: "haiku",
+      transport: "cli",
+      cli: { bin: "claude", model: "haiku" },
+    };
+    const { child } = makeStreamJsonChild("ok");
+    let capturedArgs: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      return child;
+    }) as unknown as SpawnFn;
+
+    // Forward the runnerDeps the binding built into the real runner, so the
+    // assertion lands on the CLI invocation, not on an intermediate shape.
+    const runner: typeof runLlmStep = async (_entry, prompt, runnerDeps) =>
+      runLlmStep(entry, prompt, { ...runnerDeps, spawn });
+
+    const deps = { registry: NOOP_REGISTRY, store: NOOP_STORE, runner };
+    const llmStep = buildLlmStep(step, { "review.synthesis": "synthesis prompt" }, deps, undefined);
+    await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
+
+    const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
+    assert.ok(disallowedIdx !== -1, "a no-permissions step must still emit --disallowedTools");
+    const disallowedValue = capturedArgs[disallowedIdx + 1];
+
+    const pattern = CREDENTIAL_DENY_PATTERNS.find((p) => p.includes(secretFile));
+    assert.ok(pattern !== undefined, `${secretFile} must be a credential deny pattern`);
+    assert.ok(
+      disallowedValue.includes(`Read(${pattern})`),
+      `a contents: none step must still deny Read(${pattern}); got: ${disallowedValue}`
+    );
+    assert.ok(
+      disallowedValue.includes(`Grep(${pattern})`),
+      `a contents: none step must still deny Grep(${pattern}); got: ${disallowedValue}`
+    );
+  });
+});
+
+// ─── D3: run-start portability refusal, before any model call ─────────────────
+
+describe("buildLlmStep — refuses an unportable step before the runner is called", () => {
+  const codexProfile = {
+    id: "openai",
+    roles: { reasoner: "codex", worker: "codex", scout: "codex" },
+  };
+  const codexRegistry = new ModelRegistry([
+    { id: "codex", transport: "cli" as const, cli: { bin: "codex" as const } },
+  ]);
+
+  it("throws naming the step and never invokes the runner (contents: write on codex)", async () => {
+    const step: StepDef = {
+      id: "develop.implement",
+      kind: "llm",
+      role: "worker",
+      prompt: "prompts/develop.md",
+      permissions: { contents: "write" },
+    };
+
+    let runnerCalls = 0;
+    const runner: typeof runLlmStep = async () => {
+      runnerCalls += 1;
+      return "never";
+    };
+
+    const deps = {
+      registry: codexRegistry,
+      store: NOOP_STORE,
+      profile: codexProfile,
+      runner,
+    };
+    const llmStep = buildLlmStep(step, { "develop.implement": "prompt" }, deps, undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      (err: Error) => {
+        assert.match(err.message, /develop\.implement/);
+        assert.match(err.message, /openai/);
+        assert.match(err.message, /permissions\.contents "write"/);
+        return true;
+      }
+    );
+    assert.equal(runnerCalls, 0, "no model call may be made for an unportable step");
   });
 });

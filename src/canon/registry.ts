@@ -49,8 +49,20 @@ export function defaultRegistry(
     { id: "opus", transport: "cli", cli: { bin: "claude", model: "claude-opus-5" } },
     { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "claude-sonnet-5" } },
     { id: "haiku", transport: "cli", cli: { bin: "claude", model: "claude-haiku-4-5" } },
-    // codex: no model field — the CLI uses its own default when no -m flag is passed
-    { id: "codex", transport: "cli", cli: { bin: "codex" } },
+    // codex: no model field by default — the CLI uses its own default when no -m
+    // flag is passed. AGENT_FLOWS_CODEX_MODEL overrides it, because that default
+    // is account-dependent: on a ChatGPT account it resolves to gpt-5.4-mini,
+    // which the endpoint rejects with HTTP 400; gpt-5.6-luna works on this
+    // machine. Set the env var rather than pinning an id here — the working model
+    // differs per account, so a hardcoded value would break other operators.
+    {
+      id: "codex",
+      transport: "cli",
+      cli: {
+        bin: "codex",
+        ...(env.AGENT_FLOWS_CODEX_MODEL ? { model: env.AGENT_FLOWS_CODEX_MODEL } : {}),
+      },
+    },
     {
       id: "ollama-qwen",
       transport: "api",
@@ -108,6 +120,12 @@ const DEFAULT_PROFILES: ProviderProfile[] = [
     roles: { reasoner: "ollama-qwen", worker: "ollama-qwen", scout: "ollama-qwen" },
   },
 ];
+
+/**
+ * Profiles the portability matrix reports on (spec 031 D4): the built-in
+ * defaults, in declaration order.
+ */
+export const MATRIX_PROFILE_IDS: readonly string[] = DEFAULT_PROFILES.map((p) => p.id);
 
 /** Returns the ids of the built-in provider profiles. Used by loadProviders for validation. */
 export function builtInProfileIds(): string[] {

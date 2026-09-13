@@ -4,47 +4,36 @@ import { parse } from "yaml";
 import { GraphError, pipelineAncestors, pipelineLevels } from "./graph.js";
 import { expandNested } from "./nest.js";
 import { extractPlaceholders } from "./render.js";
-import {
-  BUILD_CONFIG_DENY_PATTERNS,
-  CREDENTIAL_DENY_PATTERNS,
-  normalisePattern,
-} from "./runStep.js";
 import { canonSchemas } from "./schemas.js";
 import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 
 const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
-
-// Returns true when an allow entry removes a given deny pattern.
-// Accepts the convenient form where an entry without the leading glob prefix
-// matches if it equals the trailing path segment of the deny pattern.
-// ".env.local" matches the deny pattern for that file because ".env.local"
-// is its last segment. This is safe — the removal is limited to that exact
-// named pattern, so no broader access is silently granted than intended.
-function allowEntryMatches(entry: string, deniedPattern: string): boolean {
-  const normEntry = normalisePattern(entry);
-  const normDenied = normalisePattern(deniedPattern);
-  if (normEntry === normDenied) return true;
-  const lastSegment = normDenied.split("/").pop() ?? normDenied;
-  return normEntry === lastSegment;
-}
-
-// Returns the deny pattern most likely intended by an unrecognised allow entry.
-// Finds the first pattern whose trailing segment contains the entry as a
-// substring, or whose segment is contained within the entry. Returns undefined
-// when nothing plausible is found; callers fall back to listing all patterns.
-function findSuggestion(entry: string, patterns: readonly string[]): string | undefined {
-  const low = normalisePattern(entry).toLowerCase();
-  return patterns.find((p) => {
-    const last = (normalisePattern(p).split("/").pop() ?? normalisePattern(p)).toLowerCase();
-    return last.includes(low) || low.includes(last);
-  });
-}
 
 /** Fields that are illegal on every non-llm step kind. */
 const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"] as const;
 
 /** Fields that are illegal on every step kind OTHER than "check". */
 const NON_CHECK_FORBIDDEN = ["env"] as const;
+
+/**
+ * Rejects a deadline that is not a positive whole number of milliseconds.
+ *
+ * `0` used to be the documented escape hatch for "no deadline". It is refused
+ * now because it silently removes the only supervisor a codex or api step has:
+ * the claude transport keeps its progress watchdog, but those two would hang
+ * forever, and the codex adapter's `finally` — which deletes the sanitized copy
+ * of the repo — would never run. A step that genuinely needs longer must say how
+ * much longer.
+ */
+function assertPositiveTimeout(subject: string, field: string, value: unknown): void {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(
+      `${subject}: ${field} must be a positive integer number of milliseconds; ` +
+        `got ${JSON.stringify(value)}. There is no "no deadline" value — on codex and api ` +
+        `it would leave a hung step unsupervised.`
+    );
+  }
+}
 
 /** Runs pipelineLevels and re-throws GraphError as a plain Error (preserving the message). */
 function assertLevels(steps: PipelineDef["steps"]): void {
@@ -93,6 +82,14 @@ export function loadPipeline(
           `Replace:\n  workspace: read|write\nwith:\n  permissions:\n    contents: read|write`
       );
     }
+  }
+
+  // A non-positive deadline used to mean "no deadline". It is rejected now: on a
+  // transport with no watchdog (codex, api) it removes supervision entirely, so a
+  // hung child runs forever and the sanitized copy is never removed.
+  const defTimeout = (def as unknown as Record<string, unknown>).defaultTimeoutMs;
+  if (defTimeout !== undefined) {
+    assertPositiveTimeout(`Pipeline "${def.id}"`, "defaultTimeoutMs", defTimeout);
   }
 
   // Validate defaultMaxBudgetUsd if present
@@ -260,6 +257,12 @@ export function loadPipeline(
         }
       }
 
+      // Validate timeoutMs if present (same reasoning as defaultTimeoutMs above)
+      const timeoutField = (step as unknown as Record<string, unknown>).timeoutMs;
+      if (timeoutField !== undefined) {
+        assertPositiveTimeout(`Step "${step.id}"`, "timeoutMs", timeoutField);
+      }
+
       // Validate maxBudgetUsd if present
       const budgetField = (step as unknown as Record<string, unknown>).maxBudgetUsd;
       if (budgetField !== undefined) {
@@ -316,9 +319,12 @@ export function loadPipeline(
 
     if (step.permissions !== undefined) {
       const perms = step.permissions as unknown as Record<string, unknown>;
-      const unknownScopes = Object.keys(perms).filter(
-        (k) => k !== "contents" && k !== "allow" && k !== "deny"
-      );
+      // D5/FR-009: `allow` is not an unknown scope — it is a removed one, and the
+      // operator needs the removal named rather than a generic "unknown scope".
+      if (perms.allow !== undefined) {
+        throw new Error("permissions.allow was removed (spec 031); deny is narrowing-only");
+      }
+      const unknownScopes = Object.keys(perms).filter((k) => k !== "contents" && k !== "deny");
       if (unknownScopes.length > 0) {
         throw new Error(
           `Step "${step.id}": permissions contains unknown scope(s) "${unknownScopes.join('", "')}" — ` +
@@ -340,51 +346,25 @@ export function loadPipeline(
         );
       }
 
-      // allow and deny are only meaningful when contents is declared — an exception
-      // to a deny list that is not applied is a silent no-op, so we reject this.
-      for (const field of ["allow", "deny"] as const) {
-        const fieldValue = perms[field];
-        if (fieldValue === undefined) continue;
+      // deny is only meaningful when contents is declared — a deny list that is
+      // not applied is a silent no-op, so we reject this.
+      const denyValue = perms.deny;
+      if (denyValue !== undefined) {
         if (contentsValue === undefined) {
           throw new Error(
-            `Step "${step.id}": permissions.${field} requires permissions.contents to be set — ` +
-              `an exception to a deny list that is not applied is a silent no-op`
+            `Step "${step.id}": permissions.deny requires permissions.contents to be set — ` +
+              `a deny list that is not applied is a silent no-op`
           );
         }
-        if (!Array.isArray(fieldValue) || (fieldValue as unknown[]).length === 0) {
+        if (!Array.isArray(denyValue) || (denyValue as unknown[]).length === 0) {
           throw new Error(
-            `Step "${step.id}": permissions.${field} must be a non-empty array of strings`
+            `Step "${step.id}": permissions.deny must be a non-empty array of strings`
           );
         }
-        for (const entry of fieldValue as unknown[]) {
+        for (const entry of denyValue as unknown[]) {
           if (typeof entry !== "string" || entry.trim() === "") {
             throw new Error(
-              `Step "${step.id}": permissions.${field} entries must be non-blank strings`
-            );
-          }
-        }
-      }
-
-      // Validate that each allow entry actually matches a deny pattern it could
-      // remove. An entry that removes nothing is a silent no-op and the
-      // operator must be told — this is exactly the class of bug this project
-      // has been bitten by before ("declared but silently dropped").
-      if (perms.allow !== undefined) {
-        const stepDenyEntries = Array.isArray(perms.deny) ? (perms.deny as string[]) : [];
-        const effectiveDenyPatterns: readonly string[] = [
-          ...CREDENTIAL_DENY_PATTERNS,
-          ...BUILD_CONFIG_DENY_PATTERNS,
-          ...stepDenyEntries,
-        ];
-        for (const entry of perms.allow as string[]) {
-          if (!effectiveDenyPatterns.some((p) => allowEntryMatches(entry, p))) {
-            const suggestion = findSuggestion(entry, effectiveDenyPatterns);
-            const hint =
-              suggestion != null
-                ? `did you mean "${suggestion}"?`
-                : `available patterns: ${[...effectiveDenyPatterns].map((p) => `"${p}"`).join(", ")}`;
-            throw new Error(
-              `Step "${step.id}": permissions.allow entry "${entry}" does not match any deny pattern — ${hint}`
+              `Step "${step.id}": permissions.deny entries must be non-blank strings`
             );
           }
         }
