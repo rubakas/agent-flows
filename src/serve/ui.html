@@ -169,6 +169,69 @@
       tr[data-run-row] {
         cursor: pointer;
       }
+      /* Split view (spec 034 D9). Below the breakpoint both panes are plain
+         blocks, so the narrow layout is the stacked one by default. */
+      #runs-split,
+      #settings-split {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      #runs-pane-detail,
+      #settings-reader {
+        min-width: 0;
+      }
+      #settings-reader-title {
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+      #settings-reader-body {
+        max-height: 60vh;
+      }
+      .name-item {
+        font-family: var(--mono);
+        font-size: 12px;
+        background: var(--sunk);
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        padding: 1px 6px;
+        margin: 0 6px 6px 0;
+        cursor: pointer;
+        color: var(--ink);
+      }
+      .name-item:hover,
+      .name-item.active {
+        background: var(--accent-bg);
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      @media (min-width: 1200px) {
+        main {
+          max-width: 1600px;
+        }
+        #runs-split,
+        #settings-split {
+          flex-direction: row;
+          align-items: flex-start;
+        }
+        #runs-pane-list {
+          flex: 0 0 45%;
+          min-width: 0;
+        }
+        #settings-pane-list {
+          flex: 0 0 30%;
+          min-width: 0;
+        }
+        #runs-pane-detail,
+        #settings-reader {
+          flex: 1;
+          border-left: 1px solid var(--line);
+          padding-left: 16px;
+        }
+      }
+      tr.selected td {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
       /* A run waiting on a human is the one row that must not blend in (FR-002). */
       tr.awaiting td {
         background: color-mix(in srgb, #9a7318 10%, transparent);
@@ -590,7 +653,14 @@
           </div>
           <button class="btn" id="btn-refresh-runs" style="margin-left: auto">Refresh</button>
         </div>
-        <div id="runs-table-wrap">Loading…</div>
+        <div id="runs-split">
+          <div id="runs-pane-list">
+            <div id="runs-table-wrap">Loading…</div>
+          </div>
+          <div id="runs-pane-detail" hidden>
+            <div id="runs-pane-detail-body"></div>
+          </div>
+        </div>
       </section>
 
       <!-- Run details view (D3) -->
@@ -669,14 +739,27 @@
           <div class="card" id="env-card">Loading…</div>
         </div>
 
-        <div class="section" id="skills-section" hidden>
-          <div class="section-header"><h2>Skills</h2></div>
-          <div class="card" id="skills-wrap"></div>
-        </div>
+        <div class="section" id="settings-split">
+          <div id="settings-pane-list">
+            <div id="skills-section" hidden>
+              <div class="section-header"><h2>Skills</h2></div>
+              <div class="card" id="skills-wrap"></div>
+            </div>
 
-        <div class="section" id="agents-section" hidden>
-          <div class="section-header"><h2>Agents</h2></div>
-          <div class="card" id="agents-wrap"></div>
+            <div id="agents-section" hidden style="margin-top: 16px">
+              <div class="section-header"><h2>Agents</h2></div>
+              <div class="card" id="agents-wrap"></div>
+            </div>
+          </div>
+          <div id="settings-reader" hidden>
+            <div class="section-header">
+              <h2 id="settings-reader-title">—</h2>
+              <button class="btn copy-btn" id="btn-copy-reader" style="margin-left: auto">
+                Copy
+              </button>
+            </div>
+            <pre class="code-block" id="settings-reader-body"></pre>
+          </div>
         </div>
       </section>
     </main>
@@ -872,8 +955,28 @@
         }
       };
 
+      /**
+       * Open a URL that came from configuration or the daemon's n8n response.
+       * Only http/https may reach window.open: a "javascript:" base URL would
+       * otherwise execute in this page's origin the moment the operator clicks.
+       */
+      function openExternal(rawUrl) {
+        let parsed;
+        try {
+          parsed = new URL(rawUrl);
+        } catch {
+          flash(`Refusing to open an invalid URL: ${rawUrl}`, true);
+          return;
+        }
+        if (!["http:", "https:"].includes(parsed.protocol)) {
+          flash(`Refusing to open a ${parsed.protocol} URL — only http and https`, true);
+          return;
+        }
+        window.open(parsed.href, "_blank");
+      }
+
       document.getElementById("btn-new-in-n8n").onclick = () => {
-        if (n8nBaseUrl) window.open(`${n8nBaseUrl}/workflow/new`, "_blank");
+        if (n8nBaseUrl) openExternal(`${n8nBaseUrl}/workflow/new`);
       };
 
       // ── Project tier ───────────────────────────────────────────────────────
@@ -939,7 +1042,7 @@
                   `/api/pipelines/${encodeURIComponent(btn.dataset.editN8n)}/n8n`,
                   {}
                 );
-                window.open(r.url, "_blank");
+                openExternal(r.url);
               } catch (e) {
                 flash(e.message, true);
               }
@@ -1115,7 +1218,7 @@
           }
         } catch (e) {
           select.innerHTML = `<option value="">Error loading workflows</option>`;
-          dlgError.textContent = escH(e.message);
+          dlgError.textContent = e.message;
           dlgError.style.display = "";
         }
       };
@@ -1135,12 +1238,12 @@
 
         try {
           const r = await api("POST", "/api/templates/from-n8n", { workflowId, templateId });
-          flash(`Saved as template "${escH(r.templateId)}"`);
+          flash(`Saved as template "${r.templateId}"`);
           dialogBackdrop.classList.remove("open");
           templateIdInput.value = "";
           loadTemplateTier();
         } catch (e) {
-          dlgError.textContent = escH(e.message);
+          dlgError.textContent = e.message;
           dlgError.style.display = "";
         }
       };
@@ -1179,7 +1282,7 @@
           await loadN8nStatus();
           loadProjectTier();
         } catch (e) {
-          cfgError.textContent = escH(e.message);
+          cfgError.textContent = e.message;
           cfgError.style.display = "";
         }
       };
@@ -1210,6 +1313,9 @@
 
       /** Which chip is selected in the Runs view (D2). "active" is the default. */
       let _runsFilter = "active";
+
+      /** The run whose details are on screen, so a re-rendered table can mark it. */
+      let _selectedRunId = null;
 
       /** Statuses counted as active by the Active chip and the poller. */
       const ACTIVE_STATUSES = new Set(["running", "started", "awaiting_approval"]);
@@ -1295,7 +1401,13 @@
             r.source === "disk"
               ? ` <span class="tier-badge tier-bundled" title="restored from its artifact — this run is not live">disk</span>`
               : "";
-          html += `<tr data-run-row="${escH(r.runId)}"${r.status === "awaiting_approval" ? ' class="awaiting"' : ""}>
+          const rowClasses = [
+            r.status === "awaiting_approval" ? "awaiting" : "",
+            r.runId === _selectedRunId ? "selected" : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+          html += `<tr data-run-row="${escH(r.runId)}"${rowClasses ? ` class="${rowClasses}"` : ""}>
             <td><span class="run-status ${escH(sc)}">${escH(r.status)}</span>${diskMark}</td>
             <td class="pipeline-id">${escH(r.pipelineId)}</td>
             <td style="font-size:12px;color:var(--muted)">${escH(fmtTime(r.createdAt))}</td>
@@ -1384,7 +1496,7 @@
         _activeRunId = runId;
         closeRunStream();
 
-        const body = document.getElementById("run-view-body");
+        const body = runDetailTarget();
         body.innerHTML = `<p style="color:var(--muted);font-size:13px">Loading…</p>`;
 
         // Fetch the current snapshot first so the view has a starting state.
@@ -1776,16 +1888,65 @@
         }
       }
 
-      /** Show a names-only list (skills, agents); the section hides when empty. */
+      /**
+       * Show a names-only list (skills, agents); the section hides when empty.
+       * Each name opens its content in the reader pane (FR-014) — the endpoint
+       * returns the file's text, which the page never executes, only displays.
+       */
       function renderNameList(kind, names) {
         document.getElementById(`${kind}-section`).hidden = names.length === 0;
-        document.getElementById(`${kind}-wrap`).innerHTML = names
+        const wrap = document.getElementById(`${kind}-wrap`);
+        wrap.innerHTML = names
           .map(
             (n) =>
-              `<code style="font-size:12px;background:var(--sunk);padding:1px 5px;border-radius:3px;margin-right:6px">${escH(n)}</code>`
+              `<button class="name-item" data-read-kind="${escH(kind)}" data-read-name="${escH(n)}">${escH(n)}</button>`
           )
           .join("");
+        wrap.querySelectorAll("[data-read-name]").forEach((btn) => {
+          btn.onclick = () => openReader(btn.dataset.readKind, btn.dataset.readName);
+        });
       }
+
+      /** Text currently in the reader pane, for its copy button. */
+      let _readerText = "";
+
+      /**
+       * Load one skill or agent into the right-hand reader (FR-014).
+       * On a narrow screen the same pane renders under the list — that is CSS,
+       * not a second code path.
+       */
+      async function openReader(kind, name) {
+        const pane = document.getElementById("settings-reader");
+        const title = document.getElementById("settings-reader-title");
+        const bodyEl = document.getElementById("settings-reader-body");
+        pane.hidden = false;
+        title.textContent = name; // .textContent — safe
+        bodyEl.textContent = "Loading…";
+        for (const el of document.querySelectorAll("[data-read-name]")) {
+          el.classList.toggle(
+            "active",
+            el.dataset.readKind === kind && el.dataset.readName === name
+          );
+        }
+        try {
+          const path = kind === "skills" ? "/api/skills/" : "/api/agents/";
+          const doc = await api("GET", `${path}${encodeURIComponent(name)}`);
+          _readerText = doc.content ?? "";
+          // .textContent — the file's text is displayed, never parsed as HTML.
+          bodyEl.textContent = doc.truncated ? `${_readerText}\n\n… (truncated)` : _readerText;
+        } catch (e) {
+          _readerText = "";
+          bodyEl.textContent = e.message;
+        }
+      }
+
+      document.getElementById("btn-copy-reader").onclick = () => {
+        if (!_readerText) return;
+        navigator.clipboard.writeText(_readerText).then(
+          () => flash("Copied"),
+          () => flash("Copy failed", true)
+        );
+      };
 
       // Spec 032 FR-011: show where this project and its machine-local state live.
       async function loadHeaderContext() {
@@ -1813,6 +1974,17 @@
       const TAB_IDS = ["runs", "workflows", "templates", "settings"];
 
       /**
+       * At this width the Runs view keeps the table and the selected run's
+       * details side by side (spec 034 D9); below it, details replace the list.
+       */
+      const WIDE = window.matchMedia("(min-width: 1200px)");
+
+      /** Where run details render right now: the right pane, or the full view. */
+      function runDetailTarget() {
+        return document.getElementById(WIDE.matches ? "runs-pane-detail-body" : "run-view-body");
+      }
+
+      /**
        * Show the view named by the current hash and load its data.
        *
        * The run stream is closed on every route change before the new view is
@@ -1821,11 +1993,19 @@
        */
       function route() {
         const { view, runId } = parseHash(location.hash);
+        // FR-004/FR-014: the stream belongs to the selected run, not to a pane —
+        // the layout the details happen to render in never changes this rule.
         if (view !== "run" || runId !== _activeRunId) closeRunStream();
 
+        // FR-013: while a run is selected on a wide screen the Runs view stays on
+        // screen and the details fill its right pane, so #view-run is only ever
+        // shown on a narrow one.
+        const splitRun = view === "run" && WIDE.matches;
+        const shownView = splitRun ? "runs" : view;
         for (const id of VIEW_IDS) {
-          document.getElementById(`view-${id}`).hidden = id !== view;
+          document.getElementById(`view-${id}`).hidden = id !== shownView;
         }
+        document.getElementById("runs-pane-detail").hidden = !splitRun;
         // The run details view belongs to the Runs tab.
         const activeTab = view === "run" ? "runs" : view;
         for (const id of TAB_IDS) {
@@ -1833,8 +2013,13 @@
         }
 
         if (view === "runs") {
+          _selectedRunId = null;
           loadRuns();
         } else if (view === "run") {
+          _selectedRunId = runId;
+          // The table is part of this screen when split, so it is loaded too —
+          // and it is what shows the selection.
+          if (splitRun) loadRuns();
           openRunView(runId);
         } else if (view === "workflows") {
           loadProjectTier();
@@ -1847,6 +2032,10 @@
       }
 
       window.addEventListener("hashchange", route);
+
+      // Crossing the breakpoint moves the details between the right pane and the
+      // full view; re-routing is what performs that move.
+      WIDE.addEventListener("change", () => route());
 
       // FR-009: Escape leaves the run details view.
       document.addEventListener("keydown", (ev) => {
