@@ -1,0 +1,52 @@
+id: code-review
+version: 1
+description: Adversarial review of a code change, with every finding verified against the repo
+# stage-handoff (spec 029 FR-011): inputs.plan ← the diff under review; inputs.baseline ←
+# the ref establishing what existed before; both optional inputs default to "" when a
+# caller omits them. No step here has shell access, so scope is read out of the diff text
+# and introducedCommits carries a precomputed commit list when a caller can supply one.
+# The synthesis step outputs its verdict in result (accumulated context); a caller that
+# wants the verified findings reads artifact.result.verify.
+inputs:
+  - plan
+  - baseline
+  - introducedCommits
+optionalInputs:
+  - baseline
+  - introducedCommits
+steps:
+  - id: correctness
+    kind: llm
+    role: worker # adversarial review of one dimension; reviewer-class agents run on sonnet
+    permissions:
+      contents: read
+    prompt: prompts/audit-correctness.md
+  - id: security
+    kind: llm
+    role: worker # same reasoning as correctness — single-dimension adversarial review
+    permissions:
+      contents: read
+    prompt: prompts/audit-security.md
+  # Verification is a separate step, run by an agent other than the one that raised the
+  # finding. audit asks the reviewer that wants to report a finding whether a guard already
+  # closes it — self-certification, the wrong party for the question. Here the question goes
+  # to an independent agent empowered to disprove the claim against the artifact.
+  - id: verify
+    kind: llm
+    role: reasoner # per-finding judgement against the repo; the step the whole pipeline exists for
+    permissions:
+      contents: read
+    dependsOn: [correctness, security]
+    prompt: prompts/code-review-verify.md
+    schema: codeReviewFindings
+  # Synthesis receives {{verify}} only — never {{correctness}} or {{security}}. Withholding
+  # the raw worker findings makes overriding the verifier's verdict structurally impossible
+  # rather than merely forbidden: synthesis cannot re-judge a finding it cannot see
+  # (spec 030 FR-008).
+  - id: synthesis
+    kind: llm
+    role: reasoner # reconciles verified findings into a verdict; judgment across the whole set
+    permissions:
+      contents: read
+    dependsOn: [verify]
+    prompt: prompts/code-review-synthesis.md
