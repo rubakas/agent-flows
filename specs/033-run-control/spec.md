@@ -184,3 +184,46 @@ about 2 s with no surviving processes; the artifact and the manifest stage carry
 unknown run id returns 404. Mutations a–g are all red, with g proven red-not-hang after the test fix.
 Two defects surfaced only by the live run and were fixed: a late result resurrecting a cancelled step,
 and the manifest chain status ignoring `cancelled`.
+
+## Amendment 2026-09-13 — run details
+
+**D6 — Run details.** Every run keeps its `invocation` (`{ pipeline, inputs, models?, gateMode?,
+artifactPath?, startedAt, source: "http" }`, inputs verbatim); every executing step records, at
+execute time, `prompt` (rendered text sent to the model, llm steps), `command` (the shell command,
+check steps) and `model` (resolved registry id + transport). Steps record through a per-run
+introspection channel keyed by Mastra's `runId` (`src/runtime/stepIntrospection.ts`, a leaf module)
+because `BuildDeps` is build-time and shared (D1); the run service merges it into the run state and
+clears the map entry when the run settles, after copying into the record. Both invocation and
+per-step prompt/command/model are returned by `GET /api/runs/:id` (`RunRecord`, `runService.ts:224`)
+and persisted in the artifact. `get_run` (`daemonTools.ts:161`) gains `invocation` and per-step
+`model`/`command` but NOT prompt text (chat noise); prompts are read from the page or the artifact.
+
+## Functional Requirements (amendment)
+
+- **FR-016.** `RunRecord` gains `invocation`, set once in `start()`; `GET /api/runs/:id` and the
+  artifact include it verbatim.
+- **FR-017.** Every `llm`/`check` execute path writes `prompt`/`command` plus resolved `model` into
+  `stepIntrospection.ts`'s per-`runId` map before running; the run service copies each entry into
+  `record.steps[id]` and deletes the map entry at terminal status. Two concurrent runs never mix.
+- **FR-018.** `persistArtifact()` (`runService.ts:965-1010`) writes `invocation` and per-step
+  `prompt`/`command`/`model`.
+- **FR-019.** The run-list button (`data-attach-run`, `ui.html:1021`) is renamed "Details"; the
+  panel header is the pipeline id, with `Run <id>` (copyable), started time and status badge inside.
+- **FR-020.** The panel gains a "How it was run" block: the chat call
+  `run_pipeline({ pipeline, inputs, … })` and the equivalent `curl -X POST /api/runs`, pretty JSON;
+  long input values render collapsed with an expand control.
+- **FR-021.** Each step row gains a Model column and an expandable Prompt (llm) or Command (check)
+  block in monospace with a copy button, collapsed by default.
+
+## Verification (amendment)
+
+- **V7.** Unit: `start()` round-trips `invocation`. A fake llm runner's rendered prompt appears at
+  `GET /api/runs/:id`'s `steps.<id>.prompt`; two runs on one workflow keep separate prompts. The
+  artifact contains `invocation` plus per-step prompts. `get_run` returns `invocation` and per-step
+  `model`/`command` but never `prompt`. Mutation: drop the introspection merge → red.
+- **V8.** Route test: served `/` HTML has the new element ids, `"Details"`, and no `"Attach"`.
+  Visual check is DEFERRED — pending operator: the browser extension cannot render a page holding an
+  open SSE stream, so the owner confirms it live.
+
+**Risk.** Prompts can be large (a diff of thousands of lines); stored fully, rendered collapsed —
+artifact size grows accordingly.
