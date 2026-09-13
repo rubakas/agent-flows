@@ -1138,6 +1138,13 @@
           </div>`;
         }
 
+        // Cancel control — shown while the run can still be stopped (FR-008).
+        if (status === "running" || status === "awaiting_approval") {
+          html += `<div style="margin-bottom:10px">
+            <button class="btn danger" id="btn-cancel-run">Cancel run</button>
+          </div>`;
+        }
+
         // Steps table.
         const steps = snapshot.steps || {};
         const stepIds = Object.keys(steps);
@@ -1161,9 +1168,22 @@
 
         body.innerHTML = html;
 
-        // Wire approve/reject after setting innerHTML.
+        // Wire approve/reject/cancel after setting innerHTML.
         const approveBtn = body.querySelector("#btn-approve-run");
         const rejectBtn = body.querySelector("#btn-reject-run");
+        const cancelBtn = body.querySelector("#btn-cancel-run");
+        if (cancelBtn) {
+          cancelBtn.onclick = async () => {
+            if (!confirm("Cancel this run? Any running step is killed.")) return;
+            try {
+              await api("POST", `/api/runs/${encodeURIComponent(runId)}/cancel`, {});
+              flash("Run cancelled");
+              loadRuns();
+            } catch (e) {
+              flash(e.message, true);
+            }
+          };
+        }
         if (approveBtn) {
           approveBtn.onclick = async () => {
             try {

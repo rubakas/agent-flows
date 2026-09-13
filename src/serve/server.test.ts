@@ -10,6 +10,7 @@
 // API treats "Host" as a forbidden header and silently ignores overrides.
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   cpSync,
   existsSync,
@@ -21,6 +22,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { request as httpRequest, type IncomingMessage, type RequestOptions } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -29,15 +31,31 @@ import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { ModelRegistry } from "../canon/registry.js";
 import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
-import { startServer, readAgentFlowsConfig, type ServeHandle, CONTENT_CAP } from "./server.js";
+import {
+  startServer,
+  readAgentFlowsConfig,
+  legacyDbNotice,
+  portInvalidMessage,
+  type CliIo,
+  handleListenError,
+  portInUseMessage,
+  resolvePort,
+  type ServeHandle,
+  CONTENT_CAP,
+} from "./server.js";
 import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
 
+const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
+
 /**
- * Machine-local state for a project, rooted in the suite's own tmp dir so the
- * owner's real ~/.agent-flows is never touched (spec 032 V7).
+ * Machine-local state for a test server, rooted in a throwaway home so nothing
+ * can fall through to the owner's real ~/.agent-flows (spec 032 V7).
+ * `resolveProjectState` is pure, so the directory is created only if a test
+ * actually writes into it.
  */
-function makeState(tmpDir: string, projectDir: string): ProjectState {
-  return resolveProjectState(projectDir, { AGENT_FLOWS_HOME: join(tmpDir, "state-home") });
+function makeState(projectDir: string, tmpDir?: string): ProjectState {
+  const home = tmpDir !== undefined ? join(tmpDir, "state-home") : TEST_STATE_HOME;
+  return resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home });
 }
 
 // ── Mock RunService helpers (mirrors runService.test.ts pattern) ──────────────
@@ -150,6 +168,7 @@ describe("GET /api/pipelines — lists real pipelines", () => {
 
   before(async () => {
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -204,6 +223,7 @@ describe("FR-019: Host header rejection", () => {
 
   before(async () => {
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -234,6 +254,7 @@ describe("FR-019: content-type and Origin guards on mutating requests", () => {
 
   before(async () => {
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -291,6 +312,7 @@ describe("404 responses for unknown ids", () => {
 
   before(async () => {
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -346,6 +368,7 @@ describe("draft open → update → save round trip", () => {
     cpSync(join(REAL_REPO_ROOT, "prompts"), join(tmpRoot, "prompts"), { recursive: true });
 
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: tmpPipelinesDir,
@@ -426,6 +449,7 @@ describe("POST /api/runs — non-blocking start + SSE step events", () => {
     svcRunId = startResult.runId;
 
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -504,6 +528,7 @@ describe("SSE /api/runs/:id/events delivers snapshot first", () => {
     runId = startResult.runId;
 
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -566,6 +591,7 @@ describe("GET /api/runs/:id — suspended run includes gate payload", () => {
     await service.waitForSettled(runId);
 
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -615,6 +641,7 @@ describe("SSE /api/runs/:id/events — snapshot carries gate payload for late-co
     await service.waitForSettled(runId);
 
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -684,6 +711,7 @@ describe("GET /api/runs — FR-002: list route returns summaries in creation ord
     await service.start("pipeline-a", {});
     await service.start("pipeline-b", {});
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -725,6 +753,7 @@ describe("GET /api/runs — FR-002: list route returns summaries in creation ord
 
   it("GET /api/runs → 503 when no RunService", async () => {
     const noSvcSrv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -751,6 +780,7 @@ describe("GET /api/runs/:id — steps field always present in GetResult (FR-006)
     const start = await svc.start("test-pipeline", {});
     runId = start.runId;
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -772,6 +802,7 @@ describe("GET /api/runs/:id — steps field always present in GetResult (FR-006)
     );
     const s = await svc2.start("p", {});
     const srv2 = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -793,6 +824,7 @@ describe("GET /api/runs/:id — steps field always present in GetResult (FR-006)
       await srv2.close();
 
       const srv3 = await startServer({
+        state: makeState(REAL_REPO_ROOT),
         port: 0,
         dbPath: ":memory:",
         pipelinesDir: REAL_PIPELINES_DIR,
@@ -845,6 +877,7 @@ describe("POST /api/pipelines — create new pipeline", () => {
     tmpPipelinesDir = join(tmpRoot, "pipelines");
     mkdirSync(tmpPipelinesDir);
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: tmpPipelinesDir,
@@ -930,6 +963,7 @@ describe("DELETE /api/pipelines/:id — remove project pipeline", () => {
     );
 
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: tmpPipelinesDir,
@@ -963,6 +997,7 @@ describe("DELETE /api/pipelines/:id — remove project pipeline", () => {
 
   it("refuses to delete from the bundled catalog → 403", async () => {
     const bundledSrv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -996,6 +1031,7 @@ describe("POST /api/install — install from bundled catalog", () => {
   before(async () => {
     tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-install-test-")));
     srv = await startServer({
+      state: makeState(tmpProjectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1091,6 +1127,7 @@ describe("GET / — security headers", () => {
 
   before(async () => {
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1123,6 +1160,7 @@ describe("GET /api/environment — launch-point description", () => {
 
     // Server A: pipelinesDir === bundledPipelinesDir → source = "bundled"
     bundledSrv = await startServer({
+      state: makeState(tmpProjectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1138,6 +1176,7 @@ describe("GET /api/environment — launch-point description", () => {
       "id: custom\nversion: 1\ndescription: custom\ninputs: []\nsteps:\n  - id: s\n    kind: gate\n"
     );
     projectSrv = await startServer({
+      state: makeState(tmpProjectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: projectPipelinesDir,
@@ -1218,6 +1257,7 @@ describe("GET /api/skills/:name and GET /api/agents/:name — content endpoints"
     writeFileSync(join(agentsDir, "my-agent.md"), "# My Agent\nThis agent does things.\n");
 
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1316,6 +1356,7 @@ describe("GET /api/export/:id — export workflow bundle", () => {
 
   before(async () => {
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1369,6 +1410,7 @@ describe("POST /api/import — import workflow bundle", () => {
   before(async () => {
     tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-import-http-test-")));
     srv = await startServer({
+      state: makeState(tmpProjectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1489,7 +1531,12 @@ describe("POST /api/gate-judge — FR-012 judge-as-a-service", () => {
     const mastra = makeMastraStubForGateJudge();
     const judgeDeps = makeGateJudgeDeps('{"verdict":"approve","reason":"Looks good."}');
     const runService = new RunService(mastra, judgeDeps);
-    srv = await startServer({ port: 0, dbPath: ":memory:", runService });
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      runService,
+    });
   });
 
   after(async () => {
@@ -1518,7 +1565,12 @@ describe("POST /api/gate-judge — FR-012 judge-as-a-service", () => {
       judgePrompt: "Gate judge prompt.",
     };
     const failService = new RunService(mastra, failDeps);
-    const failSrv = await startServer({ port: 0, dbPath: ":memory:", runService: failService });
+    const failSrv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      runService: failService,
+    });
     try {
       const res = await mutate(failSrv.port, "POST", "/api/gate-judge", {
         gateMessage: "Approve this?",
@@ -1551,7 +1603,11 @@ describe("POST /api/gate-judge — FR-012 judge-as-a-service", () => {
   });
 
   it("no RunService → 503", async () => {
-    const noSrv = await startServer({ port: 0, dbPath: ":memory:" });
+    const noSrv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+    });
     try {
       const res = await mutate(noSrv.port, "POST", "/api/gate-judge", {
         gateMessage: "Approve?",
@@ -1658,6 +1714,7 @@ describe("Template lifecycle (FR-002)", () => {
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
     srv = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1762,6 +1819,7 @@ describe("path traversal guard — id-bearing routes reject hostile ids (FR-002/
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
     srv = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1852,6 +1910,7 @@ describe("n8n status and key secrecy (FR-005/FR-008)", () => {
     process.env.AGENT_FLOWS_N8N_URL = "http://localhost:15678";
     process.env.AGENT_FLOWS_N8N_API_KEY = FAKE_API_KEY;
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1877,7 +1936,11 @@ describe("n8n status and key secrecy (FR-005/FR-008)", () => {
   });
 
   it("GET /api/n8n/status returns {configured:false} when env vars are unset", async () => {
-    const uncfg = await startServer({ port: 0, dbPath: ":memory:" });
+    const uncfg = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+    });
     // Create a server with no env overrides (temporarily clear them for this sub-test)
     const savedUrl = process.env.AGENT_FLOWS_N8N_URL;
     const savedKey = process.env.AGENT_FLOWS_N8N_API_KEY;
@@ -1944,6 +2007,7 @@ describe("POST /api/pipelines/:id/n8n redirect mapping (FR-006, test plan §9)",
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
     srv = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -1980,6 +2044,7 @@ describe("GET / — run observability wired in served HTML (FR-003/FR-004/FR-006
 
   before(async () => {
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2073,6 +2138,7 @@ describe("FR-004: per-request canon resolution — daemon serves installed pipel
     tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-fr004-")));
     // Start with no .agent-flows/ at all — bundled pipelines should be served.
     srv = await startServer({
+      state: makeState(tmpProjectDir),
       port: 0,
       dbPath: ":memory:",
       projectDir: tmpProjectDir,
@@ -2145,6 +2211,7 @@ describe("FR-005: GET /api/runs/:id never returns 'suspended' or 'success' statu
     runId = id;
     await service.waitForSettled(runId);
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2189,6 +2256,7 @@ describe("FR-006/FR-007: gate rejection returns HTTP 200 with status:'rejected',
     runId = id;
     await service.waitForSettled(runId);
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2248,6 +2316,7 @@ describe("FR-006: optional rejection reason stored on gate decision", () => {
     runId = id;
     await service.waitForSettled(runId);
     srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2304,6 +2373,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
     // Tests that need to inspect capturedInput create their own server/service.
     const sharedRun = makeMockRun("shared-run-01", successResult(), successResult());
     srv = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2388,6 +2458,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
 
     // New server (new daemon) with a fresh RunService — no shared memory with stage A.
     const srv2 = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2446,6 +2517,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
     };
 
     const srv2 = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2621,6 +2693,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
       },
     };
     const srv2 = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2682,6 +2755,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
     };
 
     const srv2 = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2778,6 +2852,7 @@ describe("FR-003: POST /api/runs — artifactPath seeds inputs from artifact fil
     };
 
     const srv2 = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2841,6 +2916,7 @@ describe("FR-003: artifactPath traversal outside project directory is rejected",
     );
     const traversalRun = makeMockRun("traversal-run-01", successResult(), successResult());
     srv = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -2974,6 +3050,7 @@ describe("FR-004: artifact from a different provider profile starts a new run un
     );
 
     const srv = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -3017,6 +3094,7 @@ describe("FR-005: POST /api/runs/decide — entry-point decision route", () => {
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
     srv = await startServer({
+      state: makeState(projectDir),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -3122,7 +3200,7 @@ describe("FR-006: GET /api/runs/:id/manifest — manifest HTTP route", () => {
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-manifest-http-")));
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
-    state = makeState(tmpDir, projectDir);
+    state = makeState(projectDir, tmpDir);
   });
   after(async () => {
     await srv.close();
@@ -3237,7 +3315,7 @@ describe("FR-006: GET /api/runs/:id/manifest — disk fallback, no live run requ
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-manifest-disk-")));
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
-    state = makeState(tmpDir, projectDir);
+    state = makeState(projectDir, tmpDir);
     // Registry has never seen any of the run ids used in this suite.
     srv = await startServer({
       port: 0,
@@ -3336,7 +3414,7 @@ describe("FR-009: GET /api/runs/:id includes artifactPath after settlement", () 
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-fr009-http-")));
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
-    state = makeState(tmpDir, projectDir);
+    state = makeState(projectDir, tmpDir);
   });
   after(async () => {
     await srv.close();
@@ -3383,6 +3461,312 @@ describe("FR-009: GET /api/runs/:id includes artifactPath after settlement", () 
     assert.ok(
       runState.artifactPath.endsWith("investigate.json"),
       `artifactPath must end with investigate.json; got: ${runState.artifactPath}`
+    );
+  });
+});
+
+// ── Run cancellation (spec 033 D2/FR-005/FR-003) ─────────────────────────────
+
+/** A run whose step never finishes on its own, so the run stays "running". */
+function makePendingRun(runId: string): MockRun & { cancel: () => Promise<void> } {
+  const watchers: WatchCallback[] = [];
+  return {
+    runId,
+    watchers,
+    start: () => new Promise<Record<string, unknown>>(() => undefined),
+    resume: async () => successResult(),
+    watch: (cb) => {
+      watchers.push(cb);
+      return () => {
+        const i = watchers.indexOf(cb);
+        if (i !== -1) watchers.splice(i, 1);
+      };
+    },
+    emit: (event) => {
+      for (const cb of watchers) cb(event);
+    },
+    cancel: async () => undefined,
+  };
+}
+
+/** A Mastra mock that hands out a different run object per createRun() call. */
+function makeMastraQueue(runs: MockRun[]): MastraLike {
+  const queue = [...runs];
+  return {
+    getWorkflow: (_id) => ({
+      createRun: async () =>
+        queue.shift() as unknown as Awaited<
+          ReturnType<ReturnType<MastraLike["getWorkflow"]>["createRun"]>
+        >,
+    }),
+  };
+}
+
+describe("POST /api/runs/:id/cancel", () => {
+  let srv: ServeHandle;
+  let service: RunService;
+  let pendingRun: MockRun;
+  let runningId: string;
+  let doneId: string;
+
+  before(async () => {
+    pendingRun = makePendingRun("cancel-http-running");
+    const doneRun = makeMockRun("cancel-http-done", successResult(), successResult());
+    service = new RunService(makeMastraQueue([pendingRun, doneRun]));
+    runningId = (await service.start("spec-creation", { request: "a" })).runId;
+    doneId = (await service.start("spec-creation", { request: "b" })).runId;
+    await service.waitForSettled(doneId);
+
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => srv.close());
+
+  it("204 for a running run, 409 for the second call", async () => {
+    const sse = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runningId}/events`);
+    const reader = sse.body!.getReader();
+    const decoder = new TextDecoder();
+    await reader.read(); // snapshot
+
+    pendingRun.emit({ type: "workflow-step-start", payload: { id: "intake" } });
+    await reader.read(); // step-start
+
+    const res = await mutate(srv.port, "POST", `/api/runs/${runningId}/cancel`, {
+      reason: "operator stopped it",
+    });
+    assert.equal(res.status, 204, "cancelling a running run must answer 204");
+
+    // FR-003: the synthetic step-cancelled event reaches the SSE stream.
+    const { value } = await reader.read();
+    const chunk = decoder.decode(value);
+    assert.ok(chunk.includes("event: step"), `expected a step event, got ${JSON.stringify(chunk)}`);
+    assert.ok(chunk.includes('"stepId":"intake"'));
+    assert.ok(
+      chunk.includes('"status":"cancelled"'),
+      "step-cancelled must map to status 'cancelled' over SSE"
+    );
+    await reader.cancel();
+
+    const second = await mutate(srv.port, "POST", `/api/runs/${runningId}/cancel`, {});
+    assert.equal(second.status, 409, "a second cancel must be refused");
+    const body = (await second.json()) as { error: string; status: string };
+    assert.equal(body.status, "cancelled", "the 409 body must name the current status");
+    assert.match(body.error, /cancelled/);
+  });
+
+  it("409 for a run that already succeeded", async () => {
+    const res = await mutate(srv.port, "POST", `/api/runs/${doneId}/cancel`, {});
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { status: string };
+    assert.equal(body.status, "succeeded");
+  });
+
+  it("404 for an unknown run id", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs/no-such-run/cancel", {});
+    assert.equal(res.status, 404);
+  });
+
+  it("GET /api/runs/:id reports the cancelled run and its step timestamps", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runningId}`);
+    assert.equal(res.status, 200);
+    const state = (await res.json()) as {
+      status: string;
+      cancelled?: { at: string; reason?: string };
+      steps: Record<string, { status: string; startedAt?: string; finishedAt?: string }>;
+    };
+    assert.equal(state.status, "cancelled");
+    assert.equal(state.cancelled?.reason, "operator stopped it");
+    assert.ok(state.cancelled?.at, "cancelled.at must be present");
+    const step = state.steps.intake;
+    assert.equal(step?.status, "cancelled");
+    assert.ok(step.startedAt, "steps must carry startedAt — spec 033 D3");
+    assert.ok(step.finishedAt, "a cancelled step must carry finishedAt — spec 033 D3");
+  });
+});
+
+// ── Port resolution and EADDRINUSE (spec 033 D4/FR-011/FR-012) ───────────────
+
+describe("resolvePort — AGENT_FLOWS_PORT is the default, --port overrides it (FR-011)", () => {
+  it("uses AGENT_FLOWS_PORT when --port is absent", () => {
+    assert.equal(resolvePort(["node", "server.ts"], { AGENT_FLOWS_PORT: "8123" }), 8123);
+  });
+
+  it("--port wins over AGENT_FLOWS_PORT", () => {
+    assert.equal(
+      resolvePort(["node", "server.ts", "--port", "9001"], { AGENT_FLOWS_PORT: "8123" }),
+      9001
+    );
+  });
+
+  it("falls back to 7411 when neither is set", () => {
+    assert.equal(resolvePort(["node", "server.ts"], {}), 7411);
+  });
+});
+
+describe("resolvePort — an unusable port exits 1 instead of reaching listen()", () => {
+  class Exit extends Error {}
+
+  function failingIo(): { printed: string[]; exited: number[]; io: CliIo } {
+    const printed: string[] = [];
+    const exited: number[] = [];
+    return {
+      printed,
+      exited,
+      io: {
+        error: (m) => printed.push(m),
+        exit: (code) => {
+          exited.push(code);
+          throw new Exit();
+        },
+      },
+    };
+  }
+
+  for (const [label, argv, env, bad] of [
+    ["--port abc", ["node", "server.ts", "--port", "abc"], {}, "abc"],
+    ["AGENT_FLOWS_PORT=abc", ["node", "server.ts"], { AGENT_FLOWS_PORT: "abc" }, "abc"],
+    ["--port 70000", ["node", "server.ts", "--port", "70000"], {}, "70000"],
+    ["--port 0", ["node", "server.ts", "--port", "0"], {}, "0"],
+  ] as [string, string[], NodeJS.ProcessEnv, string][]) {
+    it(`rejects ${label}`, () => {
+      const { printed, exited, io } = failingIo();
+      assert.throws(() => resolvePort(argv, env, io), Exit);
+      assert.deepEqual(exited, [1], "an unusable port must exit 1");
+      assert.deepEqual(printed, [portInvalidMessage(bad)]);
+    });
+  }
+
+  it("the message names the value and the allowed range", () => {
+    assert.equal(
+      portInvalidMessage("abc"),
+      'agent-flows serve: invalid port "abc" — pass --port <1-65535> or set AGENT_FLOWS_PORT'
+    );
+  });
+});
+
+describe("handleListenError — EADDRINUSE exits 1 with an operator message (FR-012)", () => {
+  it("prints the exact message and exits 1", () => {
+    const printed: string[] = [];
+    const exited: number[] = [];
+    class Exit extends Error {}
+    const err = Object.assign(new Error("listen EADDRINUSE"), { code: "EADDRINUSE" });
+
+    assert.throws(
+      () =>
+        handleListenError(err, 7411, {
+          error: (m) => printed.push(m),
+          exit: (code) => {
+            exited.push(code);
+            throw new Exit();
+          },
+        }),
+      Exit
+    );
+
+    assert.deepEqual(exited, [1], "EADDRINUSE must exit 1");
+    assert.deepEqual(printed, [
+      "agent-flows serve: port 7411 is already in use — is another agent-flows daemon running? Pass --port <other> or stop it.",
+    ]);
+  });
+
+  it("rethrows any other listen error untouched", () => {
+    const err = Object.assign(new Error("listen EACCES"), { code: "EACCES" });
+    assert.throws(
+      () =>
+        handleListenError(err, 7411, {
+          error: () => undefined,
+          exit: () => {
+            throw new Error("must not exit");
+          },
+        }),
+      /EACCES/
+    );
+  });
+});
+
+describe("agent-flows serve on a taken port — live CLI (V4)", () => {
+  it("prints the port-in-use message on stderr and exits 1", async () => {
+    // Reserve a port with a plain socket server so the daemon's listen fails.
+    const blocker = createNetServer();
+    const port = await new Promise<number>((resolve) => {
+      blocker.listen(0, "127.0.0.1", () => {
+        resolve((blocker.address() as { port: number }).port);
+      });
+    });
+
+    const tmpHome = mkdtempSync(join(realpathSync(tmpdir()), "af-port-"));
+    try {
+      const child = spawn(
+        process.execPath,
+        ["--import", "tsx", join(REAL_REPO_ROOT, "src/serve/server.ts"), "--port", String(port)],
+        {
+          cwd: REAL_REPO_ROOT,
+          env: {
+            ...process.env,
+            AGENT_FLOWS_HOME: tmpHome,
+            AGENT_FLOWS_PROJECT_DIR: REAL_REPO_ROOT,
+          },
+        }
+      );
+      let stderr = "";
+      child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
+      child.stdout.resume();
+
+      const code = await new Promise<number | null>((resolve) => {
+        child.on("exit", (c) => resolve(c));
+      });
+
+      assert.equal(code, 1, `daemon must exit 1 on a taken port; stderr was:\n${stderr}`);
+      assert.ok(
+        stderr.includes(portInUseMessage(port)),
+        `stderr must carry the port-in-use message; got:\n${stderr}`
+      );
+      assert.ok(!stderr.includes("at Server."), "no stack trace may be printed");
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+  });
+});
+
+// ── FR-010 legacy database notice (spec 032 review follow-up) ────────────────
+
+describe("legacyDbNotice", () => {
+  const cwd = "/proj";
+  const legacy = join(cwd, "agent-flows.sqlite");
+  const stateDb = "/home/.agent-flows/projects/proj/agent-flows.sqlite";
+
+  it("warns when a legacy db exists and the state db does not", () => {
+    const notice = legacyDbNotice(cwd, stateDb, stateDb, (p) => p === legacy);
+    assert.ok(notice, "an unmigrated legacy db must be reported");
+    assert.match(notice, /NOT migrated/);
+    assert.ok(notice.includes(legacy) && notice.includes(stateDb));
+  });
+
+  it("stays silent when --db already points at the legacy database", () => {
+    assert.equal(
+      legacyDbNotice(cwd, legacy, stateDb, (p) => p === legacy),
+      undefined,
+      "telling the operator to pass the --db they just passed is noise"
+    );
+  });
+
+  it("stays silent once the state db exists", () => {
+    assert.equal(
+      legacyDbNotice(cwd, stateDb, stateDb, () => true),
+      undefined
+    );
+  });
+
+  it("stays silent when there is no legacy db", () => {
+    assert.equal(
+      legacyDbNotice(cwd, stateDb, stateDb, () => false),
+      undefined
     );
   });
 });

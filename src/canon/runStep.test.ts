@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn as realSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -2515,4 +2516,178 @@ describe("runLlmStep — operator settings deny rules", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+});
+
+// ── runCheckStep — cancellation and process-group kill (FR-014/FR-015) ────────
+
+describe("runCheckStep — cancellation kills the real process tree", () => {
+  const waitMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // Polls until `probe` is true or the budget runs out; returns whether it became true.
+  async function waitFor(probe: () => boolean, budgetMs: number): Promise<boolean> {
+    const deadline = Date.now() + budgetMs;
+    while (Date.now() < deadline) {
+      if (probe()) return true;
+      await waitMs(50);
+    }
+    return probe();
+  }
+
+  const isGone = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
+  function capturingSpawn(): { spawn: SpawnFn; getPid: () => number | undefined } {
+    let pid: number | undefined;
+    const fn = ((cmd: string, args: string[], opts: object) => {
+      const child = realSpawn(cmd, args, opts);
+      pid = child.pid;
+      return child;
+    }) as unknown as SpawnFn;
+    return { spawn: fn, getPid: () => pid };
+  }
+
+  // Backgrounds a long sleep and publishes its pid, so the test identifies the
+  // grandchild by pid rather than by a command-line marker — a marker would also
+  // match the identical process of a concurrently running copy of this suite.
+  function grandchildCommand(pidFile: string): string {
+    return `sleep 9000 & echo $! > ${pidFile}; wait`;
+  }
+
+  /**
+   * Best-effort SIGKILL. When the gate is green everything here is already dead
+   * and process.kill throws ESRCH; when the gate is RED the survivors are
+   * exactly what this test is about, and leaving them running would leak a
+   * `sleep 9000` into the developer's machine on every failed run.
+   */
+  function reap(pid: number | undefined): void {
+    if (pid === undefined) return;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // ESRCH — already gone, which is the expected case on a green run.
+    }
+  }
+
+  async function readGrandchildPid(pidFile: string): Promise<number> {
+    const ok = await waitFor(
+      () => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "",
+      5_000
+    );
+    assert.ok(ok, "the shell must have published the background job's pid");
+    return Number(readFileSync(pidFile, "utf8").trim());
+  }
+
+  it(
+    "aborts a running check with no deadline and kills the shell (FR-014)",
+    { timeout: 20_000 },
+    async () => {
+      const { spawn, getPid } = capturingSpawn();
+      const controller = new AbortController();
+      // timeoutMs: 0 disables the deadline — before FR-014 deps.signal was discarded here.
+      const pending = runCheckStep("sleep 9000", {
+        timeoutMs: 0,
+        signal: controller.signal,
+        spawn,
+      });
+
+      await waitMs(100);
+      const pid = getPid();
+      assert.ok(pid !== undefined, "the shell must have been spawned");
+      controller.abort();
+
+      const result = await Promise.race([pending, waitMs(8_000).then(() => "timed-out" as const)]);
+      assert.notEqual(result, "timed-out", "abort must end the step even with no deadline");
+      assert.equal((result as { passed: boolean }).passed, false);
+      assert.ok(await waitFor(() => isGone(pid), 4_000), `shell pid ${pid} must be dead`);
+    }
+  );
+
+  it(
+    "kills forked grandchildren with the shell's process group (FR-015)",
+    { timeout: 20_000 },
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "spec033-group-"));
+      const pidFile = join(dir, "grandchild.pid");
+      const { spawn, getPid } = capturingSpawn();
+      let grandPid: number | undefined;
+      try {
+        const controller = new AbortController();
+        const pending = runCheckStep(grandchildCommand(pidFile), {
+          timeoutMs: 0,
+          signal: controller.signal,
+          spawn,
+        });
+
+        grandPid = await readGrandchildPid(pidFile);
+        // Bound to a const so the waitFor closure below sees a plain number.
+        const gpid = grandPid;
+        assert.equal(isGone(gpid), false, "the grandchild must be running before the abort");
+
+        controller.abort();
+
+        // Raced, not awaited: a surviving grandchild holds the shell's stdout
+        // pipe open, so 'close' never fires and `await pending` would hang the
+        // suite forever instead of reporting a failure.
+        const outcome = await Promise.race([
+          pending,
+          waitMs(8_000).then(() => "timed-out" as const),
+        ]);
+        assert.notEqual(
+          outcome,
+          "timed-out",
+          "the runner must resolve after the abort — a surviving grandchild holds its stdout pipe open"
+        );
+
+        assert.ok(
+          await waitFor(() => isGone(gpid), 6_000),
+          `grandchild pid ${gpid} must die with the shell — a bare child.kill() leaves it running`
+        );
+      } finally {
+        // Reap by the pids this run minted, never by command-line match: a
+        // concurrent copy of this suite runs an identical `sleep 9000`.
+        reap(getPid());
+        reap(grandPid);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("a check with no deadline that exits normally still resolves with its output", async () => {
+    const result = await runCheckStep("printf 'no-deadline-output'", { timeoutMs: 0 });
+    assert.equal(result.passed, true);
+    assert.equal(result.exitCode, 0);
+    assert.ok(result.output.includes("no-deadline-output"));
+  });
+
+  it(
+    "the deadline path still kills the process group on timeout",
+    { timeout: 20_000 },
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "spec033-deadline-"));
+      const pidFile = join(dir, "grandchild.pid");
+      try {
+        const pending = runCheckStep(grandchildCommand(pidFile), { timeoutMs: 1_000 });
+        const grandPid = await readGrandchildPid(pidFile);
+
+        const result = await pending;
+        assert.equal(result.passed, false);
+        assert.ok(
+          result.output.toLowerCase().includes("timed out"),
+          `output should mention the timeout; got: ${result.output}`
+        );
+        assert.ok(
+          await waitFor(() => isGone(grandPid), 6_000),
+          `grandchild pid ${grandPid} must not survive the deadline`
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  );
 });

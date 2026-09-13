@@ -7,35 +7,18 @@ import { fileURLToPath } from "node:url";
 import { createTool } from "@mastra/core/tools";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
+import { cancelRun, daemonFetch, getRunState, pollRunUntilTerminal } from "./daemonTools.js";
 import { loadCatalog, resolveCanonDir } from "./pipelineLoader.js";
 import { resolveProjectDir } from "./projectDir.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// ── Daemon URL (FR-005) ───────────────────────────────────────────────────────
+// ── Daemon proxy (FR-005) ─────────────────────────────────────────────────────
 // The MCP tools proxy to the HTTP daemon so all three surfaces (MCP stdio, HTTP,
-// and the web editor) share the same RunService registry. Default port matches
-// server.ts. Override with AGENT_FLOWS_PORT.
-
-const DAEMON_PORT = process.env.AGENT_FLOWS_PORT ?? "7411";
-const DAEMON_BASE = `http://127.0.0.1:${DAEMON_PORT}`;
-
-async function daemonFetch(path: string, init?: RequestInit): Promise<Response> {
-  const url = `${DAEMON_BASE}${path}`;
-  let res: Response;
-  try {
-    res = await fetch(url, init);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `agent-flows MCP: cannot reach daemon at ${DAEMON_BASE} — start it with ` +
-        `"agent-flows serve" before using run tools. (${msg})`,
-      { cause: err }
-    );
-  }
-  return res;
-}
+// and the web editor) share the same RunService registry. The proxy bodies live
+// in daemonTools.ts: this module calls startStdio() at load, so a test can only
+// reach them from there.
 
 // ── Project directory (step execution cwd) ────────────────────────────────────
 
@@ -79,7 +62,7 @@ const listPipelinesTool = createTool({
 const runPipelineTool = createTool({
   id: "run_pipeline",
   description:
-    "Start a pipeline run. Returns immediately. Terminal statuses: 'awaiting_approval' (suspended at a gate, includes spec for review), 'succeeded' (completed successfully), 'rejected' (gate declined by human or judge), 'failed' (unexpected error).",
+    "Start a pipeline run. Returns immediately. Terminal statuses: 'awaiting_approval' (suspended at a gate, includes spec for review), 'succeeded' (completed successfully), 'rejected' (gate declined by human or judge), 'failed' (unexpected error), 'cancelled' (stopped by an operator via cancel_run).",
   inputSchema: z.object({
     pipeline: z.string().describe("Pipeline id (e.g. 'spec-creation')"),
     inputs: z
@@ -125,40 +108,8 @@ const runPipelineTool = createTool({
     }
     const { runId } = (await startRes.json()) as { runId: string };
 
-    // Poll until the run leaves "running" — preserves the blocking contract.
-    for (;;) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
-      const getRes = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}`);
-      if (!getRes.ok) {
-        return { error: `daemon GET /api/runs/${runId} returned HTTP ${getRes.status}` };
-      }
-      const state = (await getRes.json()) as {
-        status: string;
-        gateMessage?: string;
-        spec?: unknown;
-        result?: unknown;
-        artifactPath?: string;
-      };
-      if (state.status === "running") continue;
-      const artifactPathField =
-        state.artifactPath !== undefined ? { artifactPath: state.artifactPath } : {};
-      if (state.status === "awaiting_approval") {
-        return {
-          runId,
-          status: "awaiting_approval",
-          gateMessage: state.gateMessage,
-          spec: state.spec,
-          ...artifactPathField,
-        };
-      }
-      if (state.status === "succeeded") {
-        return { runId, status: "succeeded", result: state.result, ...artifactPathField };
-      }
-      if (state.status === "rejected") {
-        return { runId, status: "rejected", ...artifactPathField };
-      }
-      return { runId, status: "failed" };
-    }
+    // Poll until the run reaches a terminal status — preserves the blocking contract.
+    return pollRunUntilTerminal(runId);
   },
 });
 
@@ -207,35 +158,25 @@ const approveTool = createTool({
 const getRunTool = createTool({
   id: "get_run",
   description:
-    "Get the current status and result of a pipeline run. When the run is suspended at an approval gate, also returns the gate message and spec so the caller can review them before approving.",
+    "Get the current status and result of a pipeline run, including per-step progress (id, status, startedAt, finishedAt, output excerpt, error). When the run is suspended at an approval gate, also returns the gate message and spec so the caller can review them before approving. When the run was cancelled, returns when it was cancelled and why.",
   inputSchema: z.object({
     runId: z.string().describe("Run ID returned by run_pipeline"),
   }),
-  execute: async (inputData) => {
-    const res = await daemonFetch(`/api/runs/${encodeURIComponent(inputData.runId)}`);
-    if (res.status === 404) {
-      return { error: `No run found for runId "${inputData.runId}"` };
-    }
-    if (!res.ok) {
-      return { error: `daemon GET /api/runs/${inputData.runId} returned HTTP ${res.status}` };
-    }
-    const got = (await res.json()) as {
-      runId: string;
-      pipelineId: string;
-      status: string;
-      result?: unknown;
-      gateMessage?: string;
-      spec?: unknown;
-    };
-    return {
-      runId: got.runId,
-      pipelineId: got.pipelineId,
-      status: got.status,
-      result: got.result,
-      gateMessage: got.gateMessage,
-      spec: got.spec,
-    };
-  },
+  execute: (inputData) => getRunState(inputData.runId),
+});
+
+const cancelRunTool = createTool({
+  id: "cancel_run",
+  description:
+    "Cancel an in-flight pipeline run. Aborts the running step — killing any spawned child processes — or, when the run is waiting at an approval gate, unwinds it. Returns status='cancelled'. A run that has already finished cannot be cancelled and the error names its current status.",
+  inputSchema: z.object({
+    runId: z.string().describe("Run ID returned by run_pipeline"),
+    reason: z
+      .string()
+      .optional()
+      .describe("Optional free-text reason, recorded on the run and in its artifact"),
+  }),
+  execute: (inputData) => cancelRun(inputData.runId, inputData.reason),
 });
 
 // ── decide_entry_point tool (spec 029 FR-010) ─────────────────────────────────
@@ -285,6 +226,7 @@ const server = new MCPServer({
     run_pipeline: runPipelineTool,
     approve: approveTool,
     get_run: getRunTool,
+    cancel_run: cancelRunTool,
     decide_entry_point: decideEntryPointTool,
   },
 });

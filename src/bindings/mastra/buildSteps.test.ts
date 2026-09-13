@@ -578,3 +578,191 @@ describe("buildLlmStep — refuses an unportable step before the runner is calle
     assert.equal(runnerCalls, 0, "no model call may be made for an unportable step");
   });
 });
+
+// ─── FR-013: per-run abort signal reaches the runner ─────────────────────────
+
+describe("buildLlmStep — per-run abortSignal (FR-013)", () => {
+  const step: StepDef = {
+    id: "investigate.survey",
+    kind: "llm",
+    prompt: "prompts/survey.md",
+  };
+  const prompts = { "investigate.survey": "survey prompt" };
+
+  // Records the signal each call received so a test can abort afterwards and
+  // observe whether the runner would have been interrupted.
+  function makeSignalRecordingRunner(): {
+    runner: typeof runLlmStep;
+    signals: (AbortSignal | undefined)[];
+  } {
+    const signals: (AbortSignal | undefined)[] = [];
+    const runner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+      signals.push(deps?.signal);
+      return "ok";
+    };
+    return { runner, signals };
+  }
+
+  it("the runner's signal aborts when Mastra's abortSignal aborts", async () => {
+    const { runner, signals } = makeSignalRecordingRunner();
+    const llmStep = buildLlmStep(
+      step,
+      prompts,
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+      undefined
+    );
+
+    const controller = new AbortController();
+    await (llmStep as any).execute({
+      inputData: {},
+      abortSignal: controller.signal,
+      suspend: () => undefined as never,
+    });
+
+    assert.equal(signals.length, 1, "runner must have been called once");
+    const seen = signals[0];
+    assert.ok(seen !== undefined, "runner must receive a signal — FR-013");
+    assert.equal(seen.aborted, false, "signal must not be aborted before cancel");
+    controller.abort();
+    assert.equal(seen.aborted, true, "cancelling the run must abort the runner's signal");
+  });
+
+  it("two concurrent runs on one built step have independent signals", async () => {
+    const { runner, signals } = makeSignalRecordingRunner();
+    const llmStep = buildLlmStep(
+      step,
+      prompts,
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+      undefined
+    );
+
+    const runA = new AbortController();
+    const runB = new AbortController();
+    await (llmStep as any).execute({
+      inputData: {},
+      abortSignal: runA.signal,
+      suspend: () => undefined as never,
+    });
+    await (llmStep as any).execute({
+      inputData: {},
+      abortSignal: runB.signal,
+      suspend: () => undefined as never,
+    });
+
+    assert.equal(signals.length, 2, "runner must have been called once per run");
+    runA.abort();
+    assert.equal(signals[0]!.aborted, true, "run A's signal must abort");
+    assert.equal(
+      signals[1]!.aborted,
+      false,
+      "run B must be unaffected — a build-time shared signal would abort both"
+    );
+  });
+
+  it("an already-aborted run throws before the runner is called", async () => {
+    let runnerCalls = 0;
+    const runner: typeof runLlmStep = async () => {
+      runnerCalls += 1;
+      return "never";
+    };
+    const llmStep = buildLlmStep(
+      step,
+      prompts,
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+      undefined
+    );
+
+    const controller = new AbortController();
+    controller.abort();
+
+    await assert.rejects(
+      (llmStep as any).execute({
+        inputData: {},
+        abortSignal: controller.signal,
+        suspend: () => undefined as never,
+      }),
+      (err: Error) => {
+        assert.equal(err.message, "run cancelled before step investigate.survey started");
+        return true;
+      }
+    );
+    assert.equal(runnerCalls, 0, "a cancelled run must not reach the runner");
+  });
+
+  it("a build-time signal is combined with the per-run signal, either one aborting", async () => {
+    for (const abortSide of ["build", "run"] as const) {
+      const { runner, signals } = makeSignalRecordingRunner();
+      const buildController = new AbortController();
+      const llmStep = buildLlmStep(
+        step,
+        prompts,
+        {
+          registry: NOOP_REGISTRY,
+          store: NOOP_STORE,
+          runner,
+          runnerDeps: { signal: buildController.signal },
+        },
+        undefined
+      );
+
+      const runController = new AbortController();
+      await (llmStep as any).execute({
+        inputData: {},
+        abortSignal: runController.signal,
+        suspend: () => undefined as never,
+      });
+
+      const seen = signals[0];
+      assert.ok(seen !== undefined, "runner must receive a combined signal");
+      assert.equal(seen.aborted, false, "combined signal must start unaborted");
+      if (abortSide === "build") buildController.abort();
+      else runController.abort();
+      assert.equal(
+        seen.aborted,
+        true,
+        `aborting the ${abortSide} signal must abort the combination`
+      );
+    }
+  });
+});
+
+describe("buildCheckStep — per-run abortSignal (FR-013)", () => {
+  it("cancelling the run kills the check step's child", async () => {
+    const killCalls: string[] = [];
+    // A child that never exits on its own, so only the abort path can end it.
+    const spawn = ((_cmd: string, _args: string[]) => {
+      const emitter = new EventEmitter();
+      const child = Object.assign(emitter, {
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        pid: undefined,
+        kill(signal?: string) {
+          killCalls.push(signal ?? "SIGTERM");
+          setImmediate(() => emitter.emit("close", null));
+        },
+      });
+      return child;
+    }) as unknown as SpawnFn;
+
+    const step: StepDef = { id: "test.check", kind: "check", command: "sleep 60" };
+    const checkStep = buildCheckStep(
+      step,
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runnerDeps: { spawn } },
+      undefined
+    );
+
+    const controller = new AbortController();
+    const pending = (checkStep as any).execute({
+      inputData: {},
+      abortSignal: controller.signal,
+      suspend: () => undefined as never,
+    });
+    setImmediate(() => controller.abort());
+
+    const out = await pending;
+    assert.deepEqual(killCalls, ["SIGTERM"], "abort must SIGTERM the check step's child");
+    assert.equal(out["test.check"].passed, false);
+    assert.match(out["test.check"].output, /cancelled/i);
+  });
+});

@@ -59,6 +59,13 @@ export interface BuildDeps {
   store: TicketStore;
   profile?: ProviderProfile;
   runner?: typeof runLlmStep;
+  /**
+   * Runner deps shared by every step of the built workflow. Build-time and
+   * therefore shared by every concurrent run on that workflow, so it must never
+   * carry a per-run `signal` (D1/FR-013): one run's cancellation would abort the
+   * others. The per-run signal is Mastra's `abortSignal`, read from the execute
+   * params and combined with this one via `combineSignals()` at execute time.
+   */
   runnerDeps?: StepRunnerDeps;
   /** Working directory for check step commands. Defaults to process.cwd(). */
   cwd?: string;
@@ -153,6 +160,30 @@ function tryParseSchemaOutput(
   return { ok: true, value: parsed };
 }
 
+/**
+ * Combines the build-time signal (if any) with the per-run `abortSignal` Mastra
+ * hands to execute (FR-013). Either side aborting aborts the result. Returns
+ * undefined only when neither exists, so a step built without BuildDeps.runnerDeps
+ * still honours cancellation.
+ */
+function combineSignals(
+  buildSignal: AbortSignal | undefined,
+  runSignal: AbortSignal | undefined
+): AbortSignal | undefined {
+  if (!buildSignal) return runSignal;
+  if (!runSignal) return buildSignal;
+  return AbortSignal.any([buildSignal, runSignal]);
+}
+
+/**
+ * FR-013: a step whose execute begins after the run was cancelled must not spawn
+ * anything. Mastra still starts queued steps after `run.cancel()`, so the guard
+ * lives at the top of each executing step rather than in the runner.
+ */
+function assertNotCancelled(stepId: string, runSignal: AbortSignal | undefined): void {
+  if (runSignal?.aborted) throw new Error(`run cancelled before step ${stepId} started`);
+}
+
 /** Builds the runner-deps base shared by every step kind (timeout and budget fields). */
 function baseRunnerDeps(
   step: StepDef,
@@ -186,7 +217,8 @@ export function buildLlmStep(
     id: step.id,
     inputSchema: ctx,
     outputSchema: ctx,
-    execute: async ({ inputData }) => {
+    execute: async ({ inputData, abortSignal }) => {
+      assertNotCancelled(step.id, abortSignal);
       const rawCtx = inputData as Ctx;
       const ctxData: Ctx = visibleKeys
         ? (Object.fromEntries(Object.entries(rawCtx).filter(([k]) => visibleKeys.has(k))) as Ctx)
@@ -232,8 +264,12 @@ export function buildLlmStep(
       // bug class this project has hit before.
       const contentsValue = step.permissions?.contents;
       const hasContentsAccess = contentsValue !== undefined && contentsValue !== "none";
+      // FR-013: the per-run signal comes from the execute params, never from the
+      // build-time BuildDeps.runnerDeps shared across concurrent runs.
+      const signal = combineSignals(deps.runnerDeps?.signal, abortSignal);
       const runnerDeps: StepRunnerDeps = {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
+        ...(signal ? { signal } : {}),
         ...(hasContentsAccess
           ? {
               contentsAccess: contentsValue,
@@ -475,10 +511,15 @@ export function buildCheckStep(
     id: step.id,
     inputSchema: ctx,
     outputSchema: ctx,
-    execute: async ({ inputData }) => {
+    execute: async ({ inputData, abortSignal }) => {
+      assertNotCancelled(step.id, abortSignal);
       const rawCtx = inputData as Ctx;
+      // FR-013: per-run signal from the execute params, combined with any
+      // build-time one; BuildDeps.runnerDeps must not carry a per-run signal.
+      const signal = combineSignals(deps.runnerDeps?.signal, abortSignal);
       const result = await runCheckStep(resolvedCommand, {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
+        ...(signal ? { signal } : {}),
         cwd: deps.cwd,
         ...(step.env?.length ? { envAllowlist: step.env } : {}),
       });

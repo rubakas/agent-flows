@@ -64,11 +64,7 @@ import {
 import type { HardenedSpec } from "../canon/types.js";
 import { decideEntryPoint } from "../runtime/entryPoint.js";
 import { readManifest } from "../runtime/artifactStore.js";
-import {
-  ensureProjectState,
-  resolveProjectState,
-  type ProjectState,
-} from "../runtime/projectState.js";
+import { ensureProjectState, type ProjectState } from "../runtime/projectState.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -85,6 +81,7 @@ const STEP_STATUS: Record<StepEvent["kind"], string> = {
   "step-finish": "succeeded",
   "step-failed": "failed",
   "step-suspended": "suspended",
+  "step-cancelled": "cancelled",
 };
 
 // Reusable compiled regexes for the host port check and route matching.
@@ -97,6 +94,7 @@ const RE_DRAFT_SAVE = /^\/api\/drafts\/(\d+)\/save$/u;
 const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
 const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
 const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
+const RE_RUN_CANCEL = /^\/api\/runs\/([^/]+)\/cancel$/u;
 const RE_RUN_MANIFEST = /^\/api\/runs\/([^/]+)\/manifest$/u;
 const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
 const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
@@ -314,11 +312,13 @@ export interface ServeOptions {
   /** Absolute path to the SQLite database; defaults to the state dir's `agent-flows.sqlite`. */
   dbPath?: string;
   /**
-   * Machine-local state locations for this project (spec 032 D2). Defaults to
-   * `resolveProjectState(projectDir)`; the CLI passes the result of
-   * `ensureProjectState` so the directory and its marker exist.
+   * Machine-local state locations for this project (spec 032 D2). Required: a
+   * default here would silently resolve against the ambient environment, so a
+   * test that forgot to pass one would read and write the owner's real
+   * ~/.agent-flows. The CLI passes `ensureProjectState`'s result, so the
+   * directory and its marker exist.
    */
-  state?: ProjectState;
+  state: ProjectState;
   /** Directory containing pipeline YAML files; defaults to `<cwd>/pipelines`. */
   pipelinesDir?: string;
   /** Injected RunService for tests; constructed from Mastra in CLI mode. */
@@ -413,12 +413,12 @@ export function readAgentFlowsConfig(projectDir: string): string | undefined {
  * Bind a loopback-only HTTP server. Returns a handle with the actual port
  * (useful when port 0 was requested) and a close function.
  */
-export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle> {
+export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
   // opts.pipelinesDir is an explicit override (used by tests to pin a specific dir).
   // When absent, the canon directory is resolved per-request from projectDir (FR-004).
   const explicitPipelinesDir: string | undefined = opts.pipelinesDir;
   const projectDir = opts.projectDir ?? process.cwd();
-  const state = opts.state ?? resolveProjectState(projectDir);
+  const state = opts.state;
   const dbPath = opts.dbPath ?? state.dbPath;
   const db = makeDb(dbPath);
   const runService = opts.runService ?? null;
@@ -486,9 +486,18 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
   });
 
   return new Promise<ServeHandle>((resolve, reject) => {
+    // Scoped to the listen phase only (spec 033 D4): a socket error arriving
+    // after a successful bind must not try to reject an already-settled promise.
+    const onListenError = (err: Error): void => {
+      reject(err);
+    };
     server.listen(opts.port ?? 7411, "127.0.0.1", () => {
       const info = server.address() as AddressInfo;
       boundPort = info.port;
+      server.off("error", onListenError);
+      server.on("error", (err: Error) => {
+        console.error(`agent-flows serve: server error: ${err.message}`);
+      });
       resolve({
         port: info.port,
         close: () =>
@@ -503,8 +512,95 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
           }),
       });
     });
-    server.on("error", reject);
+    server.on("error", onListenError);
   });
+}
+
+// ── Port resolution and listen failures (spec 033 D4/FR-011/FR-012) ───────────
+
+/** Printed when the requested port is not a usable TCP port number (FR-011). */
+export function portInvalidMessage(value: string): string {
+  return `agent-flows serve: invalid port "${value}" — pass --port <1-65535> or set AGENT_FLOWS_PORT`;
+}
+
+/** stderr + exit wiring, injected so the validation paths are testable. */
+export interface CliIo {
+  error: (message: string) => void;
+  exit: (code: number) => never;
+}
+
+const DEFAULT_CLI_IO: CliIo = {
+  error: (message) => {
+    console.error(message);
+  },
+  exit: (code) => process.exit(code),
+};
+
+/**
+ * Resolve the daemon's listen port: `--port` wins, then `AGENT_FLOWS_PORT`,
+ * then 7411. Reading the variable here makes README.md:84's long-standing claim
+ * true and matches the MCP client, which already reads the same variable.
+ *
+ * A value that is not a usable TCP port exits 1 with an explanation rather than
+ * reaching listen(): `parseInt("abc")` is NaN and `listen(NaN)` silently binds a
+ * random ephemeral port, so the daemon would come up somewhere nobody is looking.
+ */
+export function resolvePort(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+  io: CliIo = DEFAULT_CLI_IO
+): number {
+  const idx = argv.indexOf("--port");
+  const flagValue = idx !== -1 && idx + 1 < argv.length ? argv[idx + 1] : undefined;
+  const raw = flagValue ?? env.AGENT_FLOWS_PORT ?? "7411";
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    io.error(portInvalidMessage(raw));
+    io.exit(1);
+  }
+  return port;
+}
+
+/**
+ * FR-010: a db left in the launch cwd by an older version is never migrated.
+ * Returns the operator notice, or undefined when there is nothing worth saying —
+ * including when `--db` already points at that legacy file, where advising the
+ * operator to pass the flag they just passed is pure noise.
+ */
+export function legacyDbNotice(
+  cwd: string,
+  dbPath: string,
+  stateDbPath: string,
+  exists: (path: string) => boolean = existsSync
+): string | undefined {
+  const legacyDbPath = join(cwd, "agent-flows.sqlite");
+  if (!exists(legacyDbPath) || exists(stateDbPath)) return undefined;
+  if (dbPath === legacyDbPath) return undefined;
+  return (
+    `[agent-flows] found a legacy database at ${legacyDbPath}; it is NOT migrated. ` +
+    `The default is now ${stateDbPath} — pass --db ${legacyDbPath} to keep using the old one.`
+  );
+}
+
+/** The operator-facing message printed when the daemon's port is taken (FR-012). */
+export function portInUseMessage(port: number): string {
+  return (
+    `agent-flows serve: port ${port} is already in use — ` +
+    `is another agent-flows daemon running? Pass --port <other> or stop it.`
+  );
+}
+
+/**
+ * Turn a listen failure into an operator-facing exit (FR-012). EADDRINUSE is an
+ * ordinary operator mistake, so it gets a one-line explanation and exit 1 rather
+ * than a stack trace; anything else is rethrown unchanged.
+ */
+export function handleListenError(err: unknown, port: number, io: CliIo): never {
+  if ((err as NodeJS.ErrnoException | null)?.code === "EADDRINUSE") {
+    io.error(portInUseMessage(port));
+    io.exit(1);
+  }
+  throw err;
 }
 
 // ── Request handler ────────────────────────────────────────────────────────────
@@ -1190,6 +1286,36 @@ async function handleRequest(
     return;
   }
 
+  // POST /api/runs/:id/cancel — abort an in-flight run (spec 033 D2/FR-005)
+  const cancelMatch = RE_RUN_CANCEL.exec(pathname);
+  if (method === "POST" && cancelMatch) {
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
+    const id = decodeURIComponent(cancelMatch[1]);
+    // The body is optional — an empty request is a cancel with no reason.
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { reason } = parsed.value;
+    const reasonStr = typeof reason === "string" ? reason : undefined;
+    const result = await runService.cancel(id, reasonStr);
+    if (result === undefined) {
+      json(res, 404, { error: `Run "${id}" not found` });
+      return;
+    }
+    if (!result.ok) {
+      json(res, 409, {
+        error: `Run ${id} cannot be cancelled (status: ${result.status})`,
+        status: result.status,
+      });
+      return;
+    }
+    res.writeHead(204).end();
+    return;
+  }
+
   // POST /api/gate-judge — stateless judge-as-a-service for the n8n binding (FR-012)
   if (method === "POST" && pathname === "/api/gate-judge") {
     const { runService } = ctx;
@@ -1729,7 +1855,7 @@ function getArgValue(flag: string, fallback: string): string {
 if (process.argv[1] === __filename) {
   process.env.MASTRA_TELEMETRY_DISABLED = "1";
 
-  const port = parseInt(getArgValue("--port", "7411"), 10);
+  const port = resolvePort(process.argv, process.env);
   const projectDir = resolveProjectDir();
   console.log(`agent-flows serve: running steps in ${projectDir}`);
   const { pipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
@@ -1742,14 +1868,8 @@ if (process.argv[1] === __filename) {
   console.log(`agent-flows serve: state in ${state.dir}`);
   const dbPath = getArgValue("--db", state.dbPath);
 
-  // FR-010: a db left in the launch cwd by an older version is never migrated.
-  const legacyDbPath = join(process.cwd(), "agent-flows.sqlite");
-  if (existsSync(legacyDbPath) && !existsSync(state.dbPath)) {
-    console.error(
-      `[agent-flows] found a legacy database at ${legacyDbPath}; it is NOT migrated. ` +
-        `The default is now ${state.dbPath} — pass --db ${legacyDbPath} to keep using the old one.`
-    );
-  }
+  const legacyNotice = legacyDbNotice(process.cwd(), dbPath, state.dbPath);
+  if (legacyNotice !== undefined) console.error(legacyNotice);
 
   // Non-literal specifiers prevent import-x/no-cycle from traversing into
   // @mastra/core's deep subpath exports, which crash the resolver —
@@ -1830,7 +1950,15 @@ if (process.argv[1] === __filename) {
 
   // FR-004: pipelinesDir is NOT passed to startServer so the HTTP layer resolves
   // the canon directory per-request.
-  const handle = await startServer({ port, dbPath, runService, projectDir, state });
+  const handle = await startServer({ port, dbPath, runService, projectDir, state }).catch(
+    (err: unknown) =>
+      handleListenError(err, port, {
+        error: (m) => {
+          console.error(m);
+        },
+        exit: (code) => process.exit(code),
+      })
+  );
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
   console.log(`agent-flows serve listening on http://127.0.0.1:${handle.port}`);
 }

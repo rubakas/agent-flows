@@ -18,8 +18,8 @@ import { join } from "node:path";
 import { describe, it, after } from "node:test";
 import { ModelRegistry } from "../canon/registry.js";
 import type { StepDef } from "../canon/types.js";
-import type { RunManifest, StepProvenance } from "./artifactStore.js";
-import { readManifest } from "./artifactStore.js";
+import type { ManifestStage, RunManifest, StepProvenance } from "./artifactStore.js";
+import { deriveChainStatus, readManifest } from "./artifactStore.js";
 import { ensureProjectState, resolveProjectState } from "./projectState.js";
 import { RunService } from "./runService.js";
 import type { MastraLike } from "./runService.js";
@@ -34,6 +34,8 @@ interface MockRun {
   start: (opts: unknown) => Promise<Record<string, unknown>>;
   resume: (params: unknown) => Promise<Record<string, unknown>>;
   watch: (cb: WatchCallback) => () => void;
+  /** Mirrors Mastra's Run.cancel(); RunService refuses to cancel without it. */
+  cancel?: () => Promise<void>;
 }
 
 function makeMockRun(runId: string, startResult: Record<string, unknown>): MockRun {
@@ -50,6 +52,7 @@ function makeMockRun(runId: string, startResult: Record<string, unknown>): MockR
         if (i !== -1) watchers.splice(i, 1);
       };
     },
+    cancel: async () => undefined,
   };
 }
 
@@ -940,5 +943,102 @@ describe("FR-009: GetResult includes artifactPath after settlement", () => {
 
     // Clean up: resolve the pending promise so the test process can exit cleanly.
     resolveRun({ status: "success", result: {} });
+  });
+});
+
+// ── Tests: spec 033 FR-004 — the manifest records the cancellation ───────────
+
+describe("spec 033 FR-004: cancelling a run records cancelledAt and reason in the manifest", () => {
+  it("the stage entry carries status, cancelledAt and reason", async () => {
+    const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
+    const runId = "run-manifest-cancelled-001";
+
+    // A run whose step never settles on its own, so it is still cancellable.
+    const pendingRun: MockRun = {
+      ...makeMockRun(runId, successResult()),
+      start: () => new Promise<Record<string, unknown>>(() => undefined),
+    };
+
+    const service = new RunService(makeMastra(pendingRun), undefined, runsDir, stubProfile);
+    await service.start("investigate", { request: "x" });
+
+    const result = await service.cancel(runId, "operator stopped it");
+    assert.deepEqual(result, { ok: true });
+    await flushAsync();
+
+    const manifest = await readManifest(join(runsDir, runId));
+    assert.ok(manifest, "a cancelled run must still write a manifest");
+    assert.equal(manifest.stages.length, 1);
+    const stage = manifest.stages[0];
+    assert.equal(stage.status, "cancelled");
+    assert.equal(stage.reason, "operator stopped it", "the manifest must carry the reason");
+    assert.ok(
+      typeof stage.cancelledAt === "string",
+      "the manifest must carry cancelledAt so a chain reader can see why the stage stopped"
+    );
+  });
+});
+
+// ── Tests: chain status derivation (spec 033 review follow-up) ───────────────
+
+describe("deriveChainStatus: a cancelled stage is terminal, not in-progress", () => {
+  const stage = (status: string): ManifestStage => ({
+    stageId: `stage-${status}`,
+    artifactPath: `/tmp/${status}.json`,
+    profileId: "test-provider",
+    status,
+    settledAt: "2026-09-13T10:00:00.000Z",
+  });
+
+  it("a lone cancelled stage makes the chain cancelled", () => {
+    assert.equal(
+      deriveChainStatus([stage("cancelled")]),
+      "cancelled",
+      "a fully cancelled chain must not read in-progress forever"
+    );
+  });
+
+  it("a cancelled stage after a succeeded one makes the chain cancelled", () => {
+    assert.equal(deriveChainStatus([stage("succeeded"), stage("cancelled")]), "cancelled");
+  });
+
+  it("failed wins over cancelled", () => {
+    assert.equal(deriveChainStatus([stage("cancelled"), stage("failed")]), "failed");
+    assert.equal(deriveChainStatus([stage("failed"), stage("cancelled")]), "failed");
+    assert.equal(deriveChainStatus([stage("cancelled"), stage("rejected")]), "failed");
+  });
+
+  it("leaves the pre-existing outcomes untouched", () => {
+    assert.equal(deriveChainStatus([]), "in-progress");
+    assert.equal(deriveChainStatus([stage("succeeded")]), "completed");
+    assert.equal(deriveChainStatus([stage("succeeded"), stage("running")]), "in-progress");
+    assert.equal(deriveChainStatus([stage("failed")]), "failed");
+  });
+});
+
+describe("spec 033 FR-004: a cancelled run's manifest reports the chain as cancelled", () => {
+  it("the written manifest's top-level status is cancelled", async () => {
+    const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
+    const runId = "run-manifest-chain-cancelled-001";
+
+    const pendingRun: MockRun = {
+      ...makeMockRun(runId, successResult()),
+      start: () => new Promise<Record<string, unknown>>(() => undefined),
+    };
+
+    const service = new RunService(makeMastra(pendingRun), undefined, runsDir, stubProfile);
+    await service.start("investigate", { request: "x" });
+    assert.deepEqual(await service.cancel(runId, "stopped"), { ok: true });
+    await flushAsync();
+
+    const manifestPath = join(runsDir, runId, "manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
+    assert.equal(
+      manifest.status,
+      "cancelled",
+      "the chain status must follow its only stage, not sit at in-progress"
+    );
   });
 });

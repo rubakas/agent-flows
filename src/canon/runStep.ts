@@ -120,8 +120,15 @@ export async function runCheckStep(
 
   const cwd = deps.cwd ?? process.cwd();
 
+  // FR-014: without a deadline the step is still cancellable — the kill listener
+  // attaches to deps.signal directly. Before spec 033 deps.signal was discarded
+  // whenever effectiveTimeoutMs was non-positive.
+  const abortSignal = deadline?.signal ?? deps.signal;
+
   return new Promise<CheckResult>((resolve) => {
-    const child = spawnFn("/bin/sh", ["-c", command], { env, cwd });
+    // FR-015: detached makes the shell a process-group leader so a forked
+    // grandchild (`sleep 30 & wait`) dies with it instead of outliving the run.
+    const child = spawnFn("/bin/sh", ["-c", command], { env, cwd, detached: true });
 
     // No stdin is needed; close it immediately so commands that read stdin don't hang.
     child.stdin.end();
@@ -146,8 +153,8 @@ export async function runCheckStep(
 
     child.on("close", (code) => {
       deadline?.cancel();
-      if (deadline?.signal.aborted) {
-        const reason = deadline.signal.reason as { name?: string } | undefined;
+      if (abortSignal?.aborted) {
+        const reason = abortSignal.reason as { name?: string } | undefined;
         const msg =
           reason?.name === "TimeoutError"
             ? `Step timed out after ${effectiveTimeoutMs}ms`
@@ -159,20 +166,37 @@ export async function runCheckStep(
       resolve({ passed: exitCode === 0, exitCode, output: combined });
     });
 
-    if (deadline) {
-      deadline.signal.addEventListener(
-        "abort",
-        () => {
-          child.kill("SIGTERM");
-          // Escalate to SIGKILL after a grace period; unref so the timer does not
-          // prevent the process from exiting once the promise resolves.
-          const esc = setTimeout(() => child.kill("SIGKILL"), CHECK_KILL_ESCALATION_MS);
-          if (typeof (esc as { unref?: () => void }).unref === "function") {
-            (esc as { unref: () => void }).unref();
-          }
-        },
-        { once: true }
-      );
+    // FR-015: signal the whole process group so forked grandchildren die too.
+    // Falls back to the child alone when the pid is gone or the group no longer
+    // exists (ESRCH), which is the normal race against an exiting child.
+    const killTree = (signal: "SIGTERM" | "SIGKILL") => {
+      const pid = child.pid;
+      if (pid !== undefined) {
+        try {
+          process.kill(-pid, signal);
+          return;
+        } catch {
+          // fall through to the direct kill below
+        }
+      }
+      child.kill(signal);
+    };
+
+    if (abortSignal) {
+      const onAbort = () => {
+        killTree("SIGTERM");
+        // Escalate to SIGKILL after a grace period; unref so the timer does not
+        // prevent the process from exiting once the promise resolves.
+        const esc = setTimeout(() => killTree("SIGKILL"), CHECK_KILL_ESCALATION_MS);
+        if (typeof (esc as { unref?: () => void }).unref === "function") {
+          (esc as { unref: () => void }).unref();
+        }
+      };
+      if (abortSignal.aborted) {
+        onAbort();
+      } else {
+        abortSignal.addEventListener("abort", onAbort, { once: true });
+      }
     }
   });
 }

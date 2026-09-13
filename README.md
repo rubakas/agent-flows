@@ -81,7 +81,7 @@ cd <path-to-your-repo> && agent-flows serve
 
 Run this from your project directory — `agent-flows serve` uses cwd as the project directory by default. (You can also set `AGENT_FLOWS_PROJECT_DIR` to override the target, but running from the project directory is simpler.)
 
-This starts an HTTP server on port 7411 (override with `AGENT_FLOWS_PORT=<port>`). The daemon stays running and serves a web page at `http://127.0.0.1:7411` showing active runs and available workflows. Leave this terminal open while you work.
+This starts an HTTP server on port 7411. Set `AGENT_FLOWS_PORT=<port>` to change the default; `--port <port>` on the command line overrides it. The daemon stays running and serves a web page at `http://127.0.0.1:7411` showing active runs and available workflows; a running run can be stopped there with its **Cancel run** button. Leave this terminal open while you work.
 
 **Why the daemon?** The chat, the HTTP API, and the web page all share a single run registry. The daemon is the source of truth for run state, allowing you to start a workflow in the chat, check its status from the HTTP API, and resume it from the web page—all without losing track of what is running.
 
@@ -133,7 +133,8 @@ The chat tools become available immediately:
 - `list_pipelines` — see every installed pipeline and its inputs
 - `run_pipeline` — start a workflow with a request and inputs
 - `approve` — make a gate decision (approve or reject the spec)
-- `get_run` — check the status of a running workflow
+- `get_run` — check the status of a running workflow, including per-step progress
+- `cancel_run` — stop an in-flight workflow, killing whatever step is running
 
 If you open the agent-flows repository itself in your chat, you can use the `.mcp.json` already present there for working on agent-flows (not your own repository). You do not need to restart the chat after editing a pipeline file; changes are picked up on the next call.
 

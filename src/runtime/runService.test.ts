@@ -6,6 +6,9 @@
 // resume / LibSQL snapshots) is covered by build.test.ts.
 
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { ModelRegistry } from "../canon/registry.js";
 import { RunService } from "./runService.js";
@@ -25,6 +28,8 @@ interface MockRun {
   resume: (params: unknown) => Promise<Record<string, unknown>>;
   watch: (cb: WatchCallback) => () => void;
   emit: (event: Record<string, unknown>) => void;
+  /** Mirrors Mastra's Run.cancel(); RunService refuses to cancel without it. */
+  cancel?: () => Promise<void>;
 }
 
 function makeMockRun(
@@ -50,6 +55,7 @@ function makeMockRun(
     emit: (event) => {
       for (const cb of watchers) cb(event);
     },
+    cancel: async () => undefined,
   };
 }
 
@@ -1700,5 +1706,293 @@ describe("FR-004 — judge prompt includes sentinel delimiters and untrusted-dat
       "prompt must include gate step identification"
     );
     assert.ok(capturedPrompt.includes("Gate question:"), "prompt must include gate question");
+  });
+});
+
+// ── Tests: cancel (spec 033 D1/FR-001..FR-006) ───────────────────────────────
+
+/**
+ * A mock run whose single step never finishes on its own and only ends when the
+ * run's AbortController fires — the same contract runCheckStep honours via
+ * `deps.signal`. `sawAbort` records that the step actually observed the abort,
+ * so the test can tell a real abort apart from a status flip.
+ */
+interface CancellableRun extends MockRun {
+  readonly sawAbort: () => boolean;
+  readonly cancel: () => Promise<void>;
+  /** Let the step succeed, as a step that is never cancelled eventually does. */
+  readonly finish: () => void;
+}
+
+function makeCancellableRun(runId: string, stepId: string): CancellableRun {
+  const controller = new AbortController();
+  const watchers: WatchCallback[] = [];
+  let sawAbort = false;
+  let finishStep: (() => void) | undefined;
+  const emit = (event: Record<string, unknown>): void => {
+    for (const cb of watchers) cb(event);
+  };
+  return {
+    runId,
+    startResult: {},
+    resumeResult: {},
+    watchers,
+    start: async () => {
+      emit({ type: "workflow-step-start", payload: { id: stepId } });
+      await new Promise<void>((resolve, reject) => {
+        finishStep = resolve;
+        controller.signal.addEventListener(
+          "abort",
+          () => {
+            sawAbort = true;
+            reject(new Error("Step was cancelled"));
+          },
+          { once: true }
+        );
+      });
+      return { status: "success", result: { done: true } };
+    },
+    resume: async () => ({ status: "success" }),
+    watch: (cb) => {
+      watchers.push(cb);
+      return () => {
+        const i = watchers.indexOf(cb);
+        if (i !== -1) watchers.splice(i, 1);
+      };
+    },
+    emit,
+    sawAbort: () => sawAbort,
+    cancel: async () => {
+      controller.abort();
+    },
+    finish: () => finishStep?.(),
+  };
+}
+
+/** Wait for the fire-and-forget persistArtifact write to land, or give up. */
+async function waitForFile(path: string, attempts = 50): Promise<string | undefined> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  return undefined;
+}
+
+describe("RunService.cancel — running run is aborted, not merely flagged (FR-001/FR-002)", () => {
+  it("aborts the in-flight step, reports 'cancelled', persists the artifact, and refuses a second cancel", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-cancel-"));
+    try {
+      const run = makeCancellableRun("cancel-run-01", "test.check");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+
+      const events: StepEvent[] = [];
+      const { runId } = await service.start("test-pipeline", { request: "x" });
+      service.subscribe(runId, (e) => events.push(e));
+
+      // Let the background run.start() reach the step before cancelling.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      assert.equal(service.get(runId)?.steps["test.check"]?.status, "started");
+
+      const result = await service.cancel(runId, "operator changed their mind");
+      assert.deepEqual(result, { ok: true }, "cancelling a running run must succeed");
+      assert.equal(run.sawAbort(), true, "the step must have observed the abort — FR-001");
+
+      const state = service.get(runId);
+      assert.equal(state?.status, "cancelled", "terminal status must be 'cancelled' — FR-002");
+      assert.equal(state?.cancelled?.reason, "operator changed their mind");
+      assert.ok(state?.cancelled?.at, "cancelledAt must be recorded — FR-002");
+      assert.equal(
+        state?.steps["test.check"]?.status,
+        "cancelled",
+        "the in-flight step must be closed out as cancelled"
+      );
+      assert.deepEqual(
+        events.filter((e) => e.kind === "step-cancelled").map((e) => e.stepId),
+        ["test.check"],
+        "a step-cancelled event must be emitted for the in-flight step — FR-003"
+      );
+
+      const raw = await waitForFile(join(runsDir, runId, "test-pipeline.json"));
+      assert.ok(raw !== undefined, "cancel must persist an artifact — FR-004");
+      const artifact = JSON.parse(raw) as Record<string, unknown>;
+      assert.equal(artifact.status, "cancelled", "artifact status must be 'cancelled' — FR-004");
+      assert.equal(artifact.reason, "operator changed their mind");
+      assert.ok(typeof artifact.cancelledAt === "string", "artifact must carry cancelledAt");
+
+      const second = await service.cancel(runId);
+      assert.deepEqual(
+        second,
+        { ok: false, status: "cancelled" },
+        "a second cancel must be refused with the current status"
+      );
+
+      // The aborted background start() must not overwrite the terminal status.
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      assert.equal(service.get(runId)?.status, "cancelled");
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a step result arriving after the cancel does not resurrect the step", async () => {
+    const run = makeCancellableRun("cancel-late-result", "test.check");
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("test-pipeline", { request: "x" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    await service.cancel(runId);
+
+    // runCheckStep resolves rather than throws when its signal fires, so Mastra
+    // reports the aborted step as a success.
+    run.emit({
+      type: "workflow-step-result",
+      payload: {
+        id: "test.check",
+        status: "success",
+        output: { "test.check": { passed: false, output: "Step was cancelled" } },
+      },
+    });
+
+    assert.equal(
+      service.get(runId)?.steps["test.check"]?.status,
+      "cancelled",
+      "a post-cancel step result must not report the aborted step as succeeded"
+    );
+  });
+
+  it("throws without flipping the status when the runtime has no cancel()", async () => {
+    const run = makeCancellableRun("cancel-unsupported", "test.check");
+    // A Mastra upgrade that dropped Run.cancel() looks exactly like this.
+    const crippled = { ...run, cancel: undefined } as unknown as MockRun;
+    const service = new RunService(makeMastra(crippled));
+    const { runId } = await service.start("test-pipeline", { request: "x" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    await assert.rejects(
+      () => service.cancel(runId),
+      /run cancellation unsupported by this workflow runtime/
+    );
+    assert.equal(
+      service.get(runId)?.status,
+      "running",
+      "a run that could not be aborted must not be recorded as cancelled"
+    );
+    assert.equal(
+      service.get(runId)?.cancelled,
+      undefined,
+      "no cancellation may be recorded when the abort never happened"
+    );
+  });
+
+  it("aborts a suspended run that has no recorded step path instead of resuming it", async () => {
+    const rejectedResume = {
+      status: "failed",
+      error: Object.assign(new Error("must not be reached"), { name: "GateRejectedError" }),
+    };
+    const run = makeMockRun("cancel-no-step-path", suspendedResult("x"), rejectedResume);
+    let resumes = 0;
+    let cancels = 0;
+    run.resume = async () => {
+      resumes += 1;
+      return rejectedResume;
+    };
+    run.cancel = async () => {
+      cancels += 1;
+    };
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("test-pipeline", { request: "x" });
+    await service.waitForSettled(runId);
+
+    // Mastra reported a suspension but never a usable step path: resume() would
+    // have nothing to target, so cancel() must not try.
+    const registry = (service as unknown as { registry: Map<string, { suspendedStep?: string[] }> })
+      .registry;
+    registry.get(runId)!.suspendedStep = undefined;
+
+    assert.deepEqual(await service.cancel(runId), { ok: true });
+    assert.equal(resumes, 0, "resume() must never be called with a guessed step path");
+    assert.equal(cancels, 1, "the run must fall back to a plain abort");
+    assert.equal(service.get(runId)?.status, "cancelled");
+  });
+
+  it("returns undefined for an unknown run id", async () => {
+    const run = makeCancellableRun("cancel-run-unknown", "test.check");
+    const service = new RunService(makeMastra(run));
+    assert.equal(await service.cancel("no-such-run"), undefined);
+  });
+});
+
+describe("RunService.cancel — awaiting_approval run ends 'cancelled', never 'rejected' (FR-006)", () => {
+  it("resolves the gate through the reject path but records 'cancelled'", async () => {
+    // Resuming with approved:false makes the gate throw GateRejectedError, which
+    // applyWorkflowResult would normally map to "rejected".
+    const rejectedResume = {
+      status: "failed",
+      error: Object.assign(new Error('Gate "approve" rejected (manual): cancelled'), {
+        name: "GateRejectedError",
+      }),
+    };
+    const run = makeMockRun("cancel-gate-01", suspendedResult("cancel-gate-01"), rejectedResume);
+    const service = new RunService(makeMastra(run));
+
+    const { runId } = await service.start("test-pipeline", { request: "x" });
+    const settled = await service.waitForSettled(runId);
+    assert.equal(settled?.status, "awaiting_approval");
+
+    const result = await service.cancel(runId, "no longer needed");
+    assert.deepEqual(result, { ok: true });
+
+    const state = service.get(runId);
+    assert.equal(
+      state?.status,
+      "cancelled",
+      "a cancelled gate must not be recorded as 'rejected' — FR-006"
+    );
+    assert.equal(state?.cancelled?.reason, "no longer needed");
+  });
+
+  it("refuses to cancel a run that has already succeeded", async () => {
+    const run = makeMockRun("cancel-done-01", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("test-pipeline", { request: "x" });
+    await service.waitForSettled(runId);
+
+    assert.deepEqual(await service.cancel(runId), { ok: false, status: "succeeded" });
+  });
+});
+
+describe("RunService.cancel — V1: cancelling one run leaves a concurrent run untouched", () => {
+  it("run B keeps running and completes after run A is cancelled", async () => {
+    const runA = makeCancellableRun("concurrent-a", "test.check");
+    const runB = makeCancellableRun("concurrent-b", "test.check");
+    const queue = [runA, runB];
+    const mastra: MastraLike = {
+      getWorkflow: (_id) => ({
+        createRun: async () =>
+          queue.shift() as unknown as Awaited<
+            ReturnType<ReturnType<MastraLike["getWorkflow"]>["createRun"]>
+          >,
+      }),
+    };
+    const service = new RunService(mastra);
+
+    const a = await service.start("test-pipeline", { request: "a" });
+    const b = await service.start("test-pipeline", { request: "b" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    await service.cancel(a.runId, "stop A");
+
+    assert.equal(service.get(a.runId)?.status, "cancelled");
+    assert.equal(runB.sawAbort(), false, "run B's step must not see run A's abort");
+    assert.equal(service.get(b.runId)?.status, "running", "run B must still be running");
+
+    // B runs to completion on its own — A's cancellation never reached it.
+    runB.finish();
+    const settledB = await service.waitForSettled(b.runId);
+    assert.equal(settledB?.status, "succeeded", "run B must complete after A was cancelled");
+    assert.equal(service.get(b.runId)?.status, "succeeded");
   });
 });

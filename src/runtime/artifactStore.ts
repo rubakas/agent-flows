@@ -64,6 +64,10 @@ export interface ManifestStage {
   settledAt: string;
   /** Error message if status is "failed" or "rejected". */
   error?: string;
+  /** ISO-8601 timestamp of the cancel() call; present only when status is "cancelled". */
+  cancelledAt?: string;
+  /** Operator-supplied cancellation reason, when one was given (spec 033 FR-004). */
+  reason?: string;
 }
 
 /** The run manifest file at <runDir>/manifest.json. */
@@ -73,7 +77,7 @@ export interface RunManifest {
   /** ISO-8601 timestamp of when the first stage started. */
   startedAt: string;
   /** Overall chain status, derived from all stage statuses. */
-  status: "in-progress" | "completed" | "failed";
+  status: "in-progress" | "completed" | "failed" | "cancelled";
   /** Ordered list of stages that have run in this chain. */
   stages: ManifestStage[];
 }
@@ -126,6 +130,24 @@ export async function writeRunArtifact(
  * The chain runId is derived from the artifact directory name so it matches
  * the first stage's runId regardless of which stage is currently writing.
  */
+/**
+ * Derive the chain's overall status from its stage statuses.
+ *
+ * Precedence: a failed or rejected stage wins, because a chain that broke is
+ * the most important thing to report. A cancelled stage comes next — without
+ * it a fully cancelled chain reads "in-progress" forever, since a cancelled
+ * stage is neither failed nor succeeded. "completed" requires every stage to
+ * have succeeded; anything else is still in progress.
+ *
+ * Shared by upsertManifestEntry and readManifest so the two cannot drift.
+ */
+export function deriveChainStatus(stages: readonly ManifestStage[]): RunManifest["status"] {
+  if (stages.some((s) => s.status === "failed" || s.status === "rejected")) return "failed";
+  if (stages.some((s) => s.status === "cancelled")) return "cancelled";
+  if (stages.length > 0 && stages.every((s) => s.status === "succeeded")) return "completed";
+  return "in-progress";
+}
+
 export async function upsertManifestEntry(
   artifactDir: string,
   startedAt: string,
@@ -157,11 +179,7 @@ export async function upsertManifestEntry(
     manifest.stages.push(entry);
   }
 
-  // Derive overall status: failed wins, then completed if all succeeded, else in-progress.
-  const hasFailed = manifest.stages.some((s) => s.status === "failed" || s.status === "rejected");
-  const allSucceeded =
-    manifest.stages.length > 0 && manifest.stages.every((s) => s.status === "succeeded");
-  manifest.status = hasFailed ? "failed" : allSucceeded ? "completed" : "in-progress";
+  manifest.status = deriveChainStatus(manifest.stages);
 
   try {
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
@@ -249,13 +267,5 @@ export async function readManifest(artifactDir: string): Promise<RunManifest> {
   );
 
   // Recompute overall status to account for newly-visible stages.
-  const hasFailed = all.some((s) => s.status === "failed" || s.status === "rejected");
-  const allSucceeded = all.length > 0 && all.every((s) => s.status === "succeeded");
-  const status: RunManifest["status"] = hasFailed
-    ? "failed"
-    : allSucceeded
-      ? "completed"
-      : "in-progress";
-
-  return { ...manifest, stages: all, status };
+  return { ...manifest, stages: all, status: deriveChainStatus(all) };
 }

@@ -32,6 +32,12 @@ interface MastraRun {
   start(opts: { inputData: Record<string, unknown> }): Promise<RunResult>;
   resume(params: { step: string[]; resumeData: unknown }): Promise<RunResult>;
   watch(cb: (event: WorkflowStreamEvent) => void): () => void;
+  /**
+   * Aborts the run's AbortController, which fires the `abortSignal` Mastra hands
+   * to every step's execute context (spec 033 D1). Optional so the structural
+   * mocks in runService.test.ts that never cancel stay assignable.
+   */
+  cancel?(): Promise<void>;
 }
 
 interface MastraWorkflow {
@@ -78,7 +84,7 @@ export interface GateDecision {
 }
 
 export interface StepEvent {
-  kind: "step-start" | "step-finish" | "step-suspended" | "step-failed";
+  kind: "step-start" | "step-finish" | "step-suspended" | "step-failed" | "step-cancelled";
   stepId: string;
   suspendPayload?: unknown;
   /** Present on step-finish: first OUTPUT_EXCERPT_LIMIT chars of JSON-serialised output. */
@@ -104,7 +110,7 @@ export interface StartResult {
  * it resolves when the run completes, fails, or the judge fails (degrading to manual).
  */
 export interface SettledResult {
-  status: "awaiting_approval" | "succeeded" | "rejected" | "failed";
+  status: "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
   gateMessage?: string;
   spec?: unknown;
   result?: unknown;
@@ -113,7 +119,7 @@ export interface SettledResult {
 
 export interface ApproveResult {
   runId: string;
-  status?: "awaiting_approval" | "succeeded" | "rejected" | "failed";
+  status?: "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
   gateMessage?: string;
   spec?: unknown;
   result?: unknown;
@@ -124,16 +130,33 @@ export interface ApproveResult {
 /** Per-step state accumulated by the record-level watch (FR-006). */
 export interface StepState {
   status: string;
+  /** ISO-8601 timestamp of the step's workflow-step-start event (spec 033 D3). */
+  startedAt?: string;
+  /** ISO-8601 timestamp of the step's result/cancellation event (spec 033 D3). */
+  finishedAt?: string;
+  /** Failure reason when status is "failed" (spec 033 D3). */
+  error?: string;
   /** First OUTPUT_EXCERPT_LIMIT chars of JSON-serialised step output, if any. */
   outputExcerpt?: string;
   /** True when the output was longer than OUTPUT_EXCERPT_LIMIT. */
   outputTruncated?: boolean;
 }
 
+/** Recorded when an operator cancels a run (spec 033 FR-002). */
+export interface CancelledInfo {
+  /** ISO-8601 timestamp of the cancel() call. */
+  at: string;
+  /** Optional operator-supplied reason. */
+  reason?: string;
+}
+
+/** Outcome of RunService.cancel(). `status` names the status that blocked the cancel. */
+export type CancelResult = { ok: true } | { ok: false; status: GetResult["status"] };
+
 export interface GetResult {
   runId: string;
   pipelineId: string;
-  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed";
+  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
   /** Run-level gate mode (FR-001). */
   gateMode: GateMode;
   /** Per-step states accumulated in flight (FR-006). Always present; empty before any step fires. */
@@ -145,8 +168,13 @@ export interface GetResult {
   gateMessage?: string;
   /** Present only when status is "awaiting_approval" — the spec the human is being asked to approve. */
   spec?: unknown;
-  /** Present only when status is "failed" or "rejected" — a brief description of why the run ended. */
+  /**
+   * Present only when status is "failed", "rejected" or "cancelled" — a brief
+   * description of why the run ended.
+   */
   error?: string;
+  /** Present only when status is "cancelled" — when the operator cancelled and why (FR-002). */
+  cancelled?: CancelledInfo;
   /**
    * Set when the judge produced a malformed verdict after two attempts or encountered a
    * transport error (FR-005). The run degrades to manual: it remains awaiting_approval so a human
@@ -164,7 +192,7 @@ export interface GetResult {
 export interface RunSummary {
   runId: string;
   pipelineId: string;
-  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed";
+  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
   /** ISO-8601 timestamp of when start() was called. */
   createdAt: string;
 }
@@ -196,7 +224,7 @@ export interface JudgeDeps {
 interface RunRecord {
   pipelineId: string;
   run: MastraRun;
-  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed";
+  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
   /** Set once in start(); never mutated. */
   readonly createdAt: Date;
   /** Run-level gate mode (FR-001). */
@@ -205,6 +233,18 @@ interface RunRecord {
   steps: Record<string, StepState>;
   /** All gate decisions recorded so far (FR-008). */
   gateDecisions: GateDecision[];
+  /**
+   * Set by cancel() before any await (FR-002/FR-006). Its presence makes the
+   * cancellation sticky: applyWorkflowResult refuses to overwrite the status
+   * with whatever Mastra reports for the aborted or gate-rejected workflow.
+   */
+  cancelled?: CancelledInfo;
+  /**
+   * Live SSE subscribers (FR-003). Kept alongside the Mastra watch subscription
+   * so cancel() can emit a synthetic step-cancelled event that Mastra's own
+   * stream never produces.
+   */
+  readonly listeners: Set<StepListener>;
   /** Set when the judge fails; cleared on a new suspension. */
   judgeError?: string;
   result?: unknown;
@@ -339,6 +379,7 @@ export class RunService {
       gateMode,
       steps: {},
       gateDecisions: [],
+      listeners: new Set<StepListener>(),
       settledPromise,
       settle,
       transportPerStep,
@@ -350,13 +391,46 @@ export class RunService {
     // Runs for the lifetime of the run, regardless of how many SSE subscribers are active.
     run.watch((event: WorkflowStreamEvent) => {
       if (event.type === "workflow-step-start") {
-        record.steps[event.payload.id] = { status: "started" };
+        record.steps[event.payload.id] = {
+          status: "started",
+          startedAt: new Date().toISOString(),
+        };
       } else if (event.type === "workflow-step-suspended") {
-        record.steps[event.payload.id] = { status: "suspended" };
+        const prevStartedAt = record.steps[event.payload.id]?.startedAt;
+        record.steps[event.payload.id] = {
+          status: "suspended",
+          ...(prevStartedAt !== undefined ? { startedAt: prevStartedAt } : {}),
+        };
       } else if (event.type === "workflow-step-result") {
         const { id, status, output } = event.payload;
-        const uiStatus = status === "success" || status === "skipped" ? "succeeded" : status;
-        const state: StepState = { status: uiStatus };
+        // A result landing after cancel() describes an aborted step, not a
+        // finished one: runCheckStep resolves (rather than throws) when its
+        // signal fires, so Mastra reports "success" and would otherwise
+        // resurrect the step the cancellation just closed out.
+        const uiStatus =
+          record.cancelled !== undefined
+            ? "cancelled"
+            : status === "success" || status === "skipped"
+              ? "succeeded"
+              : status;
+        // D3: carry the start timestamp forward and stamp the finish; the result
+        // event replaces the state wholesale, so anything not copied is lost.
+        const prevStartedAt = record.steps[id]?.startedAt;
+        const rawError = (event.payload as { error?: unknown }).error;
+        // Only Error and string carry a usable message; anything else would
+        // stringify to "[object Object]" and tell the operator nothing.
+        const stepError =
+          rawError instanceof Error
+            ? rawError.message
+            : typeof rawError === "string"
+              ? rawError
+              : undefined;
+        const state: StepState = {
+          status: uiStatus,
+          ...(prevStartedAt !== undefined ? { startedAt: prevStartedAt } : {}),
+          finishedAt: new Date().toISOString(),
+          ...(stepError !== undefined ? { error: stepError } : {}),
+        };
         // Extract the step's OWN output from the accumulated context.
         // Every step returns { ...rawCtx, [step.id]: ownValue } so the full
         // context always begins with the shared request prefix — serializing
@@ -389,6 +463,10 @@ export class RunService {
         this.afterSettlement(record, settled);
       })
       .catch((err: unknown) => {
+        // FR-006: run.cancel() makes Mastra reject the start promise with an
+        // abort error. The run is already terminal as "cancelled" — a later
+        // "failed" would silently overwrite the operator's decision.
+        if (record.cancelled !== undefined) return;
         const name = err instanceof Error ? err.name : undefined;
         const msg = err instanceof Error ? err.message : String(err);
         const errStr = name ? `${name}: ${msg}` : msg;
@@ -430,6 +508,7 @@ export class RunService {
       gateDecisions: record.gateDecisions,
       result: record.result,
       ...(record.error !== undefined ? { error: record.error } : {}),
+      ...(record.cancelled !== undefined ? { cancelled: record.cancelled } : {}),
       ...(record.judgeError !== undefined ? { judgeError: record.judgeError } : {}),
       // FR-009: expose the artifact path so callers can hand it to the next stage
       // without guessing where it was written.
@@ -536,12 +615,102 @@ export class RunService {
   }
 
   /**
+   * Cancel an in-flight run (spec 033 D1/FR-001..FR-004).
+   *
+   * The status transition is synchronous — before the first await — so a second
+   * cancel arriving in the same tick sees "cancelled" and is refused rather than
+   * aborting the run twice.
+   *
+   * A `running` run is aborted through Mastra's own AbortController, whose signal
+   * reaches every step's execute context and, from there, the adapters' SIGTERM
+   * abort listeners — children die and the codex sanitized copy is swept by the
+   * existing cleanup, with no per-adapter code here.
+   *
+   * An `awaiting_approval` run has no step in flight to abort: its gate is
+   * resolved through the existing reject path so the workflow unwinds, while
+   * `record.cancelled` keeps the terminal status "cancelled", never "rejected"
+   * (FR-006).
+   *
+   * Returns undefined when the run id is unknown.
+   */
+  async cancel(runId: string, reason?: string): Promise<CancelResult | undefined> {
+    const record = this.registry.get(runId);
+    if (!record) return undefined;
+    if (record.status !== "running" && record.status !== "awaiting_approval") {
+      return { ok: false, status: record.status };
+    }
+
+    // Checked before anything is mutated: if a Mastra upgrade drops cancel(),
+    // the run must fail loudly here rather than be flagged "cancelled" while its
+    // steps keep running and burning tokens.
+    if (typeof record.run.cancel !== "function") {
+      throw new Error("run cancellation unsupported by this workflow runtime");
+    }
+
+    // A suspended run whose step path was never recorded cannot be resumed —
+    // resume() needs the exact path, and guessing one is worse than not
+    // resuming. Such a run takes the plain abort path instead.
+    const gateStep = record.status === "awaiting_approval" ? record.suspendedStep : undefined;
+    const at = new Date().toISOString();
+    record.cancelled = { at, ...(reason !== undefined ? { reason } : {}) };
+    record.status = "cancelled";
+    record.error = reason !== undefined ? `Run cancelled: ${reason}` : "Run cancelled";
+
+    // FR-003: Mastra's stream never reports a cancellation, so the in-flight
+    // steps are closed out here and the synthetic event is pushed to subscribers.
+    for (const [stepId, state] of Object.entries(record.steps)) {
+      if (state.status !== "started") continue;
+      state.status = "cancelled";
+      state.finishedAt = at;
+      for (const listener of record.listeners) listener({ kind: "step-cancelled", stepId });
+    }
+
+    if (gateStep !== undefined) {
+      record.gateDecisions.push({
+        gateStepId: gateStep.join("."),
+        mode: record.gateMode,
+        decidedBy: "human",
+        approved: false,
+        ...(reason !== undefined ? { reason } : {}),
+        decidedAt: at,
+      });
+      try {
+        const r2 = await record.run.resume({
+          step: gateStep,
+          resumeData: { approved: false, mode: record.gateMode, reason },
+        });
+        this.applyWorkflowResult(record, r2);
+      } catch {
+        // The workflow unwinding noisily does not change the outcome: the run is
+        // cancelled either way, and record.error already names the reason.
+      }
+    } else {
+      await record.run.cancel();
+    }
+
+    record.settle({ status: "cancelled", error: record.error });
+    void this.persistArtifact(record);
+    return { ok: true };
+  }
+
+  /**
    * Apply a Mastra workflow result to the run record and return the settled shape.
    *
    * Used by both start() (background) and resolveGate() so the suspended/success/failed
    * branching lives in exactly one place.
    */
   private applyWorkflowResult(record: RunRecord, r: RunResult): SettledResult {
+    // FR-006: cancel() is the authority on the terminal status. Cancelling an
+    // awaiting_approval run resolves the gate through the reject path, so
+    // without this guard the recorded status would read "rejected"; an aborted
+    // running run would report "failed" for the same reason.
+    if (record.cancelled !== undefined) {
+      record.status = "cancelled";
+      return {
+        status: "cancelled",
+        ...(record.error !== undefined ? { error: record.error } : {}),
+      };
+    }
     if (r.status === "suspended") {
       const suspendedPath = r.suspended?.[0];
       if (!suspendedPath || suspendedPath.length === 0) {
@@ -984,6 +1153,14 @@ export class RunService {
     const artifactData: Record<string, unknown> = {
       ...snapshot,
       provenance,
+      // FR-004: surface the cancellation at the top level of the artifact so a
+      // reader does not have to reach into the nested `cancelled` object.
+      ...(record.cancelled !== undefined
+        ? {
+            cancelledAt: record.cancelled.at,
+            ...(record.cancelled.reason !== undefined ? { reason: record.cancelled.reason } : {}),
+          }
+        : {}),
     };
 
     const artifactPath = await writeRunArtifact(
@@ -1005,6 +1182,14 @@ export class RunService {
         status: record.status,
         settledAt,
         ...(record.error !== undefined ? { error: record.error } : {}),
+        // FR-004: the manifest is the chain-level view, so a reader deciding
+        // whether to resume a stage must see the cancellation there too.
+        ...(record.cancelled !== undefined
+          ? {
+              cancelledAt: record.cancelled.at,
+              ...(record.cancelled.reason !== undefined ? { reason: record.cancelled.reason } : {}),
+            }
+          : {}),
       });
     }
   }
@@ -1041,7 +1226,11 @@ export class RunService {
     const record = this.registry.get(runId);
     if (!record) return () => undefined;
 
-    return record.run.watch((event: WorkflowStreamEvent) => {
+    // FR-003: step-cancelled is synthesised by cancel(), not emitted by Mastra,
+    // so the listener is registered on the record as well as on the run stream.
+    record.listeners.add(listener);
+
+    const unwatch = record.run.watch((event: WorkflowStreamEvent) => {
       if (event.type === "workflow-step-start") {
         listener({ kind: "step-start", stepId: event.payload.id });
       } else if (event.type === "workflow-step-suspended") {
@@ -1068,6 +1257,11 @@ export class RunService {
         }
       }
     });
+
+    return () => {
+      record.listeners.delete(listener);
+      unwatch();
+    };
   }
 }
 
