@@ -1,9 +1,24 @@
 import assert from "node:assert/strict";
 import { request as httpRequest, type IncomingMessage, type RequestOptions } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import { resolveProjectState, type ProjectState } from "../../runtime/projectState.js";
 import { startServer, type ServeHandle } from "../server.js";
+
+const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
+
+/**
+ * Machine-local state for a test server, rooted in a throwaway home so nothing
+ * can fall through to the owner's real ~/.agent-flows (spec 032 V7).
+ * `resolveProjectState` is pure, so the directory is created only if a test
+ * actually writes into it.
+ */
+function makeState(projectDir: string, tmpDir?: string): ProjectState {
+  const home = tmpDir !== undefined ? join(tmpDir, "state-home") : TEST_STATE_HOME;
+  return resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home });
+}
 
 const REAL_PIPELINES_DIR = join(process.cwd(), "pipelines");
 
@@ -45,7 +60,12 @@ describe("routes/content — preamble guard runs before the extracted handler", 
   let srv: ServeHandle;
 
   before(async () => {
-    srv = await startServer({ port: 0, dbPath: ":memory:", pipelinesDir: REAL_PIPELINES_DIR });
+    srv = await startServer({
+      state: makeState(process.cwd()),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
   });
   after(async () => srv.close());
 

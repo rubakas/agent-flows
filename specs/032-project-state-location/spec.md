@@ -4,7 +4,7 @@
 | ------------ | ---------------------------- |
 | Feature Name | Project state location       |
 | Branch       | `032-project-state-location` |
-| Status       | Draft — 2026-09-13           |
+| Status       | Implemented — 2026-09-13     |
 | Created      | 2026-09-13                   |
 
 ## Problem
@@ -103,7 +103,9 @@ split table.
   override.
 - **FR-006.** The mastra libsql db path is derived from the resolved db path exactly as today
   (`paths.ts:10-12`: strip `.sqlite`/`.db`, append `-mastra.db`) so a `<stateDir>/agent-flows.sqlite`
-  default yields `<stateDir>/agent-flows-mastra.db`.
+  default yields `<stateDir>/agent-flows-mastra.db`. It is derived at the call site from the
+  _effective_ db path, not stored on `ProjectState`: a field there would be a second derivation that
+  silently ignores `--db`.
 - **FR-007.** The project n8n id map is read from `<project>/.agent-flows/n8n.json` only as a
   fallback when `<stateDir>/n8n.json` does not exist, and is written only to `<stateDir>/n8n.json`
   (`server.ts:108-128`).
@@ -160,9 +162,22 @@ list` and `agent-flows install` output name the state dir alongside the canon di
   pre-migration artifacts may resolve into a different db.
 - On case-insensitive filesystems, two spellings of one directory (differing only in case) resolve to
   two separate keys and two separate state dirs — accepted.
+- The legacy runs copy uses `cpSync` with `dereference: false` (the default): symlinks are copied as
+  links, so a relative symlink that escaped `runs/` breaks at the new depth. The copy also does not
+  preserve timestamps — artifact mtimes are reset to the copy time. Both accepted: run artifacts are
+  self-describing JSON, and the legacy directory is left in place for the owner to consult.
 
 ## Follow-ups
 
 - A worktree-shared key option via `git rev-parse --git-common-dir` (research §3.1).
 - Retention/pruning of `runs/` under the state dir.
 - An `agent-flows where` CLI verb printing the canon dir and the state dir.
+
+## Verification log (2026-09-13)
+
+1294 tests green at HEAD. V5 live: a daemon on a temp project with `AGENT_FLOWS_HOME=<tmp>` ran the
+`test` pipeline with `checkCommand: true`; the artifact and the manifest landed under
+`<tmp>/projects/<key>/runs/<runId>/`, and the project listing was unchanged. Mutations, all red: the
+old in-project artifact path (14 failures), appending to `.gitignore`, redoing a partial copy, and the
+`install.sh` export. Review follow-ups applied: state is a required argument at all 57 call sites,
+stale `runs.partial` copies are swept, and the legacy notice is scoped.

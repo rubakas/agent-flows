@@ -17,7 +17,6 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { mastraDbPath } from "../bindings/mastra/paths.js";
 
 /** Environment slice the resolution reads. Injected so tests never touch the real home. */
 export type StateEnv = Record<string, string | undefined>;
@@ -30,10 +29,15 @@ export interface ProjectState {
   dir: string;
   /** <dir>/runs — run artifacts and manifests. */
   runsDir: string;
-  /** <dir>/agent-flows.sqlite — tickets and drafts. */
+  /**
+   * <dir>/agent-flows.sqlite — tickets and drafts.
+   *
+   * The Mastra LibSQL path is deliberately NOT resolved here: the CLI derives it
+   * with `mastraDbPath(dbPath)` from the *effective* db path, which `--db`
+   * overrides. A field on ProjectState would be a second, silently divergent
+   * derivation that ignores `--db`.
+   */
   dbPath: string;
-  /** <dir>/agent-flows-mastra.db — Mastra LibSQL store, derived per FR-006. */
-  mastraDbPath: string;
   /** <dir>/n8n.json — project n8n workflow id map. */
   n8nMapPath: string;
   /** <dir>/project.json — the marker written on first resolution. */
@@ -91,7 +95,6 @@ export function resolveProjectState(projectDir: string, env: StateEnv = process.
     dir,
     runsDir: join(dir, "runs"),
     dbPath,
-    mastraDbPath: mastraDbPath(dbPath),
     n8nMapPath: join(dir, "n8n.json"),
     projectJsonPath: join(dir, "project.json"),
   };
@@ -147,9 +150,16 @@ export function migrateLegacyRuns(
 ): void {
   const legacyRuns = join(projectDir, ".agent-flows", "runs");
   if (!existsSync(legacyRuns)) return;
-  if (existsSync(state.runsDir)) return;
 
   const partial = join(state.dir, "runs.partial");
+  if (existsSync(state.runsDir)) {
+    // The copy already happened. Any runs.partial still on disk is debris from
+    // an interrupted attempt that a later run superseded; leaving it behind
+    // would grow without bound and look like work in progress forever.
+    rmSync(partial, { recursive: true, force: true });
+    return;
+  }
+
   try {
     // A partial left by an interrupted copy is stale — start over.
     rmSync(partial, { recursive: true, force: true });

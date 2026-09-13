@@ -5,8 +5,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 
+import { resolveProjectState, type ProjectState } from "../../runtime/projectState.js";
 import { startServer, type ServeHandle } from "../server.js";
 import { fetchN8n, getN8nGlobalConfigPath, type N8nConfig, writeN8nConfig } from "./n8n.js";
+
+const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
+
+/**
+ * Machine-local state for a test server, rooted in a throwaway home so nothing
+ * can fall through to the owner's real ~/.agent-flows (spec 032 V7).
+ * `resolveProjectState` is pure, so the directory is created only if a test
+ * actually writes into it.
+ */
+function makeState(projectDir: string, tmpDir?: string): ProjectState {
+  const home = tmpDir !== undefined ? join(tmpDir, "state-home") : TEST_STATE_HOME;
+  return resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home });
+}
 
 /** fetch silently ignores Host overrides; node:http.request does not. */
 function rawPostWithHost(
@@ -87,6 +101,7 @@ describe("routes/n8n — preamble guards run before the extracted handler", () =
 
   before(async () => {
     srv = await startServer({
+      state: makeState(process.cwd()),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -165,6 +180,7 @@ describe("POST /api/n8n/configure — stores config and enforces security invari
     delete process.env.AGENT_FLOWS_N8N_URL;
     delete process.env.AGENT_FLOWS_N8N_API_KEY;
     srv = await startServer({
+      state: makeState(process.cwd()),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -294,6 +310,7 @@ describe("security guard proof: API key in response (neuter → RED, restore →
     delete process.env.AGENT_FLOWS_N8N_URL;
     delete process.env.AGENT_FLOWS_N8N_API_KEY;
     srv = await startServer({
+      state: makeState(process.cwd()),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -357,6 +374,7 @@ describe("DELETE /api/n8n/configure — removes config; GET /api/n8n/status then
     delete process.env.AGENT_FLOWS_N8N_URL;
     delete process.env.AGENT_FLOWS_N8N_API_KEY;
     srv = await startServer({
+      state: makeState(process.cwd()),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
@@ -412,6 +430,7 @@ describe("env-var priority: AGENT_FLOWS_N8N_URL + KEY override the file; status 
     process.env.AGENT_FLOWS_N8N_URL = "https://env.n8n.example.com";
     process.env.AGENT_FLOWS_N8N_API_KEY = "env-key-not-real";
     srv = await startServer({
+      state: makeState(process.cwd()),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,

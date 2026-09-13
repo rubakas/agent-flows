@@ -4,9 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type MastraLike } from "../runtime/runService.js";
 import { isSafeId, isSafeName } from "./route-helpers.js";
 import { startServer, type ServeHandle } from "./server.js";
+
+const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
+
+/**
+ * Machine-local state for a test server, rooted in a throwaway home so nothing
+ * can fall through to the owner's real ~/.agent-flows (spec 032 V7).
+ * `resolveProjectState` is pure, so the directory is created only if a test
+ * actually writes into it.
+ */
+function makeState(projectDir: string, tmpDir?: string): ProjectState {
+  const home = tmpDir !== undefined ? join(tmpDir, "state-home") : TEST_STATE_HOME;
+  return resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home });
+}
 
 const REAL_PIPELINES_DIR = join(process.cwd(), "pipelines");
 
@@ -72,6 +86,7 @@ describe("readAndDiscardBody — 413 on an oversized body (DELETE /api/pipelines
       "id: orphan\nversion: 1\ndescription: orphan\ninputs: []\nsteps:\n  - id: start\n    kind: gate\n"
     );
     srv = await startServer({
+      state: makeState(process.cwd()),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: tmpPipelinesDir,
@@ -117,6 +132,7 @@ describe("safePath redaction — unexpected error surfaces as 500 with <root>", 
     const runService = new RunService(throwingMastra);
 
     srv = await startServer({
+      state: makeState(process.cwd()),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: tmpPipelinesDir,
@@ -146,7 +162,12 @@ describe("dispatch ordering — POST /api/templates/from-n8n is not captured by 
   let srv: ServeHandle;
 
   before(async () => {
-    srv = await startServer({ port: 0, dbPath: ":memory:", pipelinesDir: REAL_PIPELINES_DIR });
+    srv = await startServer({
+      state: makeState(process.cwd()),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
   });
   after(async () => srv.close());
 

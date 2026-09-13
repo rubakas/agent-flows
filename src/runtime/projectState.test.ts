@@ -146,7 +146,6 @@ describe("FR-002: state dir resolution", () => {
     assert.equal(state.dir, join(home, "projects", "k"));
     assert.equal(state.runsDir, join(home, "projects", "k", "runs"));
     assert.equal(state.dbPath, join(home, "projects", "k", "agent-flows.sqlite"));
-    assert.equal(state.mastraDbPath, join(home, "projects", "k", "agent-flows-mastra.db"));
     assert.equal(state.n8nMapPath, join(home, "projects", "k", "n8n.json"));
     assert.equal(state.projectJsonPath, join(home, "projects", "k", "project.json"));
   });
@@ -253,6 +252,33 @@ describe("FR-009: legacy runs/ is copied once, non-destructively", () => {
     assert.equal(hashTree(state.runsDir), afterFirst, "a second start must not copy again");
     assert.equal(notices.length, 0, "a second start must print no migration notice");
     assert.equal(hashTree(legacy), legacyHash, "the legacy dir must be untouched");
+  });
+
+  it("sweeps a stale runs.partial when runs/ already exists", () => {
+    const home = makeTmpDir();
+    const projectDir = makeTmpDir();
+    seedLegacyRuns(projectDir);
+
+    const state: ProjectState = ensureProjectState(
+      projectDir,
+      { AGENT_FLOWS_HOME: home },
+      () => undefined
+    );
+    assert.ok(existsSync(state.runsDir), "the first start must have copied runs/");
+
+    // Debris from an interrupted attempt that a later start superseded.
+    const partial = join(state.dir, "runs.partial");
+    mkdirSync(join(partial, "half-copied"), { recursive: true });
+    writeFileSync(join(partial, "half-copied", "a.json"), "{}\n", "utf8");
+
+    const beforeRuns = hashTree(state.runsDir);
+    ensureProjectState(projectDir, { AGENT_FLOWS_HOME: home }, () => undefined);
+
+    assert.ok(
+      !existsSync(partial),
+      "a stale runs.partial must be swept, not leaked, once runs/ exists"
+    );
+    assert.equal(hashTree(state.runsDir), beforeRuns, "runs/ must be left untouched");
   });
 
   it("does nothing when there is no legacy runs dir", () => {

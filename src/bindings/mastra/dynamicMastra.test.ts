@@ -30,12 +30,26 @@ import { LibSQLStore } from "@mastra/libsql";
 
 import { ModelRegistry } from "../../canon/registry.js";
 import { makeInMemoryDb } from "../../db/index.js";
+import { resolveProjectState, type ProjectState } from "../../runtime/projectState.js";
 import { RunService, type MastraLike } from "../../runtime/runService.js";
 import { startServer, type ServeHandle } from "../../serve/server.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow } from "./build.js";
 import { createDynamicMastra } from "./dynamicMastra.js";
 import { mastraDbPath } from "./paths.js";
+
+const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
+
+/**
+ * Machine-local state for a test server, rooted in a throwaway home so nothing
+ * can fall through to the owner's real ~/.agent-flows (spec 032 V7).
+ * `resolveProjectState` is pure, so the directory is created only if a test
+ * actually writes into it.
+ */
+function makeState(projectDir: string, tmpDir?: string): ProjectState {
+  const home = tmpDir !== undefined ? join(tmpDir, "state-home") : TEST_STATE_HOME;
+  return resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home });
+}
 
 // Simple pipeline used in the install-then-run test.  Uses a check step with a
 // trivially fast, deterministic command so the run does not call a model or
@@ -95,6 +109,7 @@ describe("createDynamicMastra — installed pipeline becomes executable without 
     const runService = new RunService(dynamicMastra);
 
     srv = await startServer({
+      state: makeState(tmpProjectDir),
       port: 0,
       dbPath: ":memory:",
       runService,
