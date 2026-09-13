@@ -1206,6 +1206,14 @@ async function handleRequest(
     // Snapshot first — allows a client connecting mid-run to catch up.
     res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
 
+    // A run restored from its artifact will never emit another event (spec 034
+    // FR-011). Subscribing would register a listener on a run the service does
+    // not hold and leave the client waiting on a stream that can never speak.
+    if (snapshot.source === "disk") {
+      res.end();
+      return;
+    }
+
     const safeWrite = (data: string): void => {
       if (!res.destroyed) res.write(data);
     };

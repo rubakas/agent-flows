@@ -1289,8 +1289,14 @@
             : r.settledAt !== undefined
               ? `<span title="settled ${escH(fmtTime(r.settledAt))}">${escH(fmtElapsed(r.createdAt, r.settledAt))}</span>`
               : `<span title="no settle time recorded for this run">—</span>`;
+          // FR-011: a persisted run is a record, not a live process — say so in
+          // the row so the missing Cancel button later is not a surprise.
+          const diskMark =
+            r.source === "disk"
+              ? ` <span class="tier-badge tier-bundled" title="restored from its artifact — this run is not live">disk</span>`
+              : "";
           html += `<tr data-run-row="${escH(r.runId)}"${r.status === "awaiting_approval" ? ' class="awaiting"' : ""}>
-            <td><span class="run-status ${escH(sc)}">${escH(r.status)}</span></td>
+            <td><span class="run-status ${escH(sc)}">${escH(r.status)}</span>${diskMark}</td>
             <td class="pipeline-id">${escH(r.pipelineId)}</td>
             <td style="font-size:12px;color:var(--muted)">${escH(fmtTime(r.createdAt))}</td>
             <td style="font-size:12px;color:var(--muted)">${elapsed}</td>
@@ -1396,6 +1402,11 @@
         if (parseHash(location.hash).runId !== runId) return;
 
         renderRunDetail(runId, snapshot, body);
+
+        // FR-011: a run restored from disk has nothing left to stream. Opening an
+        // EventSource for it would burn a connection on a stream that closes
+        // immediately, and __afDebug.openStreams is how a test proves we don't.
+        if (snapshot.source === "disk") return;
 
         const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
         activeRunEs = es;
@@ -1585,8 +1596,15 @@
 
         if (inv) html += invocationHtml(inv);
 
+        // A persisted run cannot be acted on: the workflow it belonged to is
+        // gone with the daemon that ran it (FR-011).
+        const isDisk = snapshot.source === "disk";
+        if (isDisk) {
+          html += `<p style="font-size:12px;color:var(--muted);margin-bottom:10px">Restored from ${escH(snapshot.artifactPath || "its artifact")} — not live, no further updates.</p>`;
+        }
+
         // Gate controls — shown only when the run is awaiting approval.
-        if (status === "awaiting_approval" && snapshot.gateMessage) {
+        if (!isDisk && status === "awaiting_approval" && snapshot.gateMessage) {
           html += `<div class="gate-box">
             <p>${escH(snapshot.gateMessage)}</p>
             <div class="gate-actions">
@@ -1597,7 +1615,7 @@
         }
 
         // Cancel control — shown while the run can still be stopped (FR-008).
-        if (status === "running" || status === "awaiting_approval") {
+        if (!isDisk && (status === "running" || status === "awaiting_approval")) {
           html += `<div style="margin-bottom:10px">
             <button class="btn danger" id="btn-cancel-run">Cancel run</button>
           </div>`;

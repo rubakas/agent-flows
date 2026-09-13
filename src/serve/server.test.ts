@@ -27,7 +27,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import { Mastra } from "@mastra/core";
+import { buildPipelineWorkflow } from "../bindings/mastra/build.js";
+import { BUNDLED_PIPELINES_DIR } from "../bindings/mastra/pipelineLoader.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
+import { loadPipeline } from "../canon/load.js";
 import { ModelRegistry } from "../canon/registry.js";
 import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
@@ -45,6 +49,7 @@ import {
   CONTENT_CAP,
 } from "./server.js";
 import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
+import type { TicketStore } from "../module/seams.js";
 
 const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
 
@@ -2254,6 +2259,229 @@ describe("GET /api/runs — summaries carry settledAt once terminal (spec 034 FR
       Date.parse(summary.settledAt) >= Date.parse(summary.createdAt),
       "settledAt must not precede createdAt"
     );
+  });
+});
+
+// ── Spec 034 FR-010/FR-011: persisted runs served after a restart ────────────
+
+/** Write a settled run's artifact into a state dir, exactly as persistArtifact does. */
+function writePersistedRun(runsDir: string, runId: string): void {
+  const dir = join(runsDir, runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "test.json"),
+    JSON.stringify({
+      runId,
+      pipelineId: "test",
+      status: "succeeded",
+      gateMode: "manual",
+      invocation: {
+        pipeline: "test",
+        inputs: { request: "ship it" },
+        gateMode: "manual",
+        startedAt: "2026-09-13T09:00:00.000Z",
+        source: "http",
+      },
+      steps: { run: { status: "succeeded", command: "echo hello" } },
+      gateDecisions: [],
+      provenance: {
+        pipelineId: "test",
+        profileId: "anthropic",
+        transportPerStep: {},
+        startedAt: "2026-09-13T09:00:00.000Z",
+        settledAt: "2026-09-13T09:01:00.000Z",
+      },
+    }),
+    "utf8"
+  );
+}
+
+describe("Persisted runs are served by a daemon that never ran them (FR-010/FR-011)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  const runId = "persisted-run-01";
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-persisted-")));
+    const state = makeState(REAL_REPO_ROOT, tmpDir);
+    mkdirSync(state.runsDir, { recursive: true });
+    writePersistedRun(state.runsDir, runId);
+    // A fresh RunService: its registry has never heard of the run above.
+    const svc = new RunService(
+      makeMastra(makeMockRun("unrelated", successResult(), successResult())),
+      undefined,
+      state.runsDir
+    );
+    srv = await startServer({
+      state,
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: svc,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("GET /api/runs lists it, marked as coming from disk", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      runs: { runId: string; source?: string; settledAt?: string; status: string }[];
+    };
+    const summary = body.runs.find((r) => r.runId === runId);
+    assert.ok(summary !== undefined, "a run left on disk must appear in the list after a restart");
+    assert.equal(summary.source, "disk");
+    assert.equal(summary.status, "succeeded");
+    assert.equal(summary.settledAt, "2026-09-13T09:01:00.000Z");
+  });
+
+  it("GET /api/runs/:id rebuilds its invocation and steps from the artifact", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      source?: string;
+      invocation?: { inputs?: Record<string, unknown> };
+      steps: Record<string, { command?: string }>;
+    };
+    assert.equal(body.source, "disk");
+    assert.deepEqual(body.invocation?.inputs, { request: "ship it" });
+    assert.equal(body.steps.run?.command, "echo hello");
+  });
+
+  it("its events stream sends one snapshot and closes", async () => {
+    // A live run's stream stays open with heartbeats, so a regression here would
+    // hang this test forever. The abort turns that hang into a failure.
+    const ac = new AbortController();
+    const guard = setTimeout(() => ac.abort(), 5_000);
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}/events`, {
+      signal: ac.signal,
+    });
+    assert.equal(res.status, 200);
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      assert.fail(
+        `the events stream for a restored run must end on its own: ${String(err)} — FR-011`
+      );
+    } finally {
+      clearTimeout(guard);
+    }
+    assert.match(text, /^event: snapshot\n/u, "the one event must be the snapshot");
+    assert.equal(
+      text.split("event: snapshot").length - 1,
+      1,
+      "a restored run has exactly one thing to say"
+    );
+    assert.ok(!text.includes("event: step"), "a restored run emits no step events");
+  });
+
+  it("cancelling it is a 409 naming its status, not a 404", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { status?: string; error?: string };
+    assert.equal(body.status, "succeeded");
+  });
+
+  it("approving it is a 409 too", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}/approve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approved: true }),
+    });
+    assert.equal(res.status, 409);
+    const body = (await res.json()) as { error?: string };
+    assert.match(String(body.error), /restored from its artifact/u);
+  });
+});
+
+describe("A restart keeps a real run visible (spec 034 V5)", () => {
+  let tmpDir: string;
+  let state: ProjectState;
+  let runId: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-restart-")));
+    state = makeState(REAL_REPO_ROOT, tmpDir);
+
+    // First daemon: a real `test` pipeline (one check step) run to completion.
+    const pipeline = loadPipeline(join(BUNDLED_PIPELINES_DIR, "test.yaml"));
+    const wf = buildPipelineWorkflow(pipeline, {
+      registry: new ModelRegistry([]),
+      store: {} as unknown as TicketStore,
+      checkCommand: "echo hello",
+    });
+    const mastra = new Mastra({ workflows: { [pipeline.def.id]: wf } });
+    const svc = new RunService(mastra, undefined, state.runsDir);
+    const first = await startServer({
+      state,
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: BUNDLED_PIPELINES_DIR,
+      runService: svc,
+    });
+    const started = await fetch(`http://127.0.0.1:${first.port}/api/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pipeline: "test", inputs: {} }),
+    });
+    runId = ((await started.json()) as { runId: string }).runId;
+    await svc.waitForSettled(runId);
+    // persistArtifact is fire-and-forget; wait for the file to land.
+    const artifactDir = join(state.runsDir, runId);
+    for (let i = 0; i < 100 && !existsSync(join(artifactDir, "test.json")); i++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+    await first.close();
+  });
+  after(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  it("a NEW daemon on the same state dir still lists and serves the run", async () => {
+    // Second daemon: a different RunService whose registry is empty. Nothing but
+    // the state dir connects it to the run above.
+    const fresh = new RunService(
+      makeMastra(makeMockRun("fresh", successResult(), successResult())),
+      undefined,
+      state.runsDir
+    );
+    const srv = await startServer({
+      state,
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: BUNDLED_PIPELINES_DIR,
+      runService: fresh,
+    });
+    try {
+      const list = (await (await fetch(`http://127.0.0.1:${srv.port}/api/runs`)).json()) as {
+        runs: { runId: string; source?: string; status: string }[];
+      };
+      const summary = list.runs.find((r) => r.runId === runId);
+      assert.ok(summary !== undefined, "the run must survive the restart in GET /api/runs");
+      assert.equal(summary.source, "disk");
+      assert.equal(summary.status, "succeeded");
+
+      const detail = (await (
+        await fetch(`http://127.0.0.1:${srv.port}/api/runs/${runId}`)
+      ).json()) as {
+        invocation?: { pipeline?: string };
+        steps: Record<string, { command?: string }>;
+      };
+      assert.equal(detail.invocation?.pipeline, "test", "the invocation must survive the restart");
+      assert.equal(
+        detail.steps.run?.command,
+        "echo hello",
+        "the step's command must survive the restart"
+      );
+    } finally {
+      await srv.close();
+    }
   });
 });
 

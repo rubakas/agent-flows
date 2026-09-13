@@ -19,7 +19,12 @@ import { describe, it, after } from "node:test";
 import { ModelRegistry } from "../canon/registry.js";
 import type { StepDef } from "../canon/types.js";
 import type { ManifestStage, RunManifest, StepProvenance } from "./artifactStore.js";
-import { deriveChainStatus, readManifest } from "./artifactStore.js";
+import {
+  deriveChainStatus,
+  listPersistedRuns,
+  readManifest,
+  readPersistedRun,
+} from "./artifactStore.js";
 import { ensureProjectState, resolveProjectState } from "./projectState.js";
 import { RunService } from "./runService.js";
 import type { MastraLike } from "./runService.js";
@@ -1040,5 +1045,163 @@ describe("spec 033 FR-004: a cancelled run's manifest reports the chain as cance
       "cancelled",
       "the chain status must follow its only stage, not sit at in-progress"
     );
+  });
+});
+
+// ── Spec 034 FR-010/FR-012: reading runs back from disk ──────────────────────
+
+describe("listPersistedRuns / readPersistedRun — runs survive the daemon", () => {
+  /** Write one run directory shaped exactly as persistArtifact writes it. */
+  function writeRunDir(
+    runsDir: string,
+    runId: string,
+    artifact: Record<string, unknown>,
+    fileName = "test.json"
+  ): string {
+    const dir = join(runsDir, runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, fileName), JSON.stringify(artifact, null, 2), "utf8");
+    return dir;
+  }
+
+  function sampleArtifact(runId: string): Record<string, unknown> {
+    return {
+      runId,
+      pipelineId: "test",
+      status: "succeeded",
+      gateMode: "manual",
+      source: "live",
+      invocation: {
+        pipeline: "test",
+        inputs: { request: "ship it" },
+        gateMode: "manual",
+        startedAt: "2026-09-13T10:00:00.000Z",
+        source: "http",
+      },
+      steps: {
+        run: { status: "succeeded", command: "echo hello", outputExcerpt: '{"passed":true}' },
+      },
+      gateDecisions: [],
+      result: { run: { passed: true } },
+      provenance: {
+        pipelineId: "test",
+        profileId: "anthropic",
+        transportPerStep: {},
+        startedAt: "2026-09-13T10:00:00.000Z",
+        settledAt: "2026-09-13T10:06:12.000Z",
+      },
+    };
+  }
+
+  it("summarises a run directory and rebuilds its full state", () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-persisted-"));
+    try {
+      writeRunDir(runsDir, "run-one", sampleArtifact("run-one"));
+
+      const summaries = listPersistedRuns(runsDir);
+      assert.equal(summaries.length, 1);
+      assert.deepEqual(summaries[0], {
+        runId: "run-one",
+        pipelineId: "test",
+        status: "succeeded",
+        createdAt: "2026-09-13T10:00:00.000Z",
+        settledAt: "2026-09-13T10:06:12.000Z",
+        source: "disk",
+      });
+
+      const full = readPersistedRun(runsDir, "run-one");
+      assert.equal(full?.status, "succeeded");
+      assert.equal(full?.source, "disk");
+      assert.deepEqual((full?.invocation as { inputs?: unknown })?.inputs, { request: "ship it" });
+      assert.equal(
+        (full?.steps as Record<string, { command?: string }>).run?.command,
+        "echo hello",
+        "the step's recorded command must survive the restart"
+      );
+      assert.equal(
+        full?.artifactPath,
+        join(runsDir, "run-one", "test.json"),
+        "the caller needs the path it was read from"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unparseable artifact as unreadable, with its path — never hides it", () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-persisted-bad-"));
+    try {
+      const dir = join(runsDir, "run-bad");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "test.json"), "{ this is not json", "utf8");
+
+      const summaries = listPersistedRuns(runsDir);
+      assert.equal(summaries.length, 1, "a broken artifact is still a run the operator can see");
+      assert.equal(summaries[0].status, "unreadable");
+      assert.equal(summaries[0].path, join(dir, "test.json"));
+      assert.ok(
+        typeof summaries[0].error === "string" && summaries[0].error.length > 0,
+        "the parse error must be reported so the operator can act on it"
+      );
+
+      const full = readPersistedRun(runsDir, "run-bad");
+      assert.equal(full?.status, "unreadable");
+      assert.deepEqual(full?.steps, {});
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores non-directories and a missing runs dir, and refuses to escape it", () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-persisted-edge-"));
+    try {
+      writeFileSync(join(runsDir, "stray.json"), "{}", "utf8");
+      assert.deepEqual(listPersistedRuns(runsDir), [], "a loose file is not a run");
+      assert.deepEqual(
+        listPersistedRuns(join(runsDir, "nope")),
+        [],
+        "a missing dir is not an error"
+      );
+      assert.equal(readPersistedRun(runsDir, "../../etc"), undefined, "no traversal via run id");
+      assert.equal(readPersistedRun(runsDir, "unknown-run"), undefined);
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers the artifact whose own runId matches the directory (chained stages)", () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-persisted-chain-"));
+    try {
+      const anchor = sampleArtifact("run-anchor");
+      writeRunDir(runsDir, "run-anchor", anchor, "investigate.json");
+      // A later stage of the same chain writes into the anchor's directory with
+      // its own run id (spec 029 FR-006).
+      const stage = {
+        ...sampleArtifact("run-stage-2"),
+        pipelineId: "develop",
+        provenance: {
+          pipelineId: "develop",
+          profileId: "anthropic",
+          transportPerStep: {},
+          startedAt: "2026-09-13T11:00:00.000Z",
+          settledAt: "2026-09-13T11:30:00.000Z",
+        },
+      };
+      writeFileSync(
+        join(runsDir, "run-anchor", "develop.json"),
+        JSON.stringify(stage, null, 2),
+        "utf8"
+      );
+
+      const full = readPersistedRun(runsDir, "run-anchor");
+      assert.equal(
+        (full?.invocation as { pipeline?: string })?.pipeline,
+        "test",
+        "the directory's own run must win over a later stage that shares its directory"
+      );
+      assert.equal(listPersistedRuns(runsDir).length, 1, "one directory is one listed run");
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
   });
 });

@@ -8,7 +8,12 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { getActiveProfile, resolveStepModel } from "../canon/registry.js";
 import { runLlmStep } from "../canon/runStep.js";
-import { writeRunArtifact, upsertManifestEntry } from "./artifactStore.js";
+import {
+  writeRunArtifact,
+  upsertManifestEntry,
+  listPersistedRuns,
+  readPersistedRun,
+} from "./artifactStore.js";
 import { clearRun, getRun as getStepIntrospection } from "./stepIntrospection.js";
 import type { ArtifactProvenance, StepProvenance } from "./artifactStore.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
@@ -180,7 +185,17 @@ export type CancelResult = { ok: true } | { ok: false; status: GetResult["status
 export interface GetResult {
   runId: string;
   pipelineId: string;
-  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
+  /** "unreadable" only ever comes from a persisted run whose artifact failed to parse (FR-012). */
+  status:
+    | "running"
+    | "awaiting_approval"
+    | "succeeded"
+    | "rejected"
+    | "failed"
+    | "cancelled"
+    | "unreadable";
+  /** Where this state came from: the live registry, or an artifact on disk (FR-010). */
+  source?: "live" | "disk";
   /** Run-level gate mode (FR-001). */
   gateMode: GateMode;
   /** Per-step states accumulated in flight (FR-006). Always present; empty before any step fires. */
@@ -218,7 +233,16 @@ export interface GetResult {
 export interface RunSummary {
   runId: string;
   pipelineId: string;
-  status: "running" | "awaiting_approval" | "succeeded" | "rejected" | "failed" | "cancelled";
+  status:
+    | "running"
+    | "awaiting_approval"
+    | "succeeded"
+    | "rejected"
+    | "failed"
+    | "cancelled"
+    | "unreadable";
+  /** Where this summary came from: the live registry, or an artifact on disk (FR-010). */
+  source: "live" | "disk";
   /** ISO-8601 timestamp of when start() was called. */
   createdAt: string;
   /**
@@ -593,14 +617,22 @@ export class RunService {
     clearRun(record.run.runId);
   }
 
-  /** Return the current state of a run, or undefined if the id is unknown. */
+  /**
+   * Return the current state of a run, or undefined if the id is unknown.
+   *
+   * A run the registry has never heard of may still exist on disk: the daemon
+   * was restarted, and the artifact is what the run looked like when it settled
+   * (spec 034 FR-010). The registry is consulted first — a live run is always
+   * fresher than its last snapshot.
+   */
   get(runId: string): GetResult | undefined {
     const record = this.registry.get(runId);
-    if (!record) return undefined;
+    if (!record) return this.getPersisted(runId);
     const out: GetResult = {
       runId,
       pipelineId: record.pipelineId,
       status: record.status,
+      source: "live",
       gateMode: record.gateMode,
       invocation: record.invocation,
       steps: this.mergedSteps(record),
@@ -622,19 +654,46 @@ export class RunService {
   }
 
   /**
-   * Return a summary list of all runs in creation order (FR-001).
+   * Rebuild a run's state from its artifact (spec 034 FR-010).
    *
-   * Summaries carry only the four identification/status fields — never result,
-   * spec, gateMessage, or step output — so the list endpoint stays light.
+   * Returns undefined when no runs directory is configured or the id has no
+   * artifact — indistinguishable, from the caller's side, from "no such run".
+   */
+  private getPersisted(runId: string): GetResult | undefined {
+    if (!this.runsDir) return undefined;
+    const persisted = readPersistedRun(this.runsDir, runId);
+    if (!persisted) return undefined;
+    // The artifact is a serialised GetResult plus provenance, so it already has
+    // the shape callers expect; the cast documents that it is not re-validated
+    // field by field, and status/steps/gateDecisions were normalised on read.
+    return persisted as unknown as GetResult;
+  }
+
+  /**
+   * Return a summary list of all runs, live ones first (FR-001, spec 034 FR-010).
+   *
+   * Summaries carry only the identification/status fields — never result, spec,
+   * gateMessage, or step output — so the list endpoint stays light. Runs whose
+   * artifacts are on disk but whose daemon has since restarted are merged in;
+   * a registry entry always wins over the disk copy of the same id, because the
+   * artifact is only ever as new as the last settlement.
    */
   list(): RunSummary[] {
-    return [...this.registry.entries()].map(([runId, record]) => ({
+    const live: RunSummary[] = [...this.registry.entries()].map(([runId, record]) => ({
       runId,
       pipelineId: record.pipelineId,
       status: record.status,
       createdAt: record.createdAt.toISOString(),
       ...(record.settledAt !== undefined ? { settledAt: record.settledAt } : {}),
+      source: "live" as const,
     }));
+    if (!this.runsDir) return live;
+
+    const liveIds = new Set(live.map((r) => r.runId));
+    const persisted = listPersistedRuns(this.runsDir)
+      .filter((p) => !liveIds.has(p.runId))
+      .map((p) => p as unknown as RunSummary);
+    return [...live, ...persisted];
   }
 
   /**
@@ -653,7 +712,18 @@ export class RunService {
    */
   async approve(runId: string, approved: boolean, reason?: string): Promise<ApproveResult> {
     const record = this.registry.get(runId);
-    if (!record) return { runId, error: `No run found for runId "${runId}"` };
+    if (!record) {
+      // A run restored from disk has no workflow to resume; say so instead of
+      // "no run found", which would send the operator looking for a lost run.
+      const persisted = this.getPersisted(runId);
+      if (persisted) {
+        return {
+          runId,
+          error: `Run ${runId} was restored from its artifact (status: ${persisted.status}) and cannot be approved`,
+        };
+      }
+      return { runId, error: `No run found for runId "${runId}"` };
+    }
     if (record.status !== "awaiting_approval") {
       return { runId, error: `Run ${runId} is not awaiting approval (status: ${record.status})` };
     }
@@ -736,7 +806,11 @@ export class RunService {
    */
   async cancel(runId: string, reason?: string): Promise<CancelResult | undefined> {
     const record = this.registry.get(runId);
-    if (!record) return undefined;
+    if (!record) {
+      // Present on disk but not live: a refusal (409), not a 404 (spec 034 FR-011).
+      const persisted = this.getPersisted(runId);
+      return persisted ? { ok: false, status: persisted.status } : undefined;
+    }
     if (record.status !== "running" && record.status !== "awaiting_approval") {
       return { ok: false, status: record.status };
     }

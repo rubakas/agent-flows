@@ -6,7 +6,7 @@
 // resume / LibSQL snapshots) is covered by build.test.ts.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -2221,5 +2221,125 @@ describe("RunService.list — settledAt appears only once the run settles", () =
       typeof summary?.settledAt === "string",
       "a cancelled run is terminal and must report when it stopped"
     );
+  });
+});
+
+// ── Spec 034 FR-010: persisted runs merged into list() and get() ─────────────
+
+describe("RunService — persisted runs are listed and readable after a restart", () => {
+  /** Write a settled run's artifact the way persistArtifact does. */
+  function writePersisted(runsDir: string, runId: string, pipelineId: string): void {
+    const dir = join(runsDir, runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${pipelineId}.json`),
+      JSON.stringify({
+        runId,
+        pipelineId,
+        status: "succeeded",
+        invocation: { pipeline: pipelineId, inputs: {}, gateMode: "manual", source: "http" },
+        steps: { run: { status: "succeeded", command: "echo hello" } },
+        gateDecisions: [],
+        provenance: {
+          pipelineId,
+          profileId: "anthropic",
+          transportPerStep: {},
+          startedAt: "2026-09-13T09:00:00.000Z",
+          settledAt: "2026-09-13T09:01:00.000Z",
+        },
+      }),
+      "utf8"
+    );
+  }
+
+  it("list() merges disk runs and get() falls back to the artifact", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-restore-"));
+    try {
+      writePersisted(runsDir, "old-run", "test");
+      const service = new RunService(
+        makeMastra(makeMockRun("live-run", successResult(), successResult())),
+        undefined,
+        runsDir
+      );
+      const started = await service.start("test-pipeline", { request: "now" });
+
+      const listed = service.list();
+      const live = listed.find((r) => r.runId === started.runId);
+      const disk = listed.find((r) => r.runId === "old-run");
+      assert.equal(live?.source, "live");
+      assert.ok(disk !== undefined, "a run left on disk by a previous daemon must be listed");
+      assert.equal(disk.source, "disk");
+      assert.equal(disk.pipelineId, "test");
+      assert.equal(disk.status, "succeeded");
+      assert.equal(disk.createdAt, "2026-09-13T09:00:00.000Z");
+      assert.equal(disk.settledAt, "2026-09-13T09:01:00.000Z");
+
+      const got = service.get("old-run");
+      assert.equal(got?.status, "succeeded");
+      assert.equal(got?.source, "disk");
+      assert.equal(
+        got?.steps.run?.command,
+        "echo hello",
+        "get() must fall back to the artifact for a run the registry never saw"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("the live registry wins over a disk copy of the same run id", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-restore-clash-"));
+    try {
+      const service = new RunService(
+        makeMastra(makeMockRun("clash-run", successResult(), successResult())),
+        undefined,
+        runsDir
+      );
+      const started = await service.start("live-pipeline", {});
+      // The run's own (older) artifact, as persistArtifact would have left it.
+      writePersisted(runsDir, started.runId, "stale-pipeline");
+
+      const listed = service.list().filter((r) => r.runId === started.runId);
+      assert.equal(listed.length, 1, "a run must appear once, not twice");
+      assert.equal(listed[0].source, "live");
+      assert.equal(
+        listed[0].pipelineId,
+        "live-pipeline",
+        "the registry entry must win — the artifact is only as new as the last settlement"
+      );
+      assert.equal(service.get(started.runId)?.source, "live");
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a disk run refuses cancel and approve instead of pretending to act", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-restore-act-"));
+    try {
+      writePersisted(runsDir, "done-run", "test");
+      const service = new RunService(
+        makeMastra(makeMockRun("unused", successResult(), successResult())),
+        undefined,
+        runsDir
+      );
+
+      const cancelled = await service.cancel("done-run");
+      assert.deepEqual(
+        cancelled,
+        { ok: false, status: "succeeded" },
+        "cancelling a restored run is a refusal naming its status, not a 404"
+      );
+      const approved = await service.approve("done-run", true);
+      assert.equal(approved.status, undefined);
+      assert.match(String(approved.error), /restored from its artifact/u);
+
+      assert.equal(
+        await service.cancel("no-such-run"),
+        undefined,
+        "an unknown id is still unknown"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
   });
 });

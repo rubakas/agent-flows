@@ -4,6 +4,7 @@
 // Intentionally does not import from runService.ts — the two modules form a
 // one-way dependency (runService → artifactStore) so there is no cycle.
 
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
@@ -268,4 +269,224 @@ export async function readManifest(artifactDir: string): Promise<RunManifest> {
 
   // Recompute overall status to account for newly-visible stages.
   return { ...manifest, stages: all, status: deriveChainStatus(all) };
+}
+
+// ── Reading runs back from disk (spec 034 D8/FR-010..FR-012) ─────────────────
+//
+// Deliberately synchronous, unlike the rest of this module: RunService.list()
+// and get() are synchronous and are called from route handlers that have no
+// await point for them, so an async read here would ripple through the service,
+// the routes and the MCP tools for no behavioural gain.
+
+/** One persisted run as it appears in the run list. */
+export interface PersistedRunSummary {
+  runId: string;
+  pipelineId: string;
+  /** Terminal status from the artifact, or "unreadable" when it could not be parsed. */
+  status: string;
+  /** ISO-8601 start time, from the artifact's provenance or invocation. */
+  createdAt: string;
+  /** ISO-8601 settle time from the artifact's provenance. */
+  settledAt?: string;
+  /** Always "disk" — this run was reconstructed, not served from the registry. */
+  source: "disk";
+  /** Present when status is "unreadable": why the artifact could not be read. */
+  error?: string;
+  /** Present when status is "unreadable": the file that could not be read. */
+  path?: string;
+}
+
+/** A run's full state rebuilt from its artifact — the on-disk twin of GetResult. */
+export type PersistedRun = Record<string, unknown> & {
+  runId: string;
+  status: string;
+  source: "disk";
+};
+
+/**
+ * Reject anything that could escape runsDir before it reaches join().
+ * The run id reaches these functions from a URL path segment, and join() happily
+ * resolves "..", so the guard lives here rather than only at the route.
+ */
+function isSafeRunId(runId: string): boolean {
+  return (
+    runId.length > 0 &&
+    runId.length <= 200 &&
+    !runId.startsWith(".") &&
+    !/[/\\\0]/u.test(runId) &&
+    runId !== ".."
+  );
+}
+
+/**
+ * Pick the artifact file describing a run inside its directory.
+ *
+ * A chained run writes every stage's artifact into the anchor run's directory
+ * (spec 029 FR-006), so the directory can hold several. The one whose own
+ * `runId` matches the directory wins; otherwise the latest-settling artifact
+ * is used, which is the stage the directory most recently describes.
+ */
+function pickArtifact(
+  runDir: string,
+  runId: string
+):
+  | { artifact: Record<string, unknown>; path: string }
+  | { error: string; path: string }
+  | undefined {
+  let entries: string[];
+  try {
+    entries = readdirSync(runDir);
+  } catch {
+    return undefined;
+  }
+
+  const candidates: { artifact: Record<string, unknown>; path: string }[] = [];
+  let failure: { error: string; path: string } | undefined;
+
+  for (const entry of entries) {
+    if (!entry.endsWith(".json") || entry === "manifest.json") continue;
+    const path = join(runDir, entry);
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        failure ??= { error: "artifact is not a JSON object", path };
+        continue;
+      }
+      candidates.push({ artifact: parsed as Record<string, unknown>, path });
+    } catch (err) {
+      // FR-012: remember the failure. A run whose artifact will not parse must
+      // be reported as unreadable, not quietly omitted from the list.
+      failure ??= { error: err instanceof Error ? err.message : String(err), path };
+    }
+  }
+
+  if (candidates.length === 0) return failure;
+
+  const own = candidates.find((c) => c.artifact.runId === runId);
+  if (own) return own;
+
+  return candidates.sort((a, b) => settledAtOf(a.artifact).localeCompare(settledAtOf(b.artifact)))[
+    candidates.length - 1
+  ];
+}
+
+function provenanceOf(artifact: Record<string, unknown>): Record<string, unknown> {
+  const prov = artifact.provenance;
+  return typeof prov === "object" && prov !== null ? (prov as Record<string, unknown>) : {};
+}
+
+function settledAtOf(artifact: Record<string, unknown>): string {
+  const value = provenanceOf(artifact).settledAt;
+  return typeof value === "string" ? value : "";
+}
+
+function startedAtOf(artifact: Record<string, unknown>, runDir: string): string {
+  const fromProvenance = provenanceOf(artifact).startedAt;
+  if (typeof fromProvenance === "string") return fromProvenance;
+  const invocation = artifact.invocation;
+  if (typeof invocation === "object" && invocation !== null) {
+    const started = (invocation as Record<string, unknown>).startedAt;
+    if (typeof started === "string") return started;
+  }
+  // Last resort: the directory's own mtime. A run with no recorded start time
+  // would otherwise sort to the top of the list forever.
+  try {
+    return statSync(runDir).mtime.toISOString();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Summarise every run directory under runsDir (FR-010).
+ *
+ * Returns an empty list when runsDir does not exist — a daemon that has never
+ * run anything is not an error. Directories whose artifact cannot be parsed are
+ * returned with status "unreadable" rather than dropped (FR-012).
+ */
+export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
+  let dirEntries: string[];
+  try {
+    dirEntries = readdirSync(runsDir);
+  } catch {
+    return [];
+  }
+
+  const summaries: PersistedRunSummary[] = [];
+  for (const runId of dirEntries) {
+    if (!isSafeRunId(runId)) continue;
+    const runDir = join(runsDir, runId);
+    try {
+      if (!statSync(runDir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+
+    const picked = pickArtifact(runDir, runId);
+    if (picked === undefined) continue;
+    if ("error" in picked) {
+      summaries.push({
+        runId,
+        pipelineId: "unknown",
+        status: "unreadable",
+        createdAt: startedAtOf({}, runDir),
+        source: "disk",
+        error: picked.error,
+        path: picked.path,
+      });
+      continue;
+    }
+
+    const { artifact } = picked;
+    const pipelineId = provenanceOf(artifact).pipelineId ?? artifact.pipelineId;
+    summaries.push({
+      runId,
+      pipelineId: typeof pipelineId === "string" ? pipelineId : "unknown",
+      status: typeof artifact.status === "string" ? artifact.status : "unreadable",
+      createdAt: startedAtOf(artifact, runDir),
+      ...(settledAtOf(artifact) !== "" ? { settledAt: settledAtOf(artifact) } : {}),
+      source: "disk",
+    });
+  }
+  return summaries;
+}
+
+/**
+ * Rebuild one run's full state from its artifact (FR-010).
+ *
+ * Returns undefined when the run has no directory — the caller answers 404.
+ * The artifact already holds exactly what GET /api/runs/:id returned when the
+ * run settled (it is a serialised GetResult plus provenance), so the fields are
+ * passed through rather than re-derived; `provenance` is kept so a reader can
+ * still see which profile produced it.
+ */
+export function readPersistedRun(runsDir: string, runId: string): PersistedRun | undefined {
+  if (!isSafeRunId(runId)) return undefined;
+  const runDir = join(runsDir, runId);
+  const picked = pickArtifact(runDir, runId);
+  if (picked === undefined) return undefined;
+  if ("error" in picked) {
+    return {
+      runId,
+      status: "unreadable",
+      source: "disk",
+      error: picked.error,
+      path: picked.path,
+      steps: {},
+      gateDecisions: [],
+    };
+  }
+
+  const { artifact, path } = picked;
+  return {
+    ...artifact,
+    runId,
+    status: typeof artifact.status === "string" ? artifact.status : "unreadable",
+    steps: typeof artifact.steps === "object" && artifact.steps !== null ? artifact.steps : {},
+    gateDecisions: Array.isArray(artifact.gateDecisions) ? artifact.gateDecisions : [],
+    createdAt: startedAtOf(artifact, runDir),
+    ...(settledAtOf(artifact) !== "" ? { settledAt: settledAtOf(artifact) } : {}),
+    artifactPath: path,
+    source: "disk",
+  };
 }
