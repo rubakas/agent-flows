@@ -462,10 +462,10 @@ describe("validateModelOverrides", () => {
   });
 });
 
-// ── allowPatterns / denyPatterns forwarding ───────────────────────────────────
+// ── denyPatterns forwarding ───────────────────────────────────────────────────
 
-describe("buildLlmStep — forwards allowPatterns and denyPatterns to runner deps", () => {
-  it("allow and deny from step.permissions are forwarded to runner deps (canon drop = the bug class)", async () => {
+describe("buildLlmStep — forwards denyPatterns to runner deps", () => {
+  it("deny from step.permissions is forwarded to runner deps (canon drop = the bug class)", async () => {
     const capturedDeps: StepRunnerDeps[] = [];
     const trackingRunner: typeof runLlmStep = async (_entry, _prompt, deps) => {
       capturedDeps.push({ ...deps });
@@ -486,7 +486,6 @@ describe("buildLlmStep — forwards allowPatterns and denyPatterns to runner dep
             prompt: "prompts/survey.md",
             permissions: {
               contents: "read" as const,
-              allow: ["**/*.pem"],
               deny: ["src/internal/**"],
             },
           },
@@ -495,7 +494,7 @@ describe("buildLlmStep — forwards allowPatterns and denyPatterns to runner dep
       prompts: { survey: "Analyze: {{request}}" },
     };
 
-    const { storage, store, cleanup } = makeTestFixture("fwd-allow-deny");
+    const { storage, store, cleanup } = makeTestFixture("fwd-deny");
     try {
       const wf = buildPipelineWorkflow(fwdPipeline, {
         registry: FAKE_REGISTRY,
@@ -509,11 +508,6 @@ describe("buildLlmStep — forwards allowPatterns and denyPatterns to runner dep
 
       assert.equal(capturedDeps.length, 1, "runner should be called once");
       assert.deepEqual(
-        capturedDeps[0]?.allowPatterns,
-        ["**/*.pem"],
-        "allowPatterns must be forwarded to runner deps"
-      );
-      assert.deepEqual(
         capturedDeps[0]?.denyPatterns,
         ["src/internal/**"],
         "denyPatterns must be forwarded to runner deps"
@@ -523,7 +517,7 @@ describe("buildLlmStep — forwards allowPatterns and denyPatterns to runner dep
     }
   });
 
-  it("step with no allow/deny: binding emits neither allowPatterns nor denyPatterns", async () => {
+  it("step with no deny: binding emits no denyPatterns", async () => {
     const capturedDeps: StepRunnerDeps[] = [];
     const trackingRunner: typeof runLlmStep = async (_entry, _prompt, deps) => {
       capturedDeps.push({ ...deps });
@@ -549,7 +543,7 @@ describe("buildLlmStep — forwards allowPatterns and denyPatterns to runner dep
       prompts: { basic: "Analyze: {{request}}" },
     };
 
-    const { storage, store, cleanup } = makeTestFixture("no-fwd-allow-deny");
+    const { storage, store, cleanup } = makeTestFixture("no-fwd-deny");
     try {
       const wf = buildPipelineWorkflow(noFwdPipeline, {
         registry: FAKE_REGISTRY,
@@ -562,11 +556,6 @@ describe("buildLlmStep — forwards allowPatterns and denyPatterns to runner dep
       await run.start({ inputData: { request: "test" } });
 
       assert.equal(capturedDeps.length, 1, "runner should be called once");
-      assert.equal(
-        capturedDeps[0]?.allowPatterns,
-        undefined,
-        "allowPatterns must be absent when step.permissions has no allow"
-      );
       assert.equal(
         capturedDeps[0]?.denyPatterns,
         undefined,
