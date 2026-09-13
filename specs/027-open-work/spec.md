@@ -81,6 +81,34 @@ specs/031-provider-portable-workspace/spec.md for the full verification logs.
   a `deny` entry on `/` aborts the sandboxed process (SIGABRT); `sandbox_permissions` is a confirmed
   no-op in codex 0.152.1.
 
+**DONE (later the same day):**
+
+- **Spec 032 project state location** — implemented (commit 004ffe4 plus a follow-up fix round):
+  machine-local state under `${AGENT_FLOWS_HOME ?? ~/.agent-flows}/projects/<key>/` (runs, manifests,
+  `agent-flows.sqlite`, `agent-flows-mastra.db`, project `n8n.json`); canon stays in
+  `<project>/.agent-flows/`; key = escaped realpath (+ 8-hex sha256 suffix beyond 200 chars),
+  `AGENT_FLOWS_PROJECT_KEY` override; legacy `<project>/.agent-flows/runs` copied once via
+  `runs.partial` + rename, never deleted; the runtime no longer edits the project's `.gitignore`;
+  `scripts/install.sh` now exports `AGENT_FLOWS_PROJECT_DIR`; `ServeOptions.state` is required so
+  tests cannot fall through to the real home. Verified live: daemon run on a temp project wrote
+  artifact + manifest under the state dir and left the project untouched.
+- **Spec 033 run control** — implemented: `RunService.cancel` (Mastra `run.cancel()` + per-run
+  `abortSignal` forwarded from each step's execute context into runner deps; `BuildDeps.runnerDeps`
+  never carries a per-run signal), new `cancelled` terminal status everywhere,
+  `POST /api/runs/:id/cancel` (204/409/404), MCP `cancel_run`, `get_run` now returns per-step `steps`
+  with `startedAt/finishedAt/error`, UI Cancel button, `runCheckStep` honours the signal without a
+  deadline and kills the process group (detached spawn), daemon honours `AGENT_FLOWS_PORT` with
+  `--port` overriding and prints a clear EADDRINUSE message, bounded MCP poll
+  (`AGENT_FLOWS_POLL_MAX_MS`). Verified live: a `sleep 60 & wait` check step cancelled in ~2 s, no
+  survivors, artifact and manifest stage record `cancelled`/`cancelledAt`/`reason`. Found only by the
+  live run and fixed: a late Mastra result event resurrecting a cancelled step to "succeeded"; the
+  chain manifest's overall status not knowing `cancelled`.
+- **n8n, checked in the browser 2026-09-13**: n8n shows per-node progress for workflows it executes
+  (canvas ticks, item counts, Executions list), but the agent node spawns the `claude` CLI directly
+  and never talks to the daemon, so those executions are invisible to `get_run` and bypass the
+  adapters/confinement; every pipeline with a `check` step is unrunnable there ("Unrecognized node
+  type: n8n-nodes-base.executeCommand"); 12 workflows are pushed, some duplicated.
+
 **OPEN — owner decisions needed:**
 
 1. Binding A (`src/bindings/claudeCode.ts`, `.claude/workflows/*.js`): its generated scripts bypass
@@ -93,6 +121,9 @@ specs/031-provider-portable-workspace/spec.md for the full verification logs.
 3. Collapsing `assemble-spec` / `persist-ticket` / `export-spec`: `persist-ticket` re-asserts a gate
    key on its own unique key (`buildSteps.ts` ~:412-424), so it is not a pure rename.
    **Recommendation: only worth a spec of its own, not a quick refactor.**
+4. n8n as an executor needs an ADR: either the agent node calls the daemon (`POST /api/runs`) so runs
+   are observable and confined, or n8n stays authoring-only; `check` steps need a node the instance
+   actually has.
 
 **OPEN — follow-ups, no decision needed, ordered by value:**
 
@@ -111,6 +142,12 @@ specs/031-provider-portable-workspace/spec.md for the full verification logs.
   the spec, not the code); wiring code-review into build/cycle forces new inputs onto those pipelines.
 - The two 2026-09-03 bugs (prompt path containment in `load.ts`; `models` override passthrough) —
   verify whether still open.
+- `.n8n-workflows/` export covers 8 of 12 pipelines; regenerate or document why.
+- `agent-flows where` CLI verb (print project dir, state dir, db path, port).
+- Retention/pruning for `~/.agent-flows/projects/<key>/runs`.
+- Worktree-shared key option (`git rev-parse --git-common-dir`).
+- The daemon started earlier on this machine (pid from `pgrep -f "serve/server"`) was launched with
+  `--db` pointing at a scratchpad sqlite; restart it plainly before real use.
 
 ## Audits in flight when context was cleared
 
