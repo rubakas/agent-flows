@@ -51,6 +51,67 @@ Ranked by consequence. Each was verified; none is speculative.
 7. **Cost is invisible.** `total_cost_usd` arrives in every `result` event (a trivial 2-turn probe measured $0.0546) and is not surfaced anywhere. The owner cannot see what a run cost.
 8. **Runs do not survive a daemon restart** — in-process registry, intended per spec 020 FR-008. Completed-run history is lost on restart.
 
+## 2026-09-13 — code-review finished, provider-portable workspace shipped
+
+Verified against the tree on 2026-09-13; see specs/030-code-review/spec.md and
+specs/031-provider-portable-workspace/spec.md for the full verification logs.
+
+**DONE:**
+
+- **Spec 030 code-review.** `PARTIAL` verdict defined, closing the gap where an unguarded case fell to
+  it by default (FR-009). Eval expectations split into required `expectations` and four-state
+  `conditional` want/forbid keys (FR-010). Every eval run persists step outputs to a run dir and prints
+  its path (FR-011). Live run on the change's own diff found a real blocking defect in
+  `src/evals/run.ts` that a code review and a security audit had both missed.
+- **Spec 031 provider-portable workspace.** `runLlmStep` is dispatch-only over
+  `src/canon/adapters/{claude,codex,api}.ts`; supervision moved inside each adapter (non-positive
+  `timeoutMs` is clamped for codex/api at the adapter layer; the loader separately rejects any
+  non-positive `timeoutMs`, including 0, in pipeline YAML). Codex is confined by a sanitized workspace
+  copy (`src/canon/workspace/sanitize.ts`) plus a `-c` permission profile (`codexProfile.ts`), an env
+  allowlist, `--ignore-user-config`, and `--skip-git-repo-check`. `checkPortability` runs at run start
+  before any model call; `pnpm canon:check` prints the pipeline × profile matrix with no model calls.
+  `permissions.allow` was removed (loader now hard-rejects it). The golden Claude argv is
+  byte-identical through the extraction (fixture sha1 `193ec7f665c25f230f7f6a4e9db77d6c07d8cfc2`).
+- **`code-review-citations` eval passes end to end under anthropic and under
+  `AGENT_FLOWS_PROVIDER=openai`/codex** (EVAL PASSED, verdictAccuracy 100%, misrouted 0 on both; see the
+  spec 030 verification log and spec 031 V6) — proves the pipeline is provider-portable, not just
+  Claude-shaped.
+- **Proven facts worth keeping:** `codex exec -s read-only` does **not** confine reads, only
+  writes/network; a `[permissions.<name>]` profile passed via `-c` does confine reads, at kernel level;
+  a `deny` entry on `/` aborts the sandboxed process (SIGABRT); `sandbox_permissions` is a confirmed
+  no-op in codex 0.152.1.
+
+**OPEN — owner decisions needed:**
+
+1. Binding A (`src/bindings/claudeCode.ts`, `.claude/workflows/*.js`): its generated scripts bypass
+   step permissions by their own header, and it is the only daemon-free entry point. Delete it after
+   adding daemon auto-start to the MCP `run_pipeline` tool, or keep it as a documented,
+   non-guaranteed export? **Recommendation: delete after adding daemon auto-start.**
+2. Binding C (n8n): deleting it would contradict ADR-0013's supersession and a live daemon route
+   (`src/serve/routes/n8n.ts`). **Recommendation: write an ADR before any change** — do not delete
+   without one.
+3. Collapsing `assemble-spec` / `persist-ticket` / `export-spec`: `persist-ticket` re-asserts a gate
+   key on its own unique key (`buildSteps.ts` ~:412-424), so it is not a pure rename.
+   **Recommendation: only worth a spec of its own, not a quick refactor.**
+
+**OPEN — follow-ups, no decision needed, ordered by value:**
+
+- `contents: write` on codex: an `extends=":workspace"` profile on a writable copy, with diff-back.
+- An api-transport tool loop (Mastra-native Read/Glob/Grep with in-process deny) so ollama/litellm can
+  run repo-grounded steps; until then the `local` profile is refused for every pipeline declaring
+  `contents`.
+- Container adapter (ADR-0007) as the provider-agnostic boundary for any CLI agent.
+- Research doc items T1–T5 (`docs/research/2026-09-13-openai-agents-platform-vs-agent-flows.md` §3):
+  failure-code enum, pending actions on the run resource, network policy on check steps, versioned
+  artifacts, run-level budget.
+- `AGENT_FLOWS_LIVE_TESTS=1` runs the codex preflight test (one model call) — run it in the
+  pre-release check; it is the only assertion that catches a codex CLI preflight change.
+- `src/canon/runStep.test.ts`'s `repoRoot` points at the repo's parent (pre-existing quirk).
+- D3 from spec 030: `build.yaml` still mounts `audit` with `plan: plan` (post-build review re-audits
+  the spec, not the code); wiring code-review into build/cycle forces new inputs onto those pipelines.
+- The two 2026-09-03 bugs (prompt path containment in `load.ts`; `models` override passthrough) —
+  verify whether still open.
+
 ## Audits in flight when context was cleared
 
 Two read-only audits were dispatched and their results may be lost:

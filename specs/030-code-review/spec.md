@@ -323,3 +323,15 @@ Run on 2026-09-13 against this change's own diff (1,911 lines), with `baseline` 
   while its schema constant is still declared at the top of the generated script — an unused constant
   and no JSON gating. `code-review.yaml`'s `verify` step is alone in its level, so under Binding A the
   D2 schema silently does nothing. Binding B (Mastra), the complete executor, is unaffected.
+
+## Verification log (2026-09-13)
+
+`npx tsx src/evals/run.ts code-review-citations` under the default anthropic profile — run dir
+`…/agent-flows-evals/code-review-citations/2026-09-13T04-25-30.850Z`: EVAL PASSED, verdictAccuracy
+100% (1/1), conditional misrouted 0, two conditionals not raised (reported INCONCLUSIVE). Earlier
+same-day runs and what they exposed: `00-46-31` — verdictAccuracy 100% but misrouted 1, a scorer key
+artefact (the policy key matched a duplicate NaN finding), fixed by claim-all plus re-keying;
+`01-15-41` — the ordering defect scored PARTIAL with positive narrowing because the fixture never
+persisted the order, and the hunk header read 48 vs 38 lines, both fixed in the fixture. Under
+`AGENT_FLOWS_PROVIDER=openai` the same eval PASSED (see spec 031 V6). Persisted verifier outputs from
+two runs are checked in under `src/evals/fixtures/__fixtures__/`.
