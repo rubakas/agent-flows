@@ -14,10 +14,13 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { after, describe, it } from "node:test";
 import {
   ensureProjectState,
@@ -116,6 +119,29 @@ describe("FR-001: project key derivation", () => {
     assert.equal(projectKey(dir, { AGENT_FLOWS_PROJECT_KEY: "pinned-key" }), "pinned-key");
   });
 
+  it("escapes an override that would escape the projects root", () => {
+    const dir = makeTmpDir();
+    assert.equal(projectKey(dir, { AGENT_FLOWS_PROJECT_KEY: "../x" }), "---x");
+
+    const home = makeTmpDir();
+    const state = resolveProjectState(dir, {
+      AGENT_FLOWS_HOME: home,
+      AGENT_FLOWS_PROJECT_KEY: "../x",
+    });
+    assert.equal(state.dir, join(home, "projects", "---x"));
+    assert.equal(dirname(state.dir), join(home, "projects"));
+  });
+
+  it("escapes a separator in an override to a single segment", () => {
+    const dir = makeTmpDir();
+    assert.equal(projectKey(dir, { AGENT_FLOWS_PROJECT_KEY: "a/b" }), "a-b");
+  });
+
+  it("ignores an override that escapes to nothing", () => {
+    const dir = makeTmpDir();
+    assert.equal(projectKey(dir, { AGENT_FLOWS_PROJECT_KEY: "" }), projectKey(dir, {}));
+  });
+
   it("falls back to a lexical resolve when the directory does not exist", () => {
     const missing = join(makeTmpDir(), "not", "there");
     const key = projectKey(missing, {});
@@ -133,6 +159,21 @@ describe("FR-002: state dir resolution", () => {
 
   it("defaults to ~/.agent-flows when AGENT_FLOWS_HOME is absent", () => {
     assert.ok(stateRoot({}).endsWith(join(".agent-flows")), stateRoot({}));
+  });
+
+  it("treats an empty AGENT_FLOWS_HOME as unset instead of a relative root", () => {
+    const root = stateRoot({ AGENT_FLOWS_HOME: "" });
+    assert.equal(root, stateRoot({}));
+    assert.ok(
+      isAbsolute(root),
+      `an empty AGENT_FLOWS_HOME must not yield a relative root: ${root}`
+    );
+
+    const state = resolveProjectState(makeTmpDir(), {
+      AGENT_FLOWS_HOME: "",
+      AGENT_FLOWS_PROJECT_KEY: "k",
+    });
+    assert.equal(state.dir, join(root, "projects", "k"));
   });
 
   it("resolves every machine-local path under <root>/projects/<key>", () => {
@@ -290,5 +331,114 @@ describe("FR-009: legacy runs/ is copied once, non-destructively", () => {
     );
     assert.ok(!existsSync(state.runsDir), "no runs dir may be created without a legacy one");
     assert.equal(notices.length, 0);
+  });
+});
+
+// ── V1: permissions on the state tree ─────────────────────────────────────────
+
+describe("FR-003: the state tree is created for the owner only", () => {
+  it("creates the state dir 0700 and project.json 0600", () => {
+    const home = makeTmpDir();
+    const projectDir = makeTmpDir();
+    const state = ensureProjectState(projectDir, { AGENT_FLOWS_HOME: home }, () => undefined);
+
+    assert.equal(statSync(state.dir).mode & 0o777, 0o700, "the state dir must not be traversable");
+    assert.equal(
+      statSync(state.projectJsonPath).mode & 0o777,
+      0o600,
+      "project.json must not be readable by other users"
+    );
+  });
+});
+
+// ── V4: the migration is serialised across processes ──────────────────────────
+
+describe("FR-009: a migrate.lock serialises the legacy copy", () => {
+  it("skips the copy and logs one notice while a fresh lock is held", () => {
+    const home = makeTmpDir();
+    const projectDir = makeTmpDir();
+    seedLegacyRuns(projectDir);
+
+    const state = resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home });
+    mkdirSync(join(state.dir, "migrate.lock"), { recursive: true });
+
+    const notices: string[] = [];
+    ensureProjectState(projectDir, { AGENT_FLOWS_HOME: home }, (m) => notices.push(m));
+
+    assert.ok(!existsSync(state.runsDir), "a held lock must stop the copy");
+    assert.ok(!existsSync(join(state.dir, "runs.partial")), "no partial may be left behind");
+    assert.equal(notices.length, 1, `exactly one notice expected; got ${notices.length}`);
+    assert.ok(notices[0].includes("skipping the copy"), notices[0]);
+    assert.ok(existsSync(join(state.dir, "migrate.lock")), "a held lock must not be released");
+  });
+
+  it("reclaims a stale lock, copies, and releases it", () => {
+    const home = makeTmpDir();
+    const projectDir = makeTmpDir();
+    const legacy = seedLegacyRuns(projectDir);
+    const legacyHash = hashTree(legacy);
+
+    const state = resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home });
+    const lockPath = join(state.dir, "migrate.lock");
+    mkdirSync(lockPath, { recursive: true });
+    // Older than the 10-minute staleness window: the holder is gone.
+    const longAgo = new Date(Date.now() - 30 * 60 * 1000);
+    utimesSync(lockPath, longAgo, longAgo);
+
+    ensureProjectState(projectDir, { AGENT_FLOWS_HOME: home }, () => undefined);
+
+    assert.equal(hashTree(state.runsDir), legacyHash, "a stale lock must not block the copy");
+    assert.ok(!existsSync(lockPath), "the lock must be released after the copy");
+  });
+
+  it("releases the lock after a successful copy", () => {
+    const home = makeTmpDir();
+    const projectDir = makeTmpDir();
+    seedLegacyRuns(projectDir);
+
+    const state = ensureProjectState(projectDir, { AGENT_FLOWS_HOME: home }, () => undefined);
+    assert.ok(!existsSync(join(state.dir, "migrate.lock")), "the lock must not survive the copy");
+  });
+});
+
+// ── V4: untrusted symlinks in the legacy tree ─────────────────────────────────
+
+describe("FR-009: the copy does not carry symlinks into the state dir", () => {
+  it("skips a symlink escaping the legacy tree and names it in a notice", () => {
+    const home = makeTmpDir();
+    const projectDir = makeTmpDir();
+    const legacy = seedLegacyRuns(projectDir);
+
+    const outside = join(makeTmpDir(), "outside.json");
+    writeFileSync(outside, '{"stages":[]}\n', "utf8");
+    const link = join(legacy, "run-a", "linked.json");
+    symlinkSync(outside, link);
+
+    const notices: string[] = [];
+    const state = ensureProjectState(projectDir, { AGENT_FLOWS_HOME: home }, (m) =>
+      notices.push(m)
+    );
+
+    const copied = join(state.runsDir, "run-a", "linked.json");
+    assert.ok(!existsSync(copied), "a symlink must not survive the copy into the state dir");
+    assert.ok(
+      existsSync(join(state.runsDir, "run-a", "manifest.json")),
+      "real files next to the symlink must still be copied"
+    );
+    assert.equal(notices.length, 2, `copy notice plus one skip notice expected: ${notices.length}`);
+    assert.ok(notices[1].includes(link) && notices[1].includes("symlink"), notices[1]);
+  });
+
+  it("does not follow a symlinked directory", () => {
+    const home = makeTmpDir();
+    const projectDir = makeTmpDir();
+    const legacy = seedLegacyRuns(projectDir);
+
+    const outsideDir = makeTmpDir();
+    writeFileSync(join(outsideDir, "secret.json"), "{}\n", "utf8");
+    symlinkSync(outsideDir, join(legacy, "run-c"));
+
+    const state = ensureProjectState(projectDir, { AGENT_FLOWS_HOME: home }, () => undefined);
+    assert.ok(!existsSync(join(state.runsDir, "run-c")), "a symlinked dir must not be copied");
   });
 });

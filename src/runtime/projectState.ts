@@ -9,10 +9,12 @@ import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -50,20 +52,36 @@ const KEY_MAX_LENGTH = 200;
 /** Length of the sha256 hex suffix appended to a truncated key (FR-001). */
 const KEY_HASH_LENGTH = 8;
 
+/** Age past which a migration lock is treated as abandoned by a dead process. */
+const MIGRATION_LOCK_STALE_MS = 10 * 60 * 1000;
+
+/** Every character outside [A-Za-z0-9_-] becomes "-", so a key is always one safe path segment. */
+function escapeKey(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/gu, "-");
+}
+
 /**
  * Derive the project key from the project directory (FR-001, D3).
  *
- * AGENT_FLOWS_PROJECT_KEY overrides the derivation entirely. Otherwise the
- * absolute realpath is escaped — every character outside [A-Za-z0-9_-] becomes
- * "-" — and, when the escaped form exceeds 200 characters, cut to 200 and
- * joined by "-" to an 8-char sha256 of the *unescaped* realpath (total 209).
+ * AGENT_FLOWS_PROJECT_KEY overrides the derivation, but is escaped exactly as a
+ * derived key is: the key is a single path segment under <root>/projects/, so an
+ * override carrying "/" or ".." would otherwise redirect the whole state tree
+ * out of that root. An override that escapes to nothing is ignored.
+ *
+ * Otherwise the absolute realpath is escaped — every character outside
+ * [A-Za-z0-9_-] becomes "-" — and, when the escaped form exceeds 200 characters,
+ * cut to 200 and joined by "-" to an 8-char sha256 of the *unescaped* realpath
+ * (total 209).
  *
  * The realpath is resolved here independently of resolveProjectDir(), whose
  * return value stays raw so step execution cwd is unaffected.
  */
 export function projectKey(projectDir: string, env: StateEnv = process.env): string {
   const override = env.AGENT_FLOWS_PROJECT_KEY;
-  if (override !== undefined && override !== "") return override;
+  if (override !== undefined) {
+    const clamped = escapeKey(override);
+    if (clamped !== "") return clamped;
+  }
 
   let real: string;
   try {
@@ -73,16 +91,24 @@ export function projectKey(projectDir: string, env: StateEnv = process.env): str
     real = resolve(projectDir);
   }
 
-  const escaped = real.replace(/[^A-Za-z0-9_-]/gu, "-");
+  const escaped = escapeKey(real);
   if (escaped.length <= KEY_MAX_LENGTH) return escaped;
 
   const hash = createHash("sha256").update(real).digest("hex").slice(0, KEY_HASH_LENGTH);
   return `${escaped.slice(0, KEY_MAX_LENGTH)}-${hash}`;
 }
 
-/** Root of all agent-flows machine-local state: AGENT_FLOWS_HOME or ~/.agent-flows (FR-002). */
+/**
+ * Root of all agent-flows machine-local state: AGENT_FLOWS_HOME or ~/.agent-flows (FR-002).
+ *
+ * An exported-but-empty AGENT_FLOWS_HOME counts as unset: `??` is nullish-only,
+ * so it would let "" through and put the whole state tree in a relative
+ * `projects/<key>` under the daemon's cwd.
+ */
 export function stateRoot(env: StateEnv = process.env): string {
-  return env.AGENT_FLOWS_HOME ?? join(homedir(), ".agent-flows");
+  const home = env.AGENT_FLOWS_HOME;
+  if (home !== undefined && home !== "") return home;
+  return join(homedir(), ".agent-flows");
 }
 
 /** Resolve every machine-local path for a project. Pure — creates nothing (FR-002). */
@@ -113,7 +139,9 @@ export function ensureProjectState(
   log: (msg: string) => void = console.error
 ): ProjectState {
   const state = resolveProjectState(projectDir, env);
-  mkdirSync(state.dir, { recursive: true });
+  // 0700/0600 throughout: the tree is per-user project state, so it follows the
+  // mode pattern writeN8nConfig uses for ~/.agent-flows (src/serve/routes/n8n.ts).
+  mkdirSync(state.dir, { recursive: true, mode: 0o700 });
 
   if (!existsSync(state.projectJsonPath)) {
     let real: string;
@@ -128,11 +156,49 @@ export function ensureProjectState(
       createdAt: new Date().toISOString(),
       schemaVersion: 1,
     };
-    writeFileSync(state.projectJsonPath, JSON.stringify(marker, null, 2), "utf8");
+    writeFileSync(state.projectJsonPath, JSON.stringify(marker, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
   }
 
   migrateLegacyRuns(projectDir, state, log);
   return state;
+}
+
+/**
+ * Take the exclusive migration marker for a state dir.
+ *
+ * `mkdir` without `recursive` fails with EEXIST when the directory is already
+ * there, which makes it an atomic test-and-set across processes. A marker whose
+ * mtime is older than MIGRATION_LOCK_STALE_MS was left by a process that died
+ * mid-migration and is reclaimed.
+ */
+function acquireMigrationLock(lockPath: string): boolean {
+  try {
+    mkdirSync(lockPath, { mode: 0o700 });
+    return true;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+
+  let heldSince: number;
+  try {
+    heldSince = statSync(lockPath).mtimeMs;
+  } catch {
+    // The holder released it between the failed mkdir and the stat.
+    heldSince = 0;
+  }
+  if (Date.now() - heldSince < MIGRATION_LOCK_STALE_MS) return false;
+
+  rmSync(lockPath, { recursive: true, force: true });
+  try {
+    mkdirSync(lockPath, { mode: 0o700 });
+    return true;
+  } catch {
+    // Another start reclaimed the stale marker first — let it do the work.
+    return false;
+  }
 }
 
 /**
@@ -142,6 +208,11 @@ export function ensureProjectState(
  * interrupted copy is never mistaken for a complete one — a leftover
  * runs.partial is discarded and the copy redone. The legacy directory is never
  * deleted or modified; the owner removes it by hand after reading the notice.
+ *
+ * The whole sequence is serialised by <dir>/migrate.lock: two daemons on one
+ * project key (supported since spec 033) would otherwise interleave the rm, the
+ * copy and the rename and leave a truncated runs/ permanently treated as
+ * migrated.
  */
 export function migrateLegacyRuns(
   projectDir: string,
@@ -151,28 +222,60 @@ export function migrateLegacyRuns(
   const legacyRuns = join(projectDir, ".agent-flows", "runs");
   if (!existsSync(legacyRuns)) return;
 
-  const partial = join(state.dir, "runs.partial");
-  if (existsSync(state.runsDir)) {
-    // The copy already happened. Any runs.partial still on disk is debris from
-    // an interrupted attempt that a later run superseded; leaving it behind
-    // would grow without bound and look like work in progress forever.
-    rmSync(partial, { recursive: true, force: true });
+  const lockPath = join(state.dir, "migrate.lock");
+  if (!acquireMigrationLock(lockPath)) {
+    log(
+      `[agent-flows] another start is copying ${legacyRuns} to ${state.runsDir}; ` +
+        `skipping the copy this start.`
+    );
     return;
   }
 
   try {
-    // A partial left by an interrupted copy is stale — start over.
-    rmSync(partial, { recursive: true, force: true });
-    cpSync(legacyRuns, partial, { recursive: true });
-    renameSync(partial, state.runsDir);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log(`[agent-flows] copying ${legacyRuns} to ${state.runsDir} failed: ${msg}`);
-    return;
-  }
+    const partial = join(state.dir, "runs.partial");
+    if (existsSync(state.runsDir)) {
+      // The copy already happened. Any runs.partial still on disk is debris from
+      // an interrupted attempt that a later run superseded; leaving it behind
+      // would grow without bound and look like work in progress forever.
+      rmSync(partial, { recursive: true, force: true });
+      return;
+    }
 
-  log(
-    `[agent-flows] copied run artifacts from ${legacyRuns} to ${state.runsDir}; ` +
-      `the old directory was left untouched and may be deleted by hand.`
-  );
+    const skippedLinks: string[] = [];
+    try {
+      // A partial left by an interrupted copy is stale — start over.
+      rmSync(partial, { recursive: true, force: true });
+      cpSync(legacyRuns, partial, {
+        recursive: true,
+        // The legacy tree comes from the project and may hold symlinks pointing
+        // outside it. Carrying them over would give the state dir — which every
+        // artifact read treats as trusted — a read-through to arbitrary files.
+        // (`dereference: true` is not enough: Node 22's cpSync ignores it for
+        // entries inside a recursive copy.)
+        filter: (src: string): boolean => {
+          if (!lstatSync(src).isSymbolicLink()) return true;
+          skippedLinks.push(src);
+          return false;
+        },
+      });
+      renameSync(partial, state.runsDir);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`[agent-flows] copying ${legacyRuns} to ${state.runsDir} failed: ${msg}`);
+      return;
+    }
+
+    log(
+      `[agent-flows] copied run artifacts from ${legacyRuns} to ${state.runsDir}; ` +
+        `the old directory was left untouched and may be deleted by hand.`
+    );
+    if (skippedLinks.length > 0) {
+      log(
+        `[agent-flows] skipped ${skippedLinks.length} symlink(s) under ${legacyRuns}: ` +
+          `symlinks are not copied into the state dir (${skippedLinks.join(", ")}).`
+      );
+    }
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+  }
 }

@@ -89,11 +89,16 @@ split table.
 
 - **FR-001.** The project key is derived by escaping every character outside `[A-Za-z0-9_-]` in the
   resolved (`realpath`) absolute project dir to `-`, truncated to 200 chars plus an 8-char sha256
-  suffix when longer; `AGENT_FLOWS_PROJECT_KEY` overrides the derivation entirely (D3).
+  suffix when longer; `AGENT_FLOWS_PROJECT_KEY` overrides the derivation entirely (D3), but is put
+  through the same escaping — the key is one path segment, so an override carrying `/` or `..` must
+  not redirect the state tree out of `<root>/projects/` — and is ignored when it escapes to nothing.
 - **FR-002.** The state dir resolves to `${AGENT_FLOWS_HOME ?? path.join(os.homedir(),
-".agent-flows")}/projects/<key>/` (D2, D3).
+".agent-flows")}/projects/<key>/` (D2, D3); an exported-but-empty `AGENT_FLOWS_HOME` counts as unset,
+  so it never yields a relative `projects/<key>` under the daemon's cwd.
 - **FR-003.** `project.json` (`{ projectDir, key, createdAt, schemaVersion: 1 }`) is written once, on
-  first resolution for a key, and never overwritten on subsequent resolutions of the same key.
+  first resolution for a key, and never overwritten on subsequent resolutions of the same key. The
+  state dir is created with mode `0700` and `project.json` written with mode `0600`, matching
+  `writeN8nConfig` (`n8n.ts:106-112`), so the tree is not readable by other users of the host.
 - **FR-004.** Run artifacts and manifests default to `<stateDir>/runs/<runId>/<pipelineId>.json` and
   the equivalent manifest path, replacing the `<project>/.agent-flows/runs/...` default in
   `artifactStore.ts:103-104`, `runService.ts:999,1024`, and the run-detail route
@@ -114,7 +119,11 @@ split table.
 - **FR-009.** On daemon start, if `<project>/.agent-flows/runs` exists and `<stateDir>/runs` does
   not, the runs dir is copied (not moved) into the state dir exactly once, and one notice line naming
   both paths is printed; a start that finds an incomplete copy (`runs.partial` present, no `runs`)
-  redoes it; a start with a complete copy performs no copy and leaves the legacy dir untouched.
+  redoes it; a start with a complete copy performs no copy and leaves the legacy dir untouched. The
+  whole sequence is serialised by an exclusive `<stateDir>/migrate.lock` directory (`mkdir` without
+  `recursive`, released in a `finally`): a start that finds the lock held and younger than ten
+  minutes skips the copy and prints one notice, and a start that finds it older reclaims it as
+  abandoned — two daemons on one key (spec 033) must not interleave into a truncated `runs/`.
 - **FR-010.** If a legacy `<cwd>/agent-flows.sqlite` exists in the daemon's launch cwd, and no
   `<stateDir>/agent-flows.sqlite` exists yet, the daemon prints a notice naming the legacy path and
   the new default; it is never auto-migrated.
@@ -162,10 +171,13 @@ list` and `agent-flows install` output name the state dir alongside the canon di
   pre-migration artifacts may resolve into a different db.
 - On case-insensitive filesystems, two spellings of one directory (differing only in case) resolve to
   two separate keys and two separate state dirs — accepted.
-- The legacy runs copy uses `cpSync` with `dereference: false` (the default): symlinks are copied as
-  links, so a relative symlink that escaped `runs/` breaks at the new depth. The copy also does not
-  preserve timestamps — artifact mtimes are reset to the copy time. Both accepted: run artifacts are
-  self-describing JSON, and the legacy directory is left in place for the owner to consult.
+- The legacy runs copy skips symlinks outright (a `filter` that rejects every `lstat` symlink) and
+  names the skipped paths in a second notice: a link copied as a link would give the state dir, which
+  artifact reads treat as trusted, a read-through to files outside the project. `dereference: true`
+  is not an alternative — Node 22's `cpSync` ignores it for entries inside a recursive copy. The copy
+  also does not preserve timestamps — artifact mtimes are reset to the copy time. Accepted: run
+  artifacts are self-describing JSON, and the legacy directory is left in place for the owner to
+  consult.
 
 ## Follow-ups
 
