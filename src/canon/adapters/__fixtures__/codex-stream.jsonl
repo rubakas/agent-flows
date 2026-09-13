@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a09cd5-5a39-7cc1-bf0d-56e7561f9b4a"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll inspect the two files and report their contents."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"rg --files -g 'package.json' -g 'notes.txt' && sed -n '1,200p' package.json && sed -n '1,200p' notes.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"rg --files -g 'package.json' -g 'notes.txt' && sed -n '1,200p' package.json && sed -n '1,200p' notes.txt\"","aggregated_output":"package.json\nnotes.txt\n{\"name\":\"stream-probe\",\"version\":\"0.0.1\"}\nprobe note: hello\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Package name: `stream-probe`\n\nNote: probe note: hello"}}
+{"type":"turn.completed","usage":{"input_tokens":30909,"cached_input_tokens":25088,"cache_write_input_tokens":0,"output_tokens":186,"reasoning_output_tokens":13}}
