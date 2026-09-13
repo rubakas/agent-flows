@@ -1,0 +1,213 @@
+{
+  "codeReviewFindings": [
+    {
+      "claim": "Correctness #1 — applyRefund mutates order.refundedCents before writeLedgerEntry, so a failed ledger write leaves order state and ledger disagreeing with no rollback.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "136-137 (= src/billing/refund.ts:25-26 inside the diff)",
+      "quote": "+  order.refundedCents += amountCents;\n+  writeLedgerEntry({ orderId: order.id, amountCents, feeCents });",
+      "verdict": "CONFIRMED",
+      "citationAccurate": false,
+      "scope": "introduced",
+      "kind": "defect",
+      "severity": "major",
+      "probes": {
+        "guard": "No guard. The whole function body is visible (hunk `@@ -0,0 +1,48 @@` covers the entire new file), and it contains no try/catch, no compensating decrement, no transaction wrapper. The parent is visible too: `+  return applyRefund(order, req.amountCents);` in the `@@ -31,7 +34,7 @@` hunk is a bare return, not wrapped. Guard concluded absent from positive evidence (complete function body shown), not from an empty search.",
+        "reachability": "Entry point `handleRefund(req: RefundRequest)` → `applyRefund(order, req.amountCents)`. Every input that passes `Number.isInteger(amountCents) && amountCents > 0`, the paid-status check and the 90-day window reaches both lines unconditionally — there is no branch between them. The only clamp on the input (`amountCents > order.paidCents - order.refundedCents`) constrains the amount, not the ordering.",
+        "remedy": "The finding claims no transaction wraps the pair. Searched the diff for `transaction`, `rollback`, `try`, `catch`, `finally` — none present. Searched the repository: `src/billing/**` returned no files, so `ledger.ts` cannot be opened to check whether `writeLedgerEntry` is infallible or self-transactional. That half is `unverified` (empty search proves nothing here); the in-diff half is positively established.",
+        "callers": "Production caller present and load-bearing: the second hunk replaces `legacyRefund` with `applyRefund` inside `handleRefund`, and the baseline states `handleRefund` is the only production caller. Repository grep for `applyRefund` outside the fixture returned nothing, so out-of-diff callers are `unverified`.",
+        "scope": "introduced — both lines are `+` lines in `@@ -0,0 +1,48 @@` on a new file (`new file mode 100644`, `--- /dev/null`). introducedCommits was supplied empty, so there is no commit attribution to report."
+      },
+      "correctedWording": "Citation only: `src/billing/refund.ts` does not exist in this workspace (`src/billing/**` → no files); the diff is the `DIFF` constant in `src/evals/fixtures/code-review-citations.ts`. Lines 136-137 resolve in that fixture file, not in a 48-line refund.ts, where the pair sits at lines 25-26. The defect itself stands exactly as claimed."
+    },
+    {
+      "claim": "Correctness #2 — reverseRefund repeats the ordering defect: order.refundedCents = 0 is set before writeLedgerEntry, so a failed ledger write silently loses the reversal record.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "147-148 (= src/billing/refund.ts:36-37 inside the diff)",
+      "quote": "+  order.refundedCents = 0;\n+  writeLedgerEntry({ orderId: order.id, amountCents: -order.paidCents, feeCents: 0 });",
+      "verdict": "CONFIRMED",
+      "citationAccurate": false,
+      "scope": "introduced",
+      "kind": "defect",
+      "severity": "major",
+      "probes": {
+        "guard": "The only guard in the function is `if (order.refundedCents !== order.paidCents)`, which restricts *which* orders may be reversed (full refunds only) and does nothing about write ordering. Body fully visible in the same complete-file hunk; no try/catch or transaction. Note the guard also makes the ledger amount correct (`-order.paidCents` equals the refunded total), so the claim narrows to the ordering alone, which is how the finding states it.",
+        "reachability": "No caller for `reverseRefund` appears in either hunk, and the baseline names `handleRefund` as the sole production caller of `applyRefund` only — it says nothing about `reverseRefund`. Repository grep for `reverseRefund` outside the fixture: no matches. Reachability is therefore `unverified` from absence; per instruction this neither declines the finding nor lowers it, since the defect reads real from the diff alone.",
+        "remedy": "Same search as finding 1 — no rollback, compensation or transaction anywhere in the diff; `ledger.ts` is not in this workspace, so its failure semantics are `unverified`.",
+        "callers": "`unverified` — no production caller of `reverseRefund` is visible in the diff or findable in this workspace (grep empty, and `src/billing/` is absent entirely). An invisible caller and an absent one look identical to my tools, so this is reported empty rather than treated as proof the function is dead.",
+        "scope": "introduced — `+` lines in `@@ -0,0 +1,48 @@` on a newly added file. introducedCommits supplied empty; no commit attribution available."
+      },
+      "correctedWording": "Citation only: same path correction as finding 1 — the openable anchor is `src/evals/fixtures/code-review-citations.ts:147-148`; within the notional refund.ts the pair is at lines 36-37. Defect stands."
+    },
+    {
+      "claim": "Correctness, ruled out — applyRefund does not itself bound amountCents against paidCents, but assertRefundable already rejects it one frame up, so it is unreachable.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "157-159, 163-166",
+      "quote": "+  if (amountCents > order.paidCents - order.refundedCents) {\n+    throw new Error(\"refund exceeds the amount paid\");\n+  }",
+      "verdict": "DECLINED",
+      "citationAccurate": true,
+      "scope": "introduced",
+      "kind": "defect",
+      "severity": "minor",
+      "probes": {
+        "guard": "The guard exists and is visible in the diff, not inferred: the `@@ -18,6 +18,9 @@` hunk adds `amountCents > order.paidCents - order.refundedCents` to `assertRefundable`, and the `@@ -31,7 +34,7 @@` hunk shows `assertRefundable(order, req.amountCents);` executing immediately before `return applyRefund(order, req.amountCents);` on the same value. The over-refund case cannot reach applyRefund on this path.",
+        "reachability": "Entry point `handleRefund`; permitted input `req.amountCents`; clamp is the added assertRefundable line. The reviewer correctly declined to report it — this entry records the adjudication, and I reach the same result on the merits.",
+        "remedy": "N/A — the finding asserts a guard exists rather than that none does, and I verified the guard in the diff text.",
+        "callers": "`assertRefundable` has a production caller inside `handleRefund`, shown as unchanged context in the second hunk, so the guard is load-bearing and not test-only. Repo-wide confirmation impossible: `src/billing/refundController.ts` is absent (`unverified`).",
+        "scope": "introduced — the guard lines carry `+` in `@@ -18,6 +18,9 @@`, matching the baseline's statement that this check is added by this change. introducedCommits empty."
+      },
+      "correctedWording": ""
+    },
+    {
+      "claim": "Correctness, ruled out — daysSince(order.paidAt) returning NaN would bypass the window, but Order.paidAt is non-nullable and written with status \"paid\", so it is unreachable.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "131, 177-180",
+      "quote": "+  if (daysSince(order.paidAt) > REFUND_WINDOW_DAYS) {",
+      "verdict": "DECLINED",
+      "citationAccurate": true,
+      "scope": "introduced",
+      "kind": "defect",
+      "severity": "minor",
+      "probes": {
+        "guard": "Two guards close it. The supplied baseline states verbatim: \"Order (src/billing/order.ts, unchanged by this work) declares paidAt as a non-nullable Date. It is written in the same transaction that sets status to \\\"paid\\\", so an order whose status is \\\"paid\\\" always carries a real timestamp and daysSince never receives undefined.\" The diff shows `if (order.status !== \"paid\") { throw new Error(\"order is not paid\"); }` as unchanged context in the assertRefundable hunk, so no other status reaches applyRefund.",
+        "reachability": "For NaN to occur, an order with an unset `paidAt` would have to pass `status === \"paid\"`. The baseline forecloses exactly that pairing. No permitted input produces the claimed state.",
+        "remedy": "N/A — the reviewer asserts the guard, and the guard text is present in the provided baseline.",
+        "callers": "`daysSince` is imported from `./clock.js` and called once, in applyRefund, itself called from handleRefund — a production path. `src/billing/clock.ts` is not in this workspace, so the implementation's NaN behaviour is `unverified`; it does not matter, because the input can never be undefined.",
+        "scope": "introduced — line 131 is a `+` line in `@@ -0,0 +1,48 @@`. introducedCommits empty."
+      },
+      "correctedWording": ""
+    },
+    {
+      "claim": "Correctness, ruled out — REFUND_WINDOW_DAYS = 90 is a business decision about window length, not a code defect; the enforcing mechanism is correct.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "119",
+      "quote": "+export const REFUND_WINDOW_DAYS = 90;",
+      "verdict": "CONFIRMED",
+      "citationAccurate": true,
+      "scope": "introduced",
+      "kind": "business-decision",
+      "severity": "minor",
+      "probes": {
+        "guard": "Nothing overrides the constant: it is a module-level `const` with no parameter, config read or environment override anywhere in the complete file body. The mechanism that consumes it (`daysSince(order.paidAt) > REFUND_WINDOW_DAYS`, then throw) is correct — strictly-greater means day 90 still refunds, which is the ordinary reading of an inclusive 90-day window.",
+        "reachability": "Reached on every applyRefund call from handleRefund; the value governs which orders are refundable at all. Owner and question: the owner of the refund policy for `src/billing` (the same party that owns `FEE_RATE_BASIS_POINTS`) — is 90 days the intended refund window, and should it be a deploy-time constant rather than configurable? No such owner is named in this workspace, so the attribution is by role, `unverified`.",
+        "remedy": "N/A — no remedy is claimed; the item is a classification, and I concur with it.",
+        "callers": "`REFUND_WINDOW_DAYS` is exported and used once, in applyRefund on the production path from handleRefund — not test-only. Grep outside the fixture: no matches (`unverified` for other consumers).",
+        "scope": "introduced — `+` line in `@@ -0,0 +1,48 @@`; the constant is new to the tree even if the 90-day policy predates it in legacyRefund, which the baseline does not state either way. introducedCommits empty."
+      },
+      "correctedWording": ""
+    },
+    {
+      "claim": "Security #1 — non-atomic state update in applyRefund: order.refundedCents is mutated and \"presumably persists\" before writeLedgerEntry, so a throw, an async rejection or a crash leaves the order refunded with no audit trail, or lets a retry double-refund.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "136-137 (= src/billing/refund.ts:25-26 inside the diff)",
+      "quote": "+  order.refundedCents += amountCents;\n+  writeLedgerEntry({ orderId: order.id, amountCents, feeCents });",
+      "verdict": "CONFIRMED",
+      "citationAccurate": false,
+      "scope": "introduced",
+      "kind": "defect",
+      "severity": "major",
+      "probes": {
+        "guard": "Same as correctness #1: complete function body visible, no try/catch, no transaction, no compensating decrement; parent call site unwrapped. Two sub-claims are not supported by the diff, however — `writeLedgerEntry`'s result is never awaited or assigned, so the \"async and rejects\" path would not even propagate as written, and nothing in the diff shows the order being persisted at all (applyRefund mutates an in-memory object and returns).",
+        "reachability": "`handleRefund` → `applyRefund`, unconditional between the two lines, as in correctness #1.",
+        "remedy": "No transaction or rollback in the diff; `src/billing/ledger.ts` is absent from this workspace so `writeLedgerEntry`'s durability and failure semantics are `unverified` (empty search, not proof).",
+        "callers": "`handleRefund` is the production caller per the second hunk and the baseline. Repo-wide: `unverified`.",
+        "scope": "introduced — `+` lines in `@@ -0,0 +1,48 @@`. introducedCommits supplied empty."
+      },
+      "correctedWording": "The core defect is confirmed, but the claim overreaches on three points and should read: `order.refundedCents += amountCents` mutates the in-memory order before `writeLedgerEntry` is called; if the ledger write throws, the order object carries a refund with no ledger entry and nothing unwinds it. Drop \"(presumably) persists\" — no persistence call appears anywhere in the fully-shown function. Drop \"is async and rejects\" — the call's result is neither awaited nor returned, so a rejection would surface as an unhandled rejection rather than as the ordering failure described. Drop \"a retried request could double-refund\" — no retry or idempotency machinery is visible in the diff to support it. Citation: the openable anchor is `src/evals/fixtures/code-review-citations.ts:136-137`; `src/billing/refund.ts` has 48 lines and does not exist on disk."
+    },
+    {
+      "claim": "Security #2 — TOCTOU race: handleRefund loads the order, checks the bound, then mutates without a lock or transaction, so two concurrent requests could each pass assertRefundable and together refund more than paidCents.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "163-166",
+      "quote": "   const order = await loadOrder(req.orderId);\n   assertRefundable(order, req.amountCents);\n-  return legacyRefund(order, req.amountCents);\n+  return applyRefund(order, req.amountCents);",
+      "verdict": "PARTIAL",
+      "citationAccurate": true,
+      "scope": "pre-existing",
+      "kind": "defect",
+      "severity": "minor",
+      "probes": {
+        "guard": "No lock, version check or compare-and-swap appears in either hunk. But the narrowing evidence is positive, not absent: applyRefund's body is shown in full (`@@ -0,0 +1,48 @@` covers all 48 lines) and contains no write-back — it mutates a local object and returns. The claimed outcome, two requests persisting an over-refund, therefore cannot be established from the diff, because the diff never shows the order being persisted at all. Whether `loadOrder`'s storage layer serializes is outside this workspace.",
+        "reachability": "Entry point `handleRefund(req)`, reached per request; the interleaving requires two concurrent requests on the same `orderId`. Nothing in the shown code clamps concurrency. The check-then-act shape is real and visible; only its consequence is unestablished.",
+        "remedy": "The finding concedes the gap may be closed by `loadOrder`/persistence. Searched this workspace: `src/billing/**` returns no files, so `loadOrder` cannot be opened and that possible remedy is `unverified`. I do not decline on that empty search.",
+        "callers": "`loadOrder` and `assertRefundable` both appear on the production path inside handleRefund as unchanged context. Repo-wide confirmation `unverified` (files absent).",
+        "scope": "pre-existing — the `loadOrder` and `assertRefundable` lines are unchanged context in `@@ -31,7 +34,7 @@`; only the `legacyRefund` → `applyRefund` swap is added, and `legacyRefund` had the same load-check-mutate shape. The new assertRefundable bound (`@@ -18,6 +18,9 @@`) is introduced, but this change does not create the interleaving. introducedCommits empty."
+      },
+      "correctedWording": "Narrowed: the diff shows a check-then-act sequence in handleRefund — `loadOrder`, then `assertRefundable` reading `order.refundedCents`, then `applyRefund` mutating it — with no lock, version check or transaction in any line shown. Whether concurrent requests can actually over-refund is not established here: applyRefund's complete body performs no persistence, and `loadOrder`'s serialization semantics live in `src/billing/order.ts`, which is not in this workspace. Report it as \"no synchronization is visible across load-check-mutate; confirm whether the storage layer serializes writes for an order\", not as a demonstrated double-refund."
+    },
+    {
+      "claim": "Security #3 — reverseRefund reverses the principal but writes feeCents: 0, so after a full refund and reversal the original fee entry stands uncancelled and the ledger no longer nets to zero.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "134, 148",
+      "quote": "+  const feeCents = Math.floor((amountCents * FEE_RATE_BASIS_POINTS) / 10000);",
+      "verdict": "CONFIRMED",
+      "citationAccurate": true,
+      "scope": "introduced",
+      "kind": "business-decision",
+      "severity": "minor",
+      "probes": {
+        "guard": "Nothing compensates the fee. Both writes are visible in full: applyRefund emits `feeCents` computed at line 134, reverseRefund emits `feeCents: 0` at line 148. The asymmetry the finding describes is exactly what the code does — the factual claim is correct and needs no narrowing. What is not a code question is whether it is wrong: a processing fee that is retained on reversal is a common and deliberate arrangement.",
+        "reachability": "Requires a full refund via applyRefund followed by reverseRefund on the same order; the `order.refundedCents !== order.paidCents` guard permits precisely that sequence. Owner and question: the owner of `FEE_RATE_BASIS_POINTS` / refund policy for `src/billing` — when a full refund is reversed, is the 250bp fee returned or retained? One answerable question; no individual owner is named in this workspace, so the attribution is by role and is `unverified`.",
+        "remedy": "The finding does not claim a remedy is absent; it claims the fee is not reversed, which the two quoted lines establish directly.",
+        "callers": "`reverseRefund` has no visible production caller (see finding 2, `unverified`), which bounds the practical impact but is an empty search and so neither declines nor lowers this item. `applyRefund`'s fee write is on the live path from handleRefund.",
+        "scope": "introduced — both lines are `+` lines in `@@ -0,0 +1,48 @@`. introducedCommits empty."
+      },
+      "correctedWording": "The mechanics are confirmed as stated; the classification changes. Reversing a full refund writes `feeCents: 0` while the original refund wrote a non-zero fee, so the fee is retained after an undo. Whether that is a defect is a finance policy call, not a code error — route it to the owner of `FEE_RATE_BASIS_POINTS` with the single question \"is the 250bp fee refunded when a full refund is reversed?\" Classified `business-decision`, which keeps it out of the blocking count without disputing the observation."
+    },
+    {
+      "claim": "Security #4 — daysSince(order.paidAt) could return NaN on an unset paidAt, and NaN > REFUND_WINDOW_DAYS is false, silently bypassing the 90-day window; raised as unresolved because Order's type is not available in the repository.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "131, 177-180",
+      "quote": "+  if (daysSince(order.paidAt) > REFUND_WINDOW_DAYS) {",
+      "verdict": "DECLINED",
+      "citationAccurate": false,
+      "scope": "introduced",
+      "kind": "defect",
+      "severity": "minor",
+      "probes": {
+        "guard": "The guard exists and is reachable — in the baseline supplied with this review, not only in the missing source file: \"Order (src/billing/order.ts, unchanged by this work) declares paidAt as a non-nullable Date. It is written in the same transaction that sets status to \\\"paid\\\", so an order whose status is \\\"paid\\\" always carries a real timestamp and daysSince never receives undefined.\" The diff supplies the second half: `if (order.status !== \"paid\")` throws, as unchanged context in the assertRefundable hunk. The finding's own escape clause — \"if paidAt is in fact declared non-nullable and always set atomically with status, this is a non-issue\" — is satisfied verbatim.",
+        "reachability": "No permitted input reaches the claimed state: an order with an absent `paidAt` cannot carry `status === \"paid\"`, and no other status passes assertRefundable. The claimed bypass has no entry point.",
+        "remedy": "N/A — the declination rests on a stated guard, not on failing to find one.",
+        "callers": "`daysSince` is called on the production path (handleRefund → applyRefund). `src/billing/clock.ts` is absent from this workspace, so whether it would return NaN on undefined is `unverified` — and moot, since the input cannot be undefined.",
+        "scope": "introduced — `+` line in `@@ -0,0 +1,48 @@`. introducedCommits empty."
+      },
+      "correctedWording": "Declined. The reasoning about NaN is sound in the abstract — `NaN > 90` is indeed false — but the premise is false: the baseline provided as an input to this review states `Order.paidAt` is non-nullable and written in the same transaction that sets `status: \"paid\"`, and the unchanged `status !== \"paid\"` rejection in assertRefundable means nothing else reaches applyRefund. Citation marked inaccurate on a substantive point, not a cosmetic one: the finding asserts the governing fact is unavailable (\"I lack the file needed to close it\") when it was supplied in the baseline text at the top of this task. It is correct that `src/billing/order.ts` and `clock.ts` do not exist on disk — `src/billing/**` returns no files — but the missing file was not the only evidence available."
+    },
+    {
+      "claim": "Security #5 — no authorization check is visible on handleRefund: it loads an order by req.orderId and validates amount, status and window, but never checks that the caller may refund this specific order.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "162-166",
+      "quote": "@@ -31,7 +34,7 @@ export async function handleRefund(req: RefundRequest): Promise<RefundResult> {\n   const order = await loadOrder(req.orderId);\n   assertRefundable(order, req.amountCents);",
+      "verdict": "PARTIAL",
+      "citationAccurate": true,
+      "scope": "pre-existing",
+      "kind": "external-confirmation",
+      "severity": "minor",
+      "probes": {
+        "guard": "Undetermined by positive evidence of a *different* kind: the hunk header `@@ -31,7 +34,7 @@` exposes a seven-line window, so unlike applyRefund the body of `handleRefund` is NOT fully shown. The three visible lines contain no identity or permission check, which is all the diff supports; an auth check earlier in the function, in a decorator, or in route middleware would be invisible at this hunk width. That is the narrowing, and it rests on the hunk header rather than on an empty search.",
+        "reachability": "Entry point is `handleRefund(req: RefundRequest)`; the routing layer that invokes it is not part of the diff and `src/billing/refundController.ts` is not in this workspace, so the permitted callers cannot be enumerated. Confirmation needed from the owner of the route registration for refundController: does the route enforce order-ownership or a merchant/admin role before handleRefund runs? No such party or document is named anywhere available to me — reported as `unverified` rather than assumed absent.",
+        "remedy": "Searched the diff for `auth`, `role`, `permission`, `actor`, `session` — no matches; searched the repository for `refundController` outside the fixture — no matches. Both empty; the possible upstream remedy is `unverified`, and I do not decline on it.",
+        "callers": "No caller of `handleRefund` is visible in the diff or findable here (`unverified`). `RefundRequest`'s fields beyond `orderId` and `amountCents` are likewise unavailable, so whether it even carries an actor identity is unknown.",
+        "scope": "pre-existing — the two lines shown are unchanged context; the only `+` line in this hunk is the `legacyRefund` → `applyRefund` swap. If auth is missing it was missing before this change, which routed through legacyRefund identically. introducedCommits empty."
+      },
+      "correctedWording": "Narrowed and reclassified. Accurate form: within the three lines of `handleRefund` exposed by the `@@ -31,7 +34,7 @@` hunk, no identity or permission check appears, and neither `assertRefundable` nor `applyRefund` performs one. The finding's \"no authorization check visible on who may trigger a refund\" must not be read as \"authorization is absent\" — the hunk shows only part of the function and none of the routing layer, and the severity it carried (major) presumes an absence the diff cannot establish. This is an `external-confirmation` item: ask the owner of refundController's route registration whether order-ownership/role auth runs upstream, and close it on their answer rather than on the diff."
+    },
+    {
+      "claim": "Security #6 — applyRefund places no bound on how large an integer amountCents may be; included as confirmed-not-a-finding because assertRefundable's new check closes it one frame up.",
+      "file": "src/evals/fixtures/code-review-citations.ts",
+      "line": "128-130, 157-159",
+      "quote": "+  if (!Number.isInteger(amountCents) || amountCents <= 0) {\n+    throw new Error(\"refund amount must be a positive integer number of cents\");\n+  }",
+      "verdict": "DECLINED",
+      "citationAccurate": true,
+      "scope": "introduced",
+      "kind": "defect",
+      "severity": "minor",
+      "probes": {
+        "guard": "Guard present and visible in the diff, exactly as the reviewer says: `+  if (amountCents > order.paidCents - order.refundedCents) {` in the `@@ -18,6 +18,9 @@` hunk, executed by `assertRefundable(order, req.amountCents);` immediately before `applyRefund(order, req.amountCents)` on the same value. An implausibly large amount is rejected before applyRefund is entered, regardless of currency limits.",
+        "reachability": "No reachable path delivers an unbounded amount to applyRefund from handleRefund, the only production caller per the baseline. A direct call to applyRefund bypassing the controller would be unbounded, but no such caller exists in the diff and none is findable here (`unverified`).",
+        "remedy": "N/A — the reviewer identified the remedy correctly and verified it excludes this case; I reach the same result independently from the two hunks.",
+        "callers": "`assertRefundable` is called in production code (unchanged context inside handleRefund), so the bound is load-bearing rather than test-only. Repo-wide check impossible: refundController.ts is absent (`unverified`).",
+        "scope": "introduced — the isInteger check is a `+` line in `@@ -0,0 +1,48 @@`; the bound that closes the item is a `+` line in `@@ -18,6 +18,9 @@`, consistent with the baseline's statement that this check is added by this change. introducedCommits empty."
+      },
+      "correctedWording": ""
+    }
+  ]
+}
