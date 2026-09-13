@@ -430,6 +430,7 @@
   <body>
     <header>
       <h1>agent-flows</h1>
+      <span id="state-dir" style="font-size: 12px; color: var(--muted)"></span>
       <span class="spacer"></span>
       <span id="n8n-status-badge" style="font-size: 12px; color: var(--muted)">n8n: checking…</span>
       <button class="btn" id="btn-n8n-connect" style="display: none; font-size: 12px">
@@ -1228,8 +1229,22 @@
 
       // ── Boot ───────────────────────────────────────────────────────────────
 
+      // Spec 032 FR-011: show where machine-local state for this project lives.
+      async function loadStateDir() {
+        const el = document.getElementById("state-dir");
+        try {
+          const env = await api("GET", "/api/environment");
+          if (!env.stateDir) return;
+          el.textContent = `state: ${env.stateDir}`;
+          el.title = env.stateDir;
+        } catch {
+          // Environment unreachable — leave the header label empty.
+        }
+      }
+
       (async () => {
         await loadN8nStatus();
+        loadStateDir();
         await Promise.all([loadProjectTier(), loadTemplateTier(), loadBundledTier(), loadRuns()]);
         startRunsPoller();
       })();

@@ -224,7 +224,7 @@ interface RunRecord {
   transportPerStep: Record<string, StepProvenance>;
   /**
    * Directory to write this run's artifacts into (spec 029 FR-006).
-   * When absent: defaults to <projectDir>/.agent-flows/runs/<runId>.
+   * When absent: defaults to <runsDir>/<runId>.
    * When present: artifacts land in the parent run's directory so that chained
    * stages accumulate in one place and the manifest can be updated there.
    */
@@ -256,10 +256,11 @@ export class RunService {
     private readonly mastra: MastraLike,
     private readonly judgeDeps?: JudgeDeps,
     /**
-     * Project root for writing durable artifacts (spec 029 FR-001).
-     * Takes precedence only when judgeDeps is absent; otherwise judgeDeps.projectDir wins.
+     * Directory holding one subdirectory per run, where durable artifacts are
+     * written (spec 029 FR-001, spec 032 FR-004). The daemon passes the state
+     * dir's runs/; without it no artifact is written.
      */
-    private readonly standaloneProjectDir?: string,
+    private readonly runsDir?: string,
     /**
      * Provider profile in force for this daemon instance (spec 029 FR-002).
      * Used to record provenance.profileId when judgeDeps.profile is absent.
@@ -931,11 +932,10 @@ export class RunService {
     return result;
   }
 
-  /** Returns the project directory to use for artifact writes, or undefined if not configured. */
-  private getArtifactDir(): string | undefined {
-    // judgeDeps.projectDir is the authoritative source when judgeDeps is present.
-    if (this.judgeDeps) return this.judgeDeps.projectDir;
-    return this.standaloneProjectDir;
+  /** Returns this run's artifact directory under runsDir, or undefined if not configured. */
+  private getArtifactDir(runId: string): string | undefined {
+    if (this.runsDir === undefined) return undefined;
+    return join(this.runsDir, runId);
   }
 
   /**
@@ -963,10 +963,11 @@ export class RunService {
    * in a chain accumulate in one place (spec 029 FR-006).
    */
   private async persistArtifact(record: RunRecord): Promise<void> {
-    const dir = this.getArtifactDir();
-    if (!dir) return;
-
     const runId = record.run.runId;
+    // When chaining, write into the parent run's directory so stages accumulate.
+    const artifactDir = record.chainArtifactDir ?? this.getArtifactDir(runId);
+    if (!artifactDir) return;
+
     const snapshot = this.get(runId);
     if (!snapshot) return;
 
@@ -985,19 +986,18 @@ export class RunService {
       provenance,
     };
 
-    // When chaining, write into the parent run's directory so stages accumulate.
-    const artifactPath = await writeRunArtifact(dir, runId, record.pipelineId, artifactData, {
-      artifactDir: record.chainArtifactDir,
-    });
+    const artifactPath = await writeRunArtifact(
+      artifactDir,
+      runId,
+      record.pipelineId,
+      artifactData
+    );
 
     if (artifactPath !== undefined) {
       // Store on record so get() can expose it (FR-009).
       record.artifactPath = artifactPath;
 
-      // Update the chain manifest (FR-006). The artifact dir is the directory that
-      // received the artifact — either the chain dir or runs/<runId>.
-      const artifactDir = record.chainArtifactDir ?? join(dir, ".agent-flows", "runs", runId);
-
+      // Update the chain manifest (FR-006) in the directory that received the artifact.
       await upsertManifestEntry(artifactDir, record.createdAt.toISOString(), {
         stageId: record.pipelineId,
         artifactPath,
@@ -1019,9 +1019,8 @@ export class RunService {
   getManifestPath(runId: string): string | undefined {
     const record = this.registry.get(runId);
     if (!record) return undefined;
-    const dir = this.getArtifactDir();
-    if (!dir) return undefined;
-    const artifactDir = record.chainArtifactDir ?? join(dir, ".agent-flows", "runs", runId);
+    const artifactDir = record.chainArtifactDir ?? this.getArtifactDir(runId);
+    if (!artifactDir) return undefined;
     return join(artifactDir, "manifest.json");
   }
 

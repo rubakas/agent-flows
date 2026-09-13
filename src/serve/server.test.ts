@@ -27,9 +27,18 @@ import { after, before, describe, it } from "node:test";
 
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { ModelRegistry } from "../canon/registry.js";
+import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
 import { startServer, readAgentFlowsConfig, type ServeHandle, CONTENT_CAP } from "./server.js";
 import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
+
+/**
+ * Machine-local state for a project, rooted in the suite's own tmp dir so the
+ * owner's real ~/.agent-flows is never touched (spec 032 V7).
+ */
+function makeState(tmpDir: string, projectDir: string): ProjectState {
+  return resolveProjectState(projectDir, { AGENT_FLOWS_HOME: join(tmpDir, "state-home") });
+}
 
 // ── Mock RunService helpers (mirrors runService.test.ts pattern) ──────────────
 
@@ -1480,7 +1489,7 @@ describe("POST /api/gate-judge — FR-012 judge-as-a-service", () => {
     const mastra = makeMastraStubForGateJudge();
     const judgeDeps = makeGateJudgeDeps('{"verdict":"approve","reason":"Looks good."}');
     const runService = new RunService(mastra, judgeDeps);
-    srv = await startServer({ port: 0, runService });
+    srv = await startServer({ port: 0, dbPath: ":memory:", runService });
   });
 
   after(async () => {
@@ -1509,7 +1518,7 @@ describe("POST /api/gate-judge — FR-012 judge-as-a-service", () => {
       judgePrompt: "Gate judge prompt.",
     };
     const failService = new RunService(mastra, failDeps);
-    const failSrv = await startServer({ port: 0, runService: failService });
+    const failSrv = await startServer({ port: 0, dbPath: ":memory:", runService: failService });
     try {
       const res = await mutate(failSrv.port, "POST", "/api/gate-judge", {
         gateMessage: "Approve this?",
@@ -1542,7 +1551,7 @@ describe("POST /api/gate-judge — FR-012 judge-as-a-service", () => {
   });
 
   it("no RunService → 503", async () => {
-    const noSrv = await startServer({ port: 0 });
+    const noSrv = await startServer({ port: 0, dbPath: ":memory:" });
     try {
       const res = await mutate(noSrv.port, "POST", "/api/gate-judge", {
         gateMessage: "Approve?",
@@ -2959,7 +2968,7 @@ describe("FR-004: artifact from a different provider profile starts a new run un
     const service = new RunService(
       makeMastra(mockRun),
       undefined,
-      projectDir,
+      join(tmpDir, "state-runs"),
       openaiProfile,
       registry
     );
@@ -3107,11 +3116,13 @@ describe("FR-006: GET /api/runs/:id/manifest — manifest HTTP route", () => {
   let srv: ServeHandle;
   let tmpDir: string;
   let projectDir: string;
+  let state: ProjectState;
 
   before(async () => {
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-manifest-http-")));
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
+    state = makeState(tmpDir, projectDir);
   });
   after(async () => {
     await srv.close();
@@ -3129,6 +3140,7 @@ describe("FR-006: GET /api/runs/:id/manifest — manifest HTTP route", () => {
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
       projectDir,
+      state,
       runService: new RunService(makeMastra(mockRun)),
     });
 
@@ -3152,12 +3164,13 @@ describe("FR-006: GET /api/runs/:id/manifest — manifest HTTP route", () => {
     const mockRun = makeMockRun(runId, successResult(), successResult());
     const profile = { id: "test-profile", roles: { reasoner: "m", worker: "m", scout: "m" } };
 
-    const service = new RunService(makeMastra(mockRun), undefined, projectDir, profile);
+    const service = new RunService(makeMastra(mockRun), undefined, state.runsDir, profile);
     const srv2 = await startServer({
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
       projectDir,
+      state,
       runService: service,
     });
 
@@ -3218,17 +3231,20 @@ describe("FR-006: GET /api/runs/:id/manifest — disk fallback, no live run requ
   let srv: ServeHandle;
   let tmpDir: string;
   let projectDir: string;
+  let state: ProjectState;
 
   before(async () => {
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-manifest-disk-")));
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
+    state = makeState(tmpDir, projectDir);
     // Registry has never seen any of the run ids used in this suite.
     srv = await startServer({
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
       projectDir,
+      state,
       runService: new RunService(
         makeMastra(makeMockRun("unrelated-run", successResult(), successResult()))
       ),
@@ -3243,7 +3259,7 @@ describe("FR-006: GET /api/runs/:id/manifest — disk fallback, no live run requ
     // Produce a chain directory the way a real daemon would — write the manifest
     // and one stage artifact directly. The registry has never seen this runId.
     const runId = "ae3eff75-dead-beef-cafe-000000000001";
-    const runDir = join(projectDir, ".agent-flows", "runs", runId);
+    const runDir = join(state.runsDir, runId);
     mkdirSync(runDir, { recursive: true });
 
     const artifactPath = join(runDir, "spec-creation.json");
@@ -3314,11 +3330,13 @@ describe("FR-009: GET /api/runs/:id includes artifactPath after settlement", () 
   let srv: ServeHandle;
   let tmpDir: string;
   let projectDir: string;
+  let state: ProjectState;
 
   before(async () => {
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-fr009-http-")));
     projectDir = join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
+    state = makeState(tmpDir, projectDir);
   });
   after(async () => {
     await srv.close();
@@ -3329,13 +3347,14 @@ describe("FR-009: GET /api/runs/:id includes artifactPath after settlement", () 
     const runId = "run-fr009-http-001";
     const mockRun = makeMockRun(runId, successResult(), successResult());
     const profile = { id: "http-profile", roles: { reasoner: "m", worker: "m", scout: "m" } };
-    const service = new RunService(makeMastra(mockRun), undefined, projectDir, profile);
+    const service = new RunService(makeMastra(mockRun), undefined, state.runsDir, profile);
 
     srv = await startServer({
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
       projectDir,
+      state,
       runService: service,
     });
 
@@ -3351,15 +3370,19 @@ describe("FR-009: GET /api/runs/:id includes artifactPath after settlement", () 
       `http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(runId)}`
     );
     assert.equal(getRes.status, 200);
-    const state = (await getRes.json()) as { status: string; artifactPath?: string };
-    assert.equal(state.status, "succeeded");
+    const runState = (await getRes.json()) as { status: string; artifactPath?: string };
+    assert.equal(runState.status, "succeeded");
     assert.ok(
-      typeof state.artifactPath === "string",
-      `artifactPath must be present in GET /api/runs/:id after settlement; got: ${JSON.stringify(state.artifactPath)}`
+      typeof runState.artifactPath === "string",
+      `artifactPath must be present in GET /api/runs/:id after settlement; got: ${JSON.stringify(runState.artifactPath)}`
     );
     assert.ok(
-      state.artifactPath.endsWith("investigate.json"),
-      `artifactPath must end with investigate.json; got: ${state.artifactPath}`
+      runState.artifactPath.startsWith(state.runsDir),
+      `artifactPath must live under the state dir; got: ${runState.artifactPath}`
+    );
+    assert.ok(
+      runState.artifactPath.endsWith("investigate.json"),
+      `artifactPath must end with investigate.json; got: ${runState.artifactPath}`
     );
   });
 });

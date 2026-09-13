@@ -85,6 +85,31 @@ This starts an HTTP server on port 7411 (override with `AGENT_FLOWS_PORT=<port>`
 
 **Why the daemon?** The chat, the HTTP API, and the web page all share a single run registry. The daemon is the source of truth for run state, allowing you to start a workflow in the chat, check its status from the HTTP API, and resume it from the web page—all without losing track of what is running.
 
+### Where agent-flows keeps files
+
+agent-flows splits what your teammates need from what only this machine produced.
+
+| Location                                                                           | Contents                                                                                     | Versioned?                          |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `<your-repo>/.agent-flows/pipelines/`, `prompts/`, `providers.yaml`, `config.json` | The workflows you installed and edited — the canon                                           | Yes — commit them                   |
+| `~/.agent-flows/projects/<key>/`                                                   | `runs/` (artifacts and manifests), `agent-flows.sqlite`, `agent-flows-mastra.db`, `n8n.json` | No — machine-local, never committed |
+| `~/.agent-flows/templates/`, `~/.agent-flows/n8n.json`                             | Global template store and n8n instance credentials                                           | No — global to this machine         |
+
+`<key>` is the absolute real path of your project directory with every character
+outside `[A-Za-z0-9_-]` replaced by `-` (truncated to 200 characters plus an
+8-character hash when longer), so two checkouts of the same repository keep
+separate state.
+
+- `AGENT_FLOWS_HOME` moves the whole state root somewhere other than `~/.agent-flows`.
+- `AGENT_FLOWS_PROJECT_KEY` pins the key, e.g. to share one state directory across worktrees.
+
+If a previous version left run artifacts in `<your-repo>/.agent-flows/runs/`, the
+daemon copies them into the state directory once on start and prints a notice
+naming both paths. The old directory is never deleted or modified — remove it by
+hand when you are satisfied with the copy.
+
+agent-flows never edits your `.gitignore`.
+
 ### Wire the chat
 
 Register the agent-flows MCP server in your repository's MCP configuration. Create `.mcp.json` at your repository root — the same file this repository uses — and add:

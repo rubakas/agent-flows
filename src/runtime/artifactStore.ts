@@ -1,10 +1,10 @@
-// Writes durable run artifacts and manages the .gitignore default for runs/.
-// Spec 029 FR-001/FR-002/FR-006/FR-008.
+// Writes durable run artifacts into the machine-local state dir.
+// Spec 029 FR-001/FR-002/FR-006; spec 032 FR-004/FR-008.
 //
 // Intentionally does not import from runService.ts — the two modules form a
 // one-way dependency (runService → artifactStore) so there is no cycle.
 
-import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 // ── Provenance types ──────────────────────────────────────────────────────────
@@ -81,11 +81,11 @@ export interface RunManifest {
 // ── Artifact I/O ──────────────────────────────────────────────────────────────
 
 /**
- * Write a durable artifact to <runDir>/<pipelineId>.json.
+ * Write a durable artifact to <artifactDir>/<pipelineId>.json.
  *
- * By default runDir is <projectDir>/.agent-flows/runs/<runId>.
- * Pass opts.artifactDir to override (used when chaining stages into a parent
- * run's directory — spec 029 FR-006).
+ * artifactDir is supplied by the caller — the run's own directory under the
+ * state dir, or a parent run's directory when chaining stages (spec 029
+ * FR-006, spec 032 FR-004). Nothing is written inside the project tree.
  *
  * Returns the path written on success, or undefined if writing failed.
  * Never throws — disk errors must not affect the run outcome.
@@ -94,20 +94,16 @@ export interface RunManifest {
  * keys (callers must never place secret values in artifactData).
  */
 export async function writeRunArtifact(
-  projectDir: string,
+  artifactDir: string,
   runId: string,
   pipelineId: string,
-  artifactData: Record<string, unknown>,
-  opts?: { artifactDir?: string }
+  artifactData: Record<string, unknown>
 ): Promise<string | undefined> {
-  const artifactDir = opts?.artifactDir ?? join(projectDir, ".agent-flows", "runs", runId);
   const artifactPath = join(artifactDir, `${pipelineId}.json`);
 
   try {
     await mkdir(artifactDir, { recursive: true });
     await writeFile(artifactPath, JSON.stringify(artifactData, null, 2), "utf8");
-    // Ensure the gitignore is in place now that at least one artifact exists.
-    await ensureRunsGitignore(projectDir);
     return artifactPath;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -262,36 +258,4 @@ export async function readManifest(artifactDir: string): Promise<RunManifest> {
       : "in-progress";
 
   return { ...manifest, stages: all, status };
-}
-
-// ── .gitignore management ─────────────────────────────────────────────────────
-
-/**
- * Ensure <projectDir>/.agent-flows/.gitignore contains a "runs/" line.
- *
- * Creates the file if it does not exist. Appends the line if the file exists
- * without it. Never overwrites or removes existing content — operator
- * customisation is preserved (spec 029 FR-008, Design A).
- *
- * Default-ignore posture: artifacts contain model output that may include full
- * repository content, so committing them must be an explicit operator choice.
- */
-export async function ensureRunsGitignore(projectDir: string): Promise<void> {
-  const gitignorePath = join(projectDir, ".agent-flows", ".gitignore");
-  const runsLine = "runs/";
-
-  let existing = "";
-  try {
-    existing = await readFile(gitignorePath, "utf8");
-  } catch {
-    // File absent — fall through to create it via appendFile.
-  }
-
-  // Exact per-line match: "my-runs/" and "# runs/" are distinct from "runs/".
-  const lines = existing.split("\n").map((l) => l.trim());
-  if (lines.includes(runsLine)) return;
-
-  // Ensure we never concatenate without a separating newline.
-  const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-  await appendFile(gitignorePath, `${separator}${runsLine}\n`, "utf8");
 }

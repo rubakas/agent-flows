@@ -4,7 +4,15 @@
 // No artifacts are written to the repository or the owner's real projects.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, after } from "node:test";
@@ -12,6 +20,7 @@ import { ModelRegistry } from "../canon/registry.js";
 import type { StepDef } from "../canon/types.js";
 import type { RunManifest, StepProvenance } from "./artifactStore.js";
 import { readManifest } from "./artifactStore.js";
+import { ensureProjectState, resolveProjectState } from "./projectState.js";
 import { RunService } from "./runService.js";
 import type { MastraLike } from "./runService.js";
 
@@ -81,6 +90,17 @@ function makeTmpDir(): string {
   return dir;
 }
 
+/**
+ * Resolve the state-dir runs/ directory for a project (spec 032 FR-004).
+ * AGENT_FLOWS_HOME is pinned to a temp dir so the owner's real ~/.agent-flows
+ * is never touched.
+ */
+function makeStateRunsDir(projectDir: string): string {
+  const home = mkdtempSync(join(tmpdir(), "af-artifact-home-"));
+  dirsToClean.push(home);
+  return resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }).runsDir;
+}
+
 after(() => {
   for (const dir of dirsToClean) {
     try {
@@ -100,20 +120,34 @@ async function flushAsync(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
 }
 
+/** Recursive, sorted list of relative paths under dir — empty when dir is absent. */
+function listTree(dir: string, prefix = ""): string[] {
+  if (!existsSync(dir)) return [];
+  const out: string[] = [];
+  const entries = readdirSync(dir, { withFileTypes: true });
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const rel = prefix === "" ? e.name : `${prefix}/${e.name}`;
+    out.push(rel);
+    if (e.isDirectory()) out.push(...listTree(join(dir, e.name), rel));
+  }
+  return out;
+}
+
 // ── Tests: FR-001 — artifact written on terminal status ────────────────────
 
 describe("FR-001: artifact written when a run succeeds", () => {
   it("file exists at expected path and is valid JSON", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-artifact-success-001";
     const pipelineId = "test-pipeline";
     const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, { request: "test" });
     await flushAsync();
 
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     assert.ok(existsSync(artifactPath), `artifact must exist at ${artifactPath}`);
 
     const raw = readFileSync(artifactPath, "utf8");
@@ -155,15 +189,16 @@ describe("FR-001: artifact written when a run succeeds", () => {
 describe("FR-001: artifact written when a run suspends at a gate", () => {
   it("file exists and status is awaiting_approval", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-artifact-gate-001";
     const pipelineId = "gate-pipeline";
     const mockRun = makeMockRun(runId, suspendedResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
     await flushAsync();
 
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     assert.ok(existsSync(artifactPath), "artifact must be written at gate suspension");
 
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
@@ -177,20 +212,21 @@ describe("FR-001: artifact written when a run suspends at a gate", () => {
 describe("FR-001/FR-007: artifact is readable after the service is garbage-collected", () => {
   it("file exists on disk and is parseable with no service instance alive", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-artifact-nodaemon-001";
     const pipelineId = "nodaemon-pipeline";
 
     // Write via service — simulates the daemon running.
     {
       const mockRun = makeMockRun(runId, successResult());
-      const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+      const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
       await service.start(pipelineId, {});
       await flushAsync();
       // `service` goes out of scope here — simulates daemon stopped.
     }
 
     // Now read directly from disk — no service involved.
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     assert.ok(existsSync(artifactPath), "artifact must persist on disk after service is gone");
 
     const raw = readFileSync(artifactPath, "utf8");
@@ -203,85 +239,48 @@ describe("FR-001/FR-007: artifact is readable after the service is garbage-colle
   });
 });
 
-// ── Tests: FR-008 — .gitignore management ────────────────────────────────
+// ── Tests: spec 032 FR-008/V3 — nothing is written into the project tree ──
 
-describe("FR-008: .agent-flows/.gitignore gets a runs/ line", () => {
-  it("creates .gitignore with runs/ when it does not exist", async () => {
+describe("spec 032 FR-008: a run writes nothing into <project>/.agent-flows", () => {
+  it("the canon directory listing is identical before and after startup and a run", async () => {
     const tmpDir = makeTmpDir();
-    const runId = "run-gitignore-create-001";
-    const pipelineId = "gi-pipeline";
+    const home = mkdtempSync(join(tmpdir(), "af-artifact-home-"));
+    dirsToClean.push(home);
+
+    // Seed the canon the owner committed: pipelines/, prompts/, providers.yaml, config.json.
+    const canonDir = join(tmpDir, ".agent-flows");
+    mkdirSync(join(canonDir, "pipelines"), { recursive: true });
+    mkdirSync(join(canonDir, "prompts"), { recursive: true });
+    writeFileSync(join(canonDir, "pipelines", "test.yaml"), "id: test\n", "utf8");
+    writeFileSync(join(canonDir, "prompts", "test.md"), "# test\n", "utf8");
+    writeFileSync(join(canonDir, "providers.yaml"), "profiles: {}\n", "utf8");
+    writeFileSync(join(canonDir, "config.json"), "{}\n", "utf8");
+
+    const before = listTree(canonDir);
+
+    // The daemon's startup path is part of what must not touch the project tree.
+    const { runsDir } = ensureProjectState(tmpDir, { AGENT_FLOWS_HOME: home }, () => undefined);
+
+    const runId = "run-no-project-writes-001";
+    const pipelineId = "no-writes-pipeline";
     const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
     await flushAsync();
 
-    const gitignorePath = join(tmpDir, ".agent-flows", ".gitignore");
-    assert.ok(existsSync(gitignorePath), ".gitignore must be created");
-    const content = readFileSync(gitignorePath, "utf8");
-    assert.ok(
-      content
-        .split("\n")
-        .map((l) => l.trim())
-        .includes("runs/"),
-      ".gitignore must contain the runs/ line"
+    assert.deepEqual(
+      listTree(canonDir),
+      before,
+      "startup and a run must not add or remove anything under <project>/.agent-flows"
     );
-  });
-
-  it("appends runs/ to an existing .gitignore that lacks it, preserving other content", async () => {
-    const tmpDir = makeTmpDir();
-    // Create .agent-flows/ and pre-populate .gitignore with custom content.
-    const agentFlowsDir = join(tmpDir, ".agent-flows");
-    mkdirSync(agentFlowsDir, { recursive: true });
-    const gitignorePath = join(agentFlowsDir, ".gitignore");
-    const originalContent = "# operator custom content\n*.tmp\ncache/\n";
-    writeFileSync(gitignorePath, originalContent, "utf8");
-
-    const runId = "run-gitignore-append-001";
-    const pipelineId = "gi-append-pipeline";
-    const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
-
-    await service.start(pipelineId, {});
-    await flushAsync();
-
-    const content = readFileSync(gitignorePath, "utf8");
-    // Original content must be preserved.
-    assert.ok(content.includes("# operator custom content"), "existing content must be preserved");
-    assert.ok(content.includes("*.tmp"), "existing content must be preserved");
-    assert.ok(content.includes("cache/"), "existing content must be preserved");
-    // runs/ must have been appended.
     assert.ok(
-      content
-        .split("\n")
-        .map((l) => l.trim())
-        .includes("runs/"),
-      "runs/ must be appended"
+      existsSync(join(runsDir, runId, `${pipelineId}.json`)),
+      "the artifact must land under the state dir instead"
     );
-  });
-
-  it("does not add runs/ again when it is already present", async () => {
-    const tmpDir = makeTmpDir();
-    const agentFlowsDir = join(tmpDir, ".agent-flows");
-    mkdirSync(agentFlowsDir, { recursive: true });
-    const gitignorePath = join(agentFlowsDir, ".gitignore");
-    const originalContent = "# pre-existing\nruns/\ncache/\n";
-    writeFileSync(gitignorePath, originalContent, "utf8");
-
-    const runId = "run-gitignore-noop-001";
-    const pipelineId = "gi-noop-pipeline";
-    const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
-
-    await service.start(pipelineId, {});
-    await flushAsync();
-
-    const content = readFileSync(gitignorePath, "utf8");
-    // Content must be identical — no duplicate line added.
-    assert.equal(
-      content,
-      originalContent,
-      ".gitignore must not be modified when runs/ already present"
+    assert.ok(
+      !existsSync(join(canonDir, ".gitignore")),
+      "no .gitignore may be created inside the project"
     );
   });
 });
@@ -291,15 +290,16 @@ describe("FR-008: .agent-flows/.gitignore gets a runs/ line", () => {
 describe("Security: no credential-shaped values in artifacts", () => {
   it("artifact JSON contains no API key env-var names or secret patterns", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-artifact-nosecret-001";
     const pipelineId = "nosecret-pipeline";
     const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
     await flushAsync();
 
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const raw = readFileSync(artifactPath, "utf8");
 
     // These patterns indicate a secret value leaking into the artifact.
@@ -323,6 +323,7 @@ describe("Security: no credential-shaped values in artifacts", () => {
 
   it("artifact provenance.profileId is a profile name, not a secret value", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-artifact-profileid-001";
     const pipelineId = "profileid-pipeline";
     const mockRun = makeMockRun(runId, successResult());
@@ -331,12 +332,12 @@ describe("Security: no credential-shaped values in artifacts", () => {
       id: "anthropic",
       roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
     };
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, profile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, profile);
 
     await service.start(pipelineId, {});
     await flushAsync();
 
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
     const prov = parsed.provenance as Record<string, unknown>;
 
@@ -374,6 +375,7 @@ describe("FR-001: no artifact written when projectDir is absent", () => {
 describe("FR-001: artifact written when a run fails", () => {
   it("file exists and status is failed", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-artifact-fail-001";
     const pipelineId = "fail-pipeline";
     const failResult: Record<string, unknown> = {
@@ -381,12 +383,12 @@ describe("FR-001: artifact written when a run fails", () => {
       error: new Error("Deliberate test failure"),
     };
     const mockRun = makeMockRun(runId, failResult);
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
     await flushAsync();
 
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     assert.ok(existsSync(artifactPath), "artifact must be written on failure");
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
     assert.equal(parsed.status, "failed", "artifact status must be failed");
@@ -422,13 +424,14 @@ const testSteps: StepDef[] = [
 describe("FR-002: transportPerStep filled for model-bearing steps", () => {
   it("each llm step has correct transport and modelId from profile", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-tps-profile-001";
     const pipelineId = "tps-pipeline";
     const mockRun = makeMockRun(runId, successResult());
     const service = new RunService(
       makeMastra(mockRun),
       undefined,
-      tmpDir,
+      runsDir,
       testProfileFull,
       testRegistry
     );
@@ -436,7 +439,7 @@ describe("FR-002: transportPerStep filled for model-bearing steps", () => {
     await service.start(pipelineId, {}, { pipelineSteps: testSteps });
     await flushAsync();
 
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
     const prov = parsed.provenance as Record<string, unknown>;
     const tps = prov.transportPerStep as Record<string, StepProvenance>;
@@ -461,13 +464,14 @@ describe("FR-002: transportPerStep filled for model-bearing steps", () => {
 describe("FR-002: non-llm steps are omitted from transportPerStep", () => {
   it("gate and check steps produce no entry", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-tps-nonllm-001";
     const pipelineId = "tps-nonllm-pipeline";
     const mockRun = makeMockRun(runId, successResult());
     const service = new RunService(
       makeMastra(mockRun),
       undefined,
-      tmpDir,
+      runsDir,
       testProfileFull,
       testRegistry
     );
@@ -475,7 +479,7 @@ describe("FR-002: non-llm steps are omitted from transportPerStep", () => {
     await service.start(pipelineId, {}, { pipelineSteps: testSteps });
     await flushAsync();
 
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
     const prov = parsed.provenance as Record<string, unknown>;
     const tps = prov.transportPerStep as Record<string, StepProvenance>;
@@ -488,6 +492,7 @@ describe("FR-002: non-llm steps are omitted from transportPerStep", () => {
 describe("FR-002: per-run models override is recorded, not the profile default", () => {
   it("overridden step records the overridden model — not the profile default", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-tps-override-001";
     const pipelineId = "tps-override-pipeline";
     const mockRun = makeMockRun(runId, successResult());
@@ -495,7 +500,7 @@ describe("FR-002: per-run models override is recorded, not the profile default",
     const service = new RunService(
       makeMastra(mockRun),
       undefined,
-      tmpDir,
+      runsDir,
       testProfileFull,
       testRegistry
     );
@@ -508,7 +513,7 @@ describe("FR-002: per-run models override is recorded, not the profile default",
     );
     await flushAsync();
 
-    const artifactPath = join(tmpDir, ".agent-flows", "runs", runId, `${pipelineId}.json`);
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
     const prov = parsed.provenance as Record<string, unknown>;
     const tps = prov.transportPerStep as Record<string, StepProvenance>;
@@ -549,15 +554,16 @@ describe("FR-002: per-run models override is recorded, not the profile default",
 describe("FR-006: manifest created with the first stage", () => {
   it("manifest.json exists at the artifact directory and has one entry", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-manifest-first-001";
     const pipelineId = "investigate";
     const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
     await flushAsync();
 
-    const manifestPath = join(tmpDir, ".agent-flows", "runs", runId, "manifest.json");
+    const manifestPath = join(runsDir, runId, "manifest.json");
     assert.ok(existsSync(manifestPath), "manifest.json must be created on first stage");
 
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
@@ -578,12 +584,13 @@ describe("FR-006: manifest created with the first stage", () => {
 describe("FR-006: second stage in same chain directory adds an ordered entry", () => {
   it("second stage entry appears AFTER first entry (insertion order preserved)", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
 
     // Stage 1: run investigate, write artifact and manifest into runs/stage1-id/
     const stage1RunId = "run-manifest-chain-s1";
     const stage1Pipeline = "investigate";
     const mockRun1 = makeMockRun(stage1RunId, successResult());
-    const service1 = new RunService(makeMastra(mockRun1), undefined, tmpDir, stubProfile);
+    const service1 = new RunService(makeMastra(mockRun1), undefined, runsDir, stubProfile);
 
     await service1.start(stage1Pipeline, {});
     await flushAsync();
@@ -593,8 +600,8 @@ describe("FR-006: second stage in same chain directory adds an ordered entry", (
     const stage2RunId = "run-manifest-chain-s2";
     const stage2Pipeline = "spec-creation";
     const mockRun2 = makeMockRun(stage2RunId, successResult());
-    const chainArtifactDir = join(tmpDir, ".agent-flows", "runs", stage1RunId);
-    const service2 = new RunService(makeMastra(mockRun2), undefined, tmpDir, stubProfile);
+    const chainArtifactDir = join(runsDir, stage1RunId);
+    const service2 = new RunService(makeMastra(mockRun2), undefined, runsDir, stubProfile);
 
     await service2.start(stage2Pipeline, {}, { chainArtifactDir });
     await flushAsync();
@@ -621,17 +628,18 @@ describe("FR-006: second stage in same chain directory adds an ordered entry", (
 
   it("second stage artifact also lands in the chain directory", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
 
     const stage1RunId = "run-manifest-artdir-s1";
     const mockRun1 = makeMockRun(stage1RunId, successResult());
-    const service1 = new RunService(makeMastra(mockRun1), undefined, tmpDir, stubProfile);
+    const service1 = new RunService(makeMastra(mockRun1), undefined, runsDir, stubProfile);
     await service1.start("investigate", {});
     await flushAsync();
 
-    const chainDir = join(tmpDir, ".agent-flows", "runs", stage1RunId);
+    const chainDir = join(runsDir, stage1RunId);
     const stage2RunId = "run-manifest-artdir-s2";
     const mockRun2 = makeMockRun(stage2RunId, successResult());
-    const service2 = new RunService(makeMastra(mockRun2), undefined, tmpDir, stubProfile);
+    const service2 = new RunService(makeMastra(mockRun2), undefined, runsDir, stubProfile);
     await service2.start("spec-creation", {}, { chainArtifactDir: chainDir });
     await flushAsync();
 
@@ -649,19 +657,20 @@ describe("FR-006: second stage in same chain directory adds an ordered entry", (
 describe("FR-006: manifest is readable from disk without a live service instance", () => {
   it("manifest persists on disk after the service goes out of scope", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-manifest-nodaemon-001";
     const pipelineId = "investigate";
 
     // Write via service — then let the reference go out of scope.
     {
       const mockRun = makeMockRun(runId, successResult());
-      const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+      const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
       await service.start(pipelineId, {});
       await flushAsync();
     }
 
     // Read directly from disk — no service reference alive.
-    const manifestPath = join(tmpDir, ".agent-flows", "runs", runId, "manifest.json");
+    const manifestPath = join(runsDir, runId, "manifest.json");
     assert.ok(existsSync(manifestPath), "manifest must persist after service goes out of scope");
 
     const raw = readFileSync(manifestPath, "utf8");
@@ -822,10 +831,11 @@ describe("FR-006: readManifest reconciles artifacts missing from the manifest fi
 describe("FR-007: completing a stage starts no further run", () => {
   it("registry has exactly one run after the run completes", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-nochain-001";
     const pipelineId = "investigate";
     const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
     // Let the background completion handler fire.
@@ -844,14 +854,15 @@ describe("FR-007: completing a stage starts no further run", () => {
 
   it("manifest shows only the completed stage — no phantom next stage", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-nochain-manifest-001";
     const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start("investigate", {});
     await flushAsync();
 
-    const manifestPath = join(tmpDir, ".agent-flows", "runs", runId, "manifest.json");
+    const manifestPath = join(runsDir, runId, "manifest.json");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
 
     assert.equal(
@@ -868,10 +879,11 @@ describe("FR-007: completing a stage starts no further run", () => {
 describe("FR-009: GetResult includes artifactPath after settlement", () => {
   it("get() returns artifactPath pointing to the written file", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-fr009-001";
     const pipelineId = "investigate";
     const mockRun = makeMockRun(runId, successResult());
-    const service = new RunService(makeMastra(mockRun), undefined, tmpDir, stubProfile);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
     await flushAsync();
@@ -895,6 +907,7 @@ describe("FR-009: GetResult includes artifactPath after settlement", () => {
 
   it("artifactPath is absent before settlement (run still in 'running' state)", async () => {
     const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
     const runId = "run-fr009-before-settle-001";
     const pipelineId = "investigate";
     // Use a run that never resolves so we can inspect the pre-settled state.
@@ -916,7 +929,7 @@ describe("FR-009: GetResult includes artifactPath after settlement", () => {
       getWorkflow: () => ({ createRun: async () => slowRun as never }),
     };
 
-    const service = new RunService(mastra, undefined, tmpDir, stubProfile);
+    const service = new RunService(mastra, undefined, runsDir, stubProfile);
     await service.start(pipelineId, {});
 
     // Before the run settles, artifactPath must be absent.

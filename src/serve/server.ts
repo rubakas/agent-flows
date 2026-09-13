@@ -64,6 +64,11 @@ import {
 import type { HardenedSpec } from "../canon/types.js";
 import { decideEntryPoint } from "../runtime/entryPoint.js";
 import { readManifest } from "../runtime/artifactStore.js";
+import {
+  ensureProjectState,
+  resolveProjectState,
+  type ProjectState,
+} from "../runtime/projectState.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -105,11 +110,13 @@ const BODY_LIMIT_DEFAULT = 65_536; // 64 KB — all mutating routes except /api/
 const BODY_LIMIT_IMPORT = 4 * 1024 * 1024; // 4 MB — /api/import carries a YAML bundle
 
 // ── Project-level n8n workflow ID map (FR-006) ────────────────────────────────
-// Stored at <projectDir>/.agent-flows/n8n.json (different from the global config).
+// Stored at <stateDir>/n8n.json (different from the global config), with the
+// legacy <projectDir>/.agent-flows/n8n.json read as a fallback (spec 032 FR-007).
 // Format: {"workflows": {"<pipelineId>": "<n8nWorkflowId>"}}.
 
-function readProjectN8nMap(projectDir: string): Record<string, string> {
-  const path = join(projectDir, ".agent-flows", "n8n.json");
+function readProjectN8nMap(state: ProjectState, projectDir: string): Record<string, string> {
+  const legacyPath = join(projectDir, ".agent-flows", "n8n.json");
+  const path = existsSync(state.n8nMapPath) ? state.n8nMapPath : legacyPath;
   if (!existsSync(path)) return {};
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
@@ -122,10 +129,9 @@ function readProjectN8nMap(projectDir: string): Record<string, string> {
   return {};
 }
 
-function writeProjectN8nMap(projectDir: string, map: Record<string, string>): void {
-  const dir = join(projectDir, ".agent-flows");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "n8n.json"), JSON.stringify({ workflows: map }, null, 2), "utf8");
+function writeProjectN8nMap(state: ProjectState, map: Record<string, string>): void {
+  mkdirSync(state.dir, { recursive: true });
+  writeFileSync(state.n8nMapPath, JSON.stringify({ workflows: map }, null, 2), "utf8");
 }
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
@@ -305,8 +311,14 @@ function resolveArtifactPath(
 export interface ServeOptions {
   /** TCP port; defaults to 7411. Pass 0 for an ephemeral port (tests). */
   port?: number;
-  /** Absolute path to the SQLite database; defaults to `<cwd>/agent-flows.sqlite`. */
+  /** Absolute path to the SQLite database; defaults to the state dir's `agent-flows.sqlite`. */
   dbPath?: string;
+  /**
+   * Machine-local state locations for this project (spec 032 D2). Defaults to
+   * `resolveProjectState(projectDir)`; the CLI passes the result of
+   * `ensureProjectState` so the directory and its marker exist.
+   */
+  state?: ProjectState;
   /** Directory containing pipeline YAML files; defaults to `<cwd>/pipelines`. */
   pipelinesDir?: string;
   /** Injected RunService for tests; constructed from Mastra in CLI mode. */
@@ -339,6 +351,10 @@ interface HandlerCtx {
   uiPath: string;
   boundPort: number;
   projectDir: string;
+  /** Machine-local state locations for projectDir (spec 032 D2). */
+  state: ProjectState;
+  /** Resolved SQLite path in force for this daemon (state default or --db). */
+  dbPath: string;
   bundledPipelinesDir: string;
   skillsBase: string;
   /** Global template store directory (FR-001). */
@@ -401,11 +417,12 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
   // opts.pipelinesDir is an explicit override (used by tests to pin a specific dir).
   // When absent, the canon directory is resolved per-request from projectDir (FR-004).
   const explicitPipelinesDir: string | undefined = opts.pipelinesDir;
-  const dbPath = opts.dbPath ?? join(process.cwd(), "agent-flows.sqlite");
+  const projectDir = opts.projectDir ?? process.cwd();
+  const state = opts.state ?? resolveProjectState(projectDir);
+  const dbPath = opts.dbPath ?? state.dbPath;
   const db = makeDb(dbPath);
   const runService = opts.runService ?? null;
   const uiPath = join(__dirname, "ui.html");
-  const projectDir = opts.projectDir ?? process.cwd();
   const bundledPipelinesDir = opts.bundledPipelinesDir ?? BUNDLED_PIPELINES_DIR;
 
   const skillsBase =
@@ -451,6 +468,8 @@ export async function startServer(opts: ServeOptions = {}): Promise<ServeHandle>
       uiPath,
       boundPort,
       projectDir,
+      state,
+      dbPath,
       bundledPipelinesDir,
       skillsBase,
       templatesBase,
@@ -1109,7 +1128,7 @@ async function handleRequest(
       json(res, 400, { error: `Run id "${id}" is invalid` });
       return;
     }
-    const runDir = join(ctx.projectDir, ".agent-flows", "runs", id);
+    const runDir = join(ctx.state.runsDir, id);
     if (!existsSync(join(runDir, "manifest.json"))) {
       json(res, 404, { error: `Run "${id}" not found` });
       return;
@@ -1279,6 +1298,9 @@ async function handleRequest(
 
     json(res, 200, {
       projectDir: ctx.projectDir,
+      stateDir: ctx.state.dir,
+      runsDir: ctx.state.runsDir,
+      dbPath: ctx.dbPath,
       pipelinesSource: isBundled ? "bundled" : "project",
       pipelinesDir: ctx.pipelinesDir,
       installed: listInstalled(ctx.projectDir),
@@ -1642,7 +1664,7 @@ async function handleRequest(
       return;
     }
     // Check if a workflow was already pushed for this pipeline
-    const wfMap = readProjectN8nMap(ctx.projectDir);
+    const wfMap = readProjectN8nMap(ctx.state, ctx.projectDir);
     let existingN8nId = wfMap[id];
     if (existingN8nId) {
       // Verify the workflow still exists in n8n; re-create if 404
@@ -1683,7 +1705,7 @@ async function handleRequest(
       const n8nId = created.id;
       // Record the mapping in the project-level n8n.json
       const updatedMap = { ...wfMap, [id]: n8nId };
-      writeProjectN8nMap(ctx.projectDir, updatedMap);
+      writeProjectN8nMap(ctx.state, updatedMap);
       json(res, 200, { url: `${cfg.baseUrl}/workflow/${n8nId}` });
     } catch (err) {
       json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
@@ -1712,7 +1734,22 @@ if (process.argv[1] === __filename) {
   console.log(`agent-flows serve: running steps in ${projectDir}`);
   const { pipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
   console.log(`agent-flows serve: pipelines from ${pipelinesSource} (${pipelinesDir})`);
-  const dbPath = getArgValue("--db", join(process.cwd(), "agent-flows.sqlite"));
+
+  // Spec 032: machine-local state lives outside the project tree.
+  const state = ensureProjectState(projectDir, process.env, (m) => {
+    console.error(m);
+  });
+  console.log(`agent-flows serve: state in ${state.dir}`);
+  const dbPath = getArgValue("--db", state.dbPath);
+
+  // FR-010: a db left in the launch cwd by an older version is never migrated.
+  const legacyDbPath = join(process.cwd(), "agent-flows.sqlite");
+  if (existsSync(legacyDbPath) && !existsSync(state.dbPath)) {
+    console.error(
+      `[agent-flows] found a legacy database at ${legacyDbPath}; it is NOT migrated. ` +
+        `The default is now ${state.dbPath} — pass --db ${legacyDbPath} to keep using the old one.`
+    );
+  }
 
   // Non-literal specifiers prevent import-x/no-cycle from traversing into
   // @mastra/core's deep subpath exports, which crash the resolver —
@@ -1786,14 +1823,14 @@ if (process.argv[1] === __filename) {
     }
   );
 
-  // Pass projectDir, profile, and registry so the service can write durable
+  // Pass the state runs dir, profile, and registry so the service can write durable
   // artifacts with full provenance (spec 029 FR-001/FR-002) without requiring
   // judgeDeps in production.
-  const runService = new RunServiceClass(mastra, undefined, projectDir, profile, registry);
+  const runService = new RunServiceClass(mastra, undefined, state.runsDir, profile, registry);
 
   // FR-004: pipelinesDir is NOT passed to startServer so the HTTP layer resolves
   // the canon directory per-request.
-  const handle = await startServer({ port, dbPath, runService, projectDir });
+  const handle = await startServer({ port, dbPath, runService, projectDir, state });
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
   console.log(`agent-flows serve listening on http://127.0.0.1:${handle.port}`);
 }

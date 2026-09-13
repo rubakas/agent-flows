@@ -13,6 +13,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
+import { resolveProjectState } from "../runtime/projectState.js";
 import { installWorkflow, listAvailable, listInstalled } from "./install.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,11 +31,13 @@ if (!subcommand || subcommand === "--help" || subcommand === "-h") {
 }
 
 const projectDir = resolveProjectDir();
+const state = resolveProjectState(projectDir);
 
 if (subcommand === "list") {
   const available = listAvailable(bundledPipelinesDir);
   const installed = new Set(listInstalled(projectDir));
   console.log(`Project: ${projectDir}`);
+  console.log(`State:   ${state.dir}`);
   console.log("");
   console.log("AVAILABLE WORKFLOWS:");
   for (const id of available) {
@@ -49,6 +52,8 @@ if (subcommand === "install") {
   const ids = rest.filter((a) => !a.startsWith("--"));
   const targets = ids.length > 0 ? ids : listAvailable(bundledPipelinesDir);
 
+  console.log(`Project: ${projectDir}`);
+  console.log(`State:   ${state.dir}`);
   console.log(`Installing into ${projectDir}/.agent-flows/`);
   console.log(`Workflows: ${targets.join(", ")}`);
   console.log(`Overwrite existing: ${overwrite ? "yes (--overwrite-installed)" : "no"}`);
