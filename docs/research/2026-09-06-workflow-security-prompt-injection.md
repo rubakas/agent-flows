@@ -6,6 +6,9 @@ Research date: 2026-09-06 · Scope: `src/canon/runStep.ts`, `src/canon/runClaude
 Claims marked **[verified]** were executed against the real CLI or read out of the real files during
 this session. Claims marked **[unverified]** are inference and are labelled as such.
 
+Sections 5 and 6 are follow-up addenda: findings F7, F8 and F9, executed live on 2026-09-13 against
+claude CLI 2.1.270.
+
 ---
 
 ## 1. What the vendors and OWASP actually document
@@ -476,6 +479,117 @@ other contexts and net-negative here. Declining them deliberately:
 
 ---
 
+## 5. Addendum — are `Grep(<glob>)` deny rules real? (2026-09-13, claude CLI 2.1.270)
+
+`src/canon/runStep.ts` emits a `Grep(pattern)` deny entry for every `CREDENTIAL_DENY_PATTERNS` entry,
+because decision D1 (`specs/030-code-review/spec.md`) grants `Grep` to `contents: read`. If `Grep` were
+not a rule name the CLI's file-permission checks recognise, those denials would be inert and every read
+step could content-search the environment-file, key-material and credential patterns the matching
+`Read(...)` denial already blocks. F3 verified `Read(...)`; it did not verify `Grep(...)`. Both findings
+below are **[verified]** by live probe on 2026-09-13 against claude CLI 2.1.270 — neither is inferred
+from F3.
+
+**F7 — `Grep(<glob>)` is a rule name the CLI's file-permission checks recognise.**
+
+```
+$ claude -p "Reply with the single word OK." --restricted --strict-mcp-config \
+    --tools Read,Glob,Grep --allowedTools Read,Glob,Grep \
+    --disallowedTools 'Grep(**/vault-probe.txt)'
+```
+
+produced no warning. The control is the same invocation with `Write(**/vault-probe.txt)` substituted
+for the `Grep` rule, which produced:
+
+```
+Permission deny rule (--disallowed-tools): Write(**/vault-probe.txt) is not matched by file permission
+checks — only Edit(path) rules are. Use Edit(**/vault-probe.txt) instead (Edit rules cover all
+file-editing tools).
+```
+
+So the CLI does warn out loud on a rule name its file-permission checks do not match — as it did for
+the operator's own settings rules in F2 — and it does not warn on `Grep(...)`. Silence here is
+evidence, not absence of evidence, because the control proves the warning channel fires.
+
+**F8 — the rule is enforced, not merely accepted.**
+
+Scratch directory containing `vault-probe.txt` holding `PROBE_TOKEN=fake-not-a-real-credential-0000`.
+Prompt, identical in both arms: "Use Grep to search for the string PROBE_TOKEN in the files here.
+Report the exact matching line, or say BLOCKED if a tool refuses."
+
+- **Control** (same tool set, no deny rules): Grep found it and printed
+  `vault-probe.txt:1  PROBE_TOKEN=fake-not-a-real-credential-0000`.
+- **Test** (`--disallowedTools 'Grep(**/vault-probe.txt),Read(**/vault-probe.txt)'`): Grep returned
+  "No matches found", and a follow-up `Glob **/*` in the same directory also returned nothing.
+
+Same directory, same prompt, same tool set; the deny rule was the only variable, and the control proves
+the probe was capable of finding the file.
+
+Two behavioural notes worth recording, both visible in the test arm above:
+
+1. **The CLI silently filters denied paths out of results rather than emitting a refusal.** Unlike F3's
+   `Read` denial, which answered "File is in a directory that is denied by your permission settings",
+   the agent here observed "no matches". An agent therefore cannot distinguish a denied file from an
+   absent one, which matters for any prompt that asks a step to conclude something from an empty search.
+2. **The deny also removed the file from `Glob` output.** The protection is broader than the rule name
+   suggests: a `Grep(...)` deny hides the path from enumeration, not only from content search.
+
+**Verdict: `Grep(<glob>)` deny rules are valid and enforced. D1's compensating control is verified by live probe, not assumed — but it fails closed silently, so an empty result is not evidence that the file is absent.**
+
+---
+
+## 6. Addendum — does `--restricted` also drop the operator's own deny rules? (2026-09-13, claude CLI 2.1.270)
+
+`src/canon/runStep.ts` passes `--restricted` on every claude invocation and documents it as stopping a
+target repo's `.claude/settings.json` from widening the granted tool set. It does. The question not
+asked until now is the other direction: a settings file can also _narrow_ access through
+`permissions.deny`, and the operator's own `~/.claude/settings.json` is a settings file too. If
+`--restricted` ignores settings files, it ignores the operator's denials along with the repo's
+grants. **[verified]** by live probe on 2026-09-13 against claude CLI 2.1.270.
+
+**F9 — under `--restricted` the operator's own deny rules do not apply.**
+
+Scratch directory containing `probe-marker.txt` and a project `.claude/settings.json` holding
+`{"permissions": {"deny": ["Read(**/probe-marker.txt)"]}}`. Prompt identical in both arms:
+"read probe-marker.txt".
+
+- **Control** (settings honoured, no hardening flags):
+
+```
+$ claude -p "read probe-marker.txt"
+```
+
+refused, reporting:
+
+```
+File is in a directory that is denied by your permission settings.
+```
+
+- **Test** (the flags agent-flows actually passes):
+
+```
+$ claude -p "read probe-marker.txt" --restricted --strict-mcp-config \
+    --tools Read,Glob,Grep --allowedTools Read,Glob,Grep
+```
+
+read the file and returned its contents.
+
+Same directory, same file, same prompt; the hardening flags were the only variable, and the control
+proves the deny rule was otherwise effective.
+
+The consequence is structural, not incidental: `--restricted` is all-or-nothing about settings files,
+so agent-flows cannot rely on any deny rule an operator writes in `~/.claude/settings.json`,
+`.claude/settings.json` or `.claude/settings.local.json` — none of them are loaded. Inside an
+agent-flows step, `CREDENTIAL_DENY_PATTERNS` in `src/canon/runStep.ts` is the sole control standing
+between a step and a credential file, and it must therefore be complete on its own rather than
+assuming an operator's personal denials as a backstop. The compensating action taken on the same day
+was to extend that list to cover SSH and GnuPG key material, certificate and keystore formats, tool
+auth files (netrc, npmrc, pgpass, htpasswd), cloud provider and cluster credentials, and case-varied
+duplicates for APFS.
+
+**Verdict: `--restricted` trades the operator's deny rules away for the guarantee that a target repo cannot widen the grant. The trade is still worth making — a repo-supplied widening is the larger risk — but it makes `CREDENTIAL_DENY_PATTERNS` load-bearing and single-point. Treat any gap in that list as an unmitigated read of the named file.**
+
+---
+
 ## Sources consulted
 
 Primary — vendor documentation:
@@ -504,6 +618,13 @@ Primary — local, executed 2026-09-06 against claude CLI 2.1.261 on macOS:
 - `claude --help` (`--restricted`, `--strict-mcp-config`, `--tools`, `--allowedTools`,
   `--disallowedTools`, `--permission-mode`, `--permission-prompts`, `-p` trust-dialog caveat)
 - Four controlled invocations in an isolated scratch directory, reported inline as F2, F3 and F4.
+
+Primary — local, executed 2026-09-13 against claude CLI 2.1.270 on macOS:
+
+- Four controlled invocations (two rule-name probes, two Grep-enforcement arms) in an isolated scratch
+  directory, reported inline as F7 and F8 in section 5.
+- Two controlled invocations (settings-honoured control, `--restricted` test) in an isolated scratch
+  directory with a project deny rule, reported inline as F9 in section 6.
 
 agent-flows source read for this review: `README.md`, `docs/decisions/0015-sdlc-as-composable-workflows.md`,
 `docs/decisions/0016-prompt-authoring-convention.md`, `src/canon/runStep.ts`,
