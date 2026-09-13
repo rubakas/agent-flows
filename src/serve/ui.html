@@ -724,13 +724,31 @@
             >
           </div>
           <div class="card">
+            <div class="kv">
+              <span>Installed</span><span id="n8n-runtime-installed">checking…</span>
+            </div>
+            <div class="kv">
+              <span>Running</span><span id="n8n-runtime-running">checking…</span>
+            </div>
+            <div class="kv">
+              <span>Connected</span><span id="n8n-runtime-connected">checking…</span>
+            </div>
             <div class="kv"><span>Base URL</span><code id="n8n-base-url">—</code></div>
             <div class="actions" style="margin-top: 10px">
+              <button class="btn" id="btn-n8n-start">Start n8n</button>
+              <button class="btn danger" id="btn-n8n-stop">Stop n8n</button>
+              <button class="btn primary" id="btn-n8n-connect-runtime" style="display: none">
+                Connect
+              </button>
               <button class="btn" id="btn-n8n-connect" style="display: none">Connect n8n</button>
               <button class="btn danger" id="btn-n8n-disconnect" style="display: none">
                 Disconnect n8n
               </button>
             </div>
+            <p style="font-size: 12px; color: var(--muted); margin-top: 10px">
+              n8n issues API keys per user in its own UI; agent-flows never handles n8n credentials
+              — paste the key once and it is stored with mode 0600.
+            </p>
           </div>
         </div>
 
@@ -936,19 +954,132 @@
         }
       }
 
-      function openN8nConfigDialog() {
+      /**
+       * Open the Connect dialog. With a base URL known (the runtime probe found
+       * one), it is prefilled and focus goes straight to the key field — the only
+       * thing the operator can supply, since n8n mints keys in its own UI.
+       */
+      function openN8nConfigDialog(prefillBaseUrl) {
         document.getElementById("cfg-error").style.display = "none";
         document.getElementById("n8n-cfg-backdrop").classList.add("open");
-        document.getElementById("cfg-base-url").focus();
+        const urlField = document.getElementById("cfg-base-url");
+        if (prefillBaseUrl) {
+          urlField.value = prefillBaseUrl; // plain value assignment — safe
+          document.getElementById("cfg-api-key").focus();
+          return;
+        }
+        urlField.focus();
       }
 
-      document.getElementById("btn-n8n-connect").onclick = openN8nConfigDialog;
+      // ── n8n runtime card (spec 034 D10) ───────────────────────────────────
+
+      /** Last GET /api/n8n/runtime body, so the buttons know what they may do. */
+      let _n8nRuntime = null;
+
+      /** Poll handle for the runtime card; live only while Settings is open. */
+      let _n8nRuntimePoller = null;
+
+      function setBadge(id, text, colorVar) {
+        const el = document.getElementById(id);
+        el.textContent = text; // .textContent — safe
+        el.style.color = colorVar ? `var(${colorVar})` : "";
+      }
+
+      async function loadN8nRuntime() {
+        try {
+          const rt = await api("GET", "/api/n8n/runtime");
+          _n8nRuntime = rt;
+          const install = rt.installed || {};
+          setBadge(
+            "n8n-runtime-installed",
+            install.how === "path"
+              ? `yes — ${install.detail}`
+              : install.how === "npx"
+                ? `via npx — ${install.detail}`
+                : "no — install n8n or npx",
+            install.how === "none" ? "--err" : "--ok"
+          );
+          setBadge(
+            "n8n-runtime-running",
+            rt.running ? `yes — ${rt.baseUrl}` : `no — probed ${rt.baseUrl}`,
+            rt.running ? "--ok" : "--muted"
+          );
+          setBadge(
+            "n8n-runtime-connected",
+            n8nBaseUrl ? "yes" : "no — needs an API key",
+            n8nBaseUrl ? "--ok" : "--muted"
+          );
+          document.getElementById("btn-n8n-start").disabled = rt.running === true;
+          document.getElementById("btn-n8n-stop").disabled = rt.ownedPid === undefined;
+          // Connect is offered exactly when there is something to connect TO and
+          // we are not connected yet.
+          document.getElementById("btn-n8n-connect-runtime").style.display =
+            rt.running && !n8nBaseUrl ? "" : "none";
+        } catch (e) {
+          setBadge("n8n-runtime-running", e.message, "--err");
+        }
+      }
+
+      function startN8nRuntimePoller() {
+        if (_n8nRuntimePoller !== null) return;
+        _n8nRuntimePoller = setInterval(() => {
+          if (document.hidden) return;
+          loadN8nRuntime();
+        }, 5000);
+      }
+
+      function stopN8nRuntimePoller() {
+        if (_n8nRuntimePoller === null) return;
+        clearInterval(_n8nRuntimePoller);
+        _n8nRuntimePoller = null;
+      }
+
+      document.getElementById("btn-n8n-start").onclick = async () => {
+        const btn = document.getElementById("btn-n8n-start");
+        btn.disabled = true;
+        // Through npx the first launch downloads n8n; the request is allowed to
+        // take minutes, so say so rather than looking wedged.
+        flash("Starting n8n — the first launch via npx can take several minutes");
+        try {
+          const r = await api("POST", "/api/n8n/start", {});
+          flash(r.running ? `n8n is up at ${r.baseUrl}` : `n8n is starting — log: ${r.log}`);
+        } catch (e) {
+          flash(e.message, true);
+        } finally {
+          await loadN8nRuntime();
+        }
+      };
+
+      document.getElementById("btn-n8n-stop").onclick = async () => {
+        if (!confirm("Stop the n8n process agent-flows started?")) return;
+        try {
+          await api("POST", "/api/n8n/stop", {});
+          flash("n8n stopped");
+        } catch (e) {
+          flash(e.message, true);
+        } finally {
+          await loadN8nRuntime();
+        }
+      };
+
+      document.getElementById("btn-n8n-connect-runtime").onclick = () => {
+        const baseUrl = _n8nRuntime?.baseUrl;
+        if (!baseUrl) return;
+        // The key is created in n8n's own UI — open that page, then ask for the
+        // key. openExternal refuses anything that is not http/https.
+        openExternal(`${baseUrl}/settings/api`);
+        openN8nConfigDialog(baseUrl);
+      };
+
+      document.getElementById("btn-n8n-connect").onclick = () =>
+        openN8nConfigDialog(_n8nRuntime?.baseUrl);
       document.getElementById("btn-n8n-disconnect").onclick = async () => {
         if (!confirm("Disconnect n8n? The stored config file will be removed.")) return;
         try {
           await api("DELETE", "/api/n8n/configure", {});
           flash("n8n disconnected");
           await loadN8nStatus();
+          loadN8nRuntime();
           loadProjectTier();
         } catch (e) {
           flash(e.message, true);
@@ -1280,6 +1411,7 @@
           document.getElementById("cfg-api-key").value = "";
           flash("n8n connected");
           await loadN8nStatus();
+          loadN8nRuntime();
           loadProjectTier();
         } catch (e) {
           cfgError.textContent = e.message;
@@ -2012,6 +2144,8 @@
           document.getElementById(`tab-${id}`).classList.toggle("active", id === activeTab);
         }
 
+        if (view !== "settings") stopN8nRuntimePoller();
+
         if (view === "runs") {
           _selectedRunId = null;
           loadRuns();
@@ -2028,6 +2162,8 @@
           loadTemplateTier();
         } else if (view === "settings") {
           loadEnvironment();
+          loadN8nRuntime();
+          startN8nRuntimePoller();
         }
       }
 

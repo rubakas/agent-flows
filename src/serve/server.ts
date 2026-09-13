@@ -62,6 +62,12 @@ import {
   validateN8nBaseUrl,
   writeN8nConfig,
 } from "./routes/n8n.js";
+import {
+  handleN8nRuntime,
+  handleN8nStart,
+  handleN8nStop,
+  type N8nRuntimeDeps,
+} from "./routes/n8nRuntime.js";
 import type { HardenedSpec } from "../canon/types.js";
 import { decideEntryPoint } from "../runtime/entryPoint.js";
 import { readManifest } from "../runtime/artifactStore.js";
@@ -405,6 +411,11 @@ export interface ServeOptions {
    * Each template is one `<templateId>.yaml` bundle file (FR-001).
    */
   templatesBase?: string;
+  /**
+   * Injection points for the n8n process routes (spec 034 D10). Tests replace
+   * the launch command and shorten the waits so no real n8n is ever spawned.
+   */
+  n8nRuntime?: N8nRuntimeDeps;
 }
 
 export interface ServeHandle {
@@ -430,6 +441,8 @@ interface HandlerCtx {
   skillsBase: string;
   /** Global template store directory (FR-001). */
   templatesBase: string;
+  /** n8n process-route injection points (spec 034 D10). */
+  n8nRuntime: N8nRuntimeDeps;
 }
 
 // ── readAgentFlowsConfig ───────────────────────────────────────────────────────
@@ -544,6 +557,7 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
       bundledPipelinesDir,
       skillsBase,
       templatesBase,
+      n8nRuntime: opts.n8nRuntime ?? {},
     }).catch((err: unknown) => {
       if (!res.headersSent) {
         if (err instanceof RequestTooLargeError) {
@@ -1805,6 +1819,30 @@ async function handleRequest(
   }
 
   // ── n8n status and proxy routes (FR-005/FR-006/FR-011) ────────────────────
+
+  // ── n8n process lifecycle (spec 034 D10/FR-015..FR-018) ───────────────────
+  // These three say nothing about the API key: they are about the process, and
+  // the key belongs to the configure routes below.
+
+  // GET /api/n8n/runtime — is n8n installed, is it running, did we start it
+  if (method === "GET" && pathname === "/api/n8n/runtime") {
+    await handleN8nRuntime(res, ctx.state.dir);
+    return;
+  }
+
+  // POST /api/n8n/start — launch n8n and wait for it to answer (FR-017)
+  if (method === "POST" && pathname === "/api/n8n/start") {
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+    await handleN8nStart(res, ctx.state.dir, ctx.n8nRuntime);
+    return;
+  }
+
+  // POST /api/n8n/stop — stop only the n8n this daemon started (FR-018)
+  if (method === "POST" && pathname === "/api/n8n/stop") {
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+    await handleN8nStop(res, ctx.state.dir, ctx.n8nRuntime);
+    return;
+  }
 
   // GET /api/n8n/status — return whether n8n is configured and the base URL (FR-005/FR-008)
   // The API key NEVER appears in this response. The `source` field tells the

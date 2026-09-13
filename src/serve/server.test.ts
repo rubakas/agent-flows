@@ -2726,6 +2726,40 @@ describe("GET / — four views, tabs and router wired in served HTML (V1)", () =
     );
   });
 
+  it("carries the n8n runtime card and its key-ownership line (D10/V7)", () => {
+    for (const id of [
+      "n8n-runtime-installed",
+      "n8n-runtime-running",
+      "n8n-runtime-connected",
+      "btn-n8n-start",
+      "btn-n8n-stop",
+      "btn-n8n-connect-runtime",
+    ])
+      assert.ok(html.includes(`id="${id}"`), `served HTML must contain "${id}" — D10`);
+    assert.ok(
+      html.includes("n8n issues API keys per user in its own UI"),
+      "the card must say why the key is pasted by hand"
+    );
+    assert.ok(
+      html.includes("agent-flows never handles n8n"),
+      "the card must state that agent-flows never handles n8n credentials"
+    );
+    // The runtime card lives in Settings, not the header (FR-008).
+    const settingsStart = html.indexOf('id="view-settings"');
+    assert.ok(
+      html.indexOf("btn-n8n-start") > settingsStart,
+      "the Start button belongs to the settings view"
+    );
+  });
+
+  it("polls the runtime route only while Settings is open", () => {
+    assert.ok(html.includes("/api/n8n/runtime"), "the card must read the runtime route");
+    assert.ok(
+      html.includes("stopN8nRuntimePoller"),
+      "leaving Settings must stop the 5s runtime poll"
+    );
+  });
+
   it("hosts Save-from-n8n in Templates and New-in-n8n in Workflows (FR-008)", () => {
     const wfStart = html.indexOf('id="view-workflows"');
     const tmplStart = html.indexOf('id="view-templates"');
