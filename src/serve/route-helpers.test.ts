@@ -156,28 +156,37 @@ describe("safePath redaction — unexpected error surfaces as 500 with <root>", 
   });
 });
 
-// ── Ordering: POST /api/pipelines/:id/drafts reaches its own handler ─────────
+// ── Ordering: POST /api/pipelines/:id/template reaches its own handler ──────
 
-describe("dispatch ordering — POST /api/pipelines/:id/drafts is not captured by pipeline-detail", () => {
+describe("dispatch ordering — POST /api/pipelines/:id/template is not captured by pipeline-detail", () => {
   let srv: ServeHandle;
+  let tmpDir: string;
 
   before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-route-order-")));
     srv = await startServer({
       state: makeState(process.cwd()),
       port: 0,
       dbPath: ":memory:",
       pipelinesDir: REAL_PIPELINES_DIR,
+      templatesBase: join(tmpDir, "templates"),
     });
   });
-  after(async () => srv.close());
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
 
-  it("the response carries draftId, proving the drafts handler ran, not pipeline-detail", async () => {
-    const res = await mutate(srv.port, "POST", "/api/pipelines/investigate/drafts", {});
-    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
-    const body = (await res.json()) as { draftId?: number; def?: unknown };
-    assert.ok(
-      body.draftId !== undefined,
-      `body must be the drafts response, not a pipeline-detail response; got: ${JSON.stringify(body)}`
+  it("the response carries templateId, proving the template handler ran, not pipeline-detail or drafts", async () => {
+    const res = await mutate(srv.port, "POST", "/api/pipelines/investigate/template", {
+      templateId: "ordering-check",
+    });
+    assert.equal(res.status, 201, `expected 201, got ${res.status}`);
+    const body = (await res.json()) as { templateId?: string; def?: unknown; draftId?: number };
+    assert.equal(
+      body.templateId,
+      "ordering-check",
+      `body must be the template response, not a detail or drafts one; got: ${JSON.stringify(body)}`
     );
   });
 });

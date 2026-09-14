@@ -6,11 +6,14 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
+  mkdirSync,
   realpathSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  type Stats,
   writeFileSync,
 } from "node:fs";
 import {
@@ -19,7 +22,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parse, stringify } from "yaml";
@@ -32,10 +35,16 @@ import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draf
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import { listPipelines, loadPipeline } from "../canon/load.js";
-import { loadProviders } from "../canon/loadProviders.js";
+import { CLI_MODEL_RE, loadProviders } from "../canon/loadProviders.js";
 import { getActiveProfile } from "../canon/registry.js";
 import { makeDb, type DbInstance } from "../db/index.js";
-import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../install/bundle.js";
+import {
+  exportBundle,
+  importBundle,
+  parseBundle,
+  stringifyBundle,
+  type WorkflowBundle,
+} from "../install/bundle.js";
 import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
 import { assertSafePath, isContained } from "../install/paths.js";
 import { readManifest } from "../runtime/artifactStore.js";
@@ -86,6 +95,7 @@ const RE_PORT = /:\d+$/u;
 const RE_PORT_CAPTURE = /:(\d+)$/u;
 const RE_PIPELINE_DETAIL = /^\/api\/pipelines\/([^/]+)$/u;
 const RE_PIPELINE_DRAFTS = /^\/api\/pipelines\/([^/]+)\/drafts$/u;
+const RE_PIPELINE_TEMPLATE = /^\/api\/pipelines\/([^/]+)\/template$/u;
 const RE_DRAFT_BY_ID = /^\/api\/drafts\/(\d+)$/u;
 const RE_DRAFT_SAVE = /^\/api\/drafts\/(\d+)\/save$/u;
 const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
@@ -173,6 +183,84 @@ function findPipelineById(pipelinesDir: string, id: string): PipelineEntry | und
     }
   }
   return undefined;
+}
+
+/**
+ * The literal command of every `check` step a bundle would install (spec 037
+ * D4). The template preview shows these before Install, so accepting a bundle
+ * from elsewhere is never a blind trust decision.
+ *
+ * Best-effort by design: a pipeline entry that does not parse contributes no
+ * commands rather than failing the preview — `importBundle` is the check that
+ * refuses it at write time.
+ */
+function bundleCheckCommands(
+  bundle: WorkflowBundle
+): { pipeline: string; stepId: string; command: string }[] {
+  const checks: { pipeline: string; stepId: string; command: string }[] = [];
+  for (const file of bundle.files) {
+    // Normalised before the prefix test: "prompts/../pipelines/x.yaml" installs as
+    // a pipeline, so a preview reading the raw path would hide its check commands.
+    if (!normalize(file.path).startsWith("pipelines/")) continue;
+    let raw: unknown;
+    try {
+      raw = parse(file.content);
+    } catch {
+      continue;
+    }
+    const doc = raw as { id?: unknown; steps?: unknown };
+    if (!Array.isArray(doc?.steps)) continue;
+    for (const step of doc.steps as { id?: unknown; kind?: unknown; command?: unknown }[]) {
+      if (step?.kind !== "check" || typeof step.command !== "string") continue;
+      checks.push({
+        pipeline: typeof doc.id === "string" ? doc.id : file.path,
+        stepId: typeof step.id === "string" ? step.id : "",
+        command: step.command,
+      });
+    }
+  }
+  return checks;
+}
+
+/** One row of the catalogue listing (spec 037 FR-002). */
+interface PipelineRow {
+  id: string;
+  description: string;
+  path: string;
+  steps: number;
+  inputs: string[];
+}
+
+/**
+ * List every loadable pipeline in `pipelinesDir` as a catalogue row.
+ *
+ * `steps` and `inputs` come from the loaded definition so the Workflows and
+ * Templates tables can be rendered from one request (spec 037 D3/D4).
+ */
+function listPipelineRows(pipelinesDir: string, root: string): PipelineRow[] {
+  let files: string[];
+  try {
+    files = listPipelines(pipelinesDir);
+  } catch {
+    return [];
+  }
+  const rows: PipelineRow[] = [];
+  for (const filePath of files) {
+    try {
+      const loaded = loadPipeline(filePath);
+      rows.push({
+        id: loaded.def.id,
+        description: loaded.def.description,
+        path: relative(root, filePath),
+        steps: loaded.def.steps.length,
+        inputs: [...(loaded.def.inputs ?? [])],
+      });
+    } catch {
+      // Silently omit files that fail to parse; they are visible as errors
+      // on disk and will be flagged by `agent-flows canon:check`.
+    }
+  }
+  return rows;
 }
 
 /**
@@ -734,29 +822,17 @@ async function handleRequest(
     return;
   }
 
-  // GET /api/pipelines
+  // GET /api/pipelines[?source=bundled] (spec 037 FR-002)
+  // `source` is an exact literal, never a directory name joined from request
+  // input: the only alternative dir is the one the daemon already knows (S10).
   if (method === "GET" && pathname === "/api/pipelines") {
-    let files: string[];
-    try {
-      files = listPipelines(ctx.pipelinesDir);
-    } catch {
-      files = [];
+    const source = url.searchParams.get("source");
+    if (source !== null && source !== "bundled") {
+      json(res, 400, { error: "invalid source" });
+      return;
     }
-    const pipelines: { id: string; description: string; path: string }[] = [];
-    for (const filePath of files) {
-      try {
-        const loaded = loadPipeline(filePath);
-        pipelines.push({
-          id: loaded.def.id,
-          description: loaded.def.description,
-          path: relative(root, filePath),
-        });
-      } catch {
-        // Silently omit files that fail to parse; they are visible as errors
-        // on disk and will be flagged by `agent-flows canon:check`.
-      }
-    }
-    json(res, 200, { pipelines });
+    const dir = source === "bundled" ? ctx.bundledPipelinesDir : ctx.pipelinesDir;
+    json(res, 200, { pipelines: listPipelineRows(dir, root) });
     return;
   }
 
@@ -803,6 +879,85 @@ async function handleRequest(
     return;
   }
 
+  // POST /api/pipelines/:id/template — save a project workflow as a template
+  // bundle in the global templates dir (spec 037 D5/FR-003). Registered before
+  // the pipeline-detail route so a future looser detail pattern cannot swallow
+  // the /template suffix.
+  const saveTemplateMatch = RE_PIPELINE_TEMPLATE.exec(pathname);
+  if (method === "POST" && saveTemplateMatch) {
+    const id = decodeURIComponent(saveTemplateMatch[1]);
+    if (!isSafeId(id)) {
+      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
+      return;
+    }
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { templateId, overwrite } = parsed.value;
+    if (templateId !== undefined && typeof templateId !== "string") {
+      json(res, 400, { error: 'Field "templateId" must be a string when provided' });
+      return;
+    }
+    // The template defaults to the pipeline's own id and is re-checked either
+    // way — a default is not a reason to skip validation (S5).
+    const tId = typeof templateId === "string" && templateId !== "" ? templateId : id;
+    if (!isSafeId(tId)) {
+      json(res, 400, { error: `Template id "${tId}" is invalid` });
+      return;
+    }
+    try {
+      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
+    } catch {
+      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
+      return;
+    }
+    const entry = findPipelineById(ctx.pipelinesDir, id);
+    if (!entry) {
+      json(res, 404, { error: `Pipeline "${id}" not found` });
+      return;
+    }
+    const destPath = join(ctx.templatesBase, `${tId}.yaml`);
+    // lstat, not stat: a symlink planted at the destination (dangling or not)
+    // would redirect the write outside the templates directory, and a dangling
+    // one is invisible to existsSync.
+    let destStat: Stats | undefined;
+    try {
+      destStat = lstatSync(destPath);
+    } catch {
+      destStat = undefined;
+    }
+    if (destStat?.isSymbolicLink()) {
+      json(res, 403, { error: `Template "${tId}" path is a symbolic link — refusing to write` });
+      return;
+    }
+    if (destStat && overwrite !== true) {
+      json(res, 409, { error: `Template "${tId}" already exists` });
+      return;
+    }
+    try {
+      const bundle = exportBundle(id, ctx.pipelinesDir);
+      mkdirSync(ctx.templatesBase, { recursive: true });
+      // "wx" unless overwriting: the exclusive open closes the window between
+      // the lstat above and the write, so nothing can be planted in between.
+      writeFileSync(destPath, stringifyBundle(bundle), {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: overwrite === true ? "w" : "wx",
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        json(res, 409, { error: `Template "${tId}" already exists` });
+        return;
+      }
+      json(res, 422, { error: safePath((err as Error).message, root) });
+      return;
+    }
+    json(res, 201, { templateId: tId, path: destPath });
+    return;
+  }
+
   // GET /api/pipelines/:id
   // No isSafeId check here: findPipelineById scans loaded pipeline ids for an
   // exact match and never joins `id` into a filesystem path, so an unsafe id
@@ -812,7 +967,15 @@ async function handleRequest(
   const pipelineDetailMatch = RE_PIPELINE_DETAIL.exec(pathname);
   if (method === "GET" && pipelineDetailMatch) {
     const id = decodeURIComponent(pipelineDetailMatch[1]);
-    const entry = findPipelineById(ctx.pipelinesDir, id);
+    // Same exact-literal enum as the listing route: the template preview reads
+    // a bundled definition the project has not installed (spec 037 D4).
+    const source = url.searchParams.get("source");
+    if (source !== null && source !== "bundled") {
+      json(res, 400, { error: "invalid source" });
+      return;
+    }
+    const lookupDir = source === "bundled" ? ctx.bundledPipelinesDir : ctx.pipelinesDir;
+    const entry = findPipelineById(lookupDir, id);
     if (!entry) {
       json(res, 404, { error: `Pipeline "${id}" not found` });
       return;
@@ -985,6 +1148,17 @@ async function handleRequest(
       json(res, 400, { error: 'Field "gateMode" must be "manual" or "auto"' });
       return;
     }
+    // FR-009/S6: inputs are workflow input values, so every one of them must be
+    // a string — a nested object reaches a z.string() input and produces a run
+    // that appears to succeed on garbled data.
+    if (typeof inputs === "object" && inputs !== null && !Array.isArray(inputs)) {
+      for (const [key, value] of Object.entries(inputs as Record<string, unknown>)) {
+        if (typeof value !== "string") {
+          json(res, 400, { error: `Input "${key.slice(0, 100)}" must be a string` });
+          return;
+        }
+      }
+    }
 
     // Resolve pipeline step defs for provenance recording (spec 029 FR-002) and
     // to get the declared inputs list for artifact resolution (spec 029 FR-003).
@@ -992,6 +1166,36 @@ async function handleRequest(
     // transportPerStep will be empty rather than wrong.
     const pipelineEntry = findPipelineById(ctx.pipelinesDir, pipeline);
     const pipelineDef = pipelineEntry?.loaded.def;
+
+    // FR-009/S6: the per-step model override map is a flat step id → model id
+    // record. Keys must name steps of this pipeline and values must be
+    // registry-id-shaped, so a typo fails here rather than silently running the
+    // profile default, and nothing unvalidated reaches the CLI argv.
+    if (models !== undefined) {
+      if (typeof models !== "object" || models === null || Array.isArray(models)) {
+        json(res, 400, { error: 'Field "models" must be an object' });
+        return;
+      }
+      if (!pipelineDef) {
+        json(res, 400, {
+          error: `Field "models" cannot be validated: pipeline "${pipeline}" not found`,
+        });
+        return;
+      }
+      const stepIds = new Set(pipelineDef.steps.map((s) => s.id));
+      for (const [stepId, model] of Object.entries(models as Record<string, unknown>)) {
+        if (!stepIds.has(stepId)) {
+          json(res, 400, {
+            error: `Model override "${stepId.slice(0, 100)}" is not a step of "${pipeline}"`,
+          });
+          return;
+        }
+        if (typeof model !== "string" || model.length > 100 || !CLI_MODEL_RE.test(model)) {
+          json(res, 400, { error: `Model override "${stepId.slice(0, 100)}" must be a model id` });
+          return;
+        }
+      }
+    }
 
     // Extract explicit inputs early so the artifact check can skip inputs that
     // the operator already provided — those don't need to come from the artifact.
@@ -1722,6 +1926,7 @@ async function handleRequest(
         sourcePipeline: bundle.sourcePipeline,
         exportedAt: bundle.exportedAt,
         files: bundle.files.map((f) => f.path),
+        checks: bundleCheckCommands(bundle),
       });
     } catch (err) {
       json(res, 422, { error: `Template "${tId}" is invalid: ${(err as Error).message}` });
