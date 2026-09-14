@@ -1,6 +1,6 @@
 # 0013. A visual editor meets the Charter's bar
 
-Status: Superseded by n8n hybrid (2026-09-04) — the direction described here (agent-flows-served DAG editor) was evaluated live on 2026-09-04 and superseded by Binding C (n8n). See README "Current direction" section and `docs/research/2026-09-04-n8n-spike.md`. Originally Accepted (2026-09-03).
+Status: Superseded by n8n hybrid (2026-09-04); the hybrid was retired by ADR-0017 (2026-09-14) and this decision's direction is resumed by spec 037. See `docs/research/2026-09-04-n8n-spike.md` for the hybrid's evaluation. Originally Accepted (2026-09-03).
 
 Amends: ADR-0011 (operating surface), the README Charter. Does not revive ADR-0010.
 

@@ -81,7 +81,7 @@ cd <path-to-your-repo> && agent-flows serve
 
 Run this from your project directory — `agent-flows serve` uses cwd as the project directory by default. (You can also set `AGENT_FLOWS_PROJECT_DIR` to override the target, but running from the project directory is simpler.)
 
-This starts an HTTP server on port 7411. Set `AGENT_FLOWS_PORT=<port>` to change the default; `--port <port>` on the command line overrides it. The daemon stays running and serves a web page at `http://127.0.0.1:7411` showing active runs and available workflows; a running run can be stopped there with its **Cancel run** button. Leave this terminal open while you work.
+This starts an HTTP server on port 7411. Set `AGENT_FLOWS_PORT=<port>` to change the default; `--port <port>` on the command line overrides it. The daemon stays running and serves a web page at `http://127.0.0.1:7411` showing active runs and available workflows; a running run can be stopped there with its **Cancel run** button. Leave this terminal open while you work. The external-editor integration this page once carried was retired (ADR-0017); the daemon is the only executor.
 
 **Why the daemon?** The chat, the HTTP API, and the web page all share a single run registry. The daemon is the source of truth for run state, allowing you to start a workflow in the chat, check its status from the HTTP API, and resume it from the web page—all without losing track of what is running.
 
@@ -89,11 +89,11 @@ This starts an HTTP server on port 7411. Set `AGENT_FLOWS_PORT=<port>` to change
 
 agent-flows splits what your teammates need from what only this machine produced.
 
-| Location                                                                           | Contents                                                                                     | Versioned?                          |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------- |
-| `<your-repo>/.agent-flows/pipelines/`, `prompts/`, `providers.yaml`, `config.json` | The workflows you installed and edited — the canon                                           | Yes — commit them                   |
-| `~/.agent-flows/projects/<key>/`                                                   | `runs/` (artifacts and manifests), `agent-flows.sqlite`, `agent-flows-mastra.db`, `n8n.json` | No — machine-local, never committed |
-| `~/.agent-flows/templates/`, `~/.agent-flows/n8n.json`                             | Global template store and n8n instance credentials                                           | No — global to this machine         |
+| Location                                                                           | Contents                                                                         | Versioned?                          |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------- |
+| `<your-repo>/.agent-flows/pipelines/`, `prompts/`, `providers.yaml`, `config.json` | The workflows you installed and edited — the canon                               | Yes — commit them                   |
+| `~/.agent-flows/projects/<key>/`                                                   | `runs/` (artifacts and manifests), `agent-flows.sqlite`, `agent-flows-mastra.db` | No — machine-local, never committed |
+| `~/.agent-flows/templates/`                                                        | Global template store                                                            | No — global to this machine         |
 
 Inside one run directory (`runs/<runId>/`), beside the `<pipelineId>.json` artifact:
 
@@ -292,18 +292,6 @@ This creates native Claude Code workflows. They can execute `llm` and `assemble-
 
 **Important:** Per-step `permissions.contents` declared in your pipeline are NOT enforced by the native binding—each step runs with your current session's access level. The MCP path enforces these boundaries.
 
-### Generate n8n workflows
-
-To author and run workflows in n8n (the visual editor):
-
-```sh
-agent-flows generate n8n      # generate .n8n-workflows/*.json from the canon
-```
-
-Install the typed agent node into n8n: copy the built `integrations/n8n-nodes-agent-flows` into `<N8N_USER_FOLDER>/.n8n/nodes/node_modules/`, then import the generated workflow. See `integrations/n8n-nodes-agent-flows/README.md` for details.
-
-To connect agent-flows to your n8n instance, use the web UI's **Connect n8n** action in the header. It opens a form for your base URL (http or https) and API key. The credentials are stored in `~/.agent-flows/n8n.json` with permissions 0600, outside the project directory so they cannot be committed. Environment variables `AGENT_FLOWS_N8N_URL` and `AGENT_FLOWS_N8N_API_KEY` take priority if set. Before connecting, per-workflow "Edit in n8n" buttons are dimmed; clicking them opens the connect form.
-
 ### Run a pipeline standalone
 
 To execute a pipeline outside the chat or web UI (for testing or CI):
@@ -333,7 +321,6 @@ agent-flows doctor            # verify all prerequisites; lists missing items wi
   - **Does not implement:** `gate`, `check`, `loop`, `persist-ticket`, `export-spec`, or nested `pipeline` steps. A pipeline containing any of these kinds is refused at generation time (no file is written; any stale artifact is deleted). Use Binding B for full pipeline coverage.
   - **Permissions not enforced:** per-step `permissions.contents` declared in the canon is not passed through to the Claude Code `agent()` API (which has no permission-restriction option). Every step runs with the host session's access level. A notice comment is emitted at the top of every generated file.
 - **Binding B** — Mastra interpreter + MCP server (Apache-2.0); durable suspend/resume HITL; steps execute via the open model registry (`agent-flows mcp` starts the server; `pnpm mastra:smoke` runs standalone).
-- **Binding C** — n8n workflow generator (`.n8n-workflows/*.json`, generated via `agent-flows generate n8n`); the canon compiles to an n8n workflow whose llm steps reference the installable `n8n-nodes-agent-flows.agentFlowsAgent` community node (`integrations/n8n-nodes-agent-flows/`). n8n provides the visual editor and execution surface; the canon stays the git-backed source.
 - **Model registry** — open; CLI aliases + passthrough of any model id; local `claude`/`codex` CLIs on subscription auth, Ollama local models, keyed APIs via LiteLLM.
 - **SQLite ticket store** — pipeline source of truth (better-sqlite3 + Drizzle); persisted by the `persist-ticket` step in each pipeline run.
 - **Layer-0 key isolation** — agent-flows process environment holds no real provider keys; LLM child processes (claude CLI) receive a scrubbed environment with credential keys removed; check step child processes receive only the allowlisted base env plus any vars explicitly declared on the step (Charter invariant).
@@ -346,9 +333,9 @@ agent-flows doctor            # verify all prerequisites; lists missing items wi
 
 **One canonical pipeline definition, many execution backends.** Chat-first operation via any MCP-capable client (Claude Code, Codex, or other). The same canon (provider-neutral YAML + prompts) runs unchanged against any configured model provider — swapping providers is a registry edit, not a code change (ADR-0011, ADR-0012). Provider portability is an acceptance criterion, enforced by smoke-testing the same pipeline under at least two independent bindings.
 
-**The visual editor is n8n, not a agent-flows-built one** (evaluated live 2026-09-04; see `docs/research/2026-09-04-n8n-spike.md` and `docs/research/2026-09-04-n8n-and-alternatives.md`). Rebuilding a node editor — the canvas is only a library (n8n uses Vue Flow); the forms, modals, inspector and execution UI are years of work — is not worth it for a private tool. Instead the canon compiles to n8n via Binding C, and the typed coding-agent step ships as an installable n8n node. n8n gives the editor and runtime for free; agent-flows keeps the git-backed canon, the provider-neutral role→model registry, and the typed repo-access grounding (`permissions.contents`) that n8n has no concept of. The agent-flows web UI (`src/serve/`) is a project inventory, library manager, and run monitor: it displays workflows in the project, enables viewing and deletion, supports creation from templates (both shipped and user-saved), shows active runs with their status, streams each step's status and output live, and provides approval controls for gates. n8n is the authoring surface — new workflows are created there, and existing workflows are edited there, with a link in the agent-flows UI redirecting to n8n. Workflows authored in n8n can be saved as global templates for later use in other projects. The UI is not an editor. This reflects a shift from the earlier direction of a agent-flows-served DAG editor (ADR-0013, spec 015).
+**The editor is the daemon's own page.** The third-party workflow-editor hybrid adopted on 2026-09-04 was retired on 2026-09-14 (ADR-0017): its export covered 8 of 12 pipelines, its community node bypassed the daemon's confinement and run records, and every one of its surfaces was a second representation of the canon to keep in sync. The daemon is the only executor and its web page (`src/serve/`) is the catalogue, the editor and the run monitor — it lists the project's installed workflows and the shipped ones, supports creation from templates (shipped and user-saved), edits a workflow with validation before any file is written, shows active runs with their status, streams each step's activity live, and provides approval controls for gates. This resumes the direction of ADR-0013.
 
-Current milestone: Binding C (built; pending input interpolation per spec 021), `n8n-nodes-agent-flows` node package (built), and investigation pipeline reading via `permissions: { contents: read }` (done). The n8n round-trip and template library (spec 022) are specified but not yet built. [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps.
+Current milestone: spec 037 — the developer page. Ship 1 (retire the hybrid, land the spec-036 run view) is done; the catalogue, the editor and the visual pass follow. Investigation pipeline reading via `permissions: { contents: read }` is done. [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps.
 
 ### Architecture & Design Record
 
@@ -366,10 +353,11 @@ Current milestone: Binding C (built; pending input interpolation per spec 021), 
 - [0010. Orchestrator Transport: HTTP + SSE](docs/decisions/0010-orchestrator-transport-http-sse.md) (superseded by ADR-0011)
 - [0011. Chat-first canon and bindings](docs/decisions/0011-chat-first-canon-and-bindings.md)
 - [0012. Canon ontology: single-nesting pipeline](docs/decisions/0012-canon-ontology-single-nesting-pipeline.md) (topology rule amended by ADR-0014)
-- [0013. A visual editor meets the Charter's bar](docs/decisions/0013-visual-editor-meets-the-bar.md)
+- [0013. A visual editor meets the Charter's bar](docs/decisions/0013-visual-editor-meets-the-bar.md) (superseded 2026-09-04, resumed by ADR-0017)
 - [0014. Canon topology: explicit edges](docs/decisions/0014-canon-topology-explicit-edges.md)
 - [0015. The SDLC is a library of composable workflows](docs/decisions/0015-sdlc-as-composable-workflows.md)
 - [0016. Prompt authoring: portable core in the canon, model-conditional knobs in bindings](docs/decisions/0016-prompt-authoring-convention.md)
+- [0017. Retire the workflow-editor hybrid](docs/decisions/0017-retire-the-workflow-editor-hybrid.md)
 
 **Hardened Specs (per-feature):**
 See [`specs/`](specs/) for the full set: stage1-hardening, module-system, tracker-provider, executor, stage2-development, stage3-testing, stage4-audit, orchestrator-server, observability.

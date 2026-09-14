@@ -143,18 +143,18 @@ exportedAt, sourcePipeline, files:[{path, content}]}` from `src/install/bundle.t
 **Non-goals.** A drag-and-drop canvas (the diagram is generated from `dependsOn`); block-form step
 editing beyond the fields listed in D6 (a follow-up); MCP changes; deleting the owner's
 `~/.agent-flows/n8n.json` or `<state>/n8n.json` files (the README sections that named them are
-removed with D1; ADR-0015 is the surviving pointer that names them as safe to delete); the token
+removed with D1; ADR-0017 is the surviving pointer that names them as safe to delete); the token
 streaming and retention follow-ups of 036.
 
 ## Decisions
 
-**D1 — Retire n8n, with an ADR.** New `docs/decisions/0015-retire-the-n8n-hybrid.md` (Accepted,
+**D1 — Retire n8n, with an ADR.** New `docs/decisions/0017-retire-the-workflow-editor-hybrid.md` (Accepted,
 2026-09-14): the n8n hybrid of 2026-09-04 is withdrawn; the page is the editor and the daemon is
 the only executor; reasons: export covered 8 of 12 pipelines (`pipeline`, `loop`, `check` and gate
 semantics had no node), the community node spawned `claude` directly and bypassed the daemon's
 confinement (spec 035 was the fix and is withdrawn with it), the canvas need is met by a generated
 levels diagram, and every n8n surface was a second truth to keep in sync. ADR-0013's superseding
-note is amended to point at 0015. Spec 035 status → `Withdrawn — 2026-09-14 (ADR-0015)`; specs/027
+note is amended to point at 0015. Spec 035 status → `Withdrawn — 2026-09-14 (ADR-0017)`; specs/027
 n8n items closed. The ADR additionally names `~/.agent-flows/n8n.json` and `<stateDir>/n8n.json` as
 leftovers holding an n8n API key, safe to delete (security finding S4) — the Non-goals below keep
 the files themselves but the ADR is the surviving pointer once the README sections that named them

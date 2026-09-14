@@ -1,11 +1,16 @@
 # 035. n8n node via daemon
 
-| Field        | Value                     |
-| ------------ | ------------------------- |
-| Feature Name | n8n node via daemon       |
-| Branch       | `035-n8n-node-via-daemon` |
-| Status       | Draft — 2026-09-14        |
-| Created      | 2026-09-14                |
+| Field        | Value                             |
+| ------------ | --------------------------------- |
+| Feature Name | n8n node via daemon               |
+| Branch       | `035-n8n-node-via-daemon`         |
+| Status       | Withdrawn — 2026-09-14 (ADR-0017) |
+| Created      | 2026-09-14                        |
+
+**Withdrawn 2026-09-14 (ADR-0017).** This spec's whole subject was the n8n community node; the
+n8n hybrid was retired the same day and the node package deleted, so routing it through the daemon
+has nothing left to fix. The per-profile model list it proposed survives as a follow-up on spec 037.
+The body below is left as written, as history.
 
 ## Problem
 

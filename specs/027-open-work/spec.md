@@ -214,6 +214,27 @@ accepted on a single-user 0700-state-dir machine; a token would not stop a same-
 "Run…" form on workflow rows; n8n-through-daemon still needs the 2026-09-13 ADR; the `projectState`
 review's 7 minors are all fixed, none outstanding (2ae2140).
 
+## 2026-09-14 — n8n retired
+
+ADR-0017 retires the n8n hybrid. The daemon is the only executor and the daemon's page is the
+editor (spec 037). This closes every open n8n item recorded above; nothing above is deleted, it is
+the record of how the decision was reached.
+
+- **Line 118-125, "Binding C (n8n)" and "n8n as an executor needs an ADR":** closed. The ADR was
+  written (ADR-0017) and the answer is neither branch — `src/bindings/n8n/`, `src/serve/routes/n8n.ts`,
+  `src/serve/routes/n8nRuntime.ts`, every `/api/n8n/*` route, `POST /api/pipelines/:id/n8n`,
+  `POST /api/templates/from-n8n`, the `generate n8n` CLI target and the `bindings:n8n` script are
+  deleted. `src/serve/no-n8n.test.ts` keeps them deleted.
+- **Line 145, "`.n8n-workflows/` export covers 8 of 12 pipelines":** closed, not fixed. The partial
+  coverage is one of ADR-0017's reasons; the export is gone and `.n8n-workflows/` is dead output the
+  owner can delete.
+- **Line 167, "n8n is where new workflows are authored":** superseded. The page is the authoring
+  surface — spec 037 D3/D4/D6, shipping in Ships 2 and 3.
+- **Lines 203-214, the runtime card and "n8n-through-daemon still needs the 2026-09-13 ADR":** the
+  card and its routes are deleted; the ADR is written; spec 035 is Withdrawn.
+- **Leftovers on this machine:** `~/.agent-flows/n8n.json` and `<stateDir>/n8n.json` hold a base URL
+  and an API key that nothing reads any more. Deleting them is the owner's call (ADR-0017).
+
 ## Immediate next steps
 
 1. Implement spec 026, starting with cancellation (FR-001 … FR-007) — it is the largest control gap.
