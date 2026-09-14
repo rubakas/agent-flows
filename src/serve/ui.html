@@ -172,7 +172,8 @@
       /* Split view (spec 034 D9). Below the breakpoint both panes are plain
          blocks, so the narrow layout is the stacked one by default. */
       #runs-split,
-      #settings-split {
+      #settings-split,
+      .workflow-split {
         display: flex;
         flex-direction: column;
         gap: 16px;
@@ -210,9 +211,20 @@
           max-width: 1600px;
         }
         #runs-split,
-        #settings-split {
+        #settings-split,
+        .workflow-split {
           flex-direction: row;
           align-items: flex-start;
+        }
+        .workflow-pane-diagram {
+          flex: 0 0 45%;
+          min-width: 0;
+        }
+        .workflow-pane-tables {
+          flex: 1;
+          min-width: 0;
+          border-left: 1px solid var(--line);
+          padding-left: 16px;
         }
         #runs-pane-list {
           flex: 0 0 45%;
@@ -620,6 +632,108 @@
         color: var(--muted);
         margin-left: 6px;
       }
+      /* Levels diagram (037 D7). The container scrolls; the svg keeps its size. */
+      .diagram {
+        overflow-x: auto;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        padding: 4px;
+      }
+      .levels .node rect {
+        fill: var(--panel);
+        stroke: var(--line);
+      }
+      .levels .kind-gate rect {
+        stroke: var(--accent);
+        stroke-dasharray: 4 3;
+      }
+      .levels .unreachable rect {
+        stroke: var(--err);
+      }
+      .levels .node-id {
+        font-family: var(--mono);
+        font-size: 12px;
+        fill: var(--ink);
+      }
+      .levels .node-meta {
+        font-size: 11px;
+        fill: var(--ink-2);
+      }
+      .levels .node-sub {
+        font-size: 10px;
+        fill: var(--muted);
+      }
+      .levels .edge {
+        stroke: var(--line);
+        stroke-width: 1;
+      }
+      /* Dialogs (037 D3/D4): a bordered panel, no decorative chrome. */
+      dialog {
+        background: var(--panel);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 16px;
+        min-width: 320px;
+        max-width: 680px;
+        max-height: 80vh;
+        overflow-y: auto;
+      }
+      dialog h3 {
+        font-size: 14px;
+        margin-bottom: 10px;
+      }
+      dialog .field {
+        display: block;
+        margin-bottom: 10px;
+      }
+      dialog .field > span {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        font-family: var(--mono);
+        margin-bottom: 3px;
+      }
+      dialog textarea,
+      dialog input[type="text"],
+      dialog select {
+        font: inherit;
+        font-size: 13px;
+        width: 100%;
+        padding: 4px 6px;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      dialog textarea {
+        font-family: var(--mono);
+      }
+      dialog .dialog-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 12px;
+      }
+      dialog .radio-row {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        margin-bottom: 8px;
+        font-size: 13px;
+      }
+      .workflow-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      .workflow-head h2 {
+        font-family: var(--mono);
+        font-size: 14px;
+      }
     </style>
   </head>
   <body>
@@ -668,38 +782,66 @@
         <div id="run-view-body"></div>
       </section>
 
-      <!-- Workflows view (D4) -->
+      <!-- Workflows view (037 D3) — one table: the set the daemon actually runs -->
       <section class="view" id="view-workflows" hidden>
         <div class="section">
           <div class="section-header">
-            <h2>Project workflows</h2>
-            <span class="tier-badge tier-project">project</span>
+            <h2>Workflows</h2>
+            <span id="workflows-source-note" style="font-size: 12px; color: var(--muted)"></span>
+            <span class="actions" style="margin-left: auto">
+              <button class="btn" id="btn-new-workflow" hidden>New workflow</button>
+              <a class="btn" id="btn-from-template" href="#/templates">From template…</a>
+            </span>
           </div>
-          <div id="project-table-wrap">Loading…</div>
+          <p class="empty" id="workflows-readonly-note" hidden>
+            Bundled workflows are read-only; Install to edit.
+          </p>
+          <div id="workflows-table-wrap">Loading…</div>
         </div>
+      </section>
 
+      <!-- Workflow view (037 D5, read-only) -->
+      <section class="view" id="view-workflow" hidden>
+        <div class="section-header">
+          <a class="btn" href="#/workflows">← Workflows</a>
+        </div>
+        <div id="workflow-view-body"></div>
+      </section>
+
+      <!-- Workflow editor (037 D6) — arrives in Ship 3 -->
+      <section class="view" id="view-workflow-edit" hidden>
+        <div class="section-header">
+          <a class="btn" href="#/workflows">← Workflows</a>
+        </div>
+        <div id="workflow-edit-body"></div>
+      </section>
+
+      <!-- Templates view (037 D4) = the catalogue we ship plus saved bundles -->
+      <section class="view" id="view-templates" hidden>
         <div class="section">
           <div class="section-header">
-            <h2>Bundled workflows</h2>
-            <span class="tier-badge tier-bundled">bundled</span>
+            <h2>Bundled</h2>
+            <span style="font-size: 12px; color: var(--muted)">the workflows we ship</span>
             <button class="btn" id="btn-install-all" style="margin-left: auto">Install all</button>
           </div>
           <div id="bundled-table-wrap">Loading…</div>
         </div>
-      </section>
 
-      <!-- Templates view (D5) -->
-      <section class="view" id="view-templates" hidden>
         <div class="section">
           <div class="section-header">
-            <h2>Templates</h2>
-            <span class="tier-badge tier-template">template</span>
-            <span style="font-size: 12px; color: var(--muted)"
-              >global ~/.agent-flows/templates/</span
-            >
+            <h2>Yours</h2>
+            <span style="font-size: 12px; color: var(--muted)">~/.agent-flows/templates/</span>
           </div>
           <div id="template-table-wrap">Loading…</div>
         </div>
+      </section>
+
+      <!-- Template preview (037 D4) -->
+      <section class="view" id="view-template" hidden>
+        <div class="section-header">
+          <a class="btn" href="#/templates">← Templates</a>
+        </div>
+        <div id="template-view-body"></div>
       </section>
 
       <!-- Settings view (D6) -->
@@ -734,19 +876,64 @@
       </section>
     </main>
 
-    <!-- Read-only detail panel -->
-    <div id="detail-panel">
-      <div id="detail-header">
-        <h3 id="detail-title">—</h3>
-        <button class="btn" id="btn-close-detail">✕</button>
+    <!-- Install scope dialog (037 D3): installing makes the project set authoritative -->
+    <dialog id="dialog-install">
+      <h3>Install bundled workflows</h3>
+      <label class="radio-row">
+        <input type="radio" name="install-scope" value="all" checked />
+        <span class="install-all-label"></span>
+      </label>
+      <label class="radio-row">
+        <input type="radio" name="install-scope" value="one" />
+        <span class="install-one-label"></span>
+      </label>
+      <div class="dialog-actions">
+        <button class="btn" data-dialog-cancel="dialog-install">Cancel</button>
+        <button class="btn primary" id="btn-install-confirm">Install</button>
       </div>
-      <div id="detail-body"></div>
-    </div>
+    </dialog>
+
+    <!-- Run dialog (037 D3/FR-009) -->
+    <dialog id="dialog-run">
+      <h3 id="dialog-run-title">Run</h3>
+      <div id="dialog-run-fields"></div>
+      <div class="dialog-actions">
+        <button class="btn" data-dialog-cancel="dialog-run">Cancel</button>
+        <button class="btn primary" id="btn-run-confirm">Start run</button>
+      </div>
+    </dialog>
+
+    <!-- New workflow dialog (037 D3) -->
+    <dialog id="dialog-new-wf">
+      <h3>New workflow</h3>
+      <label class="field">
+        <span>id</span>
+        <input type="text" id="new-wf-id" placeholder="my-workflow" />
+      </label>
+      <label class="field">
+        <span>description</span>
+        <input type="text" id="new-wf-desc" placeholder="What it does" />
+      </label>
+      <div class="dialog-actions">
+        <button class="btn" data-dialog-cancel="dialog-new-wf">Cancel</button>
+        <button class="btn primary" id="btn-new-wf-confirm">Create</button>
+      </div>
+    </dialog>
 
     <div id="flash"></div>
 
     <script type="module">
       import { parseHash, hashFor, pollersFor } from "/ui-route.js";
+      import { renderLevelsSvg } from "/ui-graph.js";
+      import {
+        ACTIVE_STATUSES,
+        fmtElapsed,
+        fmtTime,
+        runRow,
+        statusClass,
+        templateRow,
+        workflowRow,
+      } from "/ui-tables.js";
       import {
         mergeLogEvents,
         renderDecisions,
@@ -786,116 +973,260 @@
         return json;
       }
 
-      // ── Detail panel ───────────────────────────────────────────────────────
+      // ── Dialogs (037 D3/D4) ────────────────────────────────────────────────
 
-      // The sliding panel now serves only the workflow "View" action; the run
-      // details moved into their own view (spec 034 D3).
-      const detailPanel = document.getElementById("detail-panel");
-      document.getElementById("btn-close-detail").onclick = () =>
-        detailPanel.classList.remove("open");
-
-      function showDetail(title, steps, inputs, description) {
-        document.getElementById("detail-title").textContent = title;
-        const body = document.getElementById("detail-body");
-        let html = "";
-        if (description)
-          html += `<p style="margin-bottom:10px;color:var(--ink-2);font-size:13px">${escH(description)}</p>`;
-        if (inputs && inputs.length) {
-          html += `<div style="margin-bottom:12px"><strong style="font-size:12px;color:var(--muted)">INPUTS</strong> `;
-          html += inputs
-            .map(
-              (i) =>
-                `<code style="font-size:12px;background:var(--sunk);padding:1px 5px;border-radius:3px">${escH(i)}</code>`
-            )
-            .join(" ");
-          html += "</div>";
-        }
-        if (steps && steps.length) {
-          html += `<div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px">STEPS</div>`;
-          for (const s of steps) {
-            const deps =
-              s.dependsOn && s.dependsOn.length ? ` ← ${escH(s.dependsOn.join(", "))}` : "";
-            html += `<div class="step-row">
-              <span class="step-kind">${escH(s.kind)}</span>
-              <span class="step-id">${escH(s.id)}</span>
-              <span style="color:var(--muted);font-size:12px">${deps}</span>
-            </div>`;
-          }
-        }
-        body.innerHTML = html;
-        detailPanel.classList.add("open");
+      for (const btn of document.querySelectorAll("[data-dialog-cancel]")) {
+        btn.onclick = () => document.getElementById(btn.dataset.dialogCancel).close();
       }
 
-      // ── Project tier ───────────────────────────────────────────────────────
+      // ── Workflows view (037 D3) ────────────────────────────────────────────
 
-      async function loadProjectTier() {
-        const wrap = document.getElementById("project-table-wrap");
+      /**
+       * Which catalogue the daemon is serving right now. resolveCanonDir is
+       * exclusive: the moment the project holds one installed pipeline it alone
+       * feeds the listing, MCP and every run — so the table shows one set, never
+       * a merge of two.
+       */
+      let _pipelinesSource = "bundled";
+
+      /** Every id currently listed, for the "install all" option of the dialog. */
+      let _listedWorkflowIds = [];
+
+      async function loadWorkflows() {
+        const wrap = document.getElementById("workflows-table-wrap");
+        const note = document.getElementById("workflows-source-note");
+        const readOnlyNote = document.getElementById("workflows-readonly-note");
         try {
           const env = await api("GET", "/api/environment");
-          const installed = env.installed || [];
-          if (!installed.length) {
-            // FR-005: say what is being served instead, so an empty section does
-            // not read as "no workflows available".
-            const note =
-              env.pipelinesSource === "bundled"
-                ? "No workflows installed in this project — the bundled workflows below are being served."
-                : "No workflows installed in this project.";
-            wrap.innerHTML = `<p class="empty">${escH(note)}</p>`;
+          _pipelinesSource = env.pipelinesSource === "project" ? "project" : "bundled";
+          const isProject = _pipelinesSource === "project";
+          const data = await api("GET", "/api/pipelines");
+          const rows = (data.pipelines || []).map((p) => ({ ...p, source: _pipelinesSource }));
+          _listedWorkflowIds = rows.map((r) => r.id);
+
+          document.getElementById("btn-new-workflow").hidden = !isProject;
+          note.textContent = isProject
+            ? "Installed in this project — this is the set the daemon runs."
+            : "Install the bundled workflows to start editing.";
+          readOnlyNote.hidden = isProject;
+
+          if (!rows.length) {
+            wrap.innerHTML = `<p class="empty">No workflows found.</p>`;
             return;
           }
-          let html = `<table><thead><tr>
-            <th>ID</th><th>Tier</th><th>Actions</th>
-          </tr></thead><tbody>`;
-          for (const id of installed) {
-            html += `<tr>
-              <td class="pipeline-id">${escH(id)}</td>
-              <td><span class="tier-badge tier-project">project</span></td>
-              <td class="actions">
-                <button class="btn" data-view-project="${escH(id)}">View</button>
-                <button class="btn danger" data-del-project="${escH(id)}">Delete</button>
-              </td>
-            </tr>`;
-          }
-          html += "</tbody></table>";
-          wrap.innerHTML = html;
-
-          // Wire view buttons
-          wrap.querySelectorAll("[data-view-project]").forEach((btn) => {
-            btn.onclick = async () => {
-              try {
-                const d = await api(
-                  "GET",
-                  `/api/pipelines/${encodeURIComponent(btn.dataset.viewProject)}`
-                );
-                showDetail(btn.dataset.viewProject, d.def.steps, d.def.inputs, d.def.description);
-              } catch (e) {
-                flash(e.message, true);
-              }
-            };
-          });
-
-          // Wire delete buttons
-          wrap.querySelectorAll("[data-del-project]").forEach((btn) => {
-            btn.onclick = async () => {
-              const id = btn.dataset.delProject;
-              if (!confirm(`Delete pipeline "${id}"?`)) return;
-              try {
-                await api("DELETE", `/api/pipelines/${encodeURIComponent(id)}`, {});
-                flash(`Deleted "${id}"`);
-                loadProjectTier();
-              } catch (e) {
-                flash(e.message, true);
-              }
-            };
-          });
+          wrap.innerHTML = `<table><thead><tr>
+            <th>ID</th><th>Description</th><th>Steps</th><th>Inputs</th><th>Source</th><th>Actions</th>
+          </tr></thead><tbody>${rows.map(workflowRow).join("")}</tbody></table>`;
+          wireWorkflowsTable(wrap);
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
       }
 
-      // ── Template tier ──────────────────────────────────────────────────────
+      function wireWorkflowsTable(wrap) {
+        for (const btn of wrap.querySelectorAll("[data-view-wf]")) {
+          btn.onclick = () => {
+            location.hash = hashFor("workflow", btn.dataset.viewWf);
+          };
+        }
+        for (const btn of wrap.querySelectorAll("[data-edit-wf]")) {
+          btn.onclick = () => {
+            location.hash = hashFor("workflow-edit", btn.dataset.editWf);
+          };
+        }
+        for (const btn of wrap.querySelectorAll("[data-run-wf]")) {
+          btn.onclick = () => openRunDialog(btn.dataset.runWf);
+        }
+        for (const btn of wrap.querySelectorAll("[data-install-wf]")) {
+          btn.onclick = () => openInstallDialog(btn.dataset.installWf, _listedWorkflowIds);
+        }
+        for (const btn of wrap.querySelectorAll("[data-del-wf]")) {
+          btn.onclick = () => deleteWorkflow(btn.dataset.delWf, loadWorkflows);
+        }
+      }
 
-      async function loadTemplateTier() {
+      async function deleteWorkflow(id, onDone) {
+        if (!confirm(`Delete workflow "${id}"?`)) return;
+        try {
+          await api("DELETE", `/api/pipelines/${encodeURIComponent(id)}`, {});
+          flash(`Deleted "${id}"`);
+          onDone();
+        } catch (e) {
+          // A 409 carries the list of dependants; it is the only useful thing to
+          // show, so it is shown verbatim.
+          flash(e.message, true);
+        }
+      }
+
+      document.getElementById("btn-new-workflow").onclick = () => {
+        document.getElementById("new-wf-id").value = "";
+        document.getElementById("new-wf-desc").value = "";
+        document.getElementById("dialog-new-wf").showModal();
+      };
+
+      document.getElementById("btn-new-wf-confirm").onclick = async () => {
+        const id = document.getElementById("new-wf-id").value.trim();
+        const description = document.getElementById("new-wf-desc").value.trim();
+        if (id === "") {
+          flash("An id is required", true);
+          return;
+        }
+        try {
+          await api("POST", "/api/pipelines", { id, description });
+          document.getElementById("dialog-new-wf").close();
+          location.hash = hashFor("workflow-edit", id);
+        } catch (e) {
+          flash(e.message, true);
+        }
+      };
+
+      // ── Install dialog (037 D3/FR-014) ─────────────────────────────────────
+
+      /** The pending install choice: the row's id and the full catalogue. */
+      let _installTarget = { id: null, ids: [], onDone: null };
+
+      function openInstallDialog(id, ids, onDone) {
+        const dlg = document.getElementById("dialog-install");
+        const all = ids.length > 0 ? ids : [id];
+        _installTarget = { id, ids: all, onDone: onDone ?? loadWorkflows };
+        // textContent, not innerHTML: these strings carry a pipeline id.
+        dlg.querySelector(".install-all-label").textContent =
+          `Install all ${all.length} bundled workflows (recommended)`;
+        dlg.querySelector(".install-one-label").textContent =
+          `Install only ${id} and what it depends on — the other ${all.length - 1} will no ` +
+          `longer be listed or runnable in this project`;
+        dlg.querySelector('input[value="all"]').checked = true;
+        dlg.showModal();
+      }
+
+      document.getElementById("btn-install-confirm").onclick = async () => {
+        const dlg = document.getElementById("dialog-install");
+        const scope = dlg.querySelector('input[name="install-scope"]:checked').value;
+        const ids = scope === "all" ? _installTarget.ids : [_installTarget.id];
+        try {
+          const r = await api("POST", "/api/install", { ids, overwrite: false });
+          dlg.close();
+          flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
+          _installTarget.onDone();
+        } catch (e) {
+          flash(e.message, true);
+        }
+      };
+
+      // ── Run dialog (037 D3/FR-009) ─────────────────────────────────────────
+
+      let _runTarget = null;
+
+      async function openRunDialog(id) {
+        try {
+          const d = await api("GET", `/api/pipelines/${encodeURIComponent(id)}`);
+          _runTarget = id;
+          document.getElementById("dialog-run-title").textContent = `Run ${id}`;
+          const inputs = d.def.inputs || [];
+          const steps = d.def.steps || [];
+          let html = inputs
+            .map(
+              (name) =>
+                `<label class="field"><span>${escH(name)}</span>
+                 <textarea rows="3" data-run-input="${escH(name)}"></textarea></label>`
+            )
+            .join("");
+          html += `<label class="field"><span>gate mode</span>
+            <select id="run-gate-mode">
+              <option value="manual">manual</option>
+              <option value="auto">auto</option>
+            </select></label>`;
+          html += `<div class="field"><span style="display:block;font-size:12px;color:var(--muted)">model overrides (optional)</span>`;
+          for (const st of steps) {
+            html += `<label class="field"><span>${escH(st.id)}</span>
+              <input type="text" data-run-model="${escH(st.id)}" placeholder="default" /></label>`;
+          }
+          html += `</div>`;
+          document.getElementById("dialog-run-fields").innerHTML = html;
+          document.getElementById("dialog-run").showModal();
+        } catch (e) {
+          flash(e.message, true);
+        }
+      }
+
+      document.getElementById("btn-run-confirm").onclick = async () => {
+        const dlg = document.getElementById("dialog-run");
+        const inputs = {};
+        for (const el of dlg.querySelectorAll("[data-run-input]")) {
+          inputs[el.dataset.runInput] = el.value;
+        }
+        const models = {};
+        for (const el of dlg.querySelectorAll("[data-run-model]")) {
+          if (el.value.trim() !== "") models[el.dataset.runModel] = el.value.trim();
+        }
+        const body = {
+          pipeline: _runTarget,
+          inputs,
+          gateMode: document.getElementById("run-gate-mode").value,
+          ...(Object.keys(models).length > 0 ? { models } : {}),
+        };
+        try {
+          const r = await api("POST", "/api/runs", body);
+          dlg.close();
+          location.hash = hashFor("run", r.runId);
+        } catch (e) {
+          flash(e.message, true);
+        }
+      };
+
+      // ── Templates view (037 D4) ────────────────────────────────────────────
+
+      /** The bundled catalogue as last listed, for Install all. */
+      let _bundledIds = [];
+
+      async function loadTemplates() {
+        loadBundledCatalogue();
+        loadSavedTemplates();
+      }
+
+      async function loadBundledCatalogue() {
+        const wrap = document.getElementById("bundled-table-wrap");
+        try {
+          const data = await api("GET", "/api/pipelines?source=bundled");
+          const rows = data.pipelines || [];
+          _bundledIds = rows.map((r) => r.id);
+          document.getElementById("btn-install-all").hidden = rows.length === 0;
+          if (!rows.length) {
+            wrap.innerHTML = `<p class="empty">No bundled workflows found.</p>`;
+            return;
+          }
+          wrap.innerHTML = `<table><thead><tr>
+            <th>ID</th><th>Description</th><th>Steps</th><th>Inputs</th><th>Actions</th>
+          </tr></thead><tbody>${rows
+            .map((r) => templateRow({ ...r, section: "bundled" }))
+            .join("")}</tbody></table>`;
+          for (const btn of wrap.querySelectorAll("[data-preview-bundled]")) {
+            btn.onclick = () => {
+              location.hash = hashFor("template", btn.dataset.previewBundled);
+            };
+          }
+          for (const btn of wrap.querySelectorAll("[data-install-bundled]")) {
+            btn.onclick = () =>
+              openInstallDialog(btn.dataset.installBundled, _bundledIds, loadTemplates);
+          }
+        } catch (e) {
+          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      // FR-014: one POST carrying every bundled id, not one per row.
+      document.getElementById("btn-install-all").onclick = async () => {
+        if (!confirm(`Install all ${_bundledIds.length} bundled workflows into this project?`))
+          return;
+        try {
+          const r = await api("POST", "/api/install", { ids: _bundledIds, overwrite: false });
+          flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
+        } catch (e) {
+          flash(e.message, true);
+        }
+      };
+
+      async function loadSavedTemplates() {
         const wrap = document.getElementById("template-table-wrap");
         try {
           const data = await api("GET", "/api/templates");
@@ -904,115 +1235,266 @@
             wrap.innerHTML = `<p class="empty">No templates saved yet.</p>`;
             return;
           }
-          let html = `<table><thead><tr>
-            <th>ID</th><th>Tier</th><th>Source pipeline</th><th>Actions</th>
-          </tr></thead><tbody>`;
-          for (const t of templates) {
-            html += `<tr>
-              <td class="pipeline-id">${escH(t.templateId)}</td>
-              <td><span class="tier-badge tier-template">template</span></td>
-              <td class="pipeline-desc">${escH(t.sourcePipeline)}</td>
-              <td class="actions">
-                <button class="btn" data-install-tmpl="${escH(t.templateId)}">Install</button>
-                <button class="btn danger" data-del-tmpl="${escH(t.templateId)}">Delete</button>
-              </td>
-            </tr>`;
-          }
-          html += "</tbody></table>";
-          wrap.innerHTML = html;
-
-          wrap.querySelectorAll("[data-install-tmpl]").forEach((btn) => {
-            btn.onclick = async () => {
-              try {
-                const r = await api(
-                  "POST",
-                  `/api/templates/${encodeURIComponent(btn.dataset.installTmpl)}/install`,
-                  {}
-                );
-                flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
-                loadProjectTier();
-              } catch (e) {
-                flash(e.message, true);
-              }
+          wrap.innerHTML = `<table><thead><tr>
+            <th>Template</th><th>Source workflow</th><th>Exported</th><th>Actions</th>
+          </tr></thead><tbody>${templates
+            .map((t) => templateRow({ ...t, section: "yours" }))
+            .join("")}</tbody></table>`;
+          for (const btn of wrap.querySelectorAll("[data-preview-tmpl]")) {
+            btn.onclick = () => {
+              location.hash = hashFor("template", btn.dataset.previewTmpl);
             };
-          });
-
-          wrap.querySelectorAll("[data-del-tmpl]").forEach((btn) => {
+          }
+          for (const btn of wrap.querySelectorAll("[data-install-tmpl]")) {
+            btn.onclick = () => installSavedTemplate(btn.dataset.installTmpl);
+          }
+          for (const btn of wrap.querySelectorAll("[data-del-tmpl]")) {
             btn.onclick = async () => {
               const id = btn.dataset.delTmpl;
               if (!confirm(`Delete template "${id}"?`)) return;
               try {
                 await api("DELETE", `/api/templates/${encodeURIComponent(id)}`, {});
                 flash(`Deleted template "${id}"`);
-                loadTemplateTier();
+                loadSavedTemplates();
               } catch (e) {
                 flash(e.message, true);
               }
             };
-          });
+          }
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
       }
 
-      // ── Bundled tier ───────────────────────────────────────────────────────
-
-      async function loadBundledTier() {
-        const wrap = document.getElementById("bundled-table-wrap");
+      async function installSavedTemplate(id) {
         try {
-          const env = await api("GET", "/api/environment");
-          const available = env.available || [];
-          if (!available.length) {
-            wrap.innerHTML = `<p class="empty">No bundled workflows found.</p>`;
-            document.getElementById("btn-install-all").hidden = true;
+          const r = await api("POST", `/api/templates/${encodeURIComponent(id)}/install`, {});
+          if (r.skipped && r.skipped.length > 0 && r.written.length === 0) {
+            if (!confirm(`"${id}" is already installed. Overwrite the project's files?`)) return;
+            const forced = await api("POST", `/api/templates/${encodeURIComponent(id)}/install`, {
+              overwrite: true,
+            });
+            flash(`Installed: ${forced.written.join(", ")}`);
             return;
           }
-          document.getElementById("btn-install-all").hidden = false;
-          let html = `<table><thead><tr>
-            <th>ID</th><th>Tier</th><th>Actions</th>
-          </tr></thead><tbody>`;
-          for (const id of available) {
-            html += `<tr>
-              <td class="pipeline-id">${escH(id)}</td>
-              <td><span class="tier-badge tier-bundled">bundled</span></td>
-              <td class="actions">
-                <button class="btn" data-install-bundled="${escH(id)}">Install</button>
-              </td>
-            </tr>`;
-          }
-          html += "</tbody></table>";
-          wrap.innerHTML = html;
-
-          wrap.querySelectorAll("[data-install-bundled]").forEach((btn) => {
-            btn.onclick = async () => {
-              try {
-                const r = await api("POST", "/api/install", {
-                  ids: [btn.dataset.installBundled],
-                  overwrite: false,
-                });
-                flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
-                loadProjectTier();
-              } catch (e) {
-                flash(e.message, true);
-              }
-            };
-          });
-
-          // FR-005: one POST carrying every bundled id, not one per row.
-          document.getElementById("btn-install-all").onclick = async () => {
-            if (!confirm(`Install all ${available.length} bundled workflows into this project?`))
-              return;
-            try {
-              const r = await api("POST", "/api/install", { ids: available, overwrite: false });
-              flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
-              loadProjectTier();
-            } catch (e) {
-              flash(e.message, true);
-            }
-          };
+          flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
         } catch (e) {
-          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+          flash(e.message, true);
         }
+      }
+
+      // ── Workflow view (037 D5) ─────────────────────────────────────────────
+
+      /** The step table of the read-only workflow view. Every cell is escaped. */
+      function stepTableHtml(def) {
+        const cell = (v) =>
+          v === undefined || v === null
+            ? ""
+            : typeof v === "string"
+              ? escH(v)
+              : escH(JSON.stringify(v));
+        let html = `<table><thead><tr>
+          <th>Step</th><th>Kind</th><th>Role</th><th>Model</th><th>Depends on</th>
+          <th>Permissions</th><th>Schema</th>
+        </tr></thead><tbody>`;
+        for (const st of def.steps || []) {
+          html += `<tr>
+            <td class="pipeline-id">${escH(st.id)}</td>
+            <td>${cell(st.kind)}</td>
+            <td>${cell(st.role)}</td>
+            <td class="pipeline-id">${cell(st.model)}</td>
+            <td class="pipeline-id">${escH((st.dependsOn || []).join(", "))}</td>
+            <td>${cell(st.permissions)}</td>
+            <td>${cell(st.schema)}</td>
+          </tr>`;
+          if (st.kind === "check" && st.command !== undefined) {
+            // The literal command a check step runs is the one thing a reader
+            // must see before trusting a workflow from elsewhere.
+            html += `<tr><td colspan="7"><pre class="code-block">${escH(st.command)}</pre></td></tr>`;
+          }
+        }
+        return `${html}</tbody></table>`;
+      }
+
+      function promptBlocksHtml(def, prompts) {
+        let html = "";
+        for (const st of def.steps || []) {
+          const text = (prompts || {})[st.id];
+          if (text === undefined) continue;
+          html += `<details class="step-detail">
+            <summary>${escH(st.id)} prompt</summary>
+            <pre class="code-block">${escH(text)}</pre>
+          </details>`;
+        }
+        return html;
+      }
+
+      /** The read-only body shared by the workflow view and the template preview. */
+      function workflowBodyHtml(d) {
+        return `<div class="workflow-split">
+          <div class="workflow-pane-diagram">
+            <div class="diagram">${renderLevelsSvg(d.levels, d.graph, { steps: d.def.steps })}</div>
+          </div>
+          <div class="workflow-pane-tables">
+            ${stepTableHtml(d.def)}
+            ${promptBlocksHtml(d.def, d.prompts)}
+          </div>
+        </div>`;
+      }
+
+      async function openWorkflowView(id) {
+        const body = document.getElementById("workflow-view-body");
+        body.innerHTML = "Loading…";
+        try {
+          // The environment is re-read here because this view is deep-linkable:
+          // arriving straight on #/workflows/<id> must not guess the source.
+          const env = await api("GET", "/api/environment");
+          _pipelinesSource = env.pipelinesSource === "project" ? "project" : "bundled";
+          const d = await api("GET", `/api/pipelines/${encodeURIComponent(id)}`);
+          const isProject = _pipelinesSource === "project";
+          body.innerHTML = `<div class="workflow-head">
+            <h2>${escH(d.def.id)}</h2>
+            <span class="pipeline-desc">${escH(d.def.description || "")}</span>
+            <span class="tier-badge tier-${isProject ? "project" : "bundled"}">${escH(
+              _pipelinesSource
+            )}</span>
+            <span class="actions" style="margin-left:auto">
+              <button class="btn" data-wf-run>Run…</button>
+              ${isProject ? `<button class="btn" data-wf-edit>Edit</button>` : ""}
+              <button class="btn" data-wf-template>Save as template</button>
+              ${isProject ? `<button class="btn danger" data-wf-delete>Delete</button>` : ""}
+            </span>
+          </div>${workflowBodyHtml(d)}`;
+
+          body.querySelector("[data-wf-run]").onclick = () => openRunDialog(id);
+          const editBtn = body.querySelector("[data-wf-edit]");
+          if (editBtn)
+            editBtn.onclick = () => {
+              location.hash = hashFor("workflow-edit", id);
+            };
+          body.querySelector("[data-wf-template]").onclick = () => saveAsTemplate(id);
+          const delBtn = body.querySelector("[data-wf-delete]");
+          if (delBtn)
+            delBtn.onclick = () =>
+              deleteWorkflow(id, () => {
+                location.hash = hashFor("workflows");
+              });
+        } catch (e) {
+          body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      async function saveAsTemplate(id) {
+        const templateId = prompt("Save as template — template id:", id);
+        if (templateId === null) return;
+        try {
+          const r = await api("POST", `/api/pipelines/${encodeURIComponent(id)}/template`, {
+            templateId,
+          });
+          flash(`Saved template "${r.templateId}"`);
+        } catch (e) {
+          if (e.status === 409 && confirm(`Template "${templateId}" exists. Overwrite?`)) {
+            try {
+              const r = await api("POST", `/api/pipelines/${encodeURIComponent(id)}/template`, {
+                templateId,
+                overwrite: true,
+              });
+              flash(`Saved template "${r.templateId}"`);
+            } catch (err) {
+              flash(err.message, true);
+            }
+            return;
+          }
+          flash(e.message, true);
+        }
+      }
+
+      /** The editor arrives in Ship 3; the route exists so a saved link resolves. */
+      function renderWorkflowEditor(id) {
+        document.getElementById("workflow-edit-body").innerHTML = `<div class="section">
+          <p class="empty">Editor arrives in Ship 3.</p>
+          <a class="btn" href="${escH(hashFor("workflow", id))}">← ${escH(id)}</a>
+        </div>`;
+      }
+
+      // ── Template preview (037 D4) ──────────────────────────────────────────
+
+      /**
+       * One hash serves both sections, so the saved bundle is tried first and a
+       * 404 means the id names a workflow from the shipped catalogue instead.
+       */
+      async function openTemplateView(id) {
+        const body = document.getElementById("template-view-body");
+        body.innerHTML = "Loading…";
+        try {
+          let bundle = null;
+          try {
+            bundle = await api("GET", `/api/templates/${encodeURIComponent(id)}`);
+          } catch (e) {
+            if (e.status !== 404) throw e;
+          }
+          if (bundle) {
+            body.innerHTML = savedTemplateHtml(bundle);
+            body.querySelector("[data-tmpl-install]").onclick = () => installSavedTemplate(id);
+            return;
+          }
+          const d = await api("GET", `/api/pipelines/${encodeURIComponent(id)}?source=bundled`);
+          body.innerHTML = `<div class="workflow-head">
+            <h2>${escH(d.def.id)}</h2>
+            <span class="pipeline-desc">${escH(d.def.description || "")}</span>
+            <span class="tier-badge tier-bundled">bundled</span>
+            <span class="actions" style="margin-left:auto">
+              <button class="btn" data-tmpl-install-bundled>Install</button>
+            </span>
+          </div>${workflowBodyHtml(d)}`;
+          body.querySelector("[data-tmpl-install-bundled]").onclick = () =>
+            openInstallDialog(id, _bundledIds.length ? _bundledIds : [id], loadTemplates);
+        } catch (e) {
+          body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      /**
+       * A saved bundle is previewed from its manifest: every check command it
+       * would install and every file it carries that is not a pipeline, so
+       * Install is never a blind trust decision (037 D4).
+       */
+      function savedTemplateHtml(t) {
+        const files = t.files || [];
+        const extras = files.filter((f) => !f.startsWith("pipelines/"));
+        const checks = t.checks || [];
+        return `<div class="workflow-head">
+            <h2>${escH(t.templateId)}</h2>
+            <span class="pipeline-desc">from ${escH(t.sourcePipeline)}, exported ${escH(
+              t.exportedAt
+            )}</span>
+            <span class="tier-badge tier-template">template</span>
+            <span class="actions" style="margin-left:auto">
+              <button class="btn" data-tmpl-install>Install</button>
+            </span>
+          </div>
+          <div class="section">
+            <div class="section-header"><h2>Check commands</h2></div>
+            ${
+              checks.length
+                ? `<table><thead><tr><th>Workflow</th><th>Step</th><th>Command</th></tr></thead><tbody>${checks
+                    .map(
+                      (c) =>
+                        `<tr><td class="pipeline-id">${escH(c.pipeline)}</td>
+                         <td class="pipeline-id">${escH(c.stepId)}</td>
+                         <td><pre class="code-block">${escH(c.command)}</pre></td></tr>`
+                    )
+                    .join("")}</tbody></table>`
+                : `<p class="empty">This bundle runs no check commands.</p>`
+            }
+          </div>
+          <div class="section">
+            <div class="section-header"><h2>Files</h2></div>
+            <p class="empty" style="font-style:normal">
+              ${escH(String(files.length))} files, ${escH(String(extras.length))} of them not a workflow definition.
+            </p>
+            <div>${files.map((f) => `<span class="name-item">${escH(f)}</span>`).join("")}</div>
+          </div>`;
       }
 
       // ── Run observability ──────────────────────────────────────────────────
@@ -1020,51 +1502,11 @@
       /** Active SSE connection for the currently-watched run, if any. */
       let activeRunEs = null;
 
-      /** Format a UTC ISO string as a short local time string. */
-      function fmtTime(iso) {
-        try {
-          return new Date(iso).toLocaleString();
-        } catch {
-          return iso;
-        }
-      }
-
-      /** Return a CSS class name for a run/step status string. */
-      function statusClass(s) {
-        if (s === "running" || s === "started") return "running";
-        if (s === "awaiting_approval") return "awaiting_approval";
-        if (s === "succeeded" || s === "completed") return "succeeded";
-        if (s === "rejected") return "rejected";
-        if (s === "failed" || s === "cancelled" || s === "terminated") return "failed";
-        return "";
-      }
-
       /** Which chip is selected in the Runs view (D2). "active" is the default. */
       let _runsFilter = "active";
 
       /** The run whose details are on screen, so a re-rendered table can mark it. */
       let _selectedRunId = null;
-
-      /** Statuses counted as active by the Active chip and the poller. */
-      const ACTIVE_STATUSES = new Set(["running", "started", "awaiting_approval"]);
-
-      /**
-       * Span between two ISO timestamps as a short human string; `endIso`
-       * defaults to now, which is what an in-flight run needs.
-       * Returns "—" for anything unparseable rather than "NaNs".
-       */
-      function fmtElapsed(startIso, endIso) {
-        const startedMs = new Date(startIso).getTime();
-        const endedMs = endIso === undefined ? Date.now() : new Date(endIso).getTime();
-        if (!Number.isFinite(startedMs) || !Number.isFinite(endedMs)) return "—";
-        const total = Math.max(0, Math.round((endedMs - startedMs) / 1000));
-        const h = Math.floor(total / 3600);
-        const m = Math.floor((total % 3600) / 60);
-        const sec = total % 60;
-        if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
-        if (m > 0) return `${m}m ${String(sec).padStart(2, "0")}s`;
-        return `${sec}s`;
-      }
 
       async function loadRuns() {
         const wrap = document.getElementById("runs-table-wrap");
@@ -1112,38 +1554,7 @@
           <th>Status</th><th>Workflow</th><th>Started</th><th>Duration</th><th>Actions</th>
         </tr></thead><tbody>`;
         for (const r of shown) {
-          const sc = statusClass(r.status);
-          const isActive = ACTIVE_STATUSES.has(r.status);
-          // Active rows tick along with the poller; a settled run shows the fixed
-          // span it actually took. A run settled before settledAt was recorded
-          // has no end to measure to, so it shows no duration rather than a
-          // still-growing elapsed.
-          const elapsed = isActive
-            ? `<span title="running since ${escH(fmtTime(r.createdAt))}">${escH(fmtElapsed(r.createdAt))}</span>`
-            : r.settledAt !== undefined
-              ? `<span title="settled ${escH(fmtTime(r.settledAt))}">${escH(fmtElapsed(r.createdAt, r.settledAt))}</span>`
-              : `<span title="no settle time recorded for this run">—</span>`;
-          // FR-011: a persisted run is a record, not a live process — say so in
-          // the row so the missing Cancel button later is not a surprise.
-          const diskMark =
-            r.source === "disk"
-              ? ` <span class="tier-badge tier-bundled" title="restored from its artifact — this run is not live">disk</span>`
-              : "";
-          const rowClasses = [
-            r.status === "awaiting_approval" ? "awaiting" : "",
-            r.runId === _selectedRunId ? "selected" : "",
-          ]
-            .filter(Boolean)
-            .join(" ");
-          html += `<tr data-run-row="${escH(r.runId)}"${rowClasses ? ` class="${rowClasses}"` : ""}>
-            <td><span class="run-status ${escH(sc)}">${escH(r.status)}</span>${diskMark}</td>
-            <td class="pipeline-id">${escH(r.pipelineId)}</td>
-            <td style="font-size:12px;color:var(--muted)">${escH(fmtTime(r.createdAt))}</td>
-            <td style="font-size:12px;color:var(--muted)">${elapsed}</td>
-            <td class="actions">
-              <button class="btn" data-run-details="${escH(r.runId)}">Details</button>
-            </td>
-          </tr>`;
+          html += runRow(r, { selected: r.runId === _selectedRunId });
         }
         html += "</tbody></table>";
         wrap.innerHTML = html;
@@ -1979,7 +2390,16 @@
 
       // ── Router (spec 034 D1/D7) ────────────────────────────────────────────
 
-      const VIEW_IDS = ["runs", "run", "workflows", "templates", "settings"];
+      const VIEW_IDS = [
+        "runs",
+        "run",
+        "workflows",
+        "workflow",
+        "workflow-edit",
+        "templates",
+        "template",
+        "settings",
+      ];
       const TAB_IDS = ["runs", "workflows", "templates", "settings"];
 
       /**
@@ -2001,7 +2421,7 @@
        * hash — releases it (FR-004).
        */
       function route() {
-        const { view, runId } = parseHash(location.hash);
+        const { view, runId, id } = parseHash(location.hash);
         // FR-004/FR-014: the stream belongs to the selected run, not to a pane —
         // the layout the details happen to render in never changes this rule.
         if (view !== "run" || runId !== _activeRunId) closeRunStream();
@@ -2015,8 +2435,14 @@
           document.getElementById(`view-${id}`).hidden = id !== shownView;
         }
         document.getElementById("runs-pane-detail").hidden = !splitRun;
-        // The run details view belongs to the Runs tab.
-        const activeTab = view === "run" ? "runs" : view;
+        // A detail view belongs to the tab its list lives on.
+        const TAB_OF = {
+          run: "runs",
+          workflow: "workflows",
+          "workflow-edit": "workflows",
+          template: "templates",
+        };
+        const activeTab = TAB_OF[view] ?? view;
         for (const id of TAB_IDS) {
           document.getElementById(`tab-${id}`).classList.toggle("active", id === activeTab);
         }
@@ -2036,10 +2462,15 @@
           if (splitRun) loadRuns();
           openRunView(runId);
         } else if (view === "workflows") {
-          loadProjectTier();
-          loadBundledTier();
+          loadWorkflows();
+        } else if (view === "workflow") {
+          openWorkflowView(id);
+        } else if (view === "workflow-edit") {
+          renderWorkflowEditor(id);
         } else if (view === "templates") {
-          loadTemplateTier();
+          loadTemplates();
+        } else if (view === "template") {
+          openTemplateView(id);
         } else if (view === "settings") {
           loadEnvironment();
         }
