@@ -46,6 +46,20 @@ export function parseHash(hash) {
   return { view: DEFAULT_VIEW };
 }
 
+/**
+ * Which background pollers a view is allowed to run (spec 037 D9/FR-010).
+ *
+ * The runs list is the only screen a poll can change, so every other view
+ * leaves the page idle — a browser extension has to be able to capture
+ * #/workflows, and a 4 s interval that never stops makes it never idle.
+ *
+ * @param {string} view A view name from parseHash.
+ * @returns {string[]}
+ */
+export function pollersFor(view) {
+  return view === "runs" ? ["runs"] : [];
+}
+
 /** The hash a view (and optional run id) is reached by. Inverse of parseHash. */
 export function hashFor(view, runId) {
   if (view === "run" && runId !== undefined) return `#/runs/${encodeURIComponent(runId)}`;

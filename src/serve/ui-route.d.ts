@@ -6,3 +6,4 @@ export declare const DEFAULT_VIEW: string;
 export declare const VIEWS: string[];
 export declare function parseHash(hash: string): { view: string; runId?: string };
 export declare function hashFor(view: string, runId?: string): string;
+export declare function pollersFor(view: string): string[];
