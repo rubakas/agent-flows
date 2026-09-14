@@ -532,6 +532,94 @@
         display: flex;
         gap: 8px;
       }
+      /* Step activity, decisions and full output (spec 036 D9/D10) */
+      .step-activity,
+      .step-output-full {
+        margin-top: 6px;
+      }
+      .step-activity > summary,
+      .step-output-full > summary {
+        font-size: 12px;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .log-events {
+        list-style: none;
+        font-family: var(--mono);
+        font-size: 12px;
+        margin-top: 6px;
+      }
+      .log-events li {
+        padding: 2px 0;
+        word-break: break-word;
+      }
+      .log-events .nested {
+        padding-left: 16px;
+      }
+      .log-events .log-note {
+        color: var(--muted);
+      }
+      .log-events .warn,
+      .log-events .term.stderr,
+      .decisions tr.warn td {
+        color: #9a7318;
+      }
+      .log-events .term {
+        font-size: 11px;
+        background: var(--sunk);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 6px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 200px;
+        overflow: auto;
+      }
+      .log-result > summary {
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .log-result pre {
+        font-size: 11px;
+        color: var(--ink-2);
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin-top: 4px;
+      }
+      .log-earlier,
+      .step-footer {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+      .step-footer:empty {
+        display: none;
+      }
+      .run-decisions:empty {
+        display: none;
+      }
+      .decisions,
+      .output {
+        margin-bottom: 10px;
+      }
+      .decisions td,
+      .output td {
+        font-size: 12px;
+      }
+      .output pre {
+        font-family: var(--mono);
+        font-size: 11px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .decision-badge {
+        font-size: 11px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: var(--sunk);
+        color: var(--muted);
+        margin-left: 6px;
+      }
     </style>
   </head>
   <body>
@@ -658,7 +746,14 @@
     <div id="flash"></div>
 
     <script type="module">
-      import { parseHash, hashFor } from "/ui-route.js";
+      import { parseHash, hashFor, pollersFor } from "/ui-route.js";
+      import {
+        mergeLogEvents,
+        renderDecisions,
+        renderLogEvent,
+        renderOutput,
+        renderStepFooter,
+      } from "/ui-log.js";
 
       // ── DOM helpers ────────────────────────────────────────────────────────
 
@@ -1094,14 +1189,23 @@
         }, 4000);
       }
 
-      // Refresh immediately when the tab becomes visible again.
+      /** Stop polling. The router calls this on every view that is not the runs list. */
+      function stopRunsPoller() {
+        if (_runsPoller === null) return;
+        clearInterval(_runsPoller);
+        _runsPoller = null;
+      }
+
+      // A hidden tab polls nothing at all (spec 037 FR-010); becoming visible
+      // again both restarts the poller and refreshes the list at once.
       document.addEventListener("visibilitychange", () => {
-        if (
-          !document.hidden &&
-          activeRunEs === null &&
-          !document.getElementById("view-runs").hidden
-        )
-          loadRuns();
+        if (document.hidden) {
+          stopRunsPoller();
+          return;
+        }
+        if (!pollersFor(parseHash(location.hash).view).includes("runs")) return;
+        startRunsPoller();
+        if (activeRunEs === null) loadRuns();
       });
 
       /**
@@ -1128,6 +1232,7 @@
       async function openRunView(runId) {
         _activeRunId = runId;
         closeRunStream();
+        resetLogState();
 
         const body = runDetailTarget();
         body.innerHTML = `<p style="color:var(--muted);font-size:13px">Loading…</p>`;
@@ -1151,7 +1256,11 @@
         // FR-011: a run restored from disk has nothing left to stream. Opening an
         // EventSource for it would burn a connection on a stream that closes
         // immediately, and __afDebug.openStreams is how a test proves we don't.
-        if (snapshot.source === "disk") return;
+        // Its step log is still on disk, so the backfill runs on its own.
+        if (snapshot.source === "disk") {
+          await backfillRunLog(runId);
+          return;
+        }
 
         const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
         activeRunEs = es;
@@ -1178,11 +1287,222 @@
           updateStepRow(data);
         });
 
+        // spec 036 D4: log events that arrive while the backfill is in flight are
+        // buffered, not rendered — the backfill has to land first so the lines
+        // stay in seq order. backfillRunLog flushes the buffer when it is done.
+        es.addEventListener("log", (ev) => {
+          let data;
+          try {
+            data = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          if (_logBuffer !== null) _logBuffer.push(data);
+          else applyLogEvents([data]);
+        });
+
         es.onerror = () => {
           // Silently stop — the view still shows last-known state.
           if (activeRunEs === es) closeRunStream();
           else es.close();
         };
+
+        // The stream is open, so nothing emitted from here on can be missed.
+        await backfillRunLog(runId);
+      }
+
+      // ── Step log: Activity, Decisions and Output (spec 036 D9/D10) ─────────
+
+      /** Merge state for the attached run: the last applied seq and its events per step. */
+      let _logState = null;
+
+      /** Log events held back while the backfill is in flight; null once flushed. */
+      let _logBuffer = null;
+
+      /** Gate decisions on screen, seeded from the snapshot and grown by log events. */
+      let _decisions = [];
+      let _judgeError;
+
+      /** Forget the previous run's log — every view of a run starts from nothing. */
+      function resetLogState() {
+        _logState = mergeLogEvents(null, []);
+        _logBuffer = [];
+        _decisions = [];
+        _judgeError = undefined;
+      }
+
+      /**
+       * Fetch the run's whole step log as NDJSON and apply it, then flush the
+       * events the stream buffered while the fetch was in flight (spec 036 D4).
+       * Duplicates between the two are dropped by seq.
+       */
+      async function backfillRunLog(runId) {
+        let text = "";
+        try {
+          const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/log`);
+          if (res.ok) text = await res.text();
+        } catch {
+          // The activity list is an addition to the view, not the view itself.
+        }
+        if (_activeRunId !== runId) return;
+
+        const events = [];
+        for (const line of text.split("\n")) {
+          if (line.trim() === "") continue;
+          try {
+            events.push(JSON.parse(line));
+          } catch {
+            // A torn last line of a file still being written — skip it.
+          }
+        }
+        applyLogEvents(events);
+
+        const buffered = _logBuffer ?? [];
+        _logBuffer = null;
+        applyLogEvents(buffered);
+      }
+
+      /** The step row for an id, whether the scope is the run body or the row itself. */
+      function findStepRow(scope, stepId) {
+        const selector = `[data-step-id="${CSS.escape(stepId)}"]`;
+        return scope.matches?.(selector) ? scope : scope.querySelector(selector);
+      }
+
+      function setStepFooter(row, events) {
+        const el = row.querySelector(".step-footer");
+        if (el) el.innerHTML = renderStepFooter(events);
+      }
+
+      /** "N earlier events" above a step whose list hit the 2000-event cap (D5). */
+      function setEarlierCount(row, dropped) {
+        const el = row.querySelector(".log-earlier");
+        if (!el) return;
+        el.hidden = dropped === 0;
+        el.textContent = dropped === 0 ? "" : `${dropped} earlier events`;
+      }
+
+      /** Paint every step's activity list from the merge state, after a re-render. */
+      function repaintLogs(scope) {
+        if (_logState === null) return;
+        for (const [stepId, events] of _logState.byStep) {
+          const row = findStepRow(scope, stepId);
+          if (!row) continue;
+          const list = row.querySelector(".log-events");
+          if (list) list.innerHTML = events.map(renderLogEvent).join("");
+          setStepFooter(row, events);
+          setEarlierCount(row, _logState.droppedEarlier.get(stepId) ?? 0);
+        }
+      }
+
+      /** Re-render the Decisions table of the run on screen. */
+      function refreshDecisions() {
+        const el = runDetailTarget().querySelector(".run-decisions");
+        if (el) el.innerHTML = renderDecisions(_decisions, _judgeError);
+      }
+
+      /**
+       * Record a live `decision` or `judge.degraded` event. A decision already
+       * carried by the snapshot arrives again in the backfill, so rows are keyed
+       * by gate, decider, verdict and superseded flag rather than appended blindly.
+       */
+      function recordDecisionEvent(ev) {
+        if (ev.kind === "judge.degraded") {
+          _judgeError = ev.error;
+          return;
+        }
+        const key = (d) =>
+          `${d.gateStepId}|${d.decidedBy}|${d.approved === true}|${d.superseded === true}`;
+        const decision = {
+          gateStepId: ev.gateStepId,
+          mode: ev.mode,
+          decidedBy: ev.decidedBy,
+          approved: ev.approved,
+          reason: ev.reason,
+          judgeModelId: ev.judgeModelId,
+          superseded: ev.superseded,
+          decidedAt: ev.at,
+        };
+        if (!_decisions.some((d) => key(d) === key(decision))) _decisions.push(decision);
+      }
+
+      /**
+       * Merge incoming log events into the state and paint the ones that were
+       * new. Each step is appended to once per batch, so the backfill is a single
+       * insert per step and a live event is a single line.
+       */
+      function applyLogEvents(incoming) {
+        if (_logState === null || incoming.length === 0) return;
+        const lastSeq = _logState.lastSeq;
+        const droppedBefore = _logState.droppedEarlier;
+        _logState = mergeLogEvents(_logState, incoming);
+
+        const applied = incoming
+          .filter((ev) => ev && typeof ev.seq === "number" && ev.seq > lastSeq)
+          .sort((a, b) => a.seq - b.seq);
+
+        const seen = new Set();
+        const html = new Map();
+        let decisionsChanged = false;
+        for (const ev of applied) {
+          if (seen.has(ev.seq)) continue;
+          seen.add(ev.seq);
+          const stepId = String(ev.stepId ?? "");
+          html.set(stepId, (html.get(stepId) ?? "") + renderLogEvent(ev));
+          if (ev.kind === "decision" || ev.kind === "judge.degraded") {
+            recordDecisionEvent(ev);
+            decisionsChanged = true;
+          }
+        }
+
+        const scope = runDetailTarget();
+        for (const [stepId, added] of html) {
+          const row = findStepRow(scope, stepId);
+          if (!row) continue; // the row appears with the next snapshot, painted from state
+          const events = _logState.byStep.get(stepId) ?? [];
+          const dropped = _logState.droppedEarlier.get(stepId) ?? 0;
+          const list = row.querySelector(".log-events");
+          if (list) {
+            // A step at the 2000-event cap lost its oldest lines, so its list is
+            // rebuilt from state rather than appended to.
+            if (dropped !== (droppedBefore.get(stepId) ?? 0))
+              list.innerHTML = events.map(renderLogEvent).join("");
+            else if (added !== "") list.insertAdjacentHTML("beforeend", added);
+          }
+          setStepFooter(row, events);
+          setEarlierCount(row, dropped);
+        }
+        if (decisionsChanged) refreshDecisions();
+      }
+
+      /**
+       * Fetch a step's persisted output the first time its Output block is opened
+       * (spec 036 D6/D10). It is never part of the snapshot or the SSE stream.
+       */
+      function wireStepOutputs(scope, runId) {
+        for (const details of scope.querySelectorAll(".step-output-full")) {
+          const row = details.closest(".step-row");
+          if (!row) continue;
+          const stepId = row.dataset.stepId;
+          details.addEventListener("toggle", async () => {
+            if (!details.open || details.dataset.loaded === "yes") return;
+            details.dataset.loaded = "yes";
+            const target = details.querySelector(".step-output-body");
+            try {
+              const res = await fetch(
+                `/api/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/output`
+              );
+              if (res.status === 404) {
+                target.textContent = "no persisted output"; // .textContent — safe
+                return;
+              }
+              if (!res.ok) throw new Error(`Request failed (${res.status})`);
+              target.innerHTML = renderOutput(await res.json());
+            } catch (e) {
+              details.dataset.loaded = "no"; // a failed fetch may be retried
+              target.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+            }
+          });
+        }
       }
 
       // ── Run detail: invocation and per-step introspection (spec 033 D6) ────
@@ -1318,6 +1638,18 @@
             <pre class="code-block">${escH(text)}</pre>
           </details>`;
         }
+        // Activity and Output (spec 036 D10). Both start empty: the activity list
+        // is painted from the merge state, the output is fetched on first open.
+        html += `<details class="step-activity"${st.status === "started" ? " open" : ""}>
+          <summary>Activity</summary>
+          <div class="log-earlier" hidden></div>
+          <ul class="log-events"></ul>
+          <div class="step-footer"></div>
+        </details>
+        <details class="step-output-full">
+          <summary>Output</summary>
+          <div class="step-output-body"></div>
+        </details>`;
         return html + `</div>`;
       }
 
@@ -1366,6 +1698,12 @@
           </div>`;
         }
 
+        // Decisions (spec 036 D10). The snapshot is authoritative — every
+        // re-render reseeds the list, and log events grow it between renders.
+        _decisions = Array.isArray(snapshot.gateDecisions) ? snapshot.gateDecisions.slice() : [];
+        _judgeError = snapshot.judgeError;
+        html += `<div class="run-decisions">${renderDecisions(_decisions, _judgeError)}</div>`;
+
         // Steps table.
         const steps = snapshot.steps || {};
         const stepIds = Object.keys(steps);
@@ -1380,6 +1718,10 @@
 
         body.innerHTML = html;
         wireCopyButtons(body);
+        wireStepOutputs(body, runId);
+        // The step rows are new DOM, so their activity lists are repainted from
+        // the merge state rather than refetched (spec 036 D4).
+        repaintLogs(body);
         if (inv) wireInvocation(body, inv);
 
         // Wire approve/reject/cancel after setting innerHTML.
@@ -1442,11 +1784,21 @@
 
         const row = document.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
         if (!row) {
-          // Step not yet in panel — trigger a full re-fetch to pick it up.
+          // A step that started after the snapshot was taken has no row yet
+          // (spec 036 D10). Re-fetch the run and re-render the steps section —
+          // the activity already merged for it is repainted from state.
+          refreshRunSnapshot();
           return;
         }
 
         if (!row.querySelector(".step-detail")) refreshStepDetail(stepId);
+
+        // The step now running is the one worth watching; a settled step is left
+        // exactly as the operator put it.
+        if (status === "started") {
+          const activity = row.querySelector(".step-activity");
+          if (activity) activity.open = true;
+        }
 
         // Update status badge.
         const badge = row.querySelector(".run-status");
@@ -1487,7 +1839,31 @@
         if (!row) return;
         row.outerHTML = stepRowHtml(stepId, st);
         const fresh = document.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
-        if (fresh) wireCopyButtons(fresh);
+        if (fresh) {
+          wireCopyButtons(fresh);
+          wireStepOutputs(fresh, runId);
+          repaintLogs(fresh);
+        }
+      }
+
+      /**
+       * Re-fetch the run and re-render its whole detail body, for the one case
+       * updateStepRow cannot patch in place: a step that has no row at all.
+       */
+      let _refreshingSnapshot = false;
+      async function refreshRunSnapshot() {
+        const runId = _activeRunId;
+        if (!runId || _refreshingSnapshot) return;
+        _refreshingSnapshot = true;
+        try {
+          const snapshot = await api("GET", `/api/runs/${encodeURIComponent(runId)}`);
+          if (_activeRunId !== runId) return;
+          renderRunDetail(runId, snapshot, runDetailTarget());
+        } catch {
+          // last-known state stays on screen
+        } finally {
+          _refreshingSnapshot = false;
+        }
       }
 
       // ── Settings view (D6) ─────────────────────────────────────────────────
@@ -1645,6 +2021,11 @@
           document.getElementById(`tab-${id}`).classList.toggle("active", id === activeTab);
         }
 
+        // FR-010: only the runs list polls, so every other view leaves the page
+        // idle — a browser extension has to be able to capture #/workflows.
+        if (!document.hidden && pollersFor(view).includes("runs")) startRunsPoller();
+        else stopRunsPoller();
+
         if (view === "runs") {
           _selectedRunId = null;
           loadRuns();
@@ -1682,7 +2063,6 @@
       (async () => {
         loadHeaderContext();
         route();
-        startRunsPoller();
       })();
     </script>
   </body>
