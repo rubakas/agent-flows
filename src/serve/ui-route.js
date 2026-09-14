@@ -8,37 +8,72 @@
 /** The view shown when the hash names no known route (FR-001). */
 export const DEFAULT_VIEW = "runs";
 
-/** Every top-level view the page can show. "run" is reached only via #/runs/<id>. */
-export const VIEWS = ["runs", "run", "workflows", "templates", "settings"];
+/**
+ * Every view the page can show. "run", "workflow", "workflow-edit" and
+ * "template" are detail views, reached only through a route carrying an id.
+ */
+export const VIEWS = [
+  "runs",
+  "run",
+  "workflows",
+  "workflow",
+  "workflow-edit",
+  "templates",
+  "template",
+  "settings",
+];
 
 /**
  * Map a location hash onto a view.
  *
- * Returns `{ view }` for the four tab routes and `{ view: "run", runId }` for
- * `#/runs/<id>`. Anything unrecognised — empty, "#", a stale link, a route from
- * a future version — falls back to the default view rather than rendering a
- * blank page.
+ * Returns `{ view }` for the four tab routes, `{ view: "run", runId }` for
+ * `#/runs/<id>`, and `{ view, id }` for the workflow, workflow-edit and
+ * template detail routes. Anything unrecognised — empty, "#", a stale link, a
+ * route from a future version — falls back to the default view rather than
+ * rendering a blank page.
  *
  * @param {string} hash Raw `location.hash`, with or without the leading "#".
- * @returns {{ view: string, runId?: string }}
+ * @returns {{ view: string, runId?: string, id?: string }}
  */
 export function parseHash(hash) {
   const raw = String(hash ?? "");
   const path = raw.replace(/^#/u, "").replace(/^\//u, "");
   const [head, ...rest] = path.split("/");
 
+  // An id is URL-encoded in the hash; decoding can throw on a malformed escape,
+  // which must fall back to a list rather than break the router.
+  const decode = (segment) => {
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return null;
+    }
+  };
+
   if (head === "runs") {
-    // A run id is URL-encoded in the hash; decoding can throw on a malformed
-    // escape, which must fall back to the list rather than break the router.
     const tail = rest.join("/");
     if (tail === "") return { view: "runs" };
-    try {
-      return { view: "run", runId: decodeURIComponent(tail) };
-    } catch {
-      return { view: "runs" };
-    }
+    const runId = decode(tail);
+    return runId === null ? { view: "runs" } : { view: "run", runId };
   }
-  // A tab route with anything trailing is not one of the five valid routes;
+
+  if (head === "workflows" && rest.length > 0 && rest[0] !== "") {
+    // Only "edit" is a valid third segment; anything else is a stale or
+    // hand-edited link (spec 037 D2/FR-006).
+    if (rest.length > 2 || (rest.length === 2 && rest[1] !== "edit")) {
+      return { view: DEFAULT_VIEW };
+    }
+    const id = decode(rest[0]);
+    if (id === null) return { view: "workflows" };
+    return { view: rest.length === 2 ? "workflow-edit" : "workflow", id };
+  }
+
+  if (head === "templates" && rest.length === 1 && rest[0] !== "") {
+    const id = decode(rest[0]);
+    return id === null ? { view: "templates" } : { view: "template", id };
+  }
+
+  // A tab route with anything trailing is not one of the valid routes;
   // "#/settings/extra" is a stale or hand-edited link, not the settings view.
   if (rest.length === 0 && (head === "workflows" || head === "templates" || head === "settings")) {
     return { view: head };
@@ -60,9 +95,17 @@ export function pollersFor(view) {
   return view === "runs" ? ["runs"] : [];
 }
 
-/** The hash a view (and optional run id) is reached by. Inverse of parseHash. */
-export function hashFor(view, runId) {
-  if (view === "run" && runId !== undefined) return `#/runs/${encodeURIComponent(runId)}`;
-  if (view === "run") return "#/runs";
+/** The hash a view (and optional id) is reached by. Inverse of parseHash. */
+export function hashFor(view, id) {
+  if (view === "run") return id === undefined ? "#/runs" : `#/runs/${encodeURIComponent(id)}`;
+  if (view === "workflow") {
+    return id === undefined ? "#/workflows" : `#/workflows/${encodeURIComponent(id)}`;
+  }
+  if (view === "workflow-edit") {
+    return id === undefined ? "#/workflows" : `#/workflows/${encodeURIComponent(id)}/edit`;
+  }
+  if (view === "template") {
+    return id === undefined ? "#/templates" : `#/templates/${encodeURIComponent(id)}`;
+  }
   return `#/${view}`;
 }

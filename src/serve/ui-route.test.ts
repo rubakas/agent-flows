@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { DEFAULT_VIEW, hashFor, parseHash, pollersFor } from "./ui-route.js";
+import { DEFAULT_VIEW, hashFor, parseHash, pollersFor, VIEWS } from "./ui-route.js";
 
 describe("parseHash — route table (FR-001)", () => {
   it("falls back to the runs view for no hash, a bare '#', and unknown routes", () => {
@@ -51,6 +51,61 @@ describe("parseHash — route table (FR-001)", () => {
     assert.equal(hashFor("settings"), "#/settings");
     assert.equal(hashFor("run", "abc def"), "#/runs/abc%20def");
     assert.equal(parseHash(hashFor("run", "abc def")).runId, "abc def");
+    assert.equal(hashFor("workflow", "a b"), "#/workflows/a%20b");
+    assert.equal(hashFor("workflow-edit", "a b"), "#/workflows/a%20b/edit");
+    assert.equal(hashFor("template", "a b"), "#/templates/a%20b");
+    for (const view of ["workflow", "workflow-edit", "template"]) {
+      const round = parseHash(hashFor(view, "a b"));
+      assert.equal(round.view, view, `hashFor(${view}) must parse back to ${view}`);
+      assert.equal(round.id, "a b");
+    }
+  });
+});
+
+describe("parseHash — catalogue detail routes (spec 037 D2/FR-006)", () => {
+  it("maps the workflow, editor and template routes to their views", () => {
+    assert.deepEqual(parseHash("#/workflows/investigate"), {
+      view: "workflow",
+      id: "investigate",
+    });
+    assert.deepEqual(parseHash("#/workflows/investigate/edit"), {
+      view: "workflow-edit",
+      id: "investigate",
+    });
+    assert.deepEqual(parseHash("#/templates/cycle"), { view: "template", id: "cycle" });
+  });
+
+  it("only 'edit' is a valid third segment; anything else falls back to runs", () => {
+    for (const hash of ["#/workflows/investigate/view", "#/workflows/investigate/edit/more"]) {
+      assert.equal(parseHash(hash).view, "runs", `${hash} must fall back`);
+    }
+  });
+
+  it("a template route with a trailing segment falls back to runs", () => {
+    assert.equal(parseHash("#/templates/cycle/extra").view, "runs");
+  });
+
+  it("a malformed escape in a detail id falls back to that route's list", () => {
+    assert.deepEqual(parseHash("#/workflows/%E0%A4%A"), { view: "workflows" });
+    assert.deepEqual(parseHash("#/templates/%E0%A4%A"), { view: "templates" });
+  });
+
+  it("VIEWS names every view parseHash can return", () => {
+    for (const hash of [
+      "#/runs",
+      "#/runs/r1",
+      "#/workflows",
+      "#/workflows/x",
+      "#/workflows/x/edit",
+      "#/templates",
+      "#/templates/x",
+      "#/settings",
+    ]) {
+      assert.ok(
+        VIEWS.includes(parseHash(hash).view),
+        `VIEWS must contain the view for ${hash} (${parseHash(hash).view})`
+      );
+    }
   });
 });
 
