@@ -187,7 +187,6 @@ describe("FR-002: state dir resolution", () => {
     assert.equal(state.dir, join(home, "projects", "k"));
     assert.equal(state.runsDir, join(home, "projects", "k", "runs"));
     assert.equal(state.dbPath, join(home, "projects", "k", "agent-flows.sqlite"));
-    assert.equal(state.n8nMapPath, join(home, "projects", "k", "n8n.json"));
     assert.equal(state.projectJsonPath, join(home, "projects", "k", "project.json"));
   });
 

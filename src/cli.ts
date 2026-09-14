@@ -15,7 +15,6 @@
 //                        install workflows into the project directory
 //   validate             validate the canon pipelines
 //   generate claude      generate Claude Code workflow bindings
-//   generate n8n         generate n8n workflow bindings
 
 // Each verb delegates to an existing module entry point rather than re-importing
 // and wiring modules itself — this keeps the router thin and ensures the
@@ -40,7 +39,7 @@ function src(...parts: string[]): string {
 }
 
 const VALID_VERBS = ["doctor", "serve", "mcp", "list", "install", "validate", "generate"] as const;
-const VALID_GENERATE_TARGETS = ["claude", "n8n"] as const;
+const VALID_GENERATE_TARGETS = ["claude"] as const;
 
 function usage(): void {
   console.log("Usage: agent-flows <verb> [args...]");
@@ -54,7 +53,6 @@ function usage(): void {
   console.log("                                install workflows into the project");
   console.log("  validate                      validate the canon pipelines");
   console.log("  generate claude               generate Claude Code workflow bindings");
-  console.log("  generate n8n                  generate n8n workflow bindings");
 }
 
 // Run a module via the same tsx process, forwarding remaining args and
@@ -115,8 +113,6 @@ switch (verb) {
     }
     if (target === "claude") {
       runModule(src("bindings", "write-cli.ts"), rest.slice(1));
-    } else if (target === "n8n") {
-      runModule(src("bindings", "n8n", "write-cli.ts"), rest.slice(1));
     } else {
       console.error(
         `agent-flows generate: unknown target "${target}". Valid targets: ${VALID_GENERATE_TARGETS.join(", ")}`

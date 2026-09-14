@@ -454,97 +454,6 @@
         color: var(--muted);
         cursor: pointer;
       }
-      /* Dialog */
-      #dialog-backdrop {
-        display: none;
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.35);
-        z-index: 200;
-        align-items: center;
-        justify-content: center;
-      }
-      #dialog-backdrop.open {
-        display: flex;
-      }
-      #dialog {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 20px;
-        width: 420px;
-        max-width: 96vw;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-      }
-      #dialog h3 {
-        font-size: 15px;
-        margin-bottom: 14px;
-      }
-      #dialog label {
-        display: block;
-        font-size: 13px;
-        margin-bottom: 4px;
-        color: var(--ink-2);
-      }
-      #dialog select,
-      #dialog input[type="text"],
-      #dialog input[type="password"],
-      #n8n-cfg-dialog input[type="text"],
-      #n8n-cfg-dialog input[type="password"] {
-        width: 100%;
-        font: inherit;
-        font-size: 13px;
-        padding: 6px 10px;
-        border: 1px solid var(--line);
-        border-radius: 5px;
-        background: var(--sunk);
-        color: var(--ink);
-        margin-bottom: 12px;
-      }
-      #dialog .dialog-actions,
-      #n8n-cfg-dialog .dialog-actions {
-        display: flex;
-        gap: 8px;
-        justify-content: flex-end;
-        margin-top: 4px;
-      }
-      #n8n-cfg-backdrop {
-        display: none;
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.35);
-        z-index: 200;
-        align-items: center;
-        justify-content: center;
-      }
-      #n8n-cfg-backdrop.open {
-        display: flex;
-      }
-      #n8n-cfg-dialog {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 20px;
-        width: 420px;
-        max-width: 96vw;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-      }
-      #n8n-cfg-dialog h3 {
-        font-size: 15px;
-        margin-bottom: 14px;
-      }
-      #n8n-cfg-dialog label {
-        display: block;
-        font-size: 13px;
-        margin-bottom: 4px;
-        color: var(--ink-2);
-      }
-      /* "Edit in n8n" buttons that are visually disabled but still clickable
-         so the user can reach the configure dialog rather than a dead button. */
-      .btn.btn-unconfigured {
-        opacity: 0.45;
-        cursor: pointer;
-      }
       #flash {
         position: fixed;
         bottom: 20px;
@@ -677,9 +586,6 @@
           <div class="section-header">
             <h2>Project workflows</h2>
             <span class="tier-badge tier-project">project</span>
-            <button class="btn" id="btn-new-in-n8n" style="display: none; margin-left: auto">
-              New in n8n
-            </button>
           </div>
           <div id="project-table-wrap">Loading…</div>
         </div>
@@ -703,55 +609,13 @@
             <span style="font-size: 12px; color: var(--muted)"
               >global ~/.agent-flows/templates/</span
             >
-            <button class="btn primary" id="btn-save-from-n8n" style="display: none">
-              Save from n8n…
-            </button>
           </div>
-          <p class="empty" id="templates-n8n-hint" hidden>
-            n8n is not connected — connect it in Settings to save a workflow as a template.
-          </p>
           <div id="template-table-wrap">Loading…</div>
         </div>
       </section>
 
       <!-- Settings view (D6) -->
       <section class="view" id="view-settings" hidden>
-        <div class="section">
-          <div class="section-header">
-            <h2>n8n</h2>
-            <span id="n8n-status-badge" style="font-size: 12px; color: var(--muted)"
-              >n8n: checking…</span
-            >
-          </div>
-          <div class="card">
-            <div class="kv">
-              <span>Installed</span><span id="n8n-runtime-installed">checking…</span>
-            </div>
-            <div class="kv">
-              <span>Running</span><span id="n8n-runtime-running">checking…</span>
-            </div>
-            <div class="kv">
-              <span>Connected</span><span id="n8n-runtime-connected">checking…</span>
-            </div>
-            <div class="kv"><span>Base URL</span><code id="n8n-base-url">—</code></div>
-            <div class="actions" style="margin-top: 10px">
-              <button class="btn" id="btn-n8n-start">Start n8n</button>
-              <button class="btn danger" id="btn-n8n-stop">Stop n8n</button>
-              <button class="btn primary" id="btn-n8n-connect-runtime" style="display: none">
-                Connect
-              </button>
-              <button class="btn" id="btn-n8n-connect" style="display: none">Connect n8n</button>
-              <button class="btn danger" id="btn-n8n-disconnect" style="display: none">
-                Disconnect n8n
-              </button>
-            </div>
-            <p style="font-size: 12px; color: var(--muted); margin-top: 10px">
-              n8n issues API keys per user in its own UI; agent-flows never handles n8n credentials
-              — paste the key once and it is stored with mode 0600.
-            </p>
-          </div>
-        </div>
-
         <div class="section">
           <div class="section-header"><h2>Environment</h2></div>
           <div class="card" id="env-card">Loading…</div>
@@ -789,45 +653,6 @@
         <button class="btn" id="btn-close-detail">✕</button>
       </div>
       <div id="detail-body"></div>
-    </div>
-
-    <!-- Configure n8n dialog (FR-008) -->
-    <div id="n8n-cfg-backdrop">
-      <div id="n8n-cfg-dialog">
-        <h3>Connect n8n</h3>
-        <label for="cfg-base-url">Base URL</label>
-        <input
-          type="text"
-          id="cfg-base-url"
-          placeholder="https://your-n8n.example.com"
-          autocomplete="off"
-        />
-        <label for="cfg-api-key">API key</label>
-        <input type="password" id="cfg-api-key" placeholder="n8n API key" autocomplete="off" />
-        <div class="dialog-actions">
-          <button class="btn" id="btn-cfg-cancel">Cancel</button>
-          <button class="btn primary" id="btn-cfg-connect">Connect</button>
-        </div>
-        <div id="cfg-error" class="error-box" style="display: none; margin-top: 10px"></div>
-      </div>
-    </div>
-
-    <!-- Save-from-n8n dialog -->
-    <div id="dialog-backdrop">
-      <div id="dialog">
-        <h3>Save workflow from n8n as template</h3>
-        <label for="dlg-wf-select">n8n workflow</label>
-        <select id="dlg-wf-select">
-          <option value="">Loading…</option>
-        </select>
-        <label for="dlg-template-id">Template id (optional)</label>
-        <input type="text" id="dlg-template-id" placeholder="auto (slugified workflow name)" />
-        <div class="dialog-actions">
-          <button class="btn" id="btn-dlg-cancel">Cancel</button>
-          <button class="btn primary" id="btn-dlg-save">Save</button>
-        </div>
-        <div id="dlg-error" class="error-box" style="display: none; margin-top: 10px"></div>
-      </div>
     </div>
 
     <div id="flash"></div>
@@ -906,210 +731,6 @@
         detailPanel.classList.add("open");
       }
 
-      // ── n8n state ──────────────────────────────────────────────────────────
-
-      let n8nBaseUrl = null;
-      // true when the connection comes from env vars — no file write possible
-      let n8nFromEnv = false;
-
-      async function loadN8nStatus() {
-        const badge = document.getElementById("n8n-status-badge");
-        const btnConnect = document.getElementById("btn-n8n-connect");
-        const btnDisconnect = document.getElementById("btn-n8n-disconnect");
-        const baseUrlEl = document.getElementById("n8n-base-url");
-        const saveBtn = document.getElementById("btn-save-from-n8n");
-        const tmplHint = document.getElementById("templates-n8n-hint");
-        try {
-          const s = await api("GET", "/api/n8n/status");
-          if (s.configured) {
-            n8nBaseUrl = s.baseUrl;
-            n8nFromEnv = s.source === "environment";
-            badge.textContent = n8nFromEnv ? "n8n: via environment" : "n8n: connected";
-            badge.style.color = "var(--ok)";
-            // The API key is never requested and never rendered (D6).
-            baseUrlEl.textContent = s.baseUrl || "—";
-            // When env vars supply the config, writing a file would be ignored —
-            // hide the disconnect action so the user doesn't expect it to work.
-            btnConnect.style.display = "none";
-            btnDisconnect.style.display = n8nFromEnv ? "none" : "";
-            document.getElementById("btn-new-in-n8n").style.display = "";
-            saveBtn.style.display = "";
-            tmplHint.hidden = true;
-          } else {
-            n8nBaseUrl = null;
-            n8nFromEnv = false;
-            badge.textContent = "n8n: not configured";
-            badge.style.color = "";
-            baseUrlEl.textContent = "—";
-            btnConnect.style.display = "";
-            btnDisconnect.style.display = "none";
-            document.getElementById("btn-new-in-n8n").style.display = "none";
-            // The template list stays usable without n8n — only the
-            // save-from-n8n action is gated, with a hint in its place (D5).
-            saveBtn.style.display = "none";
-            tmplHint.hidden = false;
-          }
-        } catch {
-          badge.textContent = "n8n: error";
-        }
-      }
-
-      /**
-       * Open the Connect dialog. With a base URL known (the runtime probe found
-       * one), it is prefilled and focus goes straight to the key field — the only
-       * thing the operator can supply, since n8n mints keys in its own UI.
-       */
-      function openN8nConfigDialog(prefillBaseUrl) {
-        document.getElementById("cfg-error").style.display = "none";
-        document.getElementById("n8n-cfg-backdrop").classList.add("open");
-        const urlField = document.getElementById("cfg-base-url");
-        if (prefillBaseUrl) {
-          urlField.value = prefillBaseUrl; // plain value assignment — safe
-          document.getElementById("cfg-api-key").focus();
-          return;
-        }
-        urlField.focus();
-      }
-
-      // ── n8n runtime card (spec 034 D10) ───────────────────────────────────
-
-      /** Last GET /api/n8n/runtime body, so the buttons know what they may do. */
-      let _n8nRuntime = null;
-
-      /** Poll handle for the runtime card; live only while Settings is open. */
-      let _n8nRuntimePoller = null;
-
-      function setBadge(id, text, colorVar) {
-        const el = document.getElementById(id);
-        el.textContent = text; // .textContent — safe
-        el.style.color = colorVar ? `var(${colorVar})` : "";
-      }
-
-      async function loadN8nRuntime() {
-        try {
-          const rt = await api("GET", "/api/n8n/runtime");
-          _n8nRuntime = rt;
-          const install = rt.installed || {};
-          setBadge(
-            "n8n-runtime-installed",
-            install.how === "path"
-              ? `yes — ${install.detail}`
-              : install.how === "npx"
-                ? `via npx — ${install.detail}`
-                : "no — install n8n or npx",
-            install.how === "none" ? "--err" : "--ok"
-          );
-          setBadge(
-            "n8n-runtime-running",
-            rt.running ? `yes — ${rt.baseUrl}` : `no — probed ${rt.baseUrl}`,
-            rt.running ? "--ok" : "--muted"
-          );
-          setBadge(
-            "n8n-runtime-connected",
-            n8nBaseUrl ? "yes" : "no — needs an API key",
-            n8nBaseUrl ? "--ok" : "--muted"
-          );
-          document.getElementById("btn-n8n-start").disabled = rt.running === true;
-          document.getElementById("btn-n8n-stop").disabled = rt.ownedPid === undefined;
-          // Connect is offered exactly when there is something to connect TO and
-          // we are not connected yet.
-          document.getElementById("btn-n8n-connect-runtime").style.display =
-            rt.running && !n8nBaseUrl ? "" : "none";
-        } catch (e) {
-          setBadge("n8n-runtime-running", e.message, "--err");
-        }
-      }
-
-      function startN8nRuntimePoller() {
-        if (_n8nRuntimePoller !== null) return;
-        _n8nRuntimePoller = setInterval(() => {
-          if (document.hidden) return;
-          loadN8nRuntime();
-        }, 5000);
-      }
-
-      function stopN8nRuntimePoller() {
-        if (_n8nRuntimePoller === null) return;
-        clearInterval(_n8nRuntimePoller);
-        _n8nRuntimePoller = null;
-      }
-
-      document.getElementById("btn-n8n-start").onclick = async () => {
-        const btn = document.getElementById("btn-n8n-start");
-        btn.disabled = true;
-        // Through npx the first launch downloads n8n; the request is allowed to
-        // take minutes, so say so rather than looking wedged.
-        flash("Starting n8n — the first launch via npx can take several minutes");
-        try {
-          const r = await api("POST", "/api/n8n/start", {});
-          flash(r.running ? `n8n is up at ${r.baseUrl}` : `n8n is starting — log: ${r.log}`);
-        } catch (e) {
-          flash(e.message, true);
-        } finally {
-          await loadN8nRuntime();
-        }
-      };
-
-      document.getElementById("btn-n8n-stop").onclick = async () => {
-        if (!confirm("Stop the n8n process agent-flows started?")) return;
-        try {
-          await api("POST", "/api/n8n/stop", {});
-          flash("n8n stopped");
-        } catch (e) {
-          flash(e.message, true);
-        } finally {
-          await loadN8nRuntime();
-        }
-      };
-
-      document.getElementById("btn-n8n-connect-runtime").onclick = () => {
-        const baseUrl = _n8nRuntime?.baseUrl;
-        if (!baseUrl) return;
-        // The key is created in n8n's own UI — open that page, then ask for the
-        // key. openExternal refuses anything that is not http/https.
-        openExternal(`${baseUrl}/settings/api`);
-        openN8nConfigDialog(baseUrl);
-      };
-
-      document.getElementById("btn-n8n-connect").onclick = () =>
-        openN8nConfigDialog(_n8nRuntime?.baseUrl);
-      document.getElementById("btn-n8n-disconnect").onclick = async () => {
-        if (!confirm("Disconnect n8n? The stored config file will be removed.")) return;
-        try {
-          await api("DELETE", "/api/n8n/configure", {});
-          flash("n8n disconnected");
-          await loadN8nStatus();
-          loadN8nRuntime();
-          loadProjectTier();
-        } catch (e) {
-          flash(e.message, true);
-        }
-      };
-
-      /**
-       * Open a URL that came from configuration or the daemon's n8n response.
-       * Only http/https may reach window.open: a "javascript:" base URL would
-       * otherwise execute in this page's origin the moment the operator clicks.
-       */
-      function openExternal(rawUrl) {
-        let parsed;
-        try {
-          parsed = new URL(rawUrl);
-        } catch {
-          flash(`Refusing to open an invalid URL: ${rawUrl}`, true);
-          return;
-        }
-        if (!["http:", "https:"].includes(parsed.protocol)) {
-          flash(`Refusing to open a ${parsed.protocol} URL — only http and https`, true);
-          return;
-        }
-        window.open(parsed.href, "_blank");
-      }
-
-      document.getElementById("btn-new-in-n8n").onclick = () => {
-        if (n8nBaseUrl) openExternal(`${n8nBaseUrl}/workflow/new`);
-      };
-
       // ── Project tier ───────────────────────────────────────────────────────
 
       async function loadProjectTier() {
@@ -1136,7 +757,6 @@
               <td><span class="tier-badge tier-project">project</span></td>
               <td class="actions">
                 <button class="btn" data-view-project="${escH(id)}">View</button>
-                <button class="btn${n8nBaseUrl ? "" : " btn-unconfigured"}" data-edit-n8n="${escH(id)}" title="${n8nBaseUrl ? "Push to n8n and open editor" : "Connect n8n to enable — click to configure"}">Edit in n8n</button>
                 <button class="btn danger" data-del-project="${escH(id)}">Delete</button>
               </td>
             </tr>`;
@@ -1153,27 +773,6 @@
                   `/api/pipelines/${encodeURIComponent(btn.dataset.viewProject)}`
                 );
                 showDetail(btn.dataset.viewProject, d.def.steps, d.def.inputs, d.def.description);
-              } catch (e) {
-                flash(e.message, true);
-              }
-            };
-          });
-
-          // Wire edit-in-n8n buttons. When n8n is not configured, redirect to
-          // the configure dialog instead of being silently inert (FR-008).
-          wrap.querySelectorAll("[data-edit-n8n]").forEach((btn) => {
-            btn.onclick = async () => {
-              if (!n8nBaseUrl) {
-                openN8nConfigDialog();
-                return;
-              }
-              try {
-                const r = await api(
-                  "POST",
-                  `/api/pipelines/${encodeURIComponent(btn.dataset.editN8n)}/n8n`,
-                  {}
-                );
-                openExternal(r.url);
               } catch (e) {
                 flash(e.message, true);
               }
@@ -1207,7 +806,7 @@
           const data = await api("GET", "/api/templates");
           const templates = data.templates || [];
           if (!templates.length) {
-            wrap.innerHTML = `<p class="empty">No templates saved yet. Use "Save from n8n…" to add one.</p>`;
+            wrap.innerHTML = `<p class="empty">No templates saved yet.</p>`;
             return;
           }
           let html = `<table><thead><tr>
@@ -1320,104 +919,6 @@
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
       }
-
-      // ── Save-from-n8n dialog ────────────────────────────────────────────────
-
-      const dialogBackdrop = document.getElementById("dialog-backdrop");
-      document.getElementById("btn-dlg-cancel").onclick = () =>
-        dialogBackdrop.classList.remove("open");
-      dialogBackdrop.onclick = (e) => {
-        if (e.target === dialogBackdrop) dialogBackdrop.classList.remove("open");
-      };
-
-      document.getElementById("btn-save-from-n8n").onclick = async () => {
-        const select = document.getElementById("dlg-wf-select");
-        const dlgError = document.getElementById("dlg-error");
-        dlgError.style.display = "none";
-        select.innerHTML = `<option value="">Loading workflows…</option>`;
-        dialogBackdrop.classList.add("open");
-        try {
-          const data = await api("GET", "/api/n8n/workflows");
-          const wfs = data.workflows || [];
-          if (!wfs.length) {
-            select.innerHTML = `<option value="">No workflows found in n8n</option>`;
-          } else {
-            // escH on workflow names — they are untrusted input (FR-013)
-            select.innerHTML = wfs
-              .map((w) => `<option value="${escH(w.id)}">${escH(w.name)}</option>`)
-              .join("");
-          }
-        } catch (e) {
-          select.innerHTML = `<option value="">Error loading workflows</option>`;
-          dlgError.textContent = e.message;
-          dlgError.style.display = "";
-        }
-      };
-
-      document.getElementById("btn-dlg-save").onclick = async () => {
-        const select = document.getElementById("dlg-wf-select");
-        const templateIdInput = document.getElementById("dlg-template-id");
-        const dlgError = document.getElementById("dlg-error");
-        dlgError.style.display = "none";
-
-        const workflowId = select.value;
-        if (!workflowId) {
-          flash("Select a workflow first", true);
-          return;
-        }
-        const templateId = templateIdInput.value.trim() || undefined;
-
-        try {
-          const r = await api("POST", "/api/templates/from-n8n", { workflowId, templateId });
-          flash(`Saved as template "${r.templateId}"`);
-          dialogBackdrop.classList.remove("open");
-          templateIdInput.value = "";
-          loadTemplateTier();
-        } catch (e) {
-          dlgError.textContent = e.message;
-          dlgError.style.display = "";
-        }
-      };
-
-      // ── Configure n8n dialog (FR-008) ─────────────────────────────────────
-
-      const n8nCfgBackdrop = document.getElementById("n8n-cfg-backdrop");
-      document.getElementById("btn-cfg-cancel").onclick = () =>
-        n8nCfgBackdrop.classList.remove("open");
-      n8nCfgBackdrop.onclick = (e) => {
-        if (e.target === n8nCfgBackdrop) n8nCfgBackdrop.classList.remove("open");
-      };
-
-      document.getElementById("btn-cfg-connect").onclick = async () => {
-        const baseUrl = document.getElementById("cfg-base-url").value.trim();
-        const apiKey = document.getElementById("cfg-api-key").value;
-        const cfgError = document.getElementById("cfg-error");
-        cfgError.style.display = "none";
-
-        if (!baseUrl) {
-          cfgError.textContent = "Base URL is required";
-          cfgError.style.display = "";
-          return;
-        }
-        if (!apiKey) {
-          cfgError.textContent = "API key is required";
-          cfgError.style.display = "";
-          return;
-        }
-        try {
-          await api("POST", "/api/n8n/configure", { baseUrl, apiKey });
-          n8nCfgBackdrop.classList.remove("open");
-          document.getElementById("cfg-base-url").value = "";
-          document.getElementById("cfg-api-key").value = "";
-          flash("n8n connected");
-          await loadN8nStatus();
-          loadN8nRuntime();
-          loadProjectTier();
-        } catch (e) {
-          cfgError.textContent = e.message;
-          cfgError.style.display = "";
-        }
-      };
 
       // ── Run observability ──────────────────────────────────────────────────
 
@@ -2144,8 +1645,6 @@
           document.getElementById(`tab-${id}`).classList.toggle("active", id === activeTab);
         }
 
-        if (view !== "settings") stopN8nRuntimePoller();
-
         if (view === "runs") {
           _selectedRunId = null;
           loadRuns();
@@ -2162,8 +1661,6 @@
           loadTemplateTier();
         } else if (view === "settings") {
           loadEnvironment();
-          loadN8nRuntime();
-          startN8nRuntimePoller();
         }
       }
 
@@ -2184,7 +1681,6 @@
 
       (async () => {
         loadHeaderContext();
-        await loadN8nStatus();
         route();
         startRunsPoller();
       })();

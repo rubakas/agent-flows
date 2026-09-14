@@ -55,7 +55,8 @@ function rawGetWithHost(
 // The unified content handler (routes/content.ts) backs both GET /api/skills/:name
 // and GET /api/agents/:name. Both routes are GET-only, so only the Host-header
 // preamble guard applies here — the content-type/Origin guards only run for
-// mutating methods and are covered on the n8n module's mutating routes instead.
+// mutating methods and are covered on POST /api/pipelines in server.test.ts
+// ("preamble guards run before the POST /api/pipelines handler") instead.
 describe("routes/content — preamble guard runs before the extracted handler", () => {
   let srv: ServeHandle;
 

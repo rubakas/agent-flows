@@ -111,7 +111,6 @@ describe("cli: generate target validation", () => {
   it("names valid generate targets in the error", () => {
     const { stderr } = runCli(["generate", "oops"]);
     assert.match(stderr, /claude/);
-    assert.match(stderr, /n8n/);
   });
 
   it("exits non-zero when generate has no target", () => {

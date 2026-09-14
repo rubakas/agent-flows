@@ -7,7 +7,6 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   realpathSync,
-  mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -28,8 +27,6 @@ import { parse, stringify } from "yaml";
 import { createDynamicMastra } from "../bindings/mastra/dynamicMastra.js";
 import { BUNDLED_PIPELINES_DIR, resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
-import { generateN8nWorkflow } from "../bindings/n8n/build.js";
-import { importN8nWorkflow } from "../bindings/n8n/import.js";
 import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
 import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
@@ -64,20 +61,6 @@ import {
   safePath,
 } from "./route-helpers.js";
 import { CONTENT_CAP, handleNamedContent } from "./routes/content.js";
-import {
-  deleteN8nConfig,
-  fetchN8n,
-  readN8nConfig,
-  requireN8nConfig,
-  validateN8nBaseUrl,
-  writeN8nConfig,
-} from "./routes/n8n.js";
-import {
-  handleN8nRuntime,
-  handleN8nStart,
-  handleN8nStop,
-  type N8nRuntimeDeps,
-} from "./routes/n8nRuntime.js";
 import type { HardenedSpec } from "../canon/types.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
@@ -118,42 +101,10 @@ const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
 const RE_EXPORT = /^\/api\/export\/([^/]+)$/u;
 const RE_TEMPLATE_DETAIL = /^\/api\/templates\/([^/]+)$/u;
 const RE_TEMPLATE_INSTALL = /^\/api\/templates\/([^/]+)\/install$/u;
-const RE_PIPELINE_N8N = /^\/api\/pipelines\/([^/]+)\/n8n$/u;
 
 // Body size limits for readBody().
 const BODY_LIMIT_DEFAULT = 65_536; // 64 KB — all mutating routes except /api/import
 const BODY_LIMIT_IMPORT = 4 * 1024 * 1024; // 4 MB — /api/import carries a YAML bundle
-
-// ── Project-level n8n workflow ID map (FR-006) ────────────────────────────────
-// Stored at <stateDir>/n8n.json (different from the global config), with the
-// legacy <projectDir>/.agent-flows/n8n.json read as a fallback (spec 032 FR-007).
-// Format: {"workflows": {"<pipelineId>": "<n8nWorkflowId>"}}.
-
-function readProjectN8nMap(state: ProjectState, projectDir: string): Record<string, string> {
-  const legacyPath = join(projectDir, ".agent-flows", "n8n.json");
-  const path = existsSync(state.n8nMapPath) ? state.n8nMapPath : legacyPath;
-  if (!existsSync(path)) return {};
-  try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-    if (typeof raw.workflows === "object" && raw.workflows !== null) {
-      return raw.workflows as Record<string, string>;
-    }
-  } catch {
-    // Malformed file — treat as empty
-  }
-  return {};
-}
-
-function writeProjectN8nMap(state: ProjectState, map: Record<string, string>): void {
-  // Owner-only, matching every other file under the state dir (projectState.ts,
-  // routes/n8n.ts): the map names this machine's workflows and has no business
-  // being group- or world-readable.
-  mkdirSync(state.dir, { recursive: true, mode: 0o700 });
-  writeFileSync(state.n8nMapPath, JSON.stringify({ workflows: map }, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-}
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
 
@@ -421,11 +372,6 @@ export interface ServeOptions {
    * Each template is one `<templateId>.yaml` bundle file (FR-001).
    */
   templatesBase?: string;
-  /**
-   * Injection points for the n8n process routes (spec 034 D10). Tests replace
-   * the launch command and shorten the waits so no real n8n is ever spawned.
-   */
-  n8nRuntime?: N8nRuntimeDeps;
 }
 
 export interface ServeHandle {
@@ -451,8 +397,6 @@ interface HandlerCtx {
   skillsBase: string;
   /** Global template store directory (FR-001). */
   templatesBase: string;
-  /** n8n process-route injection points (spec 034 D10). */
-  n8nRuntime: N8nRuntimeDeps;
 }
 
 // ── readAgentFlowsConfig ───────────────────────────────────────────────────────
@@ -567,7 +511,6 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
       bundledPipelinesDir,
       skillsBase,
       templatesBase,
-      n8nRuntime: opts.n8nRuntime ?? {},
     }).catch((err: unknown) => {
       if (!res.headersSent) {
         if (err instanceof RequestTooLargeError) {
@@ -1520,7 +1463,7 @@ async function handleRequest(
     return;
   }
 
-  // POST /api/gate-judge — stateless judge-as-a-service for the n8n binding (FR-012)
+  // POST /api/gate-judge — stateless judge-as-a-service for external callers (FR-012)
   if (method === "POST" && pathname === "/api/gate-judge") {
     const { runService } = ctx;
     if (!requireRunService(runService, res)) return;
@@ -1739,84 +1682,6 @@ async function handleRequest(
     return;
   }
 
-  // POST /api/templates/from-n8n — save an n8n workflow as a template (FR-011)
-  // Must be checked BEFORE the RE_TEMPLATE_DETAIL regex to avoid capturing "from-n8n" as an id.
-  if (method === "POST" && pathname === "/api/templates/from-n8n") {
-    const parsed = await readJsonBody(req, BODY_LIMIT_IMPORT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { workflowId, templateId: requestedId, overwrite } = parsed.value;
-    if (typeof workflowId !== "string" || workflowId.trim() === "") {
-      json(res, 400, { error: 'Field "workflowId" must be a non-empty string' });
-      return;
-    }
-    const n8nCfg = requireN8nConfig(res);
-    if (!n8nCfg) return;
-    // Fetch the workflow from n8n
-    let wfJson: unknown;
-    try {
-      const resp = await fetchN8n(n8nCfg, `/api/v1/workflows/${workflowId}`);
-      if (!resp.ok) {
-        // Do NOT include the API key in this error message
-        json(res, resp.status === 404 ? 404 : 502, {
-          error: `n8n GET workflow ${workflowId} returned HTTP ${resp.status}`,
-        });
-        return;
-      }
-      wfJson = await resp.json();
-    } catch (err) {
-      json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
-      return;
-    }
-    // Import the n8n workflow JSON to canon files
-    let importResult: ReturnType<typeof importN8nWorkflow>;
-    try {
-      importResult = importN8nWorkflow(wfJson as Parameters<typeof importN8nWorkflow>[0]);
-    } catch (err) {
-      json(res, 422, { error: (err as Error).message });
-      return;
-    }
-    // Determine the template id
-    const tId =
-      typeof requestedId === "string" && isSafeId(requestedId)
-        ? requestedId
-        : importResult.pipelineId;
-    if (!isSafeId(tId)) {
-      json(res, 400, {
-        error: `Template id "${tId}" is invalid — must be lowercase alphanumeric and hyphens only`,
-      });
-      return;
-    }
-    // Path containment
-    try {
-      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
-    } catch {
-      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
-      return;
-    }
-    const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
-    if (existsSync(templatePath) && overwrite !== true) {
-      json(res, 409, {
-        error: `Template "${tId}" already exists — pass overwrite:true to replace`,
-      });
-      return;
-    }
-    // Build bundle from import result
-    const bundle = {
-      bundleVersion: 1 as const,
-      exportedAt: new Date().toISOString(),
-      sourcePipeline: importResult.pipelineId,
-      files: importResult.files,
-    };
-    const yamlText = stringifyBundle(bundle);
-    mkdirSync(ctx.templatesBase, { recursive: true });
-    writeFileSync(templatePath, yamlText, "utf8");
-    json(res, 200, { templateId: tId, path: templatePath });
-    return;
-  }
-
   // GET /api/templates/:id — get template details
   const templateDetailMatch = RE_TEMPLATE_DETAIL.exec(pathname);
   if (method === "GET" && templateDetailMatch) {
@@ -1909,177 +1774,6 @@ async function handleRequest(
     return;
   }
 
-  // ── n8n status and proxy routes (FR-005/FR-006/FR-011) ────────────────────
-
-  // ── n8n process lifecycle (spec 034 D10/FR-015..FR-018) ───────────────────
-  // These three say nothing about the API key: they are about the process, and
-  // the key belongs to the configure routes below.
-
-  // GET /api/n8n/runtime — is n8n installed, is it running, did we start it
-  if (method === "GET" && pathname === "/api/n8n/runtime") {
-    await handleN8nRuntime(res, ctx.state.dir);
-    return;
-  }
-
-  // POST /api/n8n/start — launch n8n and wait for it to answer (FR-017)
-  if (method === "POST" && pathname === "/api/n8n/start") {
-    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-    await handleN8nStart(res, ctx.state.dir, ctx.n8nRuntime);
-    return;
-  }
-
-  // POST /api/n8n/stop — stop only the n8n this daemon started (FR-018)
-  if (method === "POST" && pathname === "/api/n8n/stop") {
-    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-    await handleN8nStop(res, ctx.state.dir, ctx.n8nRuntime);
-    return;
-  }
-
-  // GET /api/n8n/status — return whether n8n is configured and the base URL (FR-005/FR-008)
-  // The API key NEVER appears in this response. The `source` field tells the
-  // UI whether to disable the configure form (env vars cannot be overridden by writing a file).
-  if (method === "GET" && pathname === "/api/n8n/status") {
-    const cfg = readN8nConfig();
-    if (!cfg) {
-      json(res, 200, { configured: false });
-    } else {
-      json(res, 200, { configured: true, baseUrl: cfg.baseUrl, source: cfg.source });
-    }
-    return;
-  }
-
-  // POST /api/n8n/configure — store n8n connection config (FR-008)
-  // The API key is written to disk only; it NEVER appears in any response,
-  // error message, or log line, including validation errors.
-  if (method === "POST" && pathname === "/api/n8n/configure") {
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { baseUrl, apiKey } = parsed.value;
-    if (typeof baseUrl !== "string" || !baseUrl) {
-      json(res, 400, { error: 'Field "baseUrl" is required' });
-      return;
-    }
-    const validated = validateN8nBaseUrl(baseUrl);
-    if (!validated.ok) {
-      json(res, 400, { error: validated.error });
-      return;
-    }
-    if (typeof apiKey !== "string" || !apiKey) {
-      json(res, 400, { error: 'Field "apiKey" is required' });
-      return;
-    }
-    writeN8nConfig(validated.normalized, apiKey);
-    json(res, 200, { configured: true, baseUrl: validated.normalized });
-    return;
-  }
-
-  // DELETE /api/n8n/configure — remove stored n8n config (FR-008)
-  if (method === "DELETE" && pathname === "/api/n8n/configure") {
-    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-    deleteN8nConfig();
-    json(res, 200, { configured: false });
-    return;
-  }
-
-  // GET /api/n8n/workflows — proxy n8n's workflow list (FR-011)
-  if (method === "GET" && pathname === "/api/n8n/workflows") {
-    const cfg = requireN8nConfig(res);
-    if (!cfg) return;
-    try {
-      const resp = await fetchN8n(cfg, "/api/v1/workflows");
-      if (!resp.ok) {
-        json(res, resp.status === 401 ? 401 : 502, {
-          error: `n8n list workflows returned HTTP ${resp.status}`,
-        });
-        return;
-      }
-      const data = (await resp.json()) as { data?: { id: string; name: string }[] };
-      const workflows = (data.data ?? []).map(({ id, name }) => ({ id, name }));
-      json(res, 200, { workflows });
-    } catch (err) {
-      json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
-    }
-    return;
-  }
-
-  // POST /api/pipelines/:id/n8n — push a pipeline to n8n and return the edit URL (FR-006)
-  const pipelineN8nMatch = RE_PIPELINE_N8N.exec(pathname);
-  if (method === "POST" && pipelineN8nMatch) {
-    const id = decodeURIComponent(pipelineN8nMatch[1]);
-    if (!isSafeId(id)) {
-      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
-      return;
-    }
-    const entry = findPipelineById(ctx.pipelinesDir, id);
-    if (!entry) {
-      json(res, 404, { error: `Pipeline "${id}" not found` });
-      return;
-    }
-    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
-    const cfg = requireN8nConfig(res);
-    if (!cfg) return;
-    // Generate the n8n workflow JSON from the canon definition
-    let wfJson: ReturnType<typeof generateN8nWorkflow>;
-    try {
-      wfJson = generateN8nWorkflow(entry.loaded);
-    } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, root) });
-      return;
-    }
-    // Check if a workflow was already pushed for this pipeline
-    const wfMap = readProjectN8nMap(ctx.state, ctx.projectDir);
-    let existingN8nId = wfMap[id];
-    if (existingN8nId) {
-      // Verify the workflow still exists in n8n; re-create if 404
-      try {
-        const checkResp = await fetchN8n(cfg, `/api/v1/workflows/${existingN8nId}`);
-        if (checkResp.ok) {
-          json(res, 200, { url: `${cfg.baseUrl}/workflow/${existingN8nId}` });
-          return;
-        }
-        if (checkResp.status === 404) {
-          // Stale mapping — re-create below
-          existingN8nId = undefined as unknown as string;
-        } else {
-          json(res, 502, {
-            error: `n8n GET workflow ${existingN8nId} returned HTTP ${checkResp.status}`,
-          });
-          return;
-        }
-      } catch (err) {
-        json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
-        return;
-      }
-    }
-    // Create the workflow in n8n (POST /api/v1/workflows)
-    // Remove `id` from the request body — it is readOnly and the server assigns it.
-    const { id: _id, active: _active, ...wfBody } = wfJson;
-    try {
-      const createResp = await fetchN8n(cfg, "/api/v1/workflows", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(wfBody),
-      });
-      if (!createResp.ok) {
-        json(res, 502, { error: `n8n POST workflow returned HTTP ${createResp.status}` });
-        return;
-      }
-      const created = (await createResp.json()) as { id: string };
-      const n8nId = created.id;
-      // Record the mapping in the project-level n8n.json
-      const updatedMap = { ...wfMap, [id]: n8nId };
-      writeProjectN8nMap(ctx.state, updatedMap);
-      json(res, 200, { url: `${cfg.baseUrl}/workflow/${n8nId}` });
-    } catch (err) {
-      json(res, 502, { error: `Failed to reach n8n: ${(err as Error).message}` });
-    }
-    return;
-  }
-
-  // 404 fallback
   json(res, 404, { error: `Not found: ${method} ${pathname}` });
 }
 

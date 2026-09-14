@@ -2,7 +2,7 @@
 //
 // Versioned canon (pipelines/, prompts/, providers.yaml, config.json) stays in
 // <projectDir>/.agent-flows/. Everything this machine produced — run artifacts,
-// the tickets/drafts db, the mastra db, the project n8n id map — lives under
+// the tickets/drafts db, the mastra db — lives under
 // ${AGENT_FLOWS_HOME ?? ~/.agent-flows}/projects/<key>/ (D1, D2).
 
 import { createHash } from "node:crypto";
@@ -40,8 +40,6 @@ export interface ProjectState {
    * derivation that ignores `--db`.
    */
   dbPath: string;
-  /** <dir>/n8n.json — project n8n workflow id map. */
-  n8nMapPath: string;
   /** <dir>/project.json — the marker written on first resolution. */
   projectJsonPath: string;
 }
@@ -121,7 +119,6 @@ export function resolveProjectState(projectDir: string, env: StateEnv = process.
     dir,
     runsDir: join(dir, "runs"),
     dbPath,
-    n8nMapPath: join(dir, "n8n.json"),
     projectJsonPath: join(dir, "project.json"),
   };
 }
@@ -139,8 +136,8 @@ export function ensureProjectState(
   log: (msg: string) => void = console.error
 ): ProjectState {
   const state = resolveProjectState(projectDir, env);
-  // 0700/0600 throughout: the tree is per-user project state, so it follows the
-  // mode pattern writeN8nConfig uses for ~/.agent-flows (src/serve/routes/n8n.ts).
+  // 0700/0600 throughout: the tree is per-user project state: nothing in it has
+  // any business being group- or world-readable.
   mkdirSync(state.dir, { recursive: true, mode: 0o700 });
 
   if (!existsSync(state.projectJsonPath)) {

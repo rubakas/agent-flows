@@ -109,7 +109,7 @@ export function citedPathsExist(output: string, repoRoot: string): PathCheckResu
     } else if (st?.isDirectory() === true) {
       // A real directory is neither evidence of reading a file nor a
       // fabrication. Crediting it would let "src/" score a hit; penalising it
-      // would mark "the n8n binding lives in src/bindings/n8n" as a
+      // would mark "the mastra binding lives in src/bindings/mastra" as a
       // hallucination. It scores nothing either way.
       continue;
     } else {

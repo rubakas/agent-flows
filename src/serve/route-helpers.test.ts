@@ -156,9 +156,9 @@ describe("safePath redaction — unexpected error surfaces as 500 with <root>", 
   });
 });
 
-// ── Ordering: POST /api/templates/from-n8n reaches its own handler ────────────
+// ── Ordering: POST /api/pipelines/:id/drafts reaches its own handler ─────────
 
-describe("dispatch ordering — POST /api/templates/from-n8n is not captured by template-detail", () => {
+describe("dispatch ordering — POST /api/pipelines/:id/drafts is not captured by pipeline-detail", () => {
   let srv: ServeHandle;
 
   before(async () => {
@@ -171,13 +171,13 @@ describe("dispatch ordering — POST /api/templates/from-n8n is not captured by 
   });
   after(async () => srv.close());
 
-  it("a body missing workflowId gets the from-n8n-specific 400, proving its own handler ran", async () => {
-    const res = await mutate(srv.port, "POST", "/api/templates/from-n8n", {});
-    assert.equal(res.status, 400, `expected 400, got ${res.status}`);
-    const body = (await res.json()) as { error: string };
+  it("the response carries draftId, proving the drafts handler ran, not pipeline-detail", async () => {
+    const res = await mutate(srv.port, "POST", "/api/pipelines/investigate/drafts", {});
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    const body = (await res.json()) as { draftId?: number; def?: unknown };
     assert.ok(
-      body.error.includes("workflowId"),
-      `error must be the from-n8n workflowId message, not a template-detail message; got: ${body.error}`
+      body.draftId !== undefined,
+      `body must be the drafts response, not a pipeline-detail response; got: ${JSON.stringify(body)}`
     );
   });
 });

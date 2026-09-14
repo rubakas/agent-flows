@@ -165,11 +165,11 @@ describe("providers-wiring — Binding A generateWorkflowScript uses project reg
   });
 });
 
-// ── Root: n8n/write-cli.ts (validation only) ─────────────────────────────────
+// ── Root: loadProviders rejects a malformed providers.yaml ───────────────────
 
-describe("providers-wiring — n8n write-cli.ts calls loadProviders (validation)", () => {
-  it("loadProviders with a malformed providers.yaml throws before n8n generation begins", () => {
-    // This mirrors what n8n/write-cli.ts does: loadProviders(repoRoot).
+describe("providers-wiring — loadProviders validates providers.yaml before any generation", () => {
+  it("loadProviders with a malformed providers.yaml throws before generation begins", () => {
+    // This mirrors what every write-cli entry point does: loadProviders(repoRoot).
     // A malformed file must throw, not fall back silently.
     assert.throws(
       () => loadProviders("/fake/project", { readFile: () => "version: 2\n" }),

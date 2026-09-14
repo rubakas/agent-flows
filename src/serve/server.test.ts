@@ -169,6 +169,35 @@ function rawGetWithHost(
   });
 }
 
+/**
+ * Send a raw HTTP POST with an explicit Host header value, for the mutating-route
+ * preamble guards. fetch ignores Host overrides; node:http.request does not.
+ */
+function rawPostWithHost(
+  port: number,
+  path: string,
+  hostHeader: string
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const opts: RequestOptions = {
+      hostname: "127.0.0.1",
+      port,
+      path,
+      method: "POST",
+      headers: { Host: hostHeader, "content-type": "application/json", "content-length": 2 },
+    };
+    const req = httpRequest(opts, (res: IncomingMessage) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () =>
+        resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") })
+      );
+    });
+    req.on("error", reject);
+    req.end("{}");
+  });
+}
+
 // ── Pipeline listing & detail ─────────────────────────────────────────────────
 
 describe("GET /api/pipelines — lists real pipelines", () => {
@@ -1196,6 +1225,69 @@ describe("POST /api/pipelines — create new pipeline", () => {
   });
 });
 
+// ── Preamble guards on a mutating route (relocated from the deleted route test) ─
+// The content-type/Origin/Host guards run before any route handler and are
+// shared by every mutating route. POST /api/pipelines is the surviving carrier
+// of that regression coverage (spec 037 D1).
+
+describe("preamble guards run before the POST /api/pipelines handler", () => {
+  let srv: ServeHandle;
+  let tmpRoot: string;
+
+  before(async () => {
+    tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-preamble-test-")));
+    mkdirSync(join(tmpRoot, "pipelines"));
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: join(tmpRoot, "pipelines"),
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("bad Host header → 403, never reaches the handler", async () => {
+    const result = await rawPostWithHost(srv.port, "/api/pipelines", "evil.attacker.example");
+    assert.equal(result.status, 403);
+  });
+
+  it("bad content-type → 403, never reaches the handler", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "{}",
+    });
+    assert.equal(res.status, 403);
+  });
+
+  it("cross-origin Origin header → 403, never reaches the handler", async () => {
+    const res = await mutate(
+      srv.port,
+      "POST",
+      "/api/pipelines",
+      {},
+      { origin: "http://evil.attacker.example" }
+    );
+    assert.equal(res.status, 403);
+  });
+
+  it("(sanity) matching loopback Origin passes the preamble and reaches the route logic", async () => {
+    const res = await mutate(
+      srv.port,
+      "POST",
+      "/api/pipelines",
+      {},
+      { origin: `http://127.0.0.1:${srv.port}` }
+    );
+    // The body has no "id" — a 400 from the route itself, NOT a 403 preamble refusal.
+    assert.equal(res.status, 400);
+  });
+});
+
 // ── DELETE /api/pipelines/:id ─────────────────────────────────────────────────
 
 describe("DELETE /api/pipelines/:id — remove project pipeline", () => {
@@ -1995,16 +2087,6 @@ describe("Template lifecycle (FR-002)", () => {
     assert.deepEqual(body.templates, []);
   });
 
-  it("POST /api/templates/from-n8n → 503 when n8n not configured", async () => {
-    // No AGENT_FLOWS_N8N_URL / AGENT_FLOWS_N8N_API_KEY set → 503
-    const res = await mutate(srv.port, "POST", "/api/templates/from-n8n", {
-      workflowId: "w123",
-    });
-    assert.equal(res.status, 503);
-    const body = (await res.json()) as { error: string };
-    assert.ok(body.error.toLowerCase().includes("n8n"), `expected n8n mention: ${body.error}`);
-  });
-
   it("DELETE /api/templates/nonexistent → 404", async () => {
     const res = await mutate(srv.port, "DELETE", "/api/templates/nonexistent", {});
     assert.equal(res.status, 404);
@@ -2126,11 +2208,6 @@ describe("path traversal guard — id-bearing routes reject hostile ids (FR-002/
       const res = await mutate(srv.port, "DELETE", `/api/pipelines/${seg}`, {});
       assert.equal(res.status, 400, `DELETE /api/pipelines/${id} must be rejected with 400`);
     });
-
-    it(`POST /api/pipelines/${id}/n8n → 400`, async () => {
-      const res = await mutate(srv.port, "POST", `/api/pipelines/${seg}/n8n`, {});
-      assert.equal(res.status, 400, `POST /api/pipelines/${id}/n8n must be rejected with 400`);
-    });
   }
 
   it("install route positive-containment: traversal bundle file is not installed into project", async () => {
@@ -2156,141 +2233,6 @@ describe("path traversal guard — id-bearing routes reject hostile ids (FR-002/
       [],
       `project dir must be empty after traversal attempt; found: ${JSON.stringify(projectContents)}`
     );
-  });
-});
-
-// ── FR-005/FR-008: n8n status and key secrecy ─────────────────────────────────
-
-describe("n8n status and key secrecy (FR-005/FR-008)", () => {
-  let srv: ServeHandle;
-  const FAKE_API_KEY = "secret-api-key-that-must-never-appear";
-
-  before(async () => {
-    // Set env overrides so readN8nConfig() returns configured state
-    process.env.AGENT_FLOWS_N8N_URL = "http://localhost:15678";
-    process.env.AGENT_FLOWS_N8N_API_KEY = FAKE_API_KEY;
-    srv = await startServer({
-      state: makeState(REAL_REPO_ROOT),
-      port: 0,
-      dbPath: ":memory:",
-      pipelinesDir: REAL_PIPELINES_DIR,
-    });
-  });
-  after(async () => {
-    await srv.close();
-    delete process.env.AGENT_FLOWS_N8N_URL;
-    delete process.env.AGENT_FLOWS_N8N_API_KEY;
-  });
-
-  it("GET /api/n8n/status returns {configured:true, baseUrl} — key absent (test plan §8)", async () => {
-    const res = await fetch(`http://127.0.0.1:${srv.port}/api/n8n/status`);
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as Record<string, unknown>;
-    assert.equal(body.configured, true);
-    assert.equal(body.baseUrl, "http://localhost:15678");
-    // The API key must not appear in the response body
-    const bodyStr = JSON.stringify(body);
-    assert.ok(!bodyStr.includes(FAKE_API_KEY), `API key leaked into status response: ${bodyStr}`);
-    // apiKey field must not be present
-    assert.equal(body.apiKey, undefined, "apiKey must not be in response");
-  });
-
-  it("GET /api/n8n/status returns {configured:false} when env vars are unset", async () => {
-    const uncfg = await startServer({
-      state: makeState(REAL_REPO_ROOT),
-      port: 0,
-      dbPath: ":memory:",
-    });
-    // Create a server with no env overrides (temporarily clear them for this sub-test)
-    const savedUrl = process.env.AGENT_FLOWS_N8N_URL;
-    const savedKey = process.env.AGENT_FLOWS_N8N_API_KEY;
-    delete process.env.AGENT_FLOWS_N8N_URL;
-    delete process.env.AGENT_FLOWS_N8N_API_KEY;
-    try {
-      const res = await fetch(`http://127.0.0.1:${uncfg.port}/api/n8n/status`);
-      assert.equal(res.status, 200);
-      const body = (await res.json()) as Record<string, unknown>;
-      assert.equal(body.configured, false);
-      assert.equal(body.baseUrl, undefined);
-    } finally {
-      if (savedUrl) process.env.AGENT_FLOWS_N8N_URL = savedUrl;
-      if (savedKey) process.env.AGENT_FLOWS_N8N_API_KEY = savedKey;
-      await uncfg.close();
-    }
-  });
-
-  it("GET /api/n8n/workflows error response does not contain API key (test plan §8)", async () => {
-    // The n8n server is not actually running at localhost:15678, so this returns a 502.
-    // Verify the error message does not contain the API key.
-    const res = await fetch(`http://127.0.0.1:${srv.port}/api/n8n/workflows`);
-    // 502 is expected since n8n is not running
-    const body = (await res.json()) as { error: string };
-    const bodyStr = JSON.stringify(body);
-    assert.ok(!bodyStr.includes(FAKE_API_KEY), `API key leaked into error response: ${bodyStr}`);
-  });
-
-  it("POST /api/pipelines/:id/n8n error response does not contain API key (test plan §8)", async () => {
-    const res = await mutate(srv.port, "POST", "/api/pipelines/investigate/n8n", {});
-    const body = (await res.json()) as { error?: string; url?: string };
-    const bodyStr = JSON.stringify(body);
-    assert.ok(
-      !bodyStr.includes(FAKE_API_KEY),
-      `API key leaked into pipeline/n8n response: ${bodyStr}`
-    );
-  });
-
-  it("POST /api/templates/from-n8n error response does not contain API key (test plan §8)", async () => {
-    const res = await mutate(srv.port, "POST", "/api/templates/from-n8n", {
-      workflowId: "nonexistent-wf",
-    });
-    const body = (await res.json()) as { error?: string };
-    const bodyStr = JSON.stringify(body);
-    assert.ok(
-      !bodyStr.includes(FAKE_API_KEY),
-      `API key leaked into from-n8n error response: ${bodyStr}`
-    );
-  });
-});
-
-// ── FR-006: redirect mapping (n8n workflow ID map) ────────────────────────────
-
-describe("POST /api/pipelines/:id/n8n redirect mapping (FR-006, test plan §9)", () => {
-  let srv: ServeHandle;
-  let tmpDir: string;
-  let projectDir: string;
-  // We test the "unconfigured n8n" path only — a live n8n mock server would be
-  // complex to set up inline. The n8n API call path is covered by the key-secrecy
-  // test above (which proves the 502 path never leaks the key).
-
-  before(async () => {
-    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-n8n-")));
-    projectDir = join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    srv = await startServer({
-      state: makeState(projectDir),
-      port: 0,
-      dbPath: ":memory:",
-      pipelinesDir: REAL_PIPELINES_DIR,
-      bundledPipelinesDir: REAL_PIPELINES_DIR,
-      projectDir,
-    });
-  });
-  after(async () => {
-    await srv.close();
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("unconfigured n8n → 503 with actionable error naming the config file (test plan §9)", async () => {
-    const res = await mutate(srv.port, "POST", "/api/pipelines/investigate/n8n", {});
-    assert.equal(res.status, 503);
-    const body = (await res.json()) as { error: string };
-    // Error must name the config file (not the key)
-    assert.ok(body.error.includes("n8n.json"), `error should name n8n.json: ${body.error}`);
-  });
-
-  it("pipeline not found → 404", async () => {
-    const res = await mutate(srv.port, "POST", "/api/pipelines/nonexistent/n8n", {});
-    assert.equal(res.status, 404);
   });
 });
 
@@ -2853,48 +2795,6 @@ describe("POST /api/runs — artifactPath is confined to the state root", () => 
   });
 });
 
-// ── Audit: an invalid n8n base URL counts as not configured ──────────────────
-
-describe("GET /api/n8n/status — a non-http base URL is not a configuration", () => {
-  let srv: ServeHandle;
-  let savedUrl: string | undefined;
-  let savedKey: string | undefined;
-
-  before(async () => {
-    savedUrl = process.env.AGENT_FLOWS_N8N_URL;
-    savedKey = process.env.AGENT_FLOWS_N8N_API_KEY;
-    // The page hands baseUrl to window.open; a javascript: URL there would run
-    // in the page's own origin.
-    process.env.AGENT_FLOWS_N8N_URL = "javascript:alert(1)//";
-    process.env.AGENT_FLOWS_N8N_API_KEY = "irrelevant";
-    srv = await startServer({
-      state: makeState(REAL_REPO_ROOT),
-      port: 0,
-      dbPath: ":memory:",
-      pipelinesDir: REAL_PIPELINES_DIR,
-    });
-  });
-  after(async () => {
-    await srv.close();
-    if (savedUrl === undefined) delete process.env.AGENT_FLOWS_N8N_URL;
-    else process.env.AGENT_FLOWS_N8N_URL = savedUrl;
-    if (savedKey === undefined) delete process.env.AGENT_FLOWS_N8N_API_KEY;
-    else process.env.AGENT_FLOWS_N8N_API_KEY = savedKey;
-  });
-
-  it("reports not configured and never echoes the rejected URL as a base URL", async () => {
-    const res = await fetch(`http://127.0.0.1:${srv.port}/api/n8n/status`);
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as Record<string, unknown>;
-    assert.equal(body.configured, false, "an unusable base URL is not a configuration");
-    assert.equal(body.baseUrl, undefined);
-    assert.ok(
-      !JSON.stringify(body).includes("javascript:"),
-      "the rejected scheme must not reach the page"
-    );
-  });
-});
-
 // ── Spec 034: hash-routed views ──────────────────────────────────────────────
 
 describe("GET / — four views, tabs and router wired in served HTML (V1)", () => {
@@ -2924,22 +2824,6 @@ describe("GET / — four views, tabs and router wired in served HTML (V1)", () =
     assert.ok(html.includes('from "/ui-route.js"'), "the page must import the shared router");
     for (const hash of ["#/runs", "#/workflows", "#/templates", "#/settings"])
       assert.ok(html.includes(`href="${hash}"`), `the ${hash} tab link is missing`);
-  });
-
-  it("the n8n connect/disconnect buttons live inside the settings view", () => {
-    const settingsStart = html.indexOf('id="view-settings"');
-    const settingsEnd = html.indexOf("</main>", settingsStart);
-    assert.ok(settingsStart !== -1 && settingsEnd > settingsStart, "settings view not found");
-    const settings = html.slice(settingsStart, settingsEnd);
-    for (const id of ["btn-n8n-connect", "btn-n8n-disconnect", "n8n-status-badge"])
-      assert.ok(id.length > 0 && settings.includes(id), `"${id}" must sit in the settings view`);
-
-    // FR-008: and nowhere before it — the header must be free of n8n controls.
-    const header = html.slice(0, settingsStart);
-    assert.ok(
-      !header.includes("btn-n8n-connect"),
-      "the n8n connect button must not appear before the settings view (FR-008)"
-    );
   });
 
   it("carries the split-view containers and the settings reader (D9/FR-013/FR-014)", () => {
@@ -2972,59 +2856,6 @@ describe("GET / — four views, tabs and router wired in served HTML (V1)", () =
     assert.ok(
       !html.includes("textContent = escH("),
       "textContent escapes on assignment — escaping first double-escapes the text"
-    );
-    assert.ok(
-      html.includes('["http:", "https:"].includes(parsed.protocol)'),
-      "every externally-supplied URL must be scheme-checked before window.open"
-    );
-  });
-
-  it("carries the n8n runtime card and its key-ownership line (D10/V7)", () => {
-    for (const id of [
-      "n8n-runtime-installed",
-      "n8n-runtime-running",
-      "n8n-runtime-connected",
-      "btn-n8n-start",
-      "btn-n8n-stop",
-      "btn-n8n-connect-runtime",
-    ])
-      assert.ok(html.includes(`id="${id}"`), `served HTML must contain "${id}" — D10`);
-    assert.ok(
-      html.includes("n8n issues API keys per user in its own UI"),
-      "the card must say why the key is pasted by hand"
-    );
-    assert.ok(
-      html.includes("agent-flows never handles n8n"),
-      "the card must state that agent-flows never handles n8n credentials"
-    );
-    // The runtime card lives in Settings, not the header (FR-008).
-    const settingsStart = html.indexOf('id="view-settings"');
-    assert.ok(
-      html.indexOf("btn-n8n-start") > settingsStart,
-      "the Start button belongs to the settings view"
-    );
-  });
-
-  it("polls the runtime route only while Settings is open", () => {
-    assert.ok(html.includes("/api/n8n/runtime"), "the card must read the runtime route");
-    assert.ok(
-      html.includes("stopN8nRuntimePoller"),
-      "leaving Settings must stop the 5s runtime poll"
-    );
-  });
-
-  it("hosts Save-from-n8n in Templates and New-in-n8n in Workflows (FR-008)", () => {
-    const wfStart = html.indexOf('id="view-workflows"');
-    const tmplStart = html.indexOf('id="view-templates"');
-    const setStart = html.indexOf('id="view-settings"');
-    assert.ok(wfStart !== -1 && tmplStart > wfStart && setStart > tmplStart, "view order");
-    assert.ok(
-      html.slice(wfStart, tmplStart).includes("btn-new-in-n8n"),
-      "New in n8n belongs to the Workflows view"
-    );
-    assert.ok(
-      html.slice(tmplStart, setStart).includes("btn-save-from-n8n"),
-      "Save from n8n… belongs to the Templates view"
     );
   });
 });
