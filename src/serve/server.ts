@@ -96,6 +96,18 @@ const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
 const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
 const RE_RUN_CANCEL = /^\/api\/runs\/([^/]+)\/cancel$/u;
 const RE_RUN_MANIFEST = /^\/api\/runs\/([^/]+)\/manifest$/u;
+/**
+ * The page's ESM helpers, by request path (spec 037 FR-015). The file name is
+ * taken from this map and never from the request, so no traversal can reach a
+ * file next to ui.html that is not listed here.
+ */
+const STATIC_MODULES: ReadonlyMap<string, string> = new Map([
+  ["/ui-route.js", "ui-route.js"],
+  ["/ui-graph.js", "ui-graph.js"],
+  ["/ui-log.js", "ui-log.js"],
+  ["/ui-tables.js", "ui-tables.js"],
+]);
+
 const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
 const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
 const RE_EXPORT = /^\/api\/export\/([^/]+)$/u;
@@ -701,14 +713,16 @@ async function handleRequest(
     return;
   }
 
-  // GET /ui-route.js — the page's hash router, kept as a real module file so it
-  // can be unit-tested without a DOM (spec 034 D7/V2). Served from the same
-  // directory as ui.html; no build step.
-  if (method === "GET" && pathname === "/ui-route.js") {
-    const routePath = join(dirname(ctx.uiPath), "ui-route.js");
-    if (!existsSync(routePath)) {
+  // GET /ui-route.js, /ui-log.js, … — the page's ESM helpers, kept as real
+  // module files so they can be unit-tested without a DOM (spec 034 D7/V2,
+  // spec 037 FR-015). Served from the same directory as ui.html; no build step.
+  // Anything not in STATIC_MODULES falls through to the 404 at the end.
+  if (method === "GET" && STATIC_MODULES.has(pathname)) {
+    const moduleName = STATIC_MODULES.get(pathname)!;
+    const modulePath = join(dirname(ctx.uiPath), moduleName);
+    if (!existsSync(modulePath)) {
       res.writeHead(503, { "Content-Type": "text/plain" });
-      res.end("UI router absent: src/serve/ui-route.js is missing");
+      res.end(`UI module absent: src/serve/${moduleName} is missing`);
       return;
     }
     res.writeHead(200, {
@@ -716,7 +730,7 @@ async function handleRequest(
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
     });
-    res.end(readFileSync(routePath, "utf8"));
+    res.end(readFileSync(modulePath, "utf8"));
     return;
   }
 

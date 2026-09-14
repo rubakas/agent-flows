@@ -2860,7 +2860,7 @@ describe("GET / — four views, tabs and router wired in served HTML (V1)", () =
   });
 });
 
-describe("GET /ui-route.js — the router module is served next to the page (D7)", () => {
+describe("GET /ui-*.js — the page's ESM helpers are served next to it (D7, 037 FR-015)", () => {
   let srv: ServeHandle;
 
   before(async () => {
@@ -2880,6 +2880,22 @@ describe("GET /ui-route.js — the router module is served next to the page (D7)
     assert.match(ctype, /javascript/u, `expected a JS content type, got "${ctype}"`);
     const body = await res.text();
     assert.ok(body.includes("export function parseHash"), "the module must export parseHash");
+  });
+
+  it("serves the run-view renderers the same way (spec 036 D10)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ui-log.js`);
+    assert.equal(res.status, 200);
+    const ctype = res.headers.get("content-type") ?? "";
+    assert.match(ctype, /javascript/u, `expected a JS content type, got "${ctype}"`);
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+    const body = await res.text();
+    assert.ok(body.includes("export function renderLogEvent"), "must export renderLogEvent");
+  });
+
+  it("404s a module name that is not on the allowlist (FR-015)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ui-other.js`);
+    assert.equal(res.status, 404, "only the four listed module names are served");
+    await res.text();
   });
 });
 
