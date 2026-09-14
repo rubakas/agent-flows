@@ -1680,6 +1680,29 @@ describe("runCheckStep — output events", () => {
     );
   });
 
+  it("scrubs a declared value split across two reads", async () => {
+    const events: StepLogEventInput[] = [];
+    // Two writes a sleep apart, so the value cannot arrive in one chunk: the
+    // scrubber only catches it by carrying the tail of the first read over.
+    const result = await runCheckStep("printf hunter2; sleep 0.05; printf xyz", {
+      env: { PATH: process.env.PATH, PROBE_SECRET_VALUE: "hunter2xyz" },
+      envAllowlist: ["PROBE_SECRET_VALUE"],
+      onEvent: (event) => events.push(event),
+    });
+
+    assert.equal(streamText(events, "stdout"), "[redacted:PROBE_SECRET_VALUE]");
+    assert.equal(
+      events.some((e) => e.kind === "check.output" && e.text.includes("hunter2")),
+      false,
+      "no event may carry a half of the credential either"
+    );
+    assert.equal(
+      result.output.includes("hunter2"),
+      false,
+      "the retained output must never hold the credential value"
+    );
+  });
+
   it("leaves output alone when the step declares no variables", async () => {
     const events: StepLogEventInput[] = [];
     await runCheckStep("printf plain", { onEvent: (event) => events.push(event) });

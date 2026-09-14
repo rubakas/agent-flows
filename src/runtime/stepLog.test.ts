@@ -105,6 +105,70 @@ describe("stepLog — appending (FR-001)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("writes only the first step.result of a step and drops the second", () => {
+    const dir = makeDir();
+    try {
+      openRunLog("twice-run", { dir, pipelineId: "test" });
+      const first = appendStepLog("twice-run", "one", {
+        kind: "step.result",
+        status: "cancelled",
+        durationMs: 3,
+        error: "Run cancelled",
+      });
+      // The builder's own abort emit, racing the run service's synthetic event.
+      const second = appendStepLog("twice-run", "one", {
+        kind: "step.result",
+        status: "cancelled",
+        durationMs: 7,
+      });
+      // A different step is unaffected: the guard is per step, not per run.
+      appendStepLog("twice-run", "two", {
+        kind: "step.result",
+        status: "succeeded",
+        durationMs: 1,
+      });
+
+      assert.equal(first?.seq, 1);
+      assert.equal(second, undefined, "the second terminal event of a step must be dropped");
+      const events = linesOf(dir, "test");
+      assert.deepEqual(
+        events.map((e) => e.stepId),
+        ["one", "two"],
+        "exactly one terminal line per step, whichever emitter won the race"
+      );
+      assert.equal(expectKind(events[0], "step.result").durationMs, 3);
+    } finally {
+      closeRunLog("twice-run");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues the sequence across a reopen with a torn last line", () => {
+    const dir = makeDir();
+    const file = runLogFile(dir, "test");
+    try {
+      openRunLog("reopen-run", { dir, pipelineId: "test" });
+      appendStepLog("reopen-run", "one", { kind: "message", role: "assistant", text: "a" });
+      appendStepLog("reopen-run", "one", { kind: "message", role: "assistant", text: "b" });
+      closeRunLog("reopen-run");
+
+      // A write interrupted mid-line, as a crashed daemon leaves behind.
+      writeFileSync(file, `${readFileSync(file, "utf8")}{"seq":3,"kind":"mes`);
+
+      openRunLog("reopen-run", { dir, pipelineId: "test" });
+      const next = appendStepLog("reopen-run", "one", {
+        kind: "message",
+        role: "assistant",
+        text: "c",
+      });
+
+      assert.equal(next?.seq, 3, "a torn line must not consume a seq and leave a gap");
+    } finally {
+      closeRunLog("reopen-run");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("stepLog — delivery (FR-006)", () => {
@@ -211,6 +275,35 @@ describe("stepLog — reading (FR-007)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("reads the stamped seq, not a seq nested in a tool input", () => {
+    const dir = makeDir();
+    const file = runLogFile(dir, "test");
+    try {
+      openRunLog("nested-seq", { dir, pipelineId: "test" });
+      appendStepLog("nested-seq", "one", { kind: "message", role: "assistant", text: "a" });
+      appendStepLog("nested-seq", "one", {
+        kind: "tool.call",
+        callId: "call-1",
+        name: "Task",
+        input: { seq: 999 },
+      });
+      closeRunLog("nested-seq");
+
+      assert.deepEqual(
+        readRunLog(file).map((e) => e.seq),
+        [1, 2],
+        "the stamps are serialised last, so the last seq in the line is the real one"
+      );
+      assert.deepEqual(
+        readRunLog(file, { after: 2 }).map((e) => e.seq),
+        [],
+        "a nested seq must not smuggle an already-delivered event past after"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("stepLog — credential deny guard (FR-010)", () => {
@@ -291,6 +384,26 @@ describe("stepLog — credential deny guard (FR-010)", () => {
     }
   });
 
+  it("redacts a quoted credential path inside a shell command", () => {
+    const dir = makeDir();
+    try {
+      openRunLog("deny-quoted", { dir, pipelineId: "test" });
+      appendStepLog("deny-quoted", "one", {
+        kind: "tool.call",
+        callId: "call-1",
+        name: "command",
+        input: { command: 'cat "/x/.env"' },
+      });
+
+      const call = expectKind(linesOf(dir, "test")[0], "tool.call");
+      assert.equal(call.denied, true, "quoting a path must not defeat the token match");
+      assert.deepEqual(call.input, { path: "/x/.env" });
+    } finally {
+      closeRunLog("deny-quoted");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("leaves an ordinary source path and its result untouched", () => {
     const dir = makeDir();
     try {
@@ -334,6 +447,28 @@ describe("stepLog — bounds and caps (FR-009)", () => {
       assert.equal(event.truncated, true);
     } finally {
       closeRunLog("bound-run");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("counts the byte cap in UTF-8 bytes, not string length", () => {
+    const dir = makeDir();
+    try {
+      // 400 three-byte characters: 400 UTF-16 units but 1200 bytes, so the line
+      // is under the cap by `.length` and well over it by its real size.
+      const text = "한".repeat(400);
+      openRunLog("utf8-run", { dir, pipelineId: "test", caps: { bytes: 700 } });
+      appendStepLog("utf8-run", "one", { kind: "message", role: "assistant", text });
+      assert.ok(
+        readFileSync(runLogFile(dir, "test"), "utf8").length < 700,
+        "the fixture must be under the cap by string length, or it proves nothing"
+      );
+      appendStepLog("utf8-run", "one", { kind: "message", role: "assistant", text: "next" });
+
+      const kinds = linesOf(dir, "test").map((e) => e.kind);
+      assert.deepEqual(kinds, ["message", "log.truncated"], "the byte cap must count UTF-8 bytes");
+    } finally {
+      closeRunLog("utf8-run");
       rmSync(dir, { recursive: true, force: true });
     }
   });

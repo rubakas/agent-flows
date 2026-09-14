@@ -39,6 +39,8 @@ interface RunLogEntry {
   listeners: Set<StepLogListener>;
   /** callIds of denied tool calls, awaiting their result to redact (D8). */
   pendingRedactions: Set<string>;
+  /** Step ids that already have a terminal `step.result` line (D2). */
+  settledSteps: Set<string>;
   caps: RunLogCaps;
 }
 
@@ -132,8 +134,10 @@ export function openRunLog(
       // Absent: create it now so FR-001 holds before the first step starts.
       writeFileSync(file, "", { mode: 0o600 });
     }
-    seq = existing === "" ? 0 : existing.split("\n").filter((line) => line !== "").length;
-    bytes = existing.length;
+    // From the last parseable line, not from the line count: a run interrupted
+    // mid-write leaves a torn last line, which counting would turn into a gap.
+    seq = nextSeqFromFile(file) - 1;
+    bytes = Buffer.byteLength(existing, "utf8");
   } catch (err) {
     reportIoError(file, err);
   }
@@ -148,6 +152,7 @@ export function openRunLog(
     truncated: false,
     listeners: new Set<StepLogListener>(),
     pendingRedactions: new Set<string>(),
+    settledSteps: new Set<string>(),
     caps: {
       events: opts.caps?.events ?? MAX_EVENTS_PER_RUN,
       bytes: opts.caps?.bytes ?? MAX_LOG_BYTES_PER_RUN,
@@ -193,10 +198,12 @@ function deniedPath(input: unknown): string | undefined {
   }
   // A shell call names its files inside one string. Every whitespace-separated
   // token is tried, so `cat /x/.env | head` is caught like a Read of the same
-  // path; redirections and quoting make this a net, not a parser.
+  // path; surrounding quotes are stripped so `cat "/x/.env"` matches too. This
+  // is a net, not a parser: redirections and shell expansion are not resolved.
   if (typeof record.command === "string") {
     for (const token of record.command.split(/\s+/u)) {
-      if (token !== "") candidates.push(token);
+      const unquoted = token.replace(/^["']+|["']+$/gu, "");
+      if (unquoted !== "") candidates.push(unquoted);
     }
   }
   // Each candidate is matched as given: every CREDENTIAL_DENY_PATTERNS entry
@@ -244,7 +251,7 @@ function writeEvent(
   } catch (err) {
     reportIoError(entry.file, err);
   }
-  entry.bytes += line.length;
+  entry.bytes += Buffer.byteLength(line, "utf8");
   // Notified after the append, so a subscriber never sees a line the file lacks.
   for (const listener of entry.listeners) {
     try {
@@ -259,7 +266,14 @@ function writeEvent(
 /**
  * Append one event for a step. Returns the stamped event, or undefined when the
  * run is unknown (like recordStep, an unknown run is dropped rather than an
- * error) or when a per-run cap has already dropped this kind.
+ * error), when a per-run cap has already dropped this kind, or when the step
+ * already has its terminal event.
+ *
+ * A step gets exactly one `step.result` (D2). On the cancel path two emitters
+ * race for it — the run service synthesises one when it closes the run out, and
+ * the step builder emits its own once the child process finally dies — and
+ * which of them lands first depends on Mastra's `run.cancel()` ordering, so the
+ * second is dropped here rather than left to timing.
  */
 export function appendStepLog(
   runId: string | undefined,
@@ -269,6 +283,11 @@ export function appendStepLog(
   if (runId === undefined || runId === "") return undefined;
   const entry = runs.get(runId);
   if (entry === undefined) return undefined;
+
+  if (input.kind === "step.result") {
+    if (entry.settledSteps.has(stepId)) return undefined;
+    entry.settledSteps.add(stepId);
+  }
 
   const guarded = applyCredentialGuard(entry, input);
 
@@ -343,14 +362,20 @@ function nextSeqFromFile(file: string): number {
 
 /**
  * The `seq` of a raw line, read without parsing it. The key can only appear
- * after `{` or `,` at the top level — inside a string value both quotes are
- * escaped — so a crafted message text cannot forge one.
+ * after `{` or `,` — inside a string value both quotes are escaped — so a
+ * crafted message text cannot forge one. A tool input can still carry a nested
+ * `{"seq":…}` object of its own, so the LAST match is the stamp: writeEvent
+ * serialises `seq, at, runId, pipelineId, stepId` after the payload.
  */
-const RE_LINE_SEQ = /[{,]"seq":(\d+)/u;
+const RE_LINE_SEQ = /[{,]"seq":(\d+)/gu;
 
 function seqOfLine(line: string): number | undefined {
-  const match = RE_LINE_SEQ.exec(line);
-  return match === null ? undefined : Number(match[1]);
+  RE_LINE_SEQ.lastIndex = 0;
+  let last: string | undefined;
+  for (let match = RE_LINE_SEQ.exec(line); match !== null; match = RE_LINE_SEQ.exec(line)) {
+    last = match[1];
+  }
+  return last === undefined ? undefined : Number(last);
 }
 
 /**

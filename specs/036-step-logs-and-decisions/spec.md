@@ -228,9 +228,13 @@ built) with `[redacted:<NAME>]`. The scrub is applied at the source in `runCheck
 retained `CheckResult.output` — which becomes the step's context value, the artifact's
 `outputExcerpt`, the SSE `step` payload and MCP `get_run`'s `outputExcerpt` — carries the
 placeholder too; a scrub at the log sink alone would have left three other exits (found by the
-2026-09-14 security pass). Known limitation: a value split across two stdout reads is emitted
-unredacted in two halves. This scrub applies to no other kind: llm steps never receive
-declared env values.
+2026-09-14 security pass). A value split across two stdout reads is covered too: the scrubber holds
+back the last `L-1` characters of each scrubbed chunk (`L` = the longest declared value) and
+prepends them to the next one, per stream, flushing the tail when the child closes — so only a
+complete occurrence can end inside an emitted chunk. Known limitation: a value the command
+transforms before printing it (base64, a case change, an interpolation that splits it) is not
+recognised, because the scrub is a literal match on the value. This scrub applies to no other kind:
+llm steps never receive declared env values.
 
 **D3 — Sink.** New leaf module `src/runtime/stepLog.ts` (imports downward only —
 `canon/stepLogEvents`, `canon/denyPatterns`, `canon/workspace/denyMatch` and node builtins; nothing
@@ -238,8 +242,10 @@ from `serve/` and nothing else from `runtime/`; covered by the no-cycle lint rul
 `stepIntrospection`: a module map keyed by Mastra `runId`, each entry holding `{dir, pipelineId,
 seq, events, bytes, truncated, subscribers}`. API:
 
-- `openRunLog(runId, {dir, pipelineId, maxEvents?, maxBytes?})` — registers the run; the caps
-  default to the D5 constants and are injectable for tests.
+- `openRunLog(runId, {dir, pipelineId, caps?})` — registers the run; `caps` is a
+  `Partial<RunLogCaps>` (`{events?, bytes?}`) whose members default to the D5 constants, so a test
+  can lower one cap without restating the other. Byte counts are UTF-8 byte lengths, not string
+  lengths, so the cap bounds the file rather than its character count.
 - `appendStepLog(runId, stepId, input): StepLogEvent | undefined` — stamps `seq`, `at`, `runId`,
   `pipelineId` (from the record) and `stepId`, bounds the payload with `boundStepLogEvent`,
   `appendFileSync`s the line, then notifies subscribers, so file order equals delivery order and a
@@ -316,13 +322,17 @@ attempt happened. Codex command output is not scanned: codex runs in a sanitized
 no credential files (spec 031). Check step output is covered instead by the declared-env scrub of
 D2 (FR-015); no other kind needs it, because llm steps never receive declared env values.
 Command-shaped inputs are covered too: when `tool.call.input.command` is a string, each
-whitespace-separated token is matched against the deny patterns; a match is treated like a path
-match. The guard relies on a `tool.call` (with `callId`) preceding its `tool.result`; the fixture
+whitespace-separated token is matched against the deny patterns, with surrounding single and double
+quotes stripped first so `cat "/x/.env"` is caught like the bare token; a match is treated like a
+path match. The guard relies on a `tool.call` (with `callId`) preceding its `tool.result`; the fixture
 test asserts that ordering for every captured stream. `pipelineId` is validated with the same
 character class as `stepId` before any path is built; the routes answer 404 for an unsafe id.
 
 _Known limitation._ The key list is an allowlist of the argument names Claude's built-in tools use
-today, not a structural rule, and it does not descend into nested objects. There is no bypass now —
+today, not a structural rule, and it does not descend into nested objects. Command tokens are read
+as literals: a path assembled by the shell — `$HOME/.env`, `"$DIR"/.env`, `cat /x/.en''v` — is not
+resolved and so is not matched, because the guard tokenises a string rather than running a shell.
+There is no bypass now —
 Bash is never granted (`claude.ts:64-78`) and codex runs credential-free (spec 031 D2) — but a new
 tool or adapter that names or nests a path argument differently gets no redaction, silently. Trigger
 for revisiting the key list: any new tool granted to a transport, or any new adapter whose tool

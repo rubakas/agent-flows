@@ -82,6 +82,12 @@ function buildCheckEnv(
   return env;
 }
 
+/** One stream's scrubber: chunks in, safe-to-publish text out, tail on close. */
+interface StreamScrubber {
+  push: (text: string) => string;
+  flush: () => string;
+}
+
 /**
  * Builds the scrubber that keeps declared credential values out of the durable,
  * network-streamed log (FR-015).
@@ -92,25 +98,53 @@ function buildCheckEnv(
  * `CheckResult.output` are scrubbed: that output becomes the step's ctx value
  * and is persisted as the artifact's `outputExcerpt`, so leaving it alone would
  * put the credential on disk and into the next step's prompt.
+ *
+ * Returns a factory because each stream carries its own tail: stdout and stderr
+ * interleave, and sharing one carry would splice one stream's bytes into the
+ * other's event.
  */
 function makeCheckOutputScrubber(
   env: NodeJS.ProcessEnv,
   declared: readonly string[]
-): (text: string) => string {
+): () => StreamScrubber {
   const secrets = declared
     .map((name) => ({ name, value: env[name] }))
     .filter((entry): entry is { name: string; value: string } => {
       return entry.value !== undefined && entry.value !== "";
     });
-  if (secrets.length === 0) return (text) => text;
+  if (secrets.length === 0) {
+    return () => ({ push: (text) => text, flush: () => "" });
+  }
   // split/join rather than a regex: a credential can hold any character, and an
   // unescaped one would either throw or silently match the wrong thing.
-  return (text) => {
+  const scrub = (text: string): string => {
     let scrubbed = text;
     for (const { name, value } of secrets) {
       scrubbed = scrubbed.split(value).join(`[redacted:${name}]`);
     }
     return scrubbed;
+  };
+  // A value written across two reads passes a per-chunk scrub untouched, so the
+  // last L-1 characters of each scrubbed chunk (L = the longest declared value)
+  // are held back and prepended to the next one. Any occurrence that ends in the
+  // emitted part is therefore complete, and any partial one is still in the
+  // carry when its second half arrives.
+  const carryLimit = Math.max(...secrets.map((entry) => entry.value.length)) - 1;
+  return () => {
+    let carry = "";
+    return {
+      push(text: string): string {
+        const scrubbed = scrub(carry + text);
+        const hold = Math.min(carryLimit, scrubbed.length);
+        carry = hold === 0 ? "" : scrubbed.slice(scrubbed.length - hold);
+        return scrubbed.slice(0, scrubbed.length - hold);
+      },
+      flush(): string {
+        const tail = carry;
+        carry = "";
+        return tail;
+      },
+    };
   };
 }
 
@@ -150,7 +184,7 @@ export async function runCheckStep(
 
   const spawnFn = deps.spawn ?? defaultSpawn;
   const env = buildCheckEnv(deps.env ?? process.env, deps.envAllowlist ?? []);
-  const scrub = makeCheckOutputScrubber(env, deps.envAllowlist ?? []);
+  const makeScrubber = makeCheckOutputScrubber(env, deps.envAllowlist ?? []);
 
   const cwd = deps.cwd ?? process.cwd();
 
@@ -177,12 +211,28 @@ export async function runCheckStep(
       }
     };
 
+    const scrubbers: Record<"stdout" | "stderr", StreamScrubber> = {
+      stdout: makeScrubber(),
+      stderr: makeScrubber(),
+    };
+
     // FR-004: chunks are logged in arrival order, coalesced per read. Scrubbed
     // once, before either consumer sees it.
-    const observe = (stream: "stdout" | "stderr", chunk: Buffer) => {
-      const text = scrub(chunk.toString());
+    const publish = (stream: "stdout" | "stderr", text: string) => {
+      if (text === "") return;
       append(text);
       emitStepEvent(deps.onEvent, { kind: "check.output", stream, text });
+    };
+
+    const observe = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      publish(stream, scrubbers[stream].push(chunk.toString()));
+    };
+
+    // The carry the scrubber holds back is safe by then: the stream is over, so
+    // nothing can complete an occurrence that is still partial.
+    const flushScrubbers = () => {
+      publish("stdout", scrubbers.stdout.flush());
+      publish("stderr", scrubbers.stderr.flush());
     };
 
     child.stdout.on("data", (chunk: Buffer) => observe("stdout", chunk));
@@ -195,6 +245,7 @@ export async function runCheckStep(
 
     child.on("close", (code) => {
       deadline?.cancel();
+      flushScrubbers();
       if (abortSignal?.aborted) {
         const reason = abortSignal.reason as { name?: string } | undefined;
         const msg =
