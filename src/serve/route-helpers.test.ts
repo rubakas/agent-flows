@@ -190,3 +190,47 @@ describe("dispatch ordering — POST /api/pipelines/:id/template is not captured
     );
   });
 });
+
+// ── Ordering: the editor's routes reach their own handlers (037 FR-004/FR-005) ──
+
+describe("dispatch ordering — the editor's suffix routes are not captured by their prefixes", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-route-order-editor-")));
+    srv = await startServer({
+      state: makeState(process.cwd()),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      templatesBase: join(tmpDir, "templates"),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("GET /api/pipelines/:id/prompts answers 403 for the bundled catalogue, not the detail payload", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/investigate/prompts`);
+    assert.equal(res.status, 403, `expected the prompts handler's 403, got ${res.status}`);
+    const body = (await res.json()) as { error?: string; def?: unknown };
+    assert.equal(body.def, undefined, `pipeline-detail must not answer: ${JSON.stringify(body)}`);
+  });
+
+  it("POST /api/drafts/:id/preview answers with the preview payload, not the draft-save one", async () => {
+    const open = await mutate(srv.port, "POST", "/api/pipelines/investigate/drafts", {});
+    assert.equal(open.status, 200);
+    const { draftId } = (await open.json()) as { draftId: number };
+    const res = await mutate(srv.port, "POST", `/api/drafts/${draftId}/preview`, {});
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.deepEqual(
+      Object.keys(body).sort(),
+      ["def", "graph", "levels"],
+      `body must be the preview response, not a save or update one: ${JSON.stringify(body)}`
+    );
+  });
+});

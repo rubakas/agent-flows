@@ -3,14 +3,16 @@
 // DNS-rebinding and simple-form CSRF mitigations. Zero new runtime
 // dependencies — node:http only.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   realpathSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   type Stats,
@@ -22,7 +24,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parse, stringify } from "yaml";
@@ -30,8 +32,14 @@ import { parse, stringify } from "yaml";
 import { createDynamicMastra } from "../bindings/mastra/dynamicMastra.js";
 import { BUNDLED_PIPELINES_DIR, resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
-import { saveDraft, type SaveResult } from "../canon/canonWriter.js";
-import { getDraft, indexSource, openDraft, updateDraftBody } from "../canon/draftStore.js";
+import { saveDraft } from "../canon/canonWriter.js";
+import {
+  getDraft,
+  getSource,
+  indexSource,
+  openDraft,
+  updateDraftBody,
+} from "../canon/draftStore.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import { listPipelines, loadPipeline } from "../canon/load.js";
@@ -96,8 +104,17 @@ const RE_PORT_CAPTURE = /:(\d+)$/u;
 const RE_PIPELINE_DETAIL = /^\/api\/pipelines\/([^/]+)$/u;
 const RE_PIPELINE_DRAFTS = /^\/api\/pipelines\/([^/]+)\/drafts$/u;
 const RE_PIPELINE_TEMPLATE = /^\/api\/pipelines\/([^/]+)\/template$/u;
+const RE_PIPELINE_PROMPTS = /^\/api\/pipelines\/([^/]+)\/prompts$/u;
+const RE_PIPELINE_PROMPT = /^\/api\/pipelines\/([^/]+)\/prompts\/([^/]+)$/u;
 const RE_DRAFT_BY_ID = /^\/api\/drafts\/(\d+)$/u;
 const RE_DRAFT_SAVE = /^\/api\/drafts\/(\d+)\/save$/u;
+const RE_DRAFT_PREVIEW = /^\/api\/drafts\/(\d+)\/preview$/u;
+/**
+ * An own (non-namespaced) step id. A nested-pipeline step id carries a `.`
+ * (`nest.ts:154`) and names a step of another pipeline file, which the prompt
+ * write route must not edit — the pattern is what makes that a 404 (FR-005).
+ */
+const RE_OWN_STEP_ID = /^[A-Za-z0-9_-]+$/u;
 const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
 const RE_RUN_LOG = /^\/api\/runs\/([^/]+)\/log$/u;
 const RE_RUN_STEP_OUTPUT = /^\/api\/runs\/([^/]+)\/steps\/([^/]+)\/output$/u;
@@ -127,6 +144,9 @@ const RE_TEMPLATE_INSTALL = /^\/api\/templates\/([^/]+)\/install$/u;
 // Body size limits for readBody().
 const BODY_LIMIT_DEFAULT = 65_536; // 64 KB — all mutating routes except /api/import
 const BODY_LIMIT_IMPORT = 4 * 1024 * 1024; // 4 MB — /api/import carries a YAML bundle
+// 1 MiB — /api/drafts/:id/preview carries one YAML body plus every edited
+// prompt text in a single payload, which overruns the 64 KB default (FR-004).
+const BODY_LIMIT_PREVIEW = 1024 * 1024;
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
 
@@ -303,6 +323,74 @@ function findDependants(pipelinesDir: string, targetId: string): string[] {
     }
   }
   return dependants;
+}
+
+// ── Prompt files of a pipeline (spec 037 D6/FR-005) ───────────────────────────
+
+/** Where one own llm step's prompt file lives, as the on-disk pipeline declares it. */
+interface PromptTarget {
+  /** The path exactly as written in the YAML, relative to the pipeline root. */
+  rel: string;
+  /** The absolute path the loader reads it from. */
+  abs: string;
+}
+
+/**
+ * The prompt file of every own llm step of a pipeline file.
+ *
+ * Read from the YAML on disk rather than from the definition `loadPipeline`
+ * returns: expansion inlines nested pipelines and namespaces their step ids as
+ * `parent.child` (`nest.ts:154`), and those prompts belong to another file
+ * entirely. A document that does not parse yields an empty map, so the caller
+ * answers 404 for the step instead of guessing a path out of it.
+ */
+function ownPromptTargets(filePath: string): Map<string, PromptTarget> {
+  const targets = new Map<string, PromptTarget>();
+  let doc: unknown;
+  try {
+    doc = parse(readFileSync(filePath, "utf8"));
+  } catch {
+    return targets;
+  }
+  const steps = (doc as { steps?: unknown } | null)?.steps;
+  if (!Array.isArray(steps)) return targets;
+  // Same root the loader derives (load.ts:65): the pipeline file's grandparent.
+  const pipelineRoot = dirname(dirname(resolve(filePath)));
+  for (const step of steps as { id?: unknown; kind?: unknown; prompt?: unknown }[]) {
+    if (step?.kind !== "llm") continue;
+    if (typeof step.id !== "string" || typeof step.prompt !== "string") continue;
+    targets.set(step.id, { rel: step.prompt, abs: resolve(pipelineRoot, step.prompt) });
+  }
+  return targets;
+}
+
+/**
+ * Whether the write route may overwrite `absPath`: an existing `.md` file whose
+ * realpath sits inside the realpath of the pipeline root's `prompts/` directory.
+ *
+ * The loader's own containment (`load.ts:288-304`) is not sufficient for a
+ * write — it accepts any path under the pipeline root, `providers.yaml`
+ * included — so this is a second, narrower gate, and it is applied after
+ * realpathSync so a symlink planted inside `prompts/` cannot redirect the write.
+ *
+ * Hard links are not detected: a second name for a file outside `prompts/` is
+ * indistinguishable from the real thing here. That residual needs prior local
+ * write access to the directory, which this route does not grant.
+ */
+function isWritablePromptFile(absPath: string, promptsDir: string): boolean {
+  if (!absPath.endsWith(".md")) return false;
+  let realTarget: string;
+  let realDir: string;
+  try {
+    realTarget = realpathSync(absPath);
+    realDir = realpathSync(promptsDir);
+  } catch {
+    return false; // the prompt file, or the prompts directory itself, is absent
+  }
+  if (!realTarget.endsWith(".md")) return false;
+  if (!statSync(realTarget).isFile()) return false;
+  const dirWithSep = realDir.endsWith(sep) ? realDir : realDir + sep;
+  return realTarget.startsWith(dirWithSep);
 }
 
 // ── Artifact input mapping (spec 029 FR-003/FR-011) ───────────────────────────
@@ -958,6 +1046,145 @@ async function handleRequest(
     return;
   }
 
+  // GET /api/pipelines/:id/prompts — the editable prompt files of a workflow
+  // (spec 037 D6). Registered before the pipeline-detail route so the /prompts
+  // suffix reaches this handler and not the detail one. Only the pipeline's own
+  // llm steps are listed: a namespaced `parent.child` id is a step of another
+  // file, which this page does not edit.
+  const promptsMatch = RE_PIPELINE_PROMPTS.exec(pathname);
+  if (method === "GET" && promptsMatch) {
+    const id = decodeURIComponent(promptsMatch[1]);
+    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+      json(res, 403, { error: "Bundled workflows are read-only" });
+      return;
+    }
+    const entry = findPipelineById(ctx.pipelinesDir, id);
+    if (!entry) {
+      // No isSafeId here (the id is never joined into a path — see the detail
+      // route), so the echo is truncated instead.
+      json(res, 404, { error: `Pipeline "${id.slice(0, 100)}" not found` });
+      return;
+    }
+    const prompts: Record<string, { path: string; text: string; hash: string }> = {};
+    const promptsDirForRead = join(dirname(dirname(resolve(entry.filePath))), "prompts");
+    for (const [stepId, target] of ownPromptTargets(entry.filePath)) {
+      // Same gate as the write route, applied before the read: a step whose
+      // prompt is not an existing `.md` under `prompts/` is omitted, so a
+      // declared `prompt: providers.yaml` is never read and never returned.
+      if (!isWritablePromptFile(target.abs, promptsDirForRead)) continue;
+      let text: string;
+      try {
+        text = readFileSync(target.abs, "utf8");
+      } catch {
+        continue; // a prompt that cannot be read is not editable
+      }
+      prompts[stepId] = {
+        path: relative(ctx.root, target.abs),
+        text,
+        hash: createHash("sha256").update(text).digest("hex"),
+      };
+    }
+    json(res, 200, prompts);
+    return;
+  }
+
+  // PUT /api/pipelines/:id/prompts/:stepId — the only route that writes a
+  // prompt file (spec 037 FR-005). Everything it may touch is an existing `.md`
+  // inside the pipeline root's `prompts/` directory, checked after realpathSync;
+  // the loader's own containment is deliberately not trusted for a write.
+  const promptWriteMatch = RE_PIPELINE_PROMPT.exec(pathname);
+  if (method === "PUT" && promptWriteMatch) {
+    const id = decodeURIComponent(promptWriteMatch[1]);
+    const stepId = decodeURIComponent(promptWriteMatch[2]);
+    if (!isSafeId(id)) {
+      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
+      return;
+    }
+    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+      json(res, 403, { error: "Bundled workflows are read-only" });
+      return;
+    }
+    // A namespaced id belongs to a nested pipeline's file: not a step this
+    // route can address, so it is absent rather than refused.
+    if (!RE_OWN_STEP_ID.test(stepId)) {
+      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+      json(res, 404, { error: `Step "${stepId.slice(0, 100)}" not found` });
+      return;
+    }
+    const entry = findPipelineById(ctx.pipelinesDir, id);
+    if (!entry) {
+      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+      json(res, 404, { error: `Pipeline "${id}" not found` });
+      return;
+    }
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { text, ifMatch } = parsed.value;
+    if (typeof text !== "string") {
+      json(res, 400, { error: 'Field "text" must be a string' });
+      return;
+    }
+    if (typeof ifMatch !== "string") {
+      json(res, 400, { error: 'Field "ifMatch" must be a string' });
+      return;
+    }
+    // A non-llm step has no prompt file, so it is not in the map either.
+    const target = ownPromptTargets(entry.filePath).get(stepId);
+    if (!target) {
+      json(res, 404, { error: `Step "${stepId}" has no prompt file in "${id}"` });
+      return;
+    }
+    const promptsDir = join(dirname(dirname(resolve(entry.filePath))), "prompts");
+    if (!isWritablePromptFile(target.abs, promptsDir)) {
+      json(res, 403, {
+        error: `Step "${stepId}" prompt "${target.rel}" is not an existing .md file under prompts/`,
+      });
+      return;
+    }
+    const current = readFileSync(target.abs, "utf8");
+    if (createHash("sha256").update(current).digest("hex") !== ifMatch) {
+      json(res, 409, {
+        ok: false,
+        reason: "conflict",
+        message: `Prompt "${target.rel}" changed on disk since it was loaded — write refused`,
+      });
+      return;
+    }
+    // Validate before writing, exactly as the YAML save path does: the new text
+    // is handed to the loader in place of the file so an unknown placeholder is
+    // reported instead of persisted.
+    try {
+      loadPipeline(entry.filePath, {
+        readFile: (p) => (resolve(p) === target.abs ? text : readFileSync(p, "utf8")),
+      });
+    } catch (err) {
+      json(res, 422, { error: safePath((err as Error).message, root) });
+      return;
+    }
+    // Write to a sibling temp file and rename over the target, so a crash
+    // mid-write cannot leave a truncated prompt behind. The temp file starts at
+    // 0o600 and takes the target's mode before the rename, so the prompt keeps
+    // the permissions it already had.
+    // The rename goes onto the realpath so a symlink inside `prompts/` is
+    // followed exactly as writeFileSync followed it, not replaced.
+    const realTarget = realpathSync(target.abs);
+    const tmpPath = join(dirname(realTarget), `.${basename(realTarget)}.${randomUUID()}.tmp`);
+    try {
+      writeFileSync(tmpPath, text, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      chmodSync(tmpPath, statSync(realTarget).mode & 0o777);
+      renameSync(tmpPath, realTarget);
+    } catch (err) {
+      rmSync(tmpPath, { force: true });
+      throw err;
+    }
+    json(res, 200, { ok: true, hash: createHash("sha256").update(text).digest("hex") });
+    return;
+  }
+
   // GET /api/pipelines/:id
   // No isSafeId check here: findPipelineById scans loaded pipeline ids for an
   // exact match and never joins `id` into a filesystem path, so an unsafe id
@@ -1044,6 +1271,91 @@ async function handleRequest(
     return;
   }
 
+  // POST /api/drafts/:draftId/preview — validate a draft body plus the prompt
+  // texts being edited alongside it, without writing anything (spec 037 FR-004).
+  // Registered before PUT /api/drafts/:draftId so the /preview suffix can never
+  // be captured by the draft-detail route.
+  //
+  // Validation runs through loadPipeline's injected readFile — the same seam
+  // saveDraft uses — rather than a temp copy of the canon directory: a copy
+  // would silently redefine what "escapes the pipeline root" means, and the
+  // nested pipelines the loader resolves would be the copies, not the siblings
+  // that actually run.
+  const previewMatch = RE_DRAFT_PREVIEW.exec(pathname);
+  if (method === "POST" && previewMatch) {
+    const draftId = parseInt(previewMatch[1], 10);
+    const draft = getDraft(ctx.db, draftId);
+    if (!draft) {
+      await readAndDiscardBody(req, BODY_LIMIT_PREVIEW);
+      json(res, 404, { error: `Draft ${draftId} not found` });
+      return;
+    }
+    const source = getSource(ctx.db, draft.sourceId);
+    if (!source) {
+      await readAndDiscardBody(req, BODY_LIMIT_PREVIEW);
+      json(res, 404, { error: `Draft ${draftId} not found` });
+      return;
+    }
+    const parsed = await readJsonBody(req, BODY_LIMIT_PREVIEW);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const promptsField = parsed.value.prompts;
+    if (
+      promptsField !== undefined &&
+      (typeof promptsField !== "object" || promptsField === null || Array.isArray(promptsField))
+    ) {
+      json(res, 400, { error: 'Field "prompts" must be an object' });
+      return;
+    }
+    const promptTexts = (promptsField ?? {}) as Record<string, unknown>;
+    for (const [stepId, value] of Object.entries(promptTexts)) {
+      if (typeof value !== "string") {
+        json(res, 400, { error: `Prompt "${stepId.slice(0, 100)}" must be a string` });
+        return;
+      }
+    }
+    const filePath = join(source.root, source.relPath);
+    // The prompt paths come from the DRAFT body, not from disk: the body is
+    // what the operator is validating, and it may have re-pointed a step.
+    const pipelineRoot = dirname(dirname(resolve(filePath)));
+    const overrides = new Map<string, string>([[resolve(filePath), draft.body]]);
+    let draftDoc: unknown;
+    try {
+      draftDoc = parse(draft.body);
+    } catch {
+      draftDoc = null; // malformed YAML: let the loader produce the message
+    }
+    const draftSteps = (draftDoc as { steps?: unknown } | null)?.steps;
+    if (Array.isArray(draftSteps)) {
+      for (const step of draftSteps as { id?: unknown; kind?: unknown; prompt?: unknown }[]) {
+        if (step?.kind !== "llm") continue;
+        if (typeof step.id !== "string" || typeof step.prompt !== "string") continue;
+        const text = promptTexts[step.id];
+        if (typeof text !== "string") continue;
+        overrides.set(resolve(pipelineRoot, step.prompt), text);
+      }
+    }
+    let loaded: ReturnType<typeof loadPipeline>;
+    try {
+      loaded = loadPipeline(filePath, {
+        readFile: (p) => overrides.get(resolve(p)) ?? readFileSync(p, "utf8"),
+      });
+    } catch (err) {
+      json(res, 422, { error: safePath((err as Error).message, root) });
+      return;
+    }
+    // S9: prompts are deliberately absent from the response — a draft that
+    // points a step at providers.yaml must not turn preview into a file reader.
+    json(res, 200, {
+      def: loaded.def,
+      levels: pipelineLevels(loaded.def.steps),
+      graph: pipelineToGraph(loaded.def.steps),
+    });
+    return;
+  }
+
   // PUT /api/drafts/:draftId
   const updateDraftMatch = RE_DRAFT_BY_ID.exec(pathname);
   if (method === "PUT" && updateDraftMatch) {
@@ -1078,10 +1390,14 @@ async function handleRequest(
       return;
     }
     await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
-    // TODO(serve): switch to saveDraftAndRegenerate once another agent adds that export
-    const result: SaveResult & { regenerated?: string[] } = saveDraft(ctx.db, draftId);
+    // Saving writes the YAML and nothing else. Binding A (the Claude Code
+    // script under `<root>/.claude/workflows/<id>.js`) is an export produced
+    // only by the CLI — `agent-flows generate claude` — because regenerating it
+    // from a network-editable YAML would write an executable file at a
+    // YAML-controlled path.
+    const result = saveDraft(ctx.db, draftId);
     if (result.ok) {
-      json(res, 200, { ok: true, regenerated: result.regenerated ?? [] });
+      json(res, 200, { ok: true });
       return;
     }
     if (result.reason === "conflict") {
@@ -1172,13 +1488,17 @@ async function handleRequest(
     // registry-id-shaped, so a typo fails here rather than silently running the
     // profile default, and nothing unvalidated reaches the CLI argv.
     if (models !== undefined) {
+      // The pipeline name is caller-supplied like the keys are, so it is
+      // truncated the same way — an error message is not a place to echo an
+      // unbounded request field back.
+      const shownPipeline = pipeline.slice(0, 100);
       if (typeof models !== "object" || models === null || Array.isArray(models)) {
         json(res, 400, { error: 'Field "models" must be an object' });
         return;
       }
       if (!pipelineDef) {
         json(res, 400, {
-          error: `Field "models" cannot be validated: pipeline "${pipeline}" not found`,
+          error: `Field "models" cannot be validated: pipeline "${shownPipeline}" not found`,
         });
         return;
       }
@@ -1186,7 +1506,7 @@ async function handleRequest(
       for (const [stepId, model] of Object.entries(models as Record<string, unknown>)) {
         if (!stepIds.has(stepId)) {
           json(res, 400, {
-            error: `Model override "${stepId.slice(0, 100)}" is not a step of "${pipeline}"`,
+            error: `Model override "${stepId.slice(0, 100)}" is not a step of "${shownPipeline}"`,
           });
           return;
         }

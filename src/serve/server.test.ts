@@ -11,14 +11,17 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -5050,5 +5053,477 @@ describe("POST /api/runs — inputs and model overrides are validated (037 FR-00
       models: { [stepId]: "claude-sonnet-4-5" },
     });
     assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+  });
+
+  it("an unknown pipeline name is truncated in the models error, like the keys are", async () => {
+    const longName = "z".repeat(500);
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: longName,
+      inputs: {},
+      models: { some: "claude-sonnet-4-5" },
+    });
+    assert.equal(res.status, 400, `expected 400, got ${res.status}`);
+    const body = (await res.json()) as { error: string };
+    assert.ok(
+      !body.error.includes(longName),
+      `the error must not echo the whole caller-supplied name: ${body.error.length} chars`
+    );
+    assert.ok(
+      body.error.includes("z".repeat(100)),
+      `the error must still name the first 100 chars: ${body.error}`
+    );
+  });
+});
+
+// ── 037 Ship 3: the editor's routes ───────────────────────────────────────────
+
+/**
+ * A temp project laid out the way loadPipeline expects — `<root>/pipelines/*.yaml`
+ * beside `<root>/prompts/*.md` — plus the two hostile prompt targets FR-005 has
+ * to refuse: a file outside `prompts/` that the loader's own containment
+ * accepts, and a non-`.md` file inside it.
+ */
+function makeEditorProject(): { tmpRoot: string; pipelinesDir: string } {
+  const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-editor-")));
+  const pipelinesDir = join(tmpRoot, "pipelines");
+  mkdirSync(pipelinesDir);
+  for (const yml of ["spec-creation.yaml", "audit.yaml", "correct-plan.yaml"]) {
+    writeFileSync(join(pipelinesDir, yml), readFileSync(join(REAL_REPO_ROOT, "pipelines", yml)));
+  }
+  cpSync(join(REAL_REPO_ROOT, "prompts"), join(tmpRoot, "prompts"), { recursive: true });
+
+  // The loader accepts any path under the pipeline root, providers.yaml
+  // included — this pipeline is what proves the write route does not.
+  writeFileSync(join(tmpRoot, "providers.yaml"), "profiles: {}\n");
+  writeFileSync(
+    join(pipelinesDir, "outside-prompt.yaml"),
+    "id: outside-prompt\nversion: 1\ndescription: prompt outside prompts/\ninputs: []\n" +
+      "steps:\n  - id: only\n    kind: llm\n    role: worker\n    prompt: providers.yaml\n"
+  );
+  // An llm-only workflow: Binding A could generate a script for it, so it is
+  // the one that proves the save route generates nothing at all.
+  writeFileSync(join(tmpRoot, "prompts", "simple.md"), "{{request}}\n");
+  writeFileSync(
+    join(pipelinesDir, "simple.yaml"),
+    "id: simple\nversion: 1\ndescription: one llm step\ninputs:\n  - request\n" +
+      "steps:\n  - id: only\n    kind: llm\n    role: worker\n    prompt: prompts/simple.md\n"
+  );
+
+  writeFileSync(join(tmpRoot, "prompts", "evil.yaml"), "not markdown\n");
+  writeFileSync(
+    join(pipelinesDir, "yaml-prompt.yaml"),
+    "id: yaml-prompt\nversion: 1\ndescription: non-md prompt inside prompts/\ninputs: []\n" +
+      "steps:\n  - id: only\n    kind: llm\n    role: worker\n    prompt: prompts/evil.yaml\n" +
+      "  - id: after\n    kind: gate\n    dependsOn: [only]\n"
+  );
+  return { tmpRoot, pipelinesDir };
+}
+
+/** mtime + content of every file under `dir`, for the no-write assertions. */
+function fileSnapshot(dir: string): Map<string, string> {
+  const snapshot = new Map<string, string>();
+  const walk = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const st = statSync(full);
+      snapshot.set(full, `${st.mtimeMs}:${readFileSync(full, "utf8")}`);
+    }
+  };
+  walk(dir);
+  return snapshot;
+}
+
+function assertSnapshotEqual(before: Map<string, string>, after: Map<string, string>): void {
+  const changed = [...after].filter(([p, v]) => before.get(p) !== v).map(([p]) => p);
+  const removed = [...before.keys()].filter((p) => !after.has(p));
+  assert.deepEqual(changed, [], `no file may change: ${changed.join(", ")}`);
+  assert.deepEqual(removed, [], `no file may be removed: ${removed.join(", ")}`);
+}
+
+describe("GET /api/pipelines/:id/prompts — the editable prompt files (037 D6)", () => {
+  let srv: ServeHandle;
+  let tmpRoot: string;
+
+  before(async () => {
+    const project = makeEditorProject();
+    tmpRoot = project.tmpRoot;
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: project.pipelinesDir,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("lists the pipeline's own llm steps with path, text and sha256", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/spec-creation/prompts`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, { path: string; text: string; hash: string }>;
+    assert.deepEqual(Object.keys(body).sort(), ["critic", "enrich", "intake", "security"]);
+    assert.equal(body.intake.path, join("prompts", "intake.md"));
+    assert.equal(body.intake.text, readFileSync(join(tmpRoot, "prompts", "intake.md"), "utf8"));
+    assert.equal(
+      body.intake.hash,
+      createHash("sha256").update(body.intake.text).digest("hex"),
+      "hash must be the sha256 of the file content"
+    );
+  });
+
+  it("a nested pipeline's steps are absent — they belong to another file", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/spec-creation/prompts`);
+    const body = (await res.json()) as Record<string, unknown>;
+    const namespaced = Object.keys(body).filter((k) => k.includes("."));
+    assert.deepEqual(namespaced, [], `namespaced ids must not be listed: ${namespaced.join(", ")}`);
+    assert.equal(body.synthesis, undefined, "a step of the nested audit must not be listed");
+  });
+
+  it("an unknown pipeline is a 404", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/no-such/prompts`);
+    assert.equal(res.status, 404);
+  });
+
+  it("a step whose prompt is outside prompts/ is omitted — the file is never read", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/outside-prompt/prompts`);
+    assert.equal(res.status, 200);
+    const raw = await res.text();
+    const body = JSON.parse(raw) as Record<string, unknown>;
+    assert.equal(body.only, undefined, `providers.yaml must not be listed: ${raw}`);
+    assert.deepEqual(Object.keys(body), [], "the pipeline has no editable prompt at all");
+    const secret = readFileSync(join(tmpRoot, "providers.yaml"), "utf8").trim();
+    assert.ok(!raw.includes(secret), `the file's text must not reach the client: ${raw}`);
+  });
+
+  it("a step whose prompt is a non-.md file inside prompts/ is omitted", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/yaml-prompt/prompts`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.only, undefined, "prompts/evil.yaml must not be listed");
+  });
+});
+
+describe("PUT /api/pipelines/:id/prompts/:stepId — the only prompt write route (037 FR-005)", () => {
+  let srv: ServeHandle;
+  let tmpRoot: string;
+  let pipelinesDir: string;
+
+  const hashOf = (p: string): string =>
+    createHash("sha256").update(readFileSync(p, "utf8")).digest("hex");
+
+  before(async () => {
+    const project = makeEditorProject();
+    tmpRoot = project.tmpRoot;
+    pipelinesDir = project.pipelinesDir;
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("writes exactly the referenced file and leaves every sibling untouched", async () => {
+    const target = join(tmpRoot, "prompts", "intake.md");
+    const before = fileSnapshot(tmpRoot);
+    before.delete(target);
+    const text = `${readFileSync(target, "utf8")}\n<!-- edited by the editor -->\n`;
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/spec-creation/prompts/intake", {
+      text,
+      ifMatch: hashOf(target),
+    });
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    const body = (await res.json()) as { ok: boolean; hash: string };
+    assert.equal(body.ok, true);
+    assert.equal(readFileSync(target, "utf8"), text, "the prompt file must hold the new text");
+    assert.equal(body.hash, hashOf(target), "the returned hash must be the new file's sha256");
+    const after = fileSnapshot(tmpRoot);
+    after.delete(target);
+    assertSnapshotEqual(before, after);
+  });
+
+  it("a stale ifMatch is a 409 and the file is unchanged", async () => {
+    const target = join(tmpRoot, "prompts", "enrich.md");
+    const original = readFileSync(target, "utf8");
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/spec-creation/prompts/enrich", {
+      text: "replaced",
+      ifMatch: "0".repeat(64),
+    });
+    assert.equal(res.status, 409, `expected 409, got ${res.status}`);
+    assert.equal(readFileSync(target, "utf8"), original, "a conflict must write nothing");
+  });
+
+  it("an unknown placeholder is a 422 carrying the loader's message, and writes nothing", async () => {
+    const target = join(tmpRoot, "prompts", "enrich.md");
+    const original = readFileSync(target, "utf8");
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/spec-creation/prompts/enrich", {
+      text: "{{nonesuch}}",
+      ifMatch: hashOf(target),
+    });
+    assert.equal(res.status, 422, `expected 422, got ${res.status}`);
+    const body = (await res.json()) as { error: string };
+    assert.ok(
+      body.error.includes("nonesuch"),
+      `the message must name the placeholder: ${body.error}`
+    );
+    assert.equal(readFileSync(target, "utf8"), original, "an invalid prompt must not be written");
+  });
+
+  it("a prompt outside prompts/ is a 403 even though the loader accepts it", async () => {
+    const target = join(tmpRoot, "providers.yaml");
+    const original = readFileSync(target, "utf8");
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/outside-prompt/prompts/only", {
+      text: "profiles: {owned: true}\n",
+      ifMatch: hashOf(target),
+    });
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+    assert.equal(readFileSync(target, "utf8"), original, "providers.yaml must be untouched");
+  });
+
+  it("a non-.md prompt inside prompts/ is a 403", async () => {
+    const target = join(tmpRoot, "prompts", "evil.yaml");
+    const original = readFileSync(target, "utf8");
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/yaml-prompt/prompts/only", {
+      text: "owned\n",
+      ifMatch: hashOf(target),
+    });
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+    assert.equal(readFileSync(target, "utf8"), original, "the .yaml must be untouched");
+  });
+
+  it("a namespaced nested-pipeline step id is a 404", async () => {
+    const res = await mutate(
+      srv.port,
+      "PUT",
+      "/api/pipelines/spec-creation/prompts/verify.synthesis",
+      { text: "x", ifMatch: "0".repeat(64) }
+    );
+    assert.equal(res.status, 404, `expected 404, got ${res.status}`);
+  });
+
+  it("a step that is not an llm step is a 404", async () => {
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/yaml-prompt/prompts/after", {
+      text: "x",
+      ifMatch: "0".repeat(64),
+    });
+    assert.equal(res.status, 404, `expected 404, got ${res.status}`);
+  });
+
+  it("an unknown pipeline is a 404", async () => {
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/no-such/prompts/only", {
+      text: "x",
+      ifMatch: "0".repeat(64),
+    });
+    assert.equal(res.status, 404, `expected 404, got ${res.status}`);
+  });
+});
+
+describe("prompt routes against the bundled catalogue are refused (037 FR-005)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-editor-bundled-")));
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      templatesBase: join(tmpDir, "templates"),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("GET the prompt map of a bundled workflow → 403", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/investigate/prompts`);
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+  });
+
+  it("PUT a bundled workflow's prompt → 403", async () => {
+    const before = fileSnapshot(join(REAL_REPO_ROOT, "prompts"));
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/investigate/prompts/survey", {
+      text: "owned",
+      ifMatch: "0".repeat(64),
+    });
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+    assertSnapshotEqual(before, fileSnapshot(join(REAL_REPO_ROOT, "prompts")));
+  });
+});
+
+describe("POST /api/drafts/:id/preview — validate without writing (037 FR-004)", () => {
+  let srv: ServeHandle;
+  let tmpRoot: string;
+  let pipelinesDir: string;
+
+  const openDraftFor = async (id: string): Promise<{ draftId: number; body: string }> => {
+    const res = await mutate(srv.port, "POST", `/api/pipelines/${id}/drafts`, {});
+    assert.equal(res.status, 200);
+    return (await res.json()) as { draftId: number; body: string };
+  };
+
+  before(async () => {
+    const project = makeEditorProject();
+    tmpRoot = project.tmpRoot;
+    pipelinesDir = project.pipelinesDir;
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("returns def, levels and graph — and never the prompts it read", async () => {
+    const { draftId, body } = await openDraftFor("spec-creation");
+    const before = fileSnapshot(tmpRoot);
+    const res = await mutate(srv.port, "POST", `/api/drafts/${draftId}/preview`, {
+      prompts: { intake: "{{request}} edited in the editor" },
+    });
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    const payload = (await res.json()) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(payload).sort(), ["def", "graph", "levels"]);
+    assert.equal((payload.def as { id: string }).id, "spec-creation");
+    assert.ok(Array.isArray(payload.levels) && (payload.levels as unknown[]).length > 0);
+    // The nested closure — audit.yaml, correct-plan.yaml and their prompts — is
+    // read from disk during expansion, so it is part of the no-write proof.
+    assertSnapshotEqual(before, fileSnapshot(tmpRoot));
+    assert.ok(body.includes("spec-creation"), "the draft body is the file's own YAML");
+  });
+
+  it("an unknown placeholder is a 422 with the loader's message, and still writes nothing", async () => {
+    const { draftId } = await openDraftFor("spec-creation");
+    const before = fileSnapshot(tmpRoot);
+    const res = await mutate(srv.port, "POST", `/api/drafts/${draftId}/preview`, {
+      prompts: { intake: "{{nonesuch}}" },
+    });
+    assert.equal(res.status, 422, `expected 422, got ${res.status}`);
+    const payload = (await res.json()) as { error: string };
+    assert.ok(payload.error.includes("nonesuch"), `message must name it: ${payload.error}`);
+    assertSnapshotEqual(before, fileSnapshot(tmpRoot));
+  });
+
+  it("a prompt text of half a megabyte is accepted where the default-limit route rejects it", async () => {
+    const { draftId, body } = await openDraftFor("spec-creation");
+    const big = `{{request}} ${"x".repeat(512 * 1024)}`;
+    const preview = await mutate(srv.port, "POST", `/api/drafts/${draftId}/preview`, {
+      prompts: { intake: big },
+    });
+    assert.equal(preview.status, 200, `preview must accept 1 MiB, got ${preview.status}`);
+    const update = await mutate(srv.port, "PUT", `/api/drafts/${draftId}`, {
+      body: `${body}\n# ${"x".repeat(512 * 1024)}\n`,
+    });
+    assert.equal(
+      update.status,
+      413,
+      `the default-limit route must reject it, got ${update.status}`
+    );
+  });
+
+  it("an unknown draft is a 404", async () => {
+    const res = await mutate(srv.port, "POST", "/api/drafts/999999/preview", {});
+    assert.equal(res.status, 404, `expected 404, got ${res.status}`);
+  });
+
+  it("save writes the YAML and no Claude Code script — Binding A is a CLI-only export", async () => {
+    const { draftId, body } = await openDraftFor("simple");
+    const update = await mutate(srv.port, "PUT", `/api/drafts/${draftId}`, { body });
+    assert.equal(update.status, 200);
+    const res = await mutate(srv.port, "POST", `/api/drafts/${draftId}/save`, {});
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    const payload = (await res.json()) as Record<string, unknown>;
+    assert.deepEqual(payload, { ok: true });
+    assert.ok(
+      !existsSync(join(tmpRoot, ".claude", "workflows", "simple.js")),
+      "the save route must not write an executable at a YAML-controlled path"
+    );
+  });
+
+  it("a workflow Binding A cannot generate saves like any other", async () => {
+    const { draftId, body } = await openDraftFor("spec-creation");
+    const update = await mutate(srv.port, "PUT", `/api/drafts/${draftId}`, { body });
+    assert.equal(update.status, 200);
+    const res = await mutate(srv.port, "POST", `/api/drafts/${draftId}/save`, {});
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+    const payload = (await res.json()) as Record<string, unknown>;
+    assert.deepEqual(payload, { ok: true });
+    assert.ok(!existsSync(join(tmpRoot, ".claude")), "no Binding A output at all");
+  });
+});
+
+describe("GET / — the workflow editor is wired in the served HTML (037 D6)", () => {
+  let srv: ServeHandle;
+  let html: string;
+
+  before(async () => {
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+    html = await (await fetch(`http://127.0.0.1:${srv.port}/`)).text();
+  });
+  after(async () => srv.close());
+
+  it("opens a draft, the prompt map and the definition when the edit route is entered", () => {
+    assert.ok(!html.includes("Editor arrives in Ship 3"), "the placeholder must be gone");
+    assert.ok(html.includes("openWorkflowEditor"), "the edit route must open the editor");
+    for (const call of ["/drafts`", "/prompts`", "/preview`"]) {
+      assert.ok(html.includes(call), `the editor must call ${call.replace("`", "")}`);
+    }
+  });
+
+  it("validates through the preview route and never writes a canon file to render", () => {
+    assert.ok(html.includes("validateEditor"), "Validate must go through one function");
+    assert.ok(
+      html.includes("renderLevelsSvg(d.levels, d.graph"),
+      "the diagram must be re-rendered from the preview result"
+    );
+  });
+
+  it("writes every changed prompt before the YAML, each conditional on its hash", () => {
+    const promptWrite = html.indexOf("/prompts/${encodeURIComponent(stepId)}");
+    const draftSave = html.indexOf("/save`");
+    assert.ok(promptWrite > 0, "the prompt write route must be called");
+    assert.ok(draftSave > 0, "the draft save route must be called");
+    assert.ok(
+      promptWrite < draftSave,
+      "prompts are written before the YAML — a failed prompt write must stop the save"
+    );
+    assert.ok(html.includes("ifMatch"), "every prompt write must carry the hash it is based on");
+  });
+
+  it("guards an unsaved buffer and offers a reload on a conflict", () => {
+    assert.ok(html.includes("confirmLeaveEditor"), "leaving the route must be guarded");
+    assert.ok(html.includes("Reload draft"), "a conflict must offer to reopen the draft");
+  });
+
+  it("uses classes, not ids, for the editor's hooks", () => {
+    for (const hook of ["editor-yaml", "editor-validate", "editor-save", "editor-status"]) {
+      assert.ok(!html.includes(`id="${hook}"`), `"${hook}" must not be an id`);
+      assert.ok(html.includes(hook), `the "${hook}" hook must exist`);
+    }
   });
 });
