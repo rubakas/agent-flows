@@ -235,6 +235,53 @@ the record of how the decision was reached.
 - **Leftovers on this machine:** `~/.agent-flows/n8n.json` and `<stateDir>/n8n.json` hold a base URL
   and an API key that nothing reads any more. Deleting them is the owner's call (ADR-0017).
 
+## 2026-09-14 — step logs, developer page
+
+**State:** spec 036 is Implemented (backend add6e2d..5f9e933, review fixes 878a495; page half via
+037 Ship 1b). Spec 037 Ships 1a (6fe091b, 3230ddd, c8428f3), 1b (989c3f8, 350796b, a1424a3, 607eb53),
+2 (4fe9279, a56462a, 8fce0a7, 0dd41ec), 3 (d9c4545, 7fb6ff8, a67e924, guard 35f4415) are merged; Ship
+4 (restyle) is in progress on 2026-09-14 and its commits are listed in spec 037's Delivery section
+when it lands. Tests: 1379 before Ship 4. n8n retired (ADR-0017). Daemon on 7411 restarted from HEAD
+after each ship.
+
+**OPEN — owner decisions needed:**
+
+- **Usage/session limits.** The `build` run's implement step was cut off by the subscription window
+  after finishing every file; the daemon reported only "claude exited with code 1" (fixed: the reason
+  is now carried) and treated it as a failure. Decide whether a limit becomes a distinct `blocked`
+  state with the reset time, and whether `build` gets a resume/continue input instead of restarting
+  `develop.implement` on a dirty tree.
+- **Binding A.** `saveDraftAndRegenerate` now has no production caller (save must not regenerate —
+  spec 037 D6; the generator built its output path from `def.id` and emitted YAML strings into JS,
+  both hardened in d9c4545). Decide whether Binding A stays as a CLI export, and whether
+  `agent-flows generate claude` should refuse pipelines it cannot express instead of erroring per
+  step.
+- **Claude CLI `--allowedTools` in print mode gates nothing** (probe 2026-09-14 inside a Claude Code
+  session; re-run from a plain terminal before changing the golden argv).
+- **`{{checkCommand}}` is build-time only** (`config.json` or the default gate); a run input named
+  `checkCommand` is inert by design (`buildSteps.test.ts:194-219`). Spec 032 V5's evidence proved
+  nothing about inputs. Decide whether a per-run check command is wanted (it would need a validated
+  route field, never the workflow context).
+- **`POST /api/drafts/:id/preview` stays usable against the bundled catalogue** (read-only); the
+  bundled-mode guard expression is repeated at eight sites in `server.ts` — extract when next
+  touched.
+- **The Claude-in-Chrome extension cannot capture the page** (`document_idle` never reached, cause
+  unknown, not the poller); the owner's visual pass is the gate for 034/036/037 (request file:
+  scratchpad `visual-pass-request.md` from Ship 4).
+
+**Follow-ups (not decisions):**
+
+- Block-form step editing on top of the YAML tab (037 follow-up).
+- `/api/models` per-profile list for the Run… dialog.
+- Log retention/rotation.
+- Codex `reasoning`/`mcp_tool_call` item shapes.
+- Hard links inside `prompts/` undetected.
+- Shell-expansion in command tokens not matched by the deny guard.
+- `src/runtime/artifact.test.ts` two import-order warnings.
+- `pnpm -s prettier` vs `./node_modules/.bin/prettier` disagreement seen once — always use the local
+  binary.
+- Leftover `~/.agent-flows/n8n.json` and `<stateDir>/n8n.json` files (ADR-0017 says safe to delete).
+
 ## Immediate next steps
 
 1. Implement spec 026, starting with cancellation (FR-001 … FR-007) — it is the largest control gap.
