@@ -37,6 +37,7 @@ import { ModelRegistry } from "../canon/registry.js";
 import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
 import { clearRun, recordStep } from "../runtime/stepIntrospection.js";
+import { appendStepLog, writeStepOutput } from "../runtime/stepLog.js";
 import {
   startServer,
   readAgentFlowsConfig,
@@ -620,6 +621,258 @@ describe("GET /api/runs/:id — suspended run includes gate payload", () => {
       body.spec !== undefined && body.spec !== null,
       `spec must be present in GET /api/runs/:id response; got ${JSON.stringify(body.spec)}`
     );
+  });
+});
+
+// ── Step log: SSE channel, backfill route, output route (spec 036 D4/D6) ─────
+
+describe("step log delivery (FR-006/FR-007/FR-008)", () => {
+  let srv: ServeHandle;
+  let runsDir: string;
+  let liveRunId: string;
+  const DISK_RUN = "disk-log-run";
+  const NOLOG_RUN = "disk-nolog-run";
+
+  /** A settled run as a previous daemon left it, with or without an events file. */
+  function writeDiskRun(runId: string, withLog: boolean): void {
+    const dir = join(runsDir, runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "test-pipeline.json"),
+      JSON.stringify({
+        runId,
+        pipelineId: "test-pipeline",
+        status: "succeeded",
+        steps: {},
+        gateDecisions: [],
+        provenance: {
+          pipelineId: "test-pipeline",
+          profileId: "anthropic",
+          transportPerStep: {},
+          startedAt: "2026-09-14T09:00:00.000Z",
+          settledAt: "2026-09-14T09:01:00.000Z",
+        },
+      })
+    );
+    if (!withLog) return;
+    const line = {
+      seq: 1,
+      at: "2026-09-14T09:00:30.000Z",
+      runId,
+      pipelineId: "test-pipeline",
+      stepId: "one",
+      kind: "message",
+      role: "assistant",
+      text: "from disk",
+    };
+    writeFileSync(join(dir, "test-pipeline.events.jsonl"), `${JSON.stringify(line)}\n`);
+  }
+
+  before(async () => {
+    runsDir = mkdtempSync(join(tmpdir(), "af-serve-log-"));
+    writeDiskRun(DISK_RUN, true);
+    writeDiskRun(NOLOG_RUN, false);
+
+    const mockRun = makeMockRun("serve-log-run", successResult(), successResult());
+    // A run that never settles, so its log stays open for the whole suite.
+    mockRun.start = () => new Promise<Record<string, unknown>>(() => undefined);
+    const service = new RunService(makeMastra(mockRun), undefined, runsDir);
+    const started = await service.start("test-pipeline", { request: "x" });
+    liveRunId = started.runId;
+
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(runsDir, { recursive: true, force: true });
+  });
+
+  it("SSE delivers a log event for a live run once the line is on disk", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/events`);
+    assert.equal(res.status, 200);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    const { value: snapshot } = await reader.read();
+    assert.ok(decoder.decode(snapshot).includes("event: snapshot"));
+
+    appendStepLog(liveRunId, "sse.step", { kind: "message", role: "assistant", text: "live line" });
+
+    const { value, done } = await reader.read();
+    assert.equal(done, false);
+    const chunk = decoder.decode(value);
+    assert.ok(chunk.startsWith("event: log\n"), `expected a log event; got: ${chunk}`);
+    assert.ok(chunk.includes('"text":"live line"'));
+    assert.ok(chunk.includes('"stepId":"sse.step"'));
+    await reader.cancel();
+  });
+
+  it("GET /api/runs/:id/log returns NDJSON in seq order and honours after", async () => {
+    appendStepLog(liveRunId, "one", { kind: "message", role: "assistant", text: "second" });
+    appendStepLog(liveRunId, "one", { kind: "step.result", status: "succeeded", durationMs: 1 });
+
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/log`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "application/x-ndjson");
+    const all = (await res.text())
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as { seq: number; kind: string });
+    assert.deepEqual(
+      all.map((e) => e.seq),
+      all.map((_e, i) => i + 1),
+      "lines must arrive in seq order with no gaps"
+    );
+    assert.equal(all[all.length - 1].kind, "step.result");
+
+    const afterRes = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/log?after=${all.length - 1}`
+    );
+    const tail = (await afterRes.text()).split("\n").filter((l) => l !== "");
+    assert.equal(tail.length, 1, "after must return only the lines beyond the given seq");
+  });
+
+  it("rejects a non-numeric after with 400 and an unknown run with 404", async () => {
+    const logUrl = `http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/log`;
+    const bad = await fetch(`${logUrl}?after=abc`);
+    assert.equal(bad.status, 400);
+    assert.deepEqual(await bad.json(), { error: "invalid after" });
+
+    const negative = await fetch(`${logUrl}?after=-1`);
+    assert.equal(negative.status, 400);
+
+    const missing = await fetch(`http://127.0.0.1:${srv.port}/api/runs/no-such-run/log`);
+    assert.equal(missing.status, 404);
+  });
+
+  it("returns an empty 200 body for a run recorded before the log existed", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${NOLOG_RUN}/log`);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), "");
+  });
+
+  it("serves a disk run's log from the runs dir this server never ran (FR-007)", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${DISK_RUN}/log`);
+    assert.equal(res.status, 200);
+    const lines = (await res.text()).split("\n").filter((l) => l !== "");
+    assert.equal(lines.length, 1);
+    assert.deepEqual(JSON.parse(lines[0]), {
+      seq: 1,
+      at: "2026-09-14T09:00:30.000Z",
+      runId: DISK_RUN,
+      pipelineId: "test-pipeline",
+      stepId: "one",
+      kind: "message",
+      role: "assistant",
+      text: "from disk",
+    });
+  });
+
+  it("serves a step's persisted output, 404 when absent and 400 when the id is unsafe", async () => {
+    writeStepOutput(liveRunId, "survey", { kind: "json", output: { findings: [] } });
+
+    const res = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/steps/survey/output`
+    );
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), {
+      runId: liveRunId,
+      pipelineId: "test-pipeline",
+      stepId: "survey",
+      kind: "json",
+      output: { findings: [] },
+    });
+
+    const absent = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/steps/never-ran/output`
+    );
+    assert.equal(absent.status, 404);
+
+    const unsafe = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/steps/bad!id/output`
+    );
+    assert.equal(unsafe.status, 400);
+
+    const unknownRun = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/no-such-run/steps/survey/output`
+    );
+    assert.equal(unknownRun.status, 404);
+  });
+});
+
+// ── Audit: the pipelineId of a persisted artifact is untrusted path input ─────
+//
+// Both log routes join it into a file name. An artifact on disk is written by
+// whatever produced it, so a traversing id must not make the daemon read a file
+// outside the run directory.
+
+describe("step log routes — a traversing pipelineId in an artifact", () => {
+  let srv: ServeHandle;
+  let root: string;
+  let runsDir: string;
+  const EVIL_RUN = "evil-pipeline-run";
+  const PLANTED = "planted-outside-the-run-dir";
+
+  before(async () => {
+    root = mkdtempSync(join(tmpdir(), "af-serve-evil-"));
+    runsDir = join(root, "state", "runs");
+    mkdirSync(join(runsDir, EVIL_RUN), { recursive: true });
+    writeFileSync(
+      join(runsDir, EVIL_RUN, "artifact.json"),
+      JSON.stringify({
+        runId: EVIL_RUN,
+        pipelineId: "../../x",
+        status: "succeeded",
+        steps: {},
+        gateDecisions: [],
+      })
+    );
+    // What `../../x` resolves to from the run directory: two levels up is
+    // `root/state`, where these stand in for a file the daemon must not serve.
+    writeFileSync(
+      join(root, "state", "x.events.jsonl"),
+      `${JSON.stringify({ seq: 1, kind: "message", role: "assistant", text: PLANTED })}\n`
+    );
+    mkdirSync(join(root, "state", "x.outputs"), { recursive: true });
+    writeFileSync(
+      join(root, "state", "x.outputs", "one.json"),
+      JSON.stringify({ output: PLANTED })
+    );
+
+    const service = new RunService(
+      makeMastra(makeMockRun("evil-log-run", successResult(), successResult())),
+      undefined,
+      runsDir
+    );
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      runService: service,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("404s both log routes and reads nothing outside the run dir", async () => {
+    const log = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${EVIL_RUN}/log`);
+    assert.equal(log.status, 404);
+    assert.equal((await log.text()).includes(PLANTED), false, "no file outside the run dir");
+
+    const output = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${EVIL_RUN}/steps/one/output`
+    );
+    assert.equal(output.status, 404);
+    assert.equal((await output.text()).includes(PLANTED), false, "no file outside the run dir");
   });
 });
 

@@ -41,6 +41,16 @@ import { makeDb, type DbInstance } from "../db/index.js";
 import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../install/bundle.js";
 import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
 import { assertSafePath, isContained } from "../install/paths.js";
+import { readManifest } from "../runtime/artifactStore.js";
+import { decideEntryPoint } from "../runtime/entryPoint.js";
+import { ensureProjectState, type ProjectState } from "../runtime/projectState.js";
+import {
+  isSafeStepId,
+  pipeRunLog,
+  readStepOutput,
+  runLogFile,
+  stepOutputFile,
+} from "../runtime/stepLog.js";
 
 import {
   isSafeId,
@@ -69,9 +79,6 @@ import {
   type N8nRuntimeDeps,
 } from "./routes/n8nRuntime.js";
 import type { HardenedSpec } from "../canon/types.js";
-import { decideEntryPoint } from "../runtime/entryPoint.js";
-import { readManifest } from "../runtime/artifactStore.js";
-import { ensureProjectState, type ProjectState } from "../runtime/projectState.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -99,6 +106,9 @@ const RE_PIPELINE_DRAFTS = /^\/api\/pipelines\/([^/]+)\/drafts$/u;
 const RE_DRAFT_BY_ID = /^\/api\/drafts\/(\d+)$/u;
 const RE_DRAFT_SAVE = /^\/api\/drafts\/(\d+)\/save$/u;
 const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
+const RE_RUN_LOG = /^\/api\/runs\/([^/]+)\/log$/u;
+const RE_RUN_STEP_OUTPUT = /^\/api\/runs\/([^/]+)\/steps\/([^/]+)\/output$/u;
+const RE_AFTER_SEQ = /^\d+$/u;
 const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
 const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
 const RE_RUN_CANCEL = /^\/api\/runs\/([^/]+)\/cancel$/u;
@@ -1309,6 +1319,12 @@ async function handleRequest(
       safeWrite(`event: step\ndata: ${JSON.stringify(payload)}\n\n`);
     });
 
+    // Spec 036 D4: inner step events, already on disk when they arrive here, so
+    // a client that also fetches the backfill can de-duplicate on seq.
+    const unsubLog = runService.subscribeLog(id, (event) => {
+      safeWrite(`event: log\ndata: ${JSON.stringify(event)}\n\n`);
+    });
+
     // Heartbeat comment every 15 s to keep proxies alive.
     const heartbeat = setInterval(() => {
       safeWrite(": heartbeat\n\n");
@@ -1318,9 +1334,84 @@ async function handleRequest(
     req.on("close", () => {
       clearInterval(heartbeat);
       unsub();
+      unsubLog();
     });
 
     return; // Connection is kept open; do not call res.end().
+  }
+
+  // GET /api/runs/:id/log?after=<seq> — NDJSON backfill of the step log (spec 036 D4).
+  // Must precede GET /api/runs/:id, whose bare-id regex would eat the suffix.
+  const runLogMatch = RE_RUN_LOG.exec(pathname);
+  if (method === "GET" && runLogMatch) {
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
+    const id = decodeURIComponent(runLogMatch[1]);
+    const afterRaw = url.searchParams.get("after");
+    if (afterRaw !== null && !RE_AFTER_SEQ.test(afterRaw)) {
+      json(res, 400, { error: "invalid after" });
+      return;
+    }
+    if (!runService.get(id)) {
+      json(res, 404, { error: `Run "${id}" not found` });
+      return;
+    }
+    // A run recorded before this spec has no events file: an empty body, not a 404.
+    const location = runService.logLocation(id);
+    const after = Number(afterRaw ?? 0);
+    // The pipeline id comes from a persisted artifact, so it is untrusted input
+    // to a path join: an unsafe one is a run whose log cannot be addressed.
+    let file: string | undefined;
+    try {
+      file = location === undefined ? undefined : runLogFile(location.dir, location.pipelineId);
+    } catch (err) {
+      if (!(err instanceof RangeError)) throw err;
+      json(res, 404, { error: `Run "${id}" not found` });
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "application/x-ndjson",
+      "X-Content-Type-Options": "nosniff",
+    });
+    // Streamed line by line: a long run's log must not be held in memory per request.
+    if (file !== undefined) await pipeRunLog(file, res, { after });
+    res.end();
+    return;
+  }
+
+  // GET /api/runs/:id/steps/:stepId/output — one step's full output (spec 036 D6).
+  const stepOutputMatch = RE_RUN_STEP_OUTPUT.exec(pathname);
+  if (method === "GET" && stepOutputMatch) {
+    const { runService } = ctx;
+    if (!requireRunService(runService, res)) return;
+    const id = decodeURIComponent(stepOutputMatch[1]);
+    const stepId = decodeURIComponent(stepOutputMatch[2]);
+    if (!isSafeStepId(stepId)) {
+      json(res, 400, { error: `Step id "${stepId}" is invalid` });
+      return;
+    }
+    if (!runService.get(id)) {
+      json(res, 404, { error: `Run "${id}" not found` });
+      return;
+    }
+    const location = runService.logLocation(id);
+    let output: unknown;
+    try {
+      output =
+        location === undefined
+          ? undefined
+          : readStepOutput(stepOutputFile(location.dir, location.pipelineId, stepId));
+    } catch (err) {
+      if (!(err instanceof RangeError)) throw err;
+      json(res, 404, { error: `Run "${id}" not found` });
+      return;
+    }
+    if (output === undefined) {
+      json(res, 404, { error: `No output recorded for step "${stepId}"` });
+      return;
+    }
+    json(res, 200, output);
+    return;
   }
 
   // GET /api/runs/:id/manifest — return the chain manifest for a run (spec 029 FR-006).
