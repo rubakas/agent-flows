@@ -503,7 +503,7 @@ Placeholder — record each gate's mutation-proof run here as it is completed (s
 - [ ] FR-009 — run dialog payload and navigation
 - [x] FR-010 — runs poller view-gating: `pollersFor` in `ui-route.js`; mutation returning
       `["runs"]` unconditionally → red (`leaves every other view idle, including the run
-    details`)
+details`)
 - [x] FR-011 — run view rendering and escaping (Activity / Decisions / Output): delivered by
       spec 037 Ship 1b (607eb53); `src/serve/ui-log.js` + `ui-log.test.ts` (23 tests); mutation:
       `esc` dropped from the message path → red (`renderLogEvent — escaping on every path` ›

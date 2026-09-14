@@ -493,7 +493,7 @@ outside the browser, and FR-011 carries the escaping test.
 - [x] FR-011 run view Activity / Decisions / Output — delivered by spec 037 Ship 1b (607eb53);
       `src/serve/ui-log.js` + `ui-log.test.ts` (23 tests); mutation: `esc` dropped from the
       message path → red (`renderLogEvent — escaping on every path` › `escapes a message so a
-    script tag cannot reach the DOM`)
+script tag cannot reach the DOM`)
 - [x] FR-012 MCP surface unchanged — `src/bindings/mastra/daemonTools.test.ts:162`
 - [x] FR-013 no new persisted fields — `runService.test.ts`
 - [x] FR-014 events file complete on cancel/fail — `runService.test.ts`,
