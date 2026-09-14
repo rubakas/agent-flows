@@ -27,6 +27,9 @@ import type { DbInstance } from "../db/index.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/** Pipeline ids that are safe to use as the base name of a generated script. */
+const RE_SAFE_PIPELINE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/u;
+
 export type SaveResult =
   | { ok: true }
   | { ok: false; reason: "conflict"; message: string }
@@ -133,6 +136,16 @@ export function saveDraftAndRegenerate(db: DbInstance, draftId: number): SaveAnd
 
     const filePath = join(source.root, source.relPath);
     const loaded = loadPipeline(filePath);
+    // The id comes from the YAML and is about to become the name of an
+    // executable file, so it is held to the same safe-id rule the HTTP routes
+    // apply before joining anything into a path.
+    if (!RE_SAFE_PIPELINE_ID.test(loaded.def.id) || loaded.def.id.length > 100) {
+      throw new Error(
+        `Pipeline id ${JSON.stringify(loaded.def.id)} is not a safe file name — ` +
+          `refusing to generate a script for it`
+      );
+    }
+
     const providers = loadProviders(source.root);
     const profile = getActiveProfile(process.env, providers);
     const registry = defaultRegistry(process.env, providers.models);

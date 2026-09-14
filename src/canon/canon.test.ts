@@ -1933,6 +1933,43 @@ steps: []
   });
 });
 
+describe("loadPipeline — rejects an input name that is not an identifier", () => {
+  it("throws naming the input when it would become a JavaScript expression", () => {
+    const yaml = `\
+id: test
+version: 1
+description: test
+inputs:
+  - "x = 1; //"
+steps: []
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      /x = 1; \/\//
+    );
+  });
+
+  it("accepts ordinary identifier input names", () => {
+    const yaml = `\
+id: test
+version: 1
+description: test
+inputs:
+  - request
+  - _findings2
+steps: []
+`;
+    assert.doesNotThrow(() =>
+      loadPipeline("/fake/pipelines/test.yaml", {
+        readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+      })
+    );
+  });
+});
+
 // ── D2 — Plan verification and correction (spec 018) ─────────────────────────
 
 describe("spec-creation — verify and correct steps present after expansion (spec 018)", () => {

@@ -167,7 +167,7 @@ export function generateWorkflowScript(
   for (const step of llmSteps) {
     const entry = resolveStepModel(step, resolvedProfile, resolvedRegistry);
     const concreteModel = entry.cli?.model ?? entry.api?.model ?? entry.id;
-    out.push(`const ${modelVar(step.id)} = models[${sq(step.id)}] || '${concreteModel}'`);
+    out.push(`const ${modelVar(step.id)} = models[${sq(step.id)}] || ${sq(concreteModel)}`);
   }
   out.push("");
 

@@ -191,6 +191,59 @@ describe("generateWorkflowScript — unsupported kind refusal", () => {
   });
 });
 
+describe("generateWorkflowScript — model ids are escaped, not interpolated", () => {
+  it("emits a quote-bearing model id through the single-quote escaper", () => {
+    const hostile = "evil' + process.exit(1) + '";
+    const loaded: LoadedPipeline = {
+      def: {
+        id: "hostile-model",
+        version: 1,
+        description: "llm step with a quote in its model id",
+        inputs: ["task"],
+        steps: [
+          {
+            id: "work",
+            kind: "llm" as const,
+            role: "worker" as const,
+            model: hostile,
+            prompt: "prompts/work.md",
+          },
+        ],
+      },
+      prompts: { work: "Do the work for {{task}}" },
+    };
+    const s = generateWorkflowScript(loaded);
+    const line = s.split("\n").find((l) => l.startsWith("const mWork ="));
+    assert.ok(line, `the model variable must be emitted:\n${s}`);
+    assert.equal(line, "const mWork = models['work'] || 'evil\\' + process.exit(1) + \\''");
+    // Every quote the model contributes must be backslash-escaped: nothing after
+    // the opening quote may close the literal early.
+    const literal = line.slice(line.indexOf("|| '") + 4, -1);
+    assert.equal(
+      literal.replace(/\\'/g, ""),
+      "evil + process.exit(1) + ",
+      `an unescaped quote escaped the literal: ${line}`
+    );
+
+    const wrapped =
+      "(async function() {\n" + s.replace(/\bexport const meta\b/, "const meta") + "\n})";
+    const tmpFile = join(tmpdir(), "agent-flows-hostile-model-check.mjs");
+    writeFileSync(tmpFile, wrapped);
+    try {
+      execSync(`node --check ${tmpFile}`, { stdio: "pipe" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      assert.fail(`a model id must not be able to break the generated script:\n${msg}`);
+    } finally {
+      try {
+        unlinkSync(tmpFile);
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // dependsOn path tests
 // ---------------------------------------------------------------------------

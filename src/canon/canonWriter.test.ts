@@ -494,6 +494,30 @@ describe("saveDraftAndRegenerate — failed save does not regenerate", () => {
   });
 });
 
+describe("saveDraftAndRegenerate — a traversing pipeline id generates nothing", () => {
+  it('refuses id "../../x" instead of writing a script outside .claude/workflows', () => {
+    const traversing = REGEN_PIPELINE_BEFORE.replace("id: test", 'id: "../../x"');
+    const { db, root, draftId, cleanup } = setup(traversing);
+
+    try {
+      const result = saveDraftAndRegenerate(db, draftId);
+
+      assert.ok(result.ok, "the YAML save itself is unaffected");
+      if (result.ok) {
+        assert.deepEqual(result.regenerated, [], "nothing may be generated");
+        assert.ok(
+          "regenerationError" in result && result.regenerationError.includes("../../x"),
+          `the refusal must name the id: ${JSON.stringify(result)}`
+        );
+      }
+      assert.ok(!existsSync(join(root, "..", "..", "x.js")), "no script outside the workflows dir");
+      assert.ok(!existsSync(join(root, ".claude")), "no script inside it either");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("saveDraftAndRegenerate — generation failure is isolated", () => {
   it("reports ok:true with regenerationError when generation fails, YAML already written", () => {
     const { db, root, pipelinePath, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);

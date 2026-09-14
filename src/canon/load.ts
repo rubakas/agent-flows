@@ -9,6 +9,9 @@ import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
 
 const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
 
+/** A declared input name must be a plain identifier — it is emitted as one. */
+const RE_INPUT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+
 /** Fields that are illegal on every non-llm step kind. */
 const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"] as const;
 
@@ -98,6 +101,18 @@ export function loadPipeline(
     if (typeof defBudget !== "number" || defBudget <= 0) {
       throw new Error(
         `Pipeline "${def.id}": defaultMaxBudgetUsd must be a positive number; got ${JSON.stringify(defBudget)}`
+      );
+    }
+  }
+
+  // Declared input names become JavaScript identifiers in the generated Binding
+  // A script and placeholder keys at render time, so anything that is not a
+  // plain identifier is refused here rather than emitted into a script.
+  for (const name of def.inputs ?? []) {
+    if (typeof name !== "string" || !RE_INPUT_NAME.test(name)) {
+      throw new Error(
+        `Pipeline "${def.id}": input ${JSON.stringify(name)} is not a valid identifier — ` +
+          `input names must match ${RE_INPUT_NAME.source}`
       );
     }
   }
