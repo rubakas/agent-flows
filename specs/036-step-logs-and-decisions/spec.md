@@ -1,11 +1,11 @@
 # 036. Step logs and decisions
 
-| Field        | Value                                                                          |
-| ------------ | ------------------------------------------------------------------------------ |
-| Feature Name | Step logs and decisions                                                        |
-| Branch       | `main`                                                                         |
-| Status       | Implemented (backend) — 2026-09-14; page half delivered under spec 037 Ship 1b |
-| Created      | 2026-09-14                                                                     |
+| Field        | Value                    |
+| ------------ | ------------------------ |
+| Feature Name | Step logs and decisions  |
+| Branch       | `main`                   |
+| Status       | Implemented — 2026-09-14 |
+| Created      | 2026-09-14               |
 
 ## Problem
 
@@ -112,6 +112,10 @@ outputExcerpt?, outputTruncated?, prompt?, command?, model?`); steps accumulate 
   (opus, 12 min) until the CLI's usage window closed mid-step; the tree it left was lint-clean and
   type-clean, and a follow-up pass added only formatting, import order, the non-zero-exit message
   and one test. `pnpm check`: 1409 tests, 0 failing.
+- Code review 2026-09-14 by the `code-review` pipeline on the five backend commits (run
+  019137e5, 10 min): 7 minor findings, all verified, all fixed in 878a495 (UTF-8 byte cap,
+  tail-anchored `seq`, reopen seed, one terminal event per step, quoted command tokens, scrub
+  carry, D3 prose).
 
 ## Goals / Non-goals
 
@@ -486,7 +490,10 @@ outside the browser, and FR-011 carries the escaping test.
 - [x] FR-009 bounds and caps — `stepLog.test.ts`
 - [x] FR-010 deny guard, relative/absolute/nested — `stepLog.test.ts`; mutation of the leading-slash
       retry stayed green → branch removed and D8 amended (see D8)
-- [ ] FR-011 run view — spec 037 Ship 1b
+- [x] FR-011 run view Activity / Decisions / Output — delivered by spec 037 Ship 1b (607eb53);
+      `src/serve/ui-log.js` + `ui-log.test.ts` (23 tests); mutation: `esc` dropped from the
+      message path → red (`renderLogEvent — escaping on every path` › `escapes a message so a
+    script tag cannot reach the DOM`)
 - [x] FR-012 MCP surface unchanged — `src/bindings/mastra/daemonTools.test.ts:162`
 - [x] FR-013 no new persisted fields — `runService.test.ts`
 - [x] FR-014 events file complete on cancel/fail — `runService.test.ts`,
@@ -499,8 +506,9 @@ outside the browser, and FR-011 carries the escaping test.
 {status: "failed", error: "exit 1"}`; `GET /api/runs/:id/log` → 200 `application/x-ndjson` +
       `nosniff`, `after=2` honoured, `after=x` → 400; output route → 404 for a check step and 400 for
       a traversal id.
-- [ ] V6 live, part 2: `investigate` with tool events and cost — pending the CLI window;
-      `code-review` verify table — Ship 1b.
+- [ ] V6 live, part 2: `investigate` with tool events and cost — pending the CLI window.
+- [x] V6 live, part 2 (`code-review` verify table) — delivered by spec 037 Ship 1b (607eb53): the
+      Output block renders a JSON array as a table.
 - [x] Security pass 2026-09-14 (0 blocking, 1 major, 5 minor): major — scrub applied only at the
       log sink while `outputExcerpt` carried the value → fixed at the source; minor — `pipelineId`
       unvalidated in log paths → validated; command tokens not matched by the guard → matched;

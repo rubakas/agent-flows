@@ -124,6 +124,9 @@ exportedAt, sourcePipeline, files:[{path, content}]}` from `src/install/bundle.t
   with loopback Host/Origin checks (`server.ts:166-174,181-187`) and a CSP (`server.ts:752-753`)
   that every new route inherits; all new mutating routes inherit `BODY_LIMIT_DEFAULT` 64 KB
   (`server.ts:124`) except the preview route, whose limit is raised explicitly (FR-004).
+- ADR numbering: 0015 and 0016 already existed, so the retirement ADR is 0017
+  (`docs/decisions/0017-retire-the-workflow-editor-hybrid.md`); README is a gate root, so no
+  shipped doc may spell the retired tool's name — only docs/ and specs/ may.
 
 ## Goals / Non-goals
 
@@ -364,7 +367,8 @@ build runs and commit sets, in order:
 - **Ship 1 — subtractive + spec 036 landing.** D1, D9, D10, D11, plus the new static-module route.
   FRs: FR-001, FR-010, FR-011, FR-012, FR-015. All removal and behaviour-preserving; the `no-n8n`
   gate and the runs-poller gate are objectively verifiable; leaves the tree green and small before
-  any new write surface lands.
+  any new write surface lands. Delivered: 1a — `6fe091b`, `3230ddd`, `c8428f3`; 1b — `989c3f8`,
+  `350796b`, `a1424a3`, `607eb53`.
 - **Ship 2 — catalogue.** D2 (the `workflows`/`workflow`/`templates`/`template` routes), D3, D4,
   D7. FRs: FR-002, FR-003, FR-006, FR-007, FR-008, FR-009, FR-014, FR-016. The `pipelinesSource`
   flip (D3) and the bundle allowlist (FR-016) are resolved above, not left as build-time decisions.
@@ -466,8 +470,12 @@ build runs and commit sets, in order:
   message and no file changed → fix → Save → files updated, including the regenerated
   `<project>/.claude/workflows/investigate.js` (D6) → Run… → run view shows Activity live; a bundle
   containing a `config.json` entry is refused by `Install`/`Install all` with zero files written
-  (FR-016); the Chrome extension captures `#/workflows` (page idle); owner visual pass of the
-  design DEFERRED as in 034 V3.
+  (FR-016); page idle is verified by `pollersFor` and the absence of any other interval or open
+  connection off the runs view (checked 2026-09-14 with `lsof` on the daemon: no connection from a
+  fresh `#/workflows` tab); the Claude-in-Chrome extension still cannot capture the page (its
+  injection waits for `document_idle`, which this page never reaches even with the poller gated —
+  cause unknown, not the poller), so it is not a gate; owner visual pass of the design DEFERRED as
+  in 034 V3.
 - **V5.** Spec 036 V5/V6 items for the page.
 - **V6.** Mutation ledger recorded under Verification log.
 
@@ -483,7 +491,8 @@ build runs and commit sets, in order:
 
 Placeholder — record each gate's mutation-proof run here as it is completed (see V6).
 
-- [ ] FR-001 — n8n removal grep gate
+- [x] FR-001 — n8n removal grep gate: `src/serve/no-n8n.test.ts`; mutation: a `// n8n` comment
+      turns it red, proven once
 - [ ] FR-002 — bundled pipelines listing
 - [ ] FR-003 — save-as-template round trip
 - [ ] FR-004 — draft preview validation, no write
@@ -492,10 +501,17 @@ Placeholder — record each gate's mutation-proof run here as it is completed (s
 - [ ] FR-007 — diagram rendering
 - [ ] FR-008 — workflows table row actions by source
 - [ ] FR-009 — run dialog payload and navigation
-- [ ] FR-010 — runs poller view-gating
-- [ ] FR-011 — run view rendering and escaping (Activity / Decisions / Output)
-- [ ] FR-012 — environment payload and MCP surface unchanged
+- [x] FR-010 — runs poller view-gating: `pollersFor` in `ui-route.js`; mutation returning
+      `["runs"]` unconditionally → red (`leaves every other view idle, including the run
+    details`)
+- [x] FR-011 — run view rendering and escaping (Activity / Decisions / Output): delivered by
+      spec 037 Ship 1b (607eb53); `src/serve/ui-log.js` + `ui-log.test.ts` (23 tests); mutation:
+      `esc` dropped from the message path → red (`renderLogEvent — escaping on every path` ›
+      `escapes a message so a script tag cannot reach the DOM`)
+- [x] FR-012 — environment payload and MCP surface unchanged: `/api/n8n/*` → 404;
+      `/api/environment` unchanged
 - [ ] FR-013 — shared UI classes and tokens
 - [ ] FR-014 — bundled install calls the existing `POST /api/install` route
-- [ ] FR-015 — allowlisted static-module route (ui-route/ui-graph/ui-log/ui-tables)
+- [x] FR-015 — allowlisted static-module route (ui-route/ui-graph/ui-log/ui-tables): `/ui-log.js`
+      200 + `nosniff`, `/ui-other.js` 404
 - [ ] FR-016 — bundle path allowlist and symlink containment
