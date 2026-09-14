@@ -96,8 +96,10 @@ exportedAt, sourcePipeline, files:[{path, content}]}` from `src/install/bundle.t
   MCP `list_pipelines` (`src/bindings/mastra/server.ts:31-34,41-46`), so installing one bundled
   workflow makes the project set authoritative for all three and hides the rest of the bundled
   catalogue from runs and MCP alike.
-- `saveDraftAndRegenerate` writes `<project>/.claude/workflows/<id>.js` from the **on-disk**
-  pipeline (`src/canon/canonWriter.ts:135-148`), not the draft body, and surfaces failures as
+- `saveDraftAndRegenerate` writes to `dirname(pipelinesDir)` + `.claude/workflows/<id>.js` — for
+  an installed project that is `<project>/.agent-flows/.claude/workflows/<id>.js`, not
+  `<project>/.claude/workflows/<id>.js` — from the **on-disk** pipeline
+  (`src/canon/canonWriter.ts:135-148`), not the draft body, and surfaces failures as
   `regenerationError` (`canonWriter.ts:148`) rather than throwing.
 - `assertSafePath` (`src/install/paths.ts:19-33`) and `importBundle`'s per-entry check
   (`bundle.ts:179-184,227-234`) are string-only: they reject absolute paths, NUL and `../` escapes
@@ -134,6 +136,11 @@ exportedAt, sourcePipeline, files:[{path, content}]}` from `src/install/bundle.t
   makes the preview's `pipelines/` filter and the Phase-2 validators correct by
   construction. Also fixed: template write symlink/TOCTOU (`lstatSync` + `wx` + 0600),
   `exportBundle` containment, bounded error echoes.
+- Security pass on Ship 3 (2026-09-14): 1 blocking (script path from unvalidated `def.id`), 2
+  major (JS injection from YAML into the Binding A script; `GET …/prompts` served any in-root
+  file a step pointed at, including `providers.yaml`), 2 minor (hard links; non-atomic writes).
+  Resolved by dropping regeneration from save, hardening the generator/loader, containing the
+  listing, and atomic prompt writes.
 
 ## Goals / Non-goals
 
@@ -303,15 +310,17 @@ YAML plus several prompt textareas in one payload can exceed the default.
 hash the editor loaded from `GET .../prompts`, 409 on mismatch (someone changed the file since the
 draft opened; per-prompt, since the draft's `baseHash` only covers the YAML,
 `server.ts:918-922`) — then `PUT /api/drafts/:id {body}` and `POST /api/drafts/:id/save` for the
-YAML, which also 409s on its own conflict. Prompts go first because `saveDraftAndRegenerate`
-(`canonWriter.ts:135-148`) regenerates `<project>/.claude/workflows/<id>.js` from the **on-disk**
-pipeline after the YAML write — saving prompts after the YAML would bake stale prompt text into
-that file. `regenerationError` (`canonWriter.ts:148`) is shown as a non-fatal warning line, not a
-failure of the save. Both conflict paths ("the YAML or a prompt file changed since the draft
-opened") are shown with "reload draft", which reopens the draft and re-fetches
-`GET .../prompts`. Unsaved changes: the tab title gets a `•` and leaving the route asks for
-confirmation. The block form (D-fields per step) is the follow-up; the YAML tab is the editor of
-this spec.
+YAML, which also 409s on its own conflict. `Save` writes the canon files only. It does not
+regenerate Binding A scripts: the security pass on the implementation proved that
+`saveDraftAndRegenerate` built the script path from the YAML's own `id` (a draft with
+`id: ../../x` wrote a `.js` file outside the project) and that input names and model ids were
+emitted verbatim into an executable script; regeneration stays a CLI-only export
+(`agent-flows generate claude`), and the generator and loader were hardened regardless (safe
+`def.id`, identifier-shaped input names, escaped model ids). Both conflict paths ("the YAML or a
+prompt file changed since the draft opened") are shown with "reload draft", which reopens the
+draft and re-fetches `GET .../prompts`. Unsaved changes: the tab title gets a `•` and leaving the
+route asks for confirmation. The block form (D-fields per step) is the follow-up; the YAML tab is
+the editor of this spec.
 
 **D7 — Diagram.** New pure module `src/serve/ui-graph.js` (+ `.d.ts`, served via the FR-015
 allowlisted static-module route, unit-tested): `renderLevelsSvg(levels, graph, opts)` returns an
@@ -383,7 +392,7 @@ build runs and commit sets, in order:
   Delivered: 2 — 4fe9279, a56462a, 8fce0a7, 0dd41ec (2026-09-14).
 - **Ship 3 — editor.** D2 (the `workflow-edit` route), D6. FRs: FR-004, FR-005. The only genuinely
   new write surface; the prompt-path containment, conflict handling and regeneration ordering above
-  are its acceptance criteria.
+  are its acceptance criteria. Delivered: 3 — (commits recorded after merge).
 - **Ship 4 — developer-UI restyle.** D8. FR-013. Pure presentation, kept separate so Ships 1-3 stay
   free of CSS churn in their diffs; the owner's visual pass (V4) applies here and stays DEFERRED
   until an operator session is available, as in spec 034 V3.
@@ -418,7 +427,11 @@ build runs and commit sets, in order:
   `.`, i.e. a nested-pipeline step — see D6/facts). 409 when `ifMatch` does not match the sha256 of
   the on-disk file (obtained from the new `GET /api/pipelines/:id/prompts`). 403 for bundled
   pipelines, reusing the `resolve(pipelinesDir) === resolve(bundledPipelinesDir)` comparison
-  (facts).
+  (facts). The listing route `GET /api/pipelines/:id/prompts` applies the same containment as the
+  write: a step whose prompt file is not an existing `.md` under the realpath of `prompts/` is
+  omitted, never read. Prompt writes go through a temp file and `rename`, so a crash cannot leave
+  a truncated prompt. Residual: hard links inside `prompts/` are not detected (requires prior
+  local write access).
 - **FR-006.** `ui-route.js` parses the three new routes (four with the id argument on `hashFor`);
   unknown hashes and unexpected trailing segments (`#/settings/<anything>`,
   `#/workflows/<id>/<not edit>`) still fall back to runs.
@@ -507,8 +520,12 @@ Placeholder — record each gate's mutation-proof run here as it is completed (s
 - [x] FR-003 — save-as-template round trip: 201 → 0600 file, 409 without overwrite, 403 on a
       symlink at the destination, `wx` open closes the TOCTOU; live smoke wrote and deleted
       `smoke-investigate`
-- [ ] FR-004 — draft preview validation, no write
-- [ ] FR-005 — prompt write route validation and scoping
+- [x] FR-004 — preview validates through the loader's injected `readFile`; no-write proven over
+      the whole temp tree including the nested closure; 422 no-write; 512 KB prompt accepted
+      where the draft PUT 413s; mutation: preview writing the draft body → 2 red
+- [x] FR-005 — own steps only, dotted ids 404; 403 for `providers.yaml` and for a `.yaml` inside
+      `prompts/`; 409 on a stale `ifMatch`; exactly one file written (sibling mtime+content
+      snapshot); mutation: containment returning true → 2 red, `ifMatch` skipped → 1 red
 - [x] FR-006 — router new routes: `ui-route.js` three routes + inverse test
 - [x] FR-007 — diagram rendering: `ui-graph.js`, 9 tests; mutation: `esc(id)` dropped → red
       (`escapes a hostile step id in the text node and in data-step`)
