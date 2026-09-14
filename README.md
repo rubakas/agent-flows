@@ -95,6 +95,11 @@ agent-flows splits what your teammates need from what only this machine produced
 | `~/.agent-flows/projects/<key>/`                                                   | `runs/` (artifacts and manifests), `agent-flows.sqlite`, `agent-flows-mastra.db`, `n8n.json` | No — machine-local, never committed |
 | `~/.agent-flows/templates/`, `~/.agent-flows/n8n.json`                             | Global template store and n8n instance credentials                                           | No — global to this machine         |
 
+Inside one run directory (`runs/<runId>/`), beside the `<pipelineId>.json` artifact:
+
+- `<pipelineId>.events.jsonl` — the ordered step log, appended while the run is in flight.
+- `<pipelineId>.outputs/<stepId>.json` — each llm step's full output, not just the excerpt.
+
 `<key>` is the absolute real path of your project directory with every character
 outside `[A-Za-z0-9_-]` replaced by `-` (truncated to 200 characters plus an
 8-character hash when longer), so two checkouts of the same repository keep

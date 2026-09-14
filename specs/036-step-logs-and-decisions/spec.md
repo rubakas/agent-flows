@@ -1,11 +1,11 @@
 # 036. Step logs and decisions
 
-| Field        | Value                             |
-| ------------ | ---------------------------------- |
-| Feature Name | Step logs and decisions            |
-| Branch       | `main`                              |
-| Status       | Revised — 2026-09-14               |
-| Created      | 2026-09-14                         |
+| Field        | Value                                                                          |
+| ------------ | ------------------------------------------------------------------------------ |
+| Feature Name | Step logs and decisions                                                        |
+| Branch       | `main`                                                                         |
+| Status       | Implemented (backend) — 2026-09-14; page half delivered under spec 037 Ship 1b |
+| Created      | 2026-09-14                                                                     |
 
 ## Problem
 
@@ -27,7 +27,7 @@ survives only inside the whole-run `result` on success (`runService.ts:913-915`)
   `processLineForLoopDetection` (`:332`) parses each stdout line as JSON, inspects only
   `type === "assistant"` (`:342`) and its `tool_use` content blocks (`:344-363`); `findResultEvent`
   (`:216`) finds the `type === "result"` event (`ClaudeResultEvent`: `type, subtype, is_error,
-  result, total_cost_usd, num_turns`, `:202-209`). `stdoutRaw` holds the full stream for the
+result, total_cost_usd, num_turns`, `:202-209`). `stdoutRaw` holds the full stream for the
   lifetime of one call (`:269`) and is discarded; only `rawTail` (500 chars) survives for error
   messages (`:271, 313`). The watchdog is internal (`resetStallTimer`/`tripWatchdog`, `:281-297`;
   `WatchdogTrip {pathology, detail, digest}`, `:28-40`). The close handler rejects without reaching
@@ -49,7 +49,7 @@ survives only inside the whole-run `result` on success (`runService.ts:913-915`)
   child environment can hold real credentials (`GH_TOKEN` and the like). `CHECK_OUTPUT_CAP` is
   64 KiB in memory (`:87`).
 - `src/runtime/runService.ts`: `StepState` (`:137-155`: `status, startedAt?, finishedAt?, error?,
-  outputExcerpt?, outputTruncated?, prompt?, command?, model?`); steps accumulate in `run.watch`
+outputExcerpt?, outputTruncated?, prompt?, command?, model?`); steps accumulate in `run.watch`
   (`:473-534`); `mergedSteps` (`:590-601`) merges `stepIntrospection` read-through;
   `finalizeSettlement` (`:611-618`); `persistArtifact` (`:1312-1373`) computes the artifact dir
   (`:1283-1286`, `<runsDir>/<runId>/` for a root run, `chainArtifactDir` for a seeded chain) and
@@ -89,7 +89,7 @@ survives only inside the whole-run `result` on success (`runService.ts:913-915`)
 - `src/db/schema.ts` has no table for run events or step logs; run state is in-memory plus the
   artifact files.
 - Tests to extend: `src/runtime/runService.test.ts`, `src/serve/server.test.ts` (`"SSE
-  /api/runs/:id/events delivers step events for a running run"`, `:489`),
+/api/runs/:id/events delivers step events for a running run"`, `:489`),
   `src/serve/ui-route.test.ts`, `src/runtime/artifact.test.ts`,
   `src/canon/adapters/claude.golden.test.ts`, `src/canon/adapters/codex.test.ts`,
   `src/canon/adapters/supervision.test.ts`, `src/canon/workspace/denyMatch.test.ts`.
@@ -101,13 +101,17 @@ survives only inside the whole-run `result` on success (`runService.ts:913-915`)
   sonnet, synthesis on opus, 8 m 37 s) produced 2 blocking, 4 major and 4 minor findings against
   the draft; all are resolved in the decisions below.
 - Probe 2026-09-14 (claude 2.1.270, `-p --restricted --strict-mcp-config --tools Read,Glob,Bash
-  --allowedTools Read,Glob`, prompt on stdin): a Bash call not listed in `--allowedTools`
+--allowedTools Read,Glob`, prompt on stdin): a Bash call not listed in `--allowedTools`
   **executed** (`ls`, `echo`), and was refused only when a `--disallowedTools 'Bash(ls:*)'` pattern
   matched or when restricted-mode confinement blocked a file write. So `--allowedTools` denies
   nothing in print mode; the `--tools` set and the deny patterns are the gates. The daemon never
   names Bash in `--tools` (`contents: read` grants Read, Glob, Grep only,
   `src/canon/adapters/claude.ts:64-78`), so it is not exposed. Caveat: the probe ran as a child of
   an interactive Claude Code session; a re-run from a plain terminal is listed as a follow-up.
+- Build 2026-09-14: the backend was implemented by the `build` pipeline's `develop.implement` step
+  (opus, 12 min) until the CLI's usage window closed mid-step; the tree it left was lint-clean and
+  type-clean, and a follow-up pass added only formatting, import order, the non-zero-exit message
+  and one test. `pnpm check`: 1409 tests, 0 failing.
 
 ## Goals / Non-goals
 
@@ -151,7 +155,7 @@ run starting at 1; `at` is ISO-8601 with milliseconds. Kinds and payloads:
 - `step.result` `{ status: "succeeded" | "failed" | "cancelled", durationMs, error? }` — the
   terminal event of a step, emitted exactly once by the step builder (D2)
 - `decision` `{ gateStepId, mode, decidedBy: "human" | "agent", approved, reason?, judgeModelId?,
-  superseded? }` — appended whenever a `GateDecision` is pushed (`approve`, `cancel`,
+superseded? }` — appended whenever a `GateDecision` is pushed (`approve`, `cancel`,
   `resolveGate`)
 - `judge.degraded` `{ gateStepId, error }` — appended when `degradeToManual` fires
 - `log.truncated` `{ events, bytes }` — appended once when a per-run cap of D5 is reached
@@ -172,26 +176,30 @@ imports the type from there and `StepRunnerDeps` (`:47`) gains
 
 - claude (`runClaudeCli.ts`): from each stream-json line — `assistant` events (one content block per
   event in practice): every `text` block → `message`, every `tool_use` block → `tool.call {callId:
-  block.id, name: block.name, input: block.input}`, with `nested: true` when the event's
+block.id, name: block.name, input: block.input}`, with `nested: true` when the event's
   `parent_tool_use_id` is non-null; `thinking` blocks are skipped. `user` events carrying
   `tool_result` blocks → `tool.result {callId: block.tool_use_id, ok: block.is_error !== true,
-  excerpt: block.content}` — `is_error` is optional in the stream (absent on a successful Read,
+excerpt: block.content}` — `is_error` is optional in the stream (absent on a successful Read,
   `false` on a successful Bash, `true` on a refused or failed call) and `content` is a string. The
   `result` event → `usage {costUsd: total_cost_usd, turns: num_turns, durationMs: duration_ms,
-  usage: {inputTokens: usage.input_tokens, outputTokens: usage.output_tokens}, denials:
-  permission_denials.length}`; a refused tool call leaves the run-level `is_error` false, so
+usage: {inputTokens: usage.input_tokens, outputTokens: usage.output_tokens}, denials:
+permission_denials.length}`; a refused tool call leaves the run-level `is_error` false, so
   `denials` is the only run-level signal. `system`, `stream_event`, `rate_limit_event` lines are
   skipped. Every watchdog trip → `watchdog`. The existing loop detector keeps consuming the same
-  parsed line; parsing happens once.
+  parsed line; parsing happens once. On a non-zero exit the thrown error carries the last `result`
+  event's `subtype` and the first 300 characters of its `result` text (the interrupted build lost
+  its reason — 'You've hit your session limit' — because the close handler discarded it); test
+  `src/canon/runClaudeCli.test.ts` "keeps the result event's subtype and text when the CLI exits
+  non-zero".
 - codex (`codex.ts`), shapes taken from the captured fixtures (codex-cli 0.152.1): `item.started`
   with `item.type === "command_execution"` → `tool.call {callId: item.id, name: "command", input:
-  {command: item.command}}`; `item.completed` with `command_execution` → `tool.result {callId:
-  item.id, ok: item.exit_code === 0, excerpt: item.aggregated_output}`; `item.started` with
+{command: item.command}}`; `item.completed` with `command_execution` → `tool.result {callId:
+item.id, ok: item.exit_code === 0, excerpt: item.aggregated_output}`; `item.started` with
   `file_change` → `tool.call {callId: item.id, name: "file_change", input: {changes: item.changes}}`
   where each change is `{path, kind}`; `item.completed` with `file_change` → `tool.result {callId:
-  item.id, ok: item.status === "completed"}`; `item.completed` with `agent_message` → `message
-  {text: item.text}`; `turn.completed` → `usage {usage: {inputTokens: usage.input_tokens,
-  outputTokens: usage.output_tokens}}`. `thread.started`, `turn.started` and item types not present
+item.id, ok: item.status === "completed"}`; `item.completed` with `agent_message` → `message
+{text: item.text}`; `turn.completed` → `usage {usage: {inputTokens: usage.input_tokens,
+outputTokens: usage.output_tokens}}`. `thread.started`, `turn.started` and item types not present
   in the fixtures (`reasoning`, `mcp_tool_call`) are skipped until captured; there is no raw
   passthrough. Codex emits no partial text and no cost figure.
 - api (`api.ts`): one `message` with the response content, then `usage` when the response carries a
@@ -216,8 +224,12 @@ deliberately forwards the step's declared variable names into `/bin/sh -c`, so a
 `set -x` or an error echoing argv can put a real credential on stdout or stderr. Before emitting a
 `check.output` event, `runCheckStep` replaces every non-empty value of the variables the step
 declares (the `deps.envAllowlist` names `buildCheckEnv` forwards, resolved against the same env it
-built) with `[redacted:<NAME>]`. The in-memory `CheckResult.output` is unchanged; only the durable,
-network-streamed log is scrubbed. This scrub applies to no other kind: llm steps never receive
+built) with `[redacted:<NAME>]`. The scrub is applied at the source in `runCheckStep`, so the
+retained `CheckResult.output` — which becomes the step's context value, the artifact's
+`outputExcerpt`, the SSE `step` payload and MCP `get_run`'s `outputExcerpt` — carries the
+placeholder too; a scrub at the log sink alone would have left three other exits (found by the
+2026-09-14 security pass). Known limitation: a value split across two stdout reads is emitted
+unredacted in two halves. This scrub applies to no other kind: llm steps never receive
 declared env values.
 
 **D3 — Sink.** New leaf module `src/runtime/stepLog.ts` (imports downward only —
@@ -268,7 +280,9 @@ drops `message`, `tool.call`, `tool.result` and `check.output` events while stil
 run and every decision stay complete and both readers (`readRunLog`, the backfill route) stay
 bounded. Nothing accumulates in memory per run beyond the subscriber set and the counters. The page
 keeps at most 2000 rendered events per step and shows "N earlier events" above the list. The full
-step output is never in the log (D6).
+step output is never in the log (D6). The caps are enforced on the in-registry append path;
+`appendRunLogFileEvent` (post-settlement decisions only) is bounded by the gate count instead.
+File and directory modes are applied at creation only.
 
 **D6 — Full outputs.** When an llm step returns, `buildLlmStep` calls
 `writeStepOutput(runId, step.id, { kind: "text" | "json", schema?, output })` and the sink writes
@@ -288,19 +302,26 @@ settlement keeps its partial events file on disk but is not listed (027 open ite
 **D8 — Credential guard on logs (defence in depth).** Before appending a `tool.call`, the sink
 checks every string under the input keys `file_path`, `path`, `notebook_path` and every element of
 `paths` against `CREDENTIAL_DENY_PATTERNS` using the existing matcher in
-`src/canon/workspace/denyMatch.ts`. A string is matched as given and, when that fails, again with a
-leading `/` removed, because claude's tool inputs are absolute as the CLI sees them while the
-matcher is documented and tested for repo-relative paths (`denyMatch.ts:1-21`); the matcher
-therefore sees both forms and a `/Users/x/proj/.env` matches the same pattern a `.env` does. On a
-match the event is appended with `denied: true` and its input reduced to `{ path }`, and the
-`tool.result` with the same `callId` is appended with `redacted: true` and no `excerpt`. The CLI
-deny rules (spec 031) already block the read, so a redaction is observed only when that guard has
-failed, and the log then still shows that the attempt happened. Codex command output is not scanned:
-codex runs in a sanitized copy that contains no credential files (spec 031). Check step output is
-covered instead by the declared-env scrub of D2 (FR-015); no other kind needs it, because llm steps
-never receive declared env values.
+`src/canon/workspace/denyMatch.ts`. Strings are matched as given. Every entry in
+`CREDENTIAL_DENY_PATTERNS` begins with `**/`, and Node's `path.matchesGlob` matches such a pattern
+against an absolute path directly (probed 2026-09-14 with `/Users/x/proj/.env`, `/.env`,
+`//users/x/.env`, `/users/x/id_rsa`, `/users/x/a.pem`, `/secrets.yaml`,
+`/users/x/.aws/credentials`), so no relativisation step exists; a leading-slash retry was
+implemented, found unfalsifiable by mutation, and removed. If a pattern without the `**/` prefix is
+ever added, this paragraph must be revisited. On a match the event is appended with `denied: true`
+and its input reduced to `{ path }`, and the `tool.result` with the same `callId` is appended with
+`redacted: true` and no `excerpt`. The CLI deny rules (spec 031) already block the read, so a
+redaction is observed only when that guard has failed, and the log then still shows that the
+attempt happened. Codex command output is not scanned: codex runs in a sanitized copy that contains
+no credential files (spec 031). Check step output is covered instead by the declared-env scrub of
+D2 (FR-015); no other kind needs it, because llm steps never receive declared env values.
+Command-shaped inputs are covered too: when `tool.call.input.command` is a string, each
+whitespace-separated token is matched against the deny patterns; a match is treated like a path
+match. The guard relies on a `tool.call` (with `callId`) preceding its `tool.result`; the fixture
+test asserts that ordering for every captured stream. `pipelineId` is validated with the same
+character class as `stepId` before any path is built; the routes answer 404 for an unsafe id.
 
-*Known limitation.* The key list is an allowlist of the argument names Claude's built-in tools use
+_Known limitation._ The key list is an allowlist of the argument names Claude's built-in tools use
 today, not a structural rule, and it does not descend into nested objects. There is no bypass now —
 Bash is never granted (`claude.ts:64-78`) and codex runs credential-free (spec 031 D2) — but a new
 tool or adapter that names or nests a path argument differently gets no redaction, silently. Trigger
@@ -372,8 +393,9 @@ outside the browser, and FR-011 carries the escaping test.
 - **FR-014.** The events file of a run cancelled or failed mid-step is complete up to the last event
   and ends with that step's `step.result`, emitted by the step builder on every exit path
   (success, failure, abort, watchdog exhaustion).
-- **FR-015.** `check.output` never carries the value of a variable the step declared: the text is
-  scrubbed to `[redacted:<NAME>]` before the event is appended or delivered.
+- **FR-015.** `check.output` and the retained `CheckResult.output` never carry the value of a
+  variable the step declared: the text is scrubbed to `[redacted:<NAME>]` before the event is
+  appended or delivered.
 
 ## Verification
 
@@ -390,7 +412,7 @@ outside the browser, and FR-011 carries the escaping test.
   `permission_denials` entry `{tool_name, tool_use_id, tool_input}`), `codex-stream.jsonl` (one
   `command_execution` started and completed, two `agent_message`s, `turn.completed` usage) and
   `codex-write-stream.jsonl` (one `file_change` started and completed with `changes: [{path, kind:
-  "update"}]`, one `command_execution`, three `agent_message`s). Tests feed each fixture through the
+"update"}]`, one `command_execution`, three `agent_message`s). Tests feed each fixture through the
   adapter's line parser with a recording `onEvent` and assert the exact event sequence — including
   that no `step.start` or `step.result` appears, the builders owning those. A separate builder-level
   test asserts one `step.start` and exactly one terminal `step.result` per step for success, thrown
@@ -411,7 +433,8 @@ outside the browser, and FR-011 carries the escaping test.
   output-table JSON key containing `<img onerror>` both render escaped (no live tag in the produced
   HTML); a tool input, a check-output chunk, a watchdog detail and a decision reason with markup
   likewise. Mutation: dropping `escH` from any one path turns the test red.
-- **V6.** Live: run the `test` pipeline with `checkCommand: "printf out; printf err >&2; exit 0"`
+- **V6.** Live: run the `test` pipeline (its check command comes from the project config or the
+  default gate; a run input named `checkCommand` is intentionally ignored, `buildSteps.ts:559-562`)
   and confirm `check.output` events on both streams in the file and over SSE; run `investigate` and
   confirm `tool.call`/`tool.result`/`message`/`usage`/`step.result` events with cost; run
   `code-review` and confirm the `verify` output renders as a table with a verdict column; owner
@@ -436,20 +459,40 @@ outside the browser, and FR-011 carries the escaping test.
 
 ## Verification log
 
-Placeholder — record each gate's mutation-proof run here as it is completed (see V7).
-
-- [ ] FR-001 — seq monotonicity
-- [ ] FR-002 — claude adapter events (V2)
-- [ ] FR-003 — codex/api adapter events (V2)
-- [ ] FR-004 — check step events
-- [ ] FR-005 — decision / judge.degraded events, including post-settlement supersede
-- [ ] FR-006 — SSE log delivery ordering
-- [ ] FR-007 — log backfill route
-- [ ] FR-008 — output route
-- [ ] FR-009 — field bounds and per-run caps
-- [ ] FR-010 — credential deny guard (relative, absolute, nested)
-- [ ] FR-011 — run view rendering and escaping (Activity / Decisions / Output)
-- [ ] FR-012 — MCP surface unchanged
-- [ ] FR-013 — no new persisted fields
-- [ ] FR-014 — events file completeness on cancel/fail
-- [ ] FR-015 — declared env values scrubbed from check output
+- [x] FR-001 seq monotonicity — `src/runtime/stepLog.test.ts` (15 tests)
+- [x] FR-002 claude adapter events — `src/canon/adapters/streamEvents.test.ts`; mutation:
+      `tool_result` branch removed → 3 red ("maps a two-Read turn onto tool calls, results, the answer
+      and usage" :47, "carries the tool input and the result excerpt" :72, "reports a refused tool call
+      as a failed result and a denial (FR-002)" :80); restored green
+- [x] FR-003 codex/api adapter events — `streamEvents.test.ts`
+- [x] FR-004 check step events — `src/canon/runStep.test.ts`
+- [x] FR-005 decision / judge.degraded incl. post-settlement supersede —
+      `src/runtime/runService.test.ts` "logs a superseded judge verdict after the run has settled
+      (FR-005)"
+- [x] FR-006 SSE log delivery order — `src/serve/server.test.ts`
+- [x] FR-007 log backfill route incl. disk run via a second server — `server.test.ts` "serves a disk
+      run's log from the runs dir this server never ran (FR-007)"
+- [x] FR-008 output route — `server.test.ts`
+- [x] FR-009 bounds and caps — `stepLog.test.ts`
+- [x] FR-010 deny guard, relative/absolute/nested — `stepLog.test.ts`; mutation of the leading-slash
+      retry stayed green → branch removed and D8 amended (see D8)
+- [ ] FR-011 run view — spec 037 Ship 1b
+- [x] FR-012 MCP surface unchanged — `src/bindings/mastra/daemonTools.test.ts:162`
+- [x] FR-013 no new persisted fields — `runService.test.ts`
+- [x] FR-014 events file complete on cancel/fail — `runService.test.ts`,
+      `src/bindings/mastra/buildSteps.test.ts:937` (one terminal result, watchdog attempts [1,2])
+- [x] FR-015 declared env scrub — `runStep.test.ts:1661`; mutation: scrub skipped → red at :1669;
+      restored green
+- [x] V6 live, part 1 (2026-09-14, run `e7505941-18c4-4a73-873d-878700374ae0` on the restarted
+      daemon): `test.events.jsonl` created 0600 in the run dir; `check.output` on stdout (eslint, tsc,
+      prettier) and stderr (prettier warnings) in arrival order with monotonic `seq`; final `step.result
+{status: "failed", error: "exit 1"}`; `GET /api/runs/:id/log` → 200 `application/x-ndjson` +
+      `nosniff`, `after=2` honoured, `after=x` → 400; output route → 404 for a check step and 400 for
+      a traversal id.
+- [ ] V6 live, part 2: `investigate` with tool events and cost — pending the CLI window;
+      `code-review` verify table — Ship 1b.
+- [x] Security pass 2026-09-14 (0 blocking, 1 major, 5 minor): major — scrub applied only at the
+      log sink while `outputExcerpt` carried the value → fixed at the source; minor — `pipelineId`
+      unvalidated in log paths → validated; command tokens not matched by the guard → matched;
+      result-before-call ordering unasserted → asserted in the fixture test; whole-file parse per
+      backfill → line-wise skip; caps not enforced on the post-settlement path → documented.
