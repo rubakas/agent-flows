@@ -734,6 +734,41 @@
         font-family: var(--mono);
         font-size: 14px;
       }
+      /* Workflow editor (037 D6). The YAML and the prompts are both code, so
+         both tabs are monospace; the tabs themselves reuse the chip styling. */
+      .editor-text {
+        font: inherit;
+        font-family: var(--mono);
+        font-size: 12px;
+        width: 100%;
+        box-sizing: border-box;
+        min-height: 320px;
+        padding: 6px 8px;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        background: var(--bg);
+        color: var(--ink);
+        resize: vertical;
+      }
+      .editor-prompt-label {
+        display: block;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--muted);
+        margin: 10px 0 3px;
+      }
+      .editor-status {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 10px 0 0;
+        white-space: pre-wrap;
+      }
+      .editor-status.err {
+        color: var(--err);
+      }
+      .editor-status.warn {
+        color: var(--ink-2);
+      }
     </style>
   </head>
   <body>
@@ -808,7 +843,7 @@
         <div id="workflow-view-body"></div>
       </section>
 
-      <!-- Workflow editor (037 D6) — arrives in Ship 3 -->
+      <!-- Workflow editor (037 D6) — project workflows only -->
       <section class="view" id="view-workflow-edit" hidden>
         <div class="section-header">
           <a class="btn" href="#/workflows">← Workflows</a>
@@ -1409,12 +1444,233 @@
         }
       }
 
-      /** The editor arrives in Ship 3; the route exists so a saved link resolves. */
-      function renderWorkflowEditor(id) {
-        document.getElementById("workflow-edit-body").innerHTML = `<div class="section">
-          <p class="empty">Editor arrives in Ship 3.</p>
-          <a class="btn" href="${escH(hashFor("workflow", id))}">← ${escH(id)}</a>
-        </div>`;
+      // ── Workflow editor (037 D6) ───────────────────────────────────────────
+
+      /**
+       * The open editor: the draft it writes through, the prompt files it
+       * loaded with their hashes, and the last definition that validated.
+       * null whenever the editor is not on screen.
+       */
+      let _editor = null;
+
+      /** The unsaved-changes marker lives in the document title (D6). */
+      function setEditorTitle() {
+        document.title = _editor
+          ? `${_editor.dirty ? "• " : ""}${_editor.id} — agent-flows`
+          : "agent-flows";
+      }
+
+      function markEditorDirty() {
+        if (!_editor || _editor.dirty) return;
+        _editor.dirty = true;
+        setEditorTitle();
+      }
+
+      /** Write a line under the editor. `kind` is "", "err" or "warn". */
+      function editorStatus(html, kind) {
+        const el = document.querySelector(".editor-status");
+        if (!el) return;
+        el.className = `editor-status${kind ? ` ${kind}` : ""}`;
+        el.innerHTML = html;
+      }
+
+      /**
+       * The conflict line both save paths share: the file moved under the
+       * editor, so the only safe action is to reopen the draft.
+       */
+      function editorConflict(message) {
+        editorStatus(
+          `${escH(message)} — changed on disk since you opened it.
+           <button class="btn editor-reload">Reload draft</button>`,
+          "err"
+        );
+        const btn = document.querySelector(".editor-reload");
+        if (!btn || !_editor) return;
+        const id = _editor.id;
+        btn.onclick = () => {
+          _editor = null;
+          openWorkflowEditor(id);
+        };
+      }
+
+      function editorPromptsHtml(prompts) {
+        const ids = Object.keys(prompts).sort();
+        if (!ids.length) return `<p class="empty">This workflow has no prompt files.</p>`;
+        return ids
+          .map(
+            (stepId) => `<label class="editor-prompt-label">${escH(stepId)} — ${escH(
+              prompts[stepId].path
+            )}</label>
+            <textarea class="editor-text editor-prompt" spellcheck="false"
+              data-editor-prompt="${escH(stepId)}">${escH(prompts[stepId].text)}</textarea>`
+          )
+          .join("");
+      }
+
+      function editorHtml(id, body, prompts, d) {
+        return `<div class="workflow-head">
+          <h2>${escH(id)}</h2>
+          <span class="actions" style="margin-left:auto">
+            <button class="btn editor-validate">Validate</button>
+            <button class="btn primary editor-save">Save</button>
+            <button class="btn editor-discard">Discard</button>
+          </span>
+        </div>
+        <div class="workflow-split">
+          <div class="workflow-pane-diagram">
+            <div class="diagram editor-diagram">${renderLevelsSvg(d.levels, d.graph, {
+              steps: d.def.steps,
+            })}</div>
+          </div>
+          <div class="workflow-pane-tables">
+            <div class="chips editor-tabs">
+              <button class="chip active" data-editor-tab="pipeline">Pipeline</button>
+              <button class="chip" data-editor-tab="prompts">Prompts</button>
+            </div>
+            <div data-editor-panel="pipeline">
+              <textarea class="editor-text editor-yaml" spellcheck="false">${escH(body)}</textarea>
+            </div>
+            <div data-editor-panel="prompts" hidden>${editorPromptsHtml(prompts)}</div>
+          </div>
+        </div>
+        <p class="editor-status">idle</p>`;
+      }
+
+      /**
+       * Open a project workflow for editing: a draft over its YAML, the prompt
+       * files of its own llm steps with the hashes a write is conditional on,
+       * and the definition currently on disk for the first diagram (D6).
+       */
+      async function openWorkflowEditor(id) {
+        const body = document.getElementById("workflow-edit-body");
+        body.innerHTML = "Loading…";
+        try {
+          const draft = await api("POST", `/api/pipelines/${encodeURIComponent(id)}/drafts`, {});
+          const prompts = await api("GET", `/api/pipelines/${encodeURIComponent(id)}/prompts`);
+          const d = await api("GET", `/api/pipelines/${encodeURIComponent(id)}`);
+          _editor = { id, draftId: draft.draftId, prompts, dirty: false, syncedBody: draft.body };
+          setEditorTitle();
+          body.innerHTML = editorHtml(id, draft.body, prompts, d);
+          wireEditor(body);
+        } catch (e) {
+          _editor = null;
+          setEditorTitle();
+          body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      function wireEditor(body) {
+        for (const tab of body.querySelectorAll("[data-editor-tab]")) {
+          tab.onclick = () => {
+            for (const other of body.querySelectorAll("[data-editor-tab]")) {
+              other.classList.toggle("active", other === tab);
+            }
+            for (const panel of body.querySelectorAll("[data-editor-panel]")) {
+              panel.hidden = panel.dataset.editorPanel !== tab.dataset.editorTab;
+            }
+          };
+        }
+        for (const area of body.querySelectorAll(".editor-text")) {
+          area.oninput = markEditorDirty;
+        }
+        body.querySelector(".editor-validate").onclick = () => validateEditor();
+        body.querySelector(".editor-save").onclick = () => saveEditor();
+        body.querySelector(".editor-discard").onclick = () => {
+          if (_editor.dirty && !confirm("Discard the unsaved changes and reopen the draft?")) {
+            return;
+          }
+          const id = _editor.id;
+          _editor = null;
+          openWorkflowEditor(id);
+        };
+      }
+
+      /** The prompt texts that differ from the files the editor loaded. */
+      function changedPrompts() {
+        const changed = {};
+        for (const area of document.querySelectorAll("[data-editor-prompt]")) {
+          const stepId = area.dataset.editorPrompt;
+          if (area.value !== _editor.prompts[stepId].text) changed[stepId] = area.value;
+        }
+        return changed;
+      }
+
+      /**
+       * Validate the buffer without writing a canon file: the YAML goes into the
+       * draft (the edit buffer, in SQLite) and the preview route loads it with
+       * the edited prompt texts injected. A 422 message is shown verbatim — it
+       * names the step and the placeholder — and the diagram keeps its last
+       * valid state.
+       */
+      async function validateEditor() {
+        const yaml = document.querySelector(".editor-yaml").value;
+        editorStatus("validating…", "");
+        try {
+          if (yaml !== _editor.syncedBody) {
+            await api("PUT", `/api/drafts/${_editor.draftId}`, { body: yaml });
+            _editor.syncedBody = yaml;
+          }
+          const d = await api("POST", `/api/drafts/${_editor.draftId}/preview`, {
+            prompts: changedPrompts(),
+          });
+          document.querySelector(".editor-diagram").innerHTML = renderLevelsSvg(d.levels, d.graph, {
+            steps: d.def.steps,
+          });
+          editorStatus("valid", "");
+          return true;
+        } catch (e) {
+          editorStatus(escH(e.message), "err");
+          return false;
+        }
+      }
+
+      /**
+       * Save order (D6): every changed prompt first, then the YAML, so a failed
+       * prompt write stops before the YAML that refers to it is persisted. The
+       * Claude Code script is not touched — it is a CLI-only export.
+       */
+      async function saveEditor() {
+        if (!(await validateEditor())) return;
+        const id = _editor.id;
+        const changed = changedPrompts();
+        for (const [stepId, text] of Object.entries(changed)) {
+          try {
+            const r = await api(
+              "PUT",
+              `/api/pipelines/${encodeURIComponent(id)}/prompts/${encodeURIComponent(stepId)}`,
+              { text, ifMatch: _editor.prompts[stepId].hash }
+            );
+            _editor.prompts[stepId] = { ..._editor.prompts[stepId], text, hash: r.hash };
+          } catch (e) {
+            if (e.status === 409) editorConflict(`Prompt "${stepId}"`);
+            else editorStatus(escH(e.message), "err");
+            return;
+          }
+        }
+        try {
+          await api("PUT", `/api/drafts/${_editor.draftId}`, {
+            body: document.querySelector(".editor-yaml").value,
+          });
+          await api("POST", `/api/drafts/${_editor.draftId}/save`, {});
+          _editor.dirty = false;
+          _editor.syncedBody = document.querySelector(".editor-yaml").value;
+          setEditorTitle();
+          editorStatus("saved");
+        } catch (e) {
+          if (e.status === 409) editorConflict("This workflow");
+          else editorStatus(escH(e.message), "err");
+        }
+      }
+
+      /**
+       * Guard for leaving the editor with an unsaved buffer. Returns false when
+       * the operator cancels, and the caller puts the hash back.
+       */
+      function confirmLeaveEditor() {
+        if (!_editor || !_editor.dirty) return true;
+        const next = parseHash(location.hash);
+        if (next.view === "workflow-edit" && next.id === _editor.id) return true;
+        return confirm("This workflow has unsaved changes. Leave the editor?");
       }
 
       // ── Template preview (037 D4) ──────────────────────────────────────────
@@ -2422,6 +2678,12 @@
        */
       function route() {
         const { view, runId, id } = parseHash(location.hash);
+        // Leaving the editor for good: the buffer is gone, so the unsaved
+        // marker goes with it (the guard on hashchange has already run).
+        if (_editor && (view !== "workflow-edit" || id !== _editor.id)) {
+          _editor = null;
+          setEditorTitle();
+        }
         // FR-004/FR-014: the stream belongs to the selected run, not to a pane —
         // the layout the details happen to render in never changes this rule.
         if (view !== "run" || runId !== _activeRunId) closeRunStream();
@@ -2466,7 +2728,9 @@
         } else if (view === "workflow") {
           openWorkflowView(id);
         } else if (view === "workflow-edit") {
-          renderWorkflowEditor(id);
+          // Re-entering the same editor (the leave guard puts the hash back)
+          // must not throw the buffer away and reload it from disk.
+          if (!_editor || _editor.id !== id) openWorkflowEditor(id);
         } else if (view === "templates") {
           loadTemplates();
         } else if (view === "template") {
@@ -2476,17 +2740,27 @@
         }
       }
 
-      window.addEventListener("hashchange", route);
+      window.addEventListener("hashchange", () => {
+        // D6: an unsaved editor buffer is only discarded on purpose. Declining
+        // puts the hash back, which re-enters the editor route as a no-op.
+        if (!confirmLeaveEditor()) {
+          location.hash = hashFor("workflow-edit", _editor.id);
+          return;
+        }
+        route();
+      });
 
       // Crossing the breakpoint moves the details between the right pane and the
       // full view; re-routing is what performs that move.
       WIDE.addEventListener("change", () => route());
 
-      // FR-009: Escape leaves the run details view.
+      // FR-009: Escape leaves the run details view; 037 D6: and the editor, back
+      // to the workflow it was opened from.
       document.addEventListener("keydown", (ev) => {
         if (ev.key !== "Escape") return;
-        if (parseHash(location.hash).view !== "run") return;
-        location.hash = hashFor("runs");
+        const { view, id } = parseHash(location.hash);
+        if (view === "run") location.hash = hashFor("runs");
+        else if (view === "workflow-edit") location.hash = hashFor("workflow", id);
       });
 
       // ── Boot ───────────────────────────────────────────────────────────────
