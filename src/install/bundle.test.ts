@@ -7,13 +7,15 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -468,6 +470,285 @@ describe("importBundle — providers.yaml", () => {
       );
     } finally {
       rmSync(projectDir, { recursive: true });
+    }
+  });
+});
+
+// ── 7. Path allowlist and symlink containment (spec 037 FR-016) ───────────────
+
+describe("importBundle — entry path allowlist (FR-016)", () => {
+  it("refuses a bundle carrying a config.json entry and writes nothing", () => {
+    const projectDir = makeTempDir("agent-flows-allowlist-");
+    try {
+      const bundle = exportBundle("investigate", bundledPipelinesDir);
+      bundle.files.push({ path: "config.json", content: '{"checkCommand":"rm -rf /"}' });
+
+      assert.throws(
+        () => importBundle(bundle, projectDir, false),
+        (err: unknown) => {
+          assert.ok(err instanceof Error, "must throw an Error");
+          assert.ok(
+            err.message.includes("config.json") && err.message.includes("not an allowed path"),
+            `error must name the refused entry; got: "${err.message}"`
+          );
+          return true;
+        }
+      );
+
+      assert.ok(
+        !existsSync(join(projectDir, ".agent-flows")),
+        "a refused bundle writes nothing at all, not even its valid entries"
+      );
+    } finally {
+      rmSync(projectDir, { recursive: true });
+    }
+  });
+
+  it("refuses entries outside pipelines/, prompts/ and providers.yaml", () => {
+    const projectDir = makeTempDir("agent-flows-allowlist2-");
+    try {
+      for (const path of [
+        "pipelines/nested/deep.yaml",
+        "pipelines/notes.md",
+        "prompts",
+        ".env",
+        "scripts/hook.sh",
+        "providers.yml",
+      ]) {
+        assert.throws(
+          () =>
+            importBundle(
+              {
+                bundleVersion: 1 as const,
+                exportedAt: new Date().toISOString(),
+                sourcePipeline: "evil",
+                files: [{ path, content: "x" }],
+              },
+              projectDir,
+              false
+            ),
+          (err: unknown) => {
+            assert.ok(err instanceof Error);
+            assert.ok(
+              err.message.includes("not an allowed path"),
+              `entry ${path} must be refused by the allowlist; got: "${err.message}"`
+            );
+            return true;
+          },
+          `entry ${path} must be refused`
+        );
+      }
+      assert.ok(!existsSync(join(projectDir, ".agent-flows")), "nothing was written");
+    } finally {
+      rmSync(projectDir, { recursive: true });
+    }
+  });
+
+  it("still accepts the three allowed shapes", () => {
+    const projectDir = makeTempDir("agent-flows-allowlist3-");
+    try {
+      const bundle = exportBundle("investigate", bundledPipelinesDir);
+      const report = importBundle(bundle, projectDir, false);
+      assert.ok(
+        report.written.some((p) => p.startsWith("pipelines/")),
+        "pipelines/*.yaml is allowed"
+      );
+      assert.ok(
+        report.written.some((p) => p.startsWith("prompts/")),
+        "prompts/** is allowed"
+      );
+    } finally {
+      rmSync(projectDir, { recursive: true });
+    }
+  });
+});
+
+describe("importBundle — symlink containment (FR-016/S2)", () => {
+  it("a prompts/ symlink pointing outside the project fails before any write", () => {
+    const projectDir = makeTempDir("agent-flows-symlink-");
+    const outsideDir = makeTempDir("agent-flows-outside-");
+    try {
+      mkdirSync(join(projectDir, ".agent-flows"), { recursive: true });
+      // The kind of symlink assertSafePath cannot see: the entry path is a
+      // plain "prompts/…", but the directory it lands in is elsewhere.
+      symlinkSync(outsideDir, join(projectDir, ".agent-flows", "prompts"), "dir");
+
+      const bundle = exportBundle("investigate", bundledPipelinesDir);
+      assert.throws(
+        () => importBundle(bundle, projectDir, false),
+        (err: unknown) => {
+          assert.ok(err instanceof Error, "must throw an Error");
+          assert.ok(
+            err.message.includes("symlink"),
+            `error must name the symlink escape; got: "${err.message}"`
+          );
+          return true;
+        }
+      );
+
+      assert.deepEqual(
+        readdirSync(outsideDir),
+        [],
+        "not one file may land outside the project through the symlink"
+      );
+      assert.ok(
+        !existsSync(join(projectDir, ".agent-flows", "pipelines")),
+        "the valid entries of a refused bundle are not written either"
+      );
+    } finally {
+      rmSync(projectDir, { recursive: true });
+      rmSync(outsideDir, { recursive: true });
+    }
+  });
+});
+
+// ── 8. Non-normalised entry paths (spec 037 FR-016) ───────────────────────────
+
+describe("importBundle — non-normalised entry paths", () => {
+  // The allowlist patterns and the later filters (startsWith("pipelines/"),
+  // === "providers.yaml") read the entry path differently once a "." or ".."
+  // segment is in it, so such an entry is refused before any I/O happens.
+  const traversals = [
+    "prompts/../config.json",
+    "prompts/x/../../settings.json",
+    "prompts/../pipelines/evil.yaml",
+    "./prompts/a.md",
+    "pipelines/./evil.yaml",
+  ];
+
+  for (const path of traversals) {
+    it(`refuses ${path} and leaves the project tree untouched`, () => {
+      const projectDir = makeTempDir("agent-flows-nonnormal-");
+      try {
+        // A pre-existing tree, so "unchanged" is an observable state and not
+        // merely the absence of .agent-flows/.
+        mkdirSync(join(projectDir, ".agent-flows", "prompts"), { recursive: true });
+        writeFileSync(join(projectDir, ".agent-flows", "prompts", "keep.md"), "keep\n", "utf8");
+        const before = readdirSync(join(projectDir, ".agent-flows"), { recursive: true })
+          .map(String)
+          .sort();
+
+        assert.throws(
+          () =>
+            importBundle(
+              {
+                bundleVersion: 1 as const,
+                exportedAt: new Date().toISOString(),
+                sourcePipeline: "evil",
+                files: [{ path, content: "x" }],
+              },
+              projectDir,
+              false
+            ),
+          (err: unknown) => {
+            assert.ok(err instanceof Error, "must throw an Error");
+            assert.ok(
+              err.message.includes(JSON.stringify(path)),
+              `the error must name the refused entry; got: "${err.message}"`
+            );
+            assert.ok(
+              err.message.includes("normalised"),
+              `the error must state why it was refused; got: "${err.message}"`
+            );
+            return true;
+          },
+          `entry ${path} must be refused`
+        );
+
+        assert.deepEqual(
+          readdirSync(join(projectDir, ".agent-flows"), { recursive: true }).map(String).sort(),
+          before,
+          "a refused bundle writes nothing under the project"
+        );
+      } finally {
+        rmSync(projectDir, { recursive: true });
+      }
+    });
+  }
+});
+
+// ── 9. exportBundle reads only inside the catalogue root ──────────────────────
+
+describe("exportBundle — closure paths are contained", () => {
+  it("refuses a prompt path that escapes the catalogue root", () => {
+    const base = makeTempDir("agent-flows-export-escape-");
+    const outsideDir = makeTempDir("agent-flows-export-outside-");
+    try {
+      const pipelinesDir = join(base, "proj", "pipelines");
+      mkdirSync(pipelinesDir, { recursive: true });
+      writeFileSync(join(outsideDir, "payload.txt"), "outside payload\n", "utf8");
+      const escape = join("..", "..", "..", relative("/", join(outsideDir, "payload.txt")));
+      writeFileSync(
+        join(pipelinesDir, "evil.yaml"),
+        [
+          "id: evil",
+          "version: 1",
+          "description: evil",
+          "inputs: []",
+          "steps:",
+          "  - id: s",
+          "    kind: llm",
+          `    prompt: ${escape}`,
+          "    role: worker",
+        ].join("\n") + "\n"
+      );
+
+      assert.throws(
+        () => exportBundle("evil", pipelinesDir),
+        (err: unknown) => {
+          assert.ok(err instanceof Error, "must throw an Error");
+          assert.ok(
+            err.message.includes("escapes"),
+            `the error must describe the escape; got: "${err.message}"`
+          );
+          return true;
+        }
+      );
+    } finally {
+      rmSync(base, { recursive: true });
+      rmSync(outsideDir, { recursive: true });
+    }
+  });
+
+  it("refuses a nested pipeline id that escapes the pipelines directory", () => {
+    const base = makeTempDir("agent-flows-export-escape2-");
+    try {
+      const pipelinesDir = join(base, "proj", "pipelines");
+      mkdirSync(pipelinesDir, { recursive: true });
+      writeFileSync(
+        join(base, "outside.yaml"),
+        ["id: outside", "version: 1", "description: outside", "inputs: []", "steps: []"].join(
+          "\n"
+        ) + "\n",
+        "utf8"
+      );
+      writeFileSync(
+        join(pipelinesDir, "root.yaml"),
+        [
+          "id: root",
+          "version: 1",
+          "description: root",
+          "inputs: []",
+          "steps:",
+          "  - id: s",
+          "    kind: pipeline",
+          "    pipeline: ../../outside",
+        ].join("\n") + "\n"
+      );
+
+      assert.throws(
+        () => exportBundle("root", pipelinesDir),
+        (err: unknown) => {
+          assert.ok(err instanceof Error, "must throw an Error");
+          assert.ok(
+            err.message.includes("escapes"),
+            `the error must describe the escape; got: "${err.message}"`
+          );
+          return true;
+        }
+      );
+    } finally {
+      rmSync(base, { recursive: true });
     }
   });
 });

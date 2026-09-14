@@ -52,7 +52,12 @@ const ENDPOINT_MAX_LEN = 2048;
 const KEYENV_MAX_LEN = 64;
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
-const CLI_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
+/**
+ * Shape of a CLI/API model id. Exported so the serve daemon can validate a
+ * per-step model override against the same rule providers.yaml is held to
+ * (spec 037 FR-009).
+ */
+export const CLI_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
 // Any POSIX-style environment variable name. A stricter suffix rule would reject
 // real names used by common providers that do not end in the same word.
 const KEYENV_RE = /^[A-Z][A-Z0-9_]*$/;

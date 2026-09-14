@@ -7,6 +7,7 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,14 +16,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, normalize, resolve } from "node:path";
 
 import { parse, stringify } from "yaml";
 
 import { loadPipeline } from "../canon/load.js";
 import { parseProviders } from "../canon/loadProviders.js";
 import { computeClosure } from "./install.js";
-import { assertSafePath } from "./paths.js";
+import { assertSafePath, isContained } from "./paths.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -59,11 +60,13 @@ export function exportBundle(pipelineId: string, pipelinesDir: string): Workflow
   const files: BundleFile[] = [];
 
   for (const id of [...pipelines].sort()) {
+    assertSafePath(pipelinesDir, `${id}.yaml`);
     const filePath = join(pipelinesDir, `${id}.yaml`);
     files.push({ path: `pipelines/${id}.yaml`, content: readFileSync(filePath, "utf8") });
   }
 
   for (const promptPath of [...prompts].sort()) {
+    assertSafePath(root, promptPath);
     const filePath = join(root, promptPath);
     files.push({ path: promptPath, content: readFileSync(filePath, "utf8") });
   }
@@ -148,6 +151,73 @@ export function parseBundle(text: string): WorkflowBundle {
 
 // ── Import ────────────────────────────────────────────────────────────────────
 
+/**
+ * The only entry paths an imported bundle may write (spec 037 FR-016).
+ *
+ * A bundle is a file the owner may have received from a hostile checkout, so it
+ * may name only the three shapes .agent-flows/ is made of. Anything else — a
+ * config.json, a dotfile, a nested .agent-flows/ — rejects the whole bundle
+ * before any write, exactly as a traversal entry does.
+ */
+function assertAllowedBundlePath(entryPath: string): void {
+  // A non-normalised entry is refused before the patterns run. "prompts/../config.json"
+  // is contained and matches nothing, but "prompts/../pipelines/evil.yaml" would match
+  // the prompts/** pattern while landing in pipelines/ — and every later filter
+  // (startsWith("pipelines/"), === "providers.yaml") reads the raw string, so the
+  // allowlist and the writer would disagree about what the entry is. Requiring
+  // raw === normalised makes the two views identical by construction.
+  const segments = entryPath.split("/");
+  if (normalize(entryPath) !== entryPath || segments.includes(".") || segments.includes("..")) {
+    throw new Error(
+      `Bundle entry ${JSON.stringify(entryPath)} is not a normalised relative path — rejected`
+    );
+  }
+  if (entryPath === "providers.yaml") return;
+  if (/^pipelines\/[^/]+\.ya?ml$/u.test(entryPath)) return;
+  if (/^prompts\/.+$/u.test(entryPath)) return;
+  throw new Error(
+    `Bundle entry ${JSON.stringify(entryPath)} is not an allowed path — a bundle may carry ` +
+      `only pipelines/*.yaml, prompts/** and providers.yaml`
+  );
+}
+
+/**
+ * The realpath of `target`, resolving the deepest existing ancestor and
+ * re-appending the segments that do not exist yet.
+ *
+ * `assertSafePath` is string-only, so a pre-existing symlink inside
+ * .agent-flows/ (say prompts/ → /etc) passes it while the write lands outside
+ * the project. This is the same two-stage check `load.ts` already performs for
+ * prompt reads.
+ */
+function canonicalise(target: string): string {
+  const resolved = resolve(target);
+  const tail: string[] = [];
+  let cur = resolved;
+  for (;;) {
+    let present = true;
+    try {
+      lstatSync(cur);
+    } catch {
+      present = false;
+    }
+    if (present) {
+      let real: string;
+      try {
+        real = realpathSync(cur);
+      } catch {
+        // A dangling symlink on the path: unresolvable, so not provably contained.
+        throw new Error(`Path ${JSON.stringify(target)} cannot be resolved — rejected`);
+      }
+      return join(real, ...tail);
+    }
+    const parent = dirname(cur);
+    if (parent === cur) return resolved;
+    tail.unshift(basename(cur));
+    cur = parent;
+  }
+}
+
 export interface BundleImportReport {
   written: string[];
   /** Each entry is "<relative-path> (already exists)". */
@@ -178,9 +248,18 @@ export function importBundle(
 ): BundleImportReport {
   const destRoot = resolve(join(projectDir, ".agent-flows"));
 
-  // Phase 1: Validate all paths before touching the filesystem.
+  // Phase 1: Validate all paths before touching the filesystem — the allowlist
+  // (FR-016), the string containment check, and the symlink check that the
+  // string check cannot make.
+  const realRoot = canonicalise(destRoot);
   for (const entry of bundle.files) {
     assertSafePath(destRoot, entry.path);
+    assertAllowedBundlePath(entry.path);
+    if (!isContained(realRoot, canonicalise(join(destRoot, entry.path)))) {
+      throw new Error(
+        `Path ${JSON.stringify(entry.path)} escapes the root directory through a symlink — rejected`
+      );
+    }
   }
 
   // Phase 2: Write files to a temp directory and validate each pipeline loads.
