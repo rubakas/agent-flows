@@ -2,6 +2,8 @@
 // Uses --output-format stream-json for live supervision (spec-024, FR-001).
 
 import { spawn as defaultSpawn } from "node:child_process";
+import { emitStepEvent } from "./stepLogEvents.js";
+import type { StepEventSink, StepLogEventInput, UsagePayload } from "./stepLogEvents.js";
 
 export type SpawnFn = typeof defaultSpawn;
 
@@ -65,6 +67,10 @@ export interface RunCliOptions {
   maxBudgetUsd?: number;
   /** Override STALL_SILENCE_MS in tests. */
   _stallSilenceMs?: number;
+  /** Receives the stream's inner events as they are parsed (spec 036 D2). */
+  onEvent?: StepEventSink;
+  /** Which watchdog attempt this invocation is (1 or 2); stamped on watchdog events. */
+  attempt?: number;
 }
 
 export interface RunCliResult {
@@ -232,6 +238,114 @@ export function findResultEvent(rawStdout: string): ClaudeResultEvent | null {
   return found;
 }
 
+// ── Stream event mapping (spec 036 D2) ────────────────────────────────────────
+
+/** One content block of an assistant or user message, as the stream reports it. */
+interface ClaudeContentBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: unknown;
+  tool_use_id?: string;
+  content?: unknown;
+  is_error?: boolean;
+}
+
+/** Parses one stdout line, or returns undefined for anything that is not a JSON object. */
+function parseStreamLine(line: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined; // non-JSON: skip, still counts as liveness (timer already reset)
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  return parsed as Record<string, unknown>;
+}
+
+function contentBlocksOf(event: Record<string, unknown>): ClaudeContentBlock[] {
+  const message = event.message as { content?: unknown } | undefined;
+  const content = message?.content;
+  return Array.isArray(content) ? (content as ClaudeContentBlock[]) : [];
+}
+
+function usageFromResultEvent(event: Record<string, unknown>): UsagePayload {
+  const payload: UsagePayload = {};
+  if (typeof event.total_cost_usd === "number") payload.costUsd = event.total_cost_usd;
+  if (typeof event.num_turns === "number") payload.turns = event.num_turns;
+  if (typeof event.duration_ms === "number") payload.durationMs = event.duration_ms;
+  const usage = event.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+  if (typeof usage?.input_tokens === "number" && typeof usage.output_tokens === "number") {
+    payload.usage = { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens };
+  }
+  // A refused tool call leaves the run-level is_error false, so permission_denials
+  // is the only run-level signal that the CLI blocked something.
+  if (Array.isArray(event.permission_denials)) payload.denials = event.permission_denials.length;
+  return payload;
+}
+
+/**
+ * Maps one parsed stream-json event onto the provider-neutral kinds (spec 036 D2).
+ * Events that map to none of them produce no output — there is no raw passthrough.
+ */
+function claudeEventToEvents(event: Record<string, unknown>): StepLogEventInput[] {
+  if (event.type === "assistant") {
+    // A subagent's turn carries the id of the tool call that spawned it.
+    const nested = event.parent_tool_use_id != null;
+    const events: StepLogEventInput[] = [];
+    for (const block of contentBlocksOf(event)) {
+      if (block.type === "text" && typeof block.text === "string") {
+        events.push({ kind: "message", role: "assistant", text: block.text });
+      } else if (block.type === "tool_use" && typeof block.name === "string") {
+        events.push({
+          kind: "tool.call",
+          ...(typeof block.id === "string" ? { callId: block.id } : {}),
+          name: block.name,
+          input: block.input,
+          ...(nested ? { nested: true } : {}),
+        });
+      }
+      // `thinking` blocks are deliberately skipped: they are the model's private
+      // reasoning, not an action, and carry a signature blob of no use to a reader.
+    }
+    return events;
+  }
+
+  if (event.type === "user") {
+    const events: StepLogEventInput[] = [];
+    for (const block of contentBlocksOf(event)) {
+      if (block.type !== "tool_result") continue;
+      const excerpt =
+        typeof block.content === "string" ? block.content : JSON.stringify(block.content);
+      events.push({
+        kind: "tool.result",
+        ...(typeof block.tool_use_id === "string" ? { callId: block.tool_use_id } : {}),
+        // `is_error` is absent on a successful Read and false on a successful
+        // Bash, so only an explicit true means the call failed or was refused.
+        ok: block.is_error !== true,
+        ...(excerpt !== undefined ? { excerpt } : {}),
+      });
+    }
+    return events;
+  }
+
+  if (event.type === "result") {
+    return [{ kind: "usage", ...usageFromResultEvent(event) }];
+  }
+
+  return [];
+}
+
+/**
+ * Maps one raw stdout line onto step log events. Exported for direct unit
+ * testing against captured streams (spec 036 V2).
+ */
+export function claudeStreamLineToEvents(line: string): StepLogEventInput[] {
+  const event = parseStreamLine(line);
+  return event === undefined ? [] : claudeEventToEvents(event);
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export function runClaudeCli(
@@ -239,7 +353,7 @@ export function runClaudeCli(
   opts: RunCliOptions = {},
   deps: { spawn?: SpawnFn; env?: NodeJS.ProcessEnv } = {}
 ): Promise<RunCliResult> {
-  const { model, cwd, signal, extraArgs = [], maxBudgetUsd, _stallSilenceMs } = opts;
+  const { model, cwd, signal, extraArgs = [], maxBudgetUsd, _stallSilenceMs, onEvent } = opts;
   const spawnFn = deps.spawn ?? defaultSpawn;
 
   // Layer-0: scrub provider keys before passing env to child
@@ -288,6 +402,12 @@ export function runClaudeCli(
     function tripWatchdog(trip: WatchdogTrip) {
       if (watchdogTrip) return; // already tripped
       watchdogTrip = trip;
+      emitStepEvent(onEvent, {
+        kind: "watchdog",
+        pathology: trip.pathology,
+        detail: trip.detail,
+        attempt: opts.attempt ?? 1,
+      });
       child.kill("SIGTERM");
       const esc = setTimeout(() => child.kill("SIGKILL"), WATCHDOG_KILL_ESCALATION_MS);
       // Unref so the escalation timer does not prevent process exit if the promise resolves.
@@ -325,20 +445,17 @@ export function runClaudeCli(
       for (const line of completeLines.split("\n")) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        processLineForLoopDetection(trimmed);
+        // Parsed once and handed to both consumers: the loop detector needs the
+        // tool_use blocks, the log needs every mapped kind, and a second
+        // JSON.parse per line would double the cost of a long stream.
+        const event = parseStreamLine(trimmed);
+        if (event === undefined) continue;
+        processLineForLoopDetection(event);
+        for (const logEvent of claudeEventToEvents(event)) emitStepEvent(onEvent, logEvent);
       }
     });
 
-    function processLineForLoopDetection(line: string) {
-      let ev: unknown;
-      try {
-        ev = JSON.parse(line);
-      } catch {
-        return; // non-JSON: skip, still counts as liveness (timer already reset)
-      }
-      if (typeof ev !== "object" || ev === null) return;
-
-      const event = ev as Record<string, unknown>;
+    function processLineForLoopDetection(event: Record<string, unknown>) {
       if (event.type !== "assistant") return;
 
       // Extract complete tool_use blocks from assistant messages
@@ -414,7 +531,17 @@ export function runClaudeCli(
       const exitCode = code ?? -1;
       if (exitCode !== 0) {
         const tail = stderr.slice(-500);
-        reject(new Error(`claude exited with code ${exitCode}\nstderr: ${tail}`));
+        // A CLI that fails after emitting a result event carries the reason there
+        // (a session limit, a refusal), not on stderr — losing it leaves the
+        // operator with a bare exit code.
+        const failure = findResultEvent(stdoutRaw);
+        const why =
+          failure === null
+            ? ""
+            : ` (subtype: ${String(failure.subtype ?? "error")}): ${String(
+                failure.result ?? ""
+              ).slice(0, 300)}`;
+        reject(new Error(`claude exited with code ${exitCode}${why}\nstderr: ${tail}`));
         return;
       }
 

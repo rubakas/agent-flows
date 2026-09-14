@@ -160,12 +160,13 @@ async function runClaudeStep(
       extraArgs,
       maxBudgetUsd: deps.maxBudgetUsd,
       _stallSilenceMs: deps._stallSilenceMs,
+      onEvent: deps.onEvent,
     };
 
     // Attempt 1
     let trip1: WatchdogTrip;
     try {
-      const result = await runClaudeCli(prompt, claudeOpts, deps);
+      const result = await runClaudeCli(prompt, { ...claudeOpts, attempt: 1 }, deps);
       return result.stdout.trim();
     } catch (err) {
       if (!(err instanceof WatchdogTrip)) throw err;
@@ -177,7 +178,7 @@ async function runClaudeStep(
 
     // Attempt 2
     try {
-      const result = await runClaudeCli(reformulatedPrompt, claudeOpts, deps);
+      const result = await runClaudeCli(reformulatedPrompt, { ...claudeOpts, attempt: 2 }, deps);
       const text = result.stdout.trim();
       // FR-006: a BLOCKED: report must never flow downstream as step output
       if (text.startsWith("BLOCKED:")) {

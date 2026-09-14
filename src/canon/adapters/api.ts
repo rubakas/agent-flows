@@ -1,6 +1,7 @@
 // API transport adapter (OpenAI chat-completions compatible), spec 031 D1.
 // Moved verbatim from runStep.ts's api branch.
 
+import { emitStepEvent } from "../stepLogEvents.js";
 import { DEFAULT_STEP_TIMEOUT_MS, withDeadline } from "../stepRuntime.js";
 import type { ModelEntry } from "../registry.js";
 import type { StepRunnerDeps } from "../stepRuntime.js";
@@ -8,6 +9,8 @@ import type { AdapterCapabilities, ProviderAdapter } from "./types.js";
 
 interface ChatCompletion {
   choices: { message: { content: string | null } }[];
+  /** Present on endpoints that report it; absent on many local servers. */
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 async function runApiStep(
@@ -55,6 +58,16 @@ async function runApiStep(
   const content = json.choices?.[0]?.message?.content;
   if (typeof content !== "string") {
     throw new Error(`api step: missing choices[0].message.content in response from ${endpoint}`);
+  }
+
+  // No stream: the whole answer is one message, reported once it has arrived.
+  emitStepEvent(deps.onEvent, { kind: "message", role: "assistant", text: content });
+  const usage = json.usage;
+  if (typeof usage?.prompt_tokens === "number" && typeof usage.completion_tokens === "number") {
+    emitStepEvent(deps.onEvent, {
+      kind: "usage",
+      usage: { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens },
+    });
   }
   return content;
 }

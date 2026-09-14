@@ -2,6 +2,7 @@
 
 import { spawn as defaultSpawn } from "node:child_process";
 import { DEFAULT_ADAPTER_CONFIG, adapterFor } from "./adapters/index.js";
+import { emitStepEvent } from "./stepLogEvents.js";
 import { DEFAULT_STEP_TIMEOUT_MS, createDeadline } from "./stepRuntime.js";
 import type { ModelEntry } from "./registry.js";
 import type { DeadlineHandle, StepRunnerDeps } from "./stepRuntime.js";
@@ -81,6 +82,38 @@ function buildCheckEnv(
   return env;
 }
 
+/**
+ * Builds the scrubber that keeps declared credential values out of the durable,
+ * network-streamed log (FR-015).
+ *
+ * `buildCheckEnv` deliberately forwards the step's declared variable names into
+ * `/bin/sh -c`, so a `curl -v`, a `set -x` or an error echoing argv can put a
+ * real credential on stdout or stderr. Both the log and the retained
+ * `CheckResult.output` are scrubbed: that output becomes the step's ctx value
+ * and is persisted as the artifact's `outputExcerpt`, so leaving it alone would
+ * put the credential on disk and into the next step's prompt.
+ */
+function makeCheckOutputScrubber(
+  env: NodeJS.ProcessEnv,
+  declared: readonly string[]
+): (text: string) => string {
+  const secrets = declared
+    .map((name) => ({ name, value: env[name] }))
+    .filter((entry): entry is { name: string; value: string } => {
+      return entry.value !== undefined && entry.value !== "";
+    });
+  if (secrets.length === 0) return (text) => text;
+  // split/join rather than a regex: a credential can hold any character, and an
+  // unescaped one would either throw or silently match the wrong thing.
+  return (text) => {
+    let scrubbed = text;
+    for (const { name, value } of secrets) {
+      scrubbed = scrubbed.split(value).join(`[redacted:${name}]`);
+    }
+    return scrubbed;
+  };
+}
+
 // ── Check step runner ─────────────────────────────────────────────────────────
 
 /** Maximum combined stdout+stderr retained in CheckResult.output (64 KB). */
@@ -117,6 +150,7 @@ export async function runCheckStep(
 
   const spawnFn = deps.spawn ?? defaultSpawn;
   const env = buildCheckEnv(deps.env ?? process.env, deps.envAllowlist ?? []);
+  const scrub = makeCheckOutputScrubber(env, deps.envAllowlist ?? []);
 
   const cwd = deps.cwd ?? process.cwd();
 
@@ -143,8 +177,16 @@ export async function runCheckStep(
       }
     };
 
-    child.stdout.on("data", (chunk: Buffer) => append(chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => append(chunk.toString()));
+    // FR-004: chunks are logged in arrival order, coalesced per read. Scrubbed
+    // once, before either consumer sees it.
+    const observe = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      const text = scrub(chunk.toString());
+      append(text);
+      emitStepEvent(deps.onEvent, { kind: "check.output", stream, text });
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => observe("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => observe("stderr", chunk));
 
     child.on("error", (err) => {
       deadline?.cancel();

@@ -5,6 +5,7 @@
 
 import { statSync } from "node:fs";
 import type { SpawnFn, WatchdogTrip } from "./runClaudeCli.js";
+import type { StepEventSink } from "./stepLogEvents.js";
 
 /**
  * Built-in deadline applied when neither the step nor its pipeline declares a
@@ -49,6 +50,8 @@ export interface StepRunnerDeps {
   fetchFn?: typeof fetch;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Receives provider-neutral inner step events; optional (spec 036 D2). */
+  onEvent?: StepEventSink;
   /**
    * Per-step deadline in milliseconds. Takes precedence over defaultTimeoutMs.
    * Set to 0 to disable the deadline for this step (explicit escape hatch).

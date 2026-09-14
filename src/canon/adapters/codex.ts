@@ -20,11 +20,13 @@ import { spawn as defaultSpawn } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { emitStepEvent } from "../stepLogEvents.js";
 import { DEFAULT_STEP_TIMEOUT_MS, resolveWorkspaceDir, withDeadline } from "../stepRuntime.js";
 import { codexConfinementArgs } from "../workspace/codexProfile.js";
 import { materializeSanitizedWorkspace, sweepStaleWorkspaces } from "../workspace/sanitize.js";
 import { DEFAULT_ADAPTER_CONFIG } from "./types.js";
 import type { ModelEntry } from "../registry.js";
+import type { StepLogEventInput } from "../stepLogEvents.js";
 import type { StepRunnerDeps } from "../stepRuntime.js";
 import type { AdapterCapabilities, AdapterConfig, ProviderAdapter } from "./types.js";
 import type { SanitizedWorkspace } from "../workspace/sanitize.js";
@@ -105,6 +107,77 @@ function extractCodexAnswer(stdout: string): string {
   return last;
 }
 
+// ── Stream event mapping (spec 036 D2) ────────────────────────────────────────
+
+/** The item shapes seen in the captured fixtures (codex-cli 0.152.1). */
+interface CodexItem {
+  id?: string;
+  type?: string;
+  text?: string;
+  command?: string;
+  aggregated_output?: string;
+  exit_code?: number | null;
+  status?: string;
+  changes?: { path: string; kind: string }[];
+}
+
+/**
+ * Maps one `codex exec --json` line onto step log events. Item types absent
+ * from the fixtures (`reasoning`, `mcp_tool_call`) are skipped until captured;
+ * there is no raw passthrough. Exported for direct unit testing (spec 036 V2).
+ */
+export function codexStreamLineToEvents(line: string): StepLogEventInput[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return []; // non-JSON line (header noise) — skip
+  }
+  if (typeof parsed !== "object" || parsed === null) return [];
+  const event = parsed as {
+    type?: string;
+    item?: CodexItem;
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
+  const item = event.item;
+  const callId = typeof item?.id === "string" ? { callId: item.id } : {};
+
+  if (event.type === "item.started" && item?.type === "command_execution") {
+    const input = { command: item.command };
+    return [{ kind: "tool.call", ...callId, name: "command", input }];
+  }
+  if (event.type === "item.completed" && item?.type === "command_execution") {
+    return [
+      {
+        kind: "tool.result",
+        ...callId,
+        ok: item.exit_code === 0,
+        ...(item.aggregated_output !== undefined ? { excerpt: item.aggregated_output } : {}),
+      },
+    ];
+  }
+  if (event.type === "item.started" && item?.type === "file_change") {
+    const input = { changes: item.changes };
+    return [{ kind: "tool.call", ...callId, name: "file_change", input }];
+  }
+  if (event.type === "item.completed" && item?.type === "file_change") {
+    return [{ kind: "tool.result", ...callId, ok: item.status === "completed" }];
+  }
+  if (event.type === "item.completed" && item?.type === "agent_message") {
+    return [{ kind: "message", role: "assistant", text: item.text ?? "" }];
+  }
+  if (event.type === "turn.completed") {
+    // Codex reports tokens only — no cost figure and no turn count.
+    const usage = event.usage;
+    const tokens =
+      typeof usage?.input_tokens === "number" && typeof usage.output_tokens === "number"
+        ? { usage: { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens } }
+        : {};
+    return [{ kind: "usage", ...tokens }];
+  }
+  return [];
+}
+
 /**
  * The exact argv every codex step is spawned with. Exported so the live
  * preflight test exercises this array rather than a hand-written copy of it —
@@ -145,9 +218,24 @@ function runCodexCli(
 
     let stdout = "";
     let stderr = "";
+    let lineBuffer = ""; // partial last line, completed by a later chunk
 
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
+      const text = chunk.toString();
+      stdout += text;
+
+      // The answer is still extracted from the whole stdout on close; this loop
+      // exists so the log sees each item as it happens rather than at the end.
+      lineBuffer += text;
+      const newlineIdx = lineBuffer.lastIndexOf("\n");
+      if (newlineIdx === -1) return;
+      const completeLines = lineBuffer.slice(0, newlineIdx + 1);
+      lineBuffer = lineBuffer.slice(newlineIdx + 1);
+      for (const line of completeLines.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        for (const event of codexStreamLineToEvents(trimmed)) emitStepEvent(deps.onEvent, event);
+      }
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();

@@ -27,6 +27,7 @@ import {
 import type { ModelEntry } from "./registry.js";
 import type { SpawnFn } from "./runClaudeCli.js";
 import type { StepRunnerDeps } from "./runStep.js";
+import type { StepLogEventInput } from "./stepLogEvents.js";
 
 // ── claude CLI ────────────────────────────────────────────────────────────────
 
@@ -1629,6 +1630,60 @@ describe("runCheckStep — real execution", () => {
       result.output.toLowerCase().includes("timeout") || result.output.includes("100ms"),
       `output should mention timeout; got: ${result.output}`
     );
+  });
+});
+
+// ── runCheckStep — step log events (spec 036 FR-004/FR-015) ──────────────────
+
+describe("runCheckStep — output events", () => {
+  /** Concatenated text of one stream: a pipe may deliver two writes as one chunk. */
+  function streamText(events: StepLogEventInput[], stream: "stdout" | "stderr"): string {
+    return events
+      .flatMap((e) => (e.kind === "check.output" && e.stream === stream ? [e.text] : []))
+      .join("");
+  }
+
+  it("emits check.output for stdout and stderr chunks", async () => {
+    const events: StepLogEventInput[] = [];
+    await runCheckStep("printf out; printf err >&2", {
+      onEvent: (event) => events.push(event),
+    });
+
+    assert.ok(events.length > 0, "a command that prints must produce events");
+    assert.ok(
+      events.every((e) => e.kind === "check.output"),
+      "runCheckStep emits no other kind — the builder owns step.start and step.result"
+    );
+    assert.equal(streamText(events, "stdout"), "out");
+    assert.equal(streamText(events, "stderr"), "err");
+  });
+
+  it("scrubs the value of a declared env variable out of the event and the result", async () => {
+    const events: StepLogEventInput[] = [];
+    const result = await runCheckStep('printf "secret is $PROBE_SECRET_VALUE"', {
+      env: { PATH: process.env.PATH, PROBE_SECRET_VALUE: "hunter2xyz" },
+      envAllowlist: ["PROBE_SECRET_VALUE"],
+      onEvent: (event) => events.push(event),
+    });
+
+    assert.equal(streamText(events, "stdout"), "secret is [redacted:PROBE_SECRET_VALUE]");
+    // CheckResult.output becomes the step's ctx value and the artifact's
+    // outputExcerpt, so it must carry the placeholder, never the credential.
+    assert.ok(
+      result.output.includes("[redacted:PROBE_SECRET_VALUE]"),
+      `the retained output must be scrubbed; got: ${result.output}`
+    );
+    assert.equal(
+      result.output.includes("hunter2xyz"),
+      false,
+      "the retained output must never hold the credential value"
+    );
+  });
+
+  it("leaves output alone when the step declares no variables", async () => {
+    const events: StepLogEventInput[] = [];
+    await runCheckStep("printf plain", { onEvent: (event) => events.push(event) });
+    assert.equal(streamText(events, "stdout"), "plain");
   });
 });
 

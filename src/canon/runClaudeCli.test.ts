@@ -286,6 +286,21 @@ describe("runClaudeCli — stream parsing (FR-001, FR-009)", () => {
     });
   });
 
+  it("keeps the result event's subtype and text when the CLI exits non-zero", async () => {
+    const resultLine =
+      '{"type":"result","subtype":"error","is_error":true,"result":"limit reached"}';
+    const { spawn } = makeFakeSpawn({
+      stdoutChunks: [`${resultLine}\n`],
+      exitCode: 1,
+    });
+    await assert.rejects(runClaudeCli("hi", {}, { spawn }), (err: Error) => {
+      assert.ok(err.message.includes("code 1"));
+      assert.ok(err.message.includes("subtype: error"), "the result subtype must survive");
+      assert.ok(err.message.includes("limit reached"), "the reason must not be lost");
+      return true;
+    });
+  });
+
   it("rejects with model error when result text contains [claude-code:unrecognized_model]", async () => {
     const badOutput = "[claude-code:unrecognized_model]\nThere's an issue with the selected model";
     const { spawn } = makeFakeSpawn({
