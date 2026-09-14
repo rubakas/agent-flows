@@ -127,6 +127,13 @@ exportedAt, sourcePipeline, files:[{path, content}]}` from `src/install/bundle.t
 - ADR numbering: 0015 and 0016 already existed, so the retirement ADR is 0017
   (`docs/decisions/0017-retire-the-workflow-editor-hybrid.md`); README is a gate root, so no
   shipped doc may spell the retired tool's name — only docs/ and specs/ may.
+- Security pass on Ship 2 (2026-09-14): 1 blocking — the allowlist matched raw strings while
+  `join()` normalised, so `prompts/../config.json` passed and would have landed a
+  `checkCommand` the daemon executes; fixed by requiring `raw === normalize(raw)` at the
+  single entry gate (`src/install/bundle.ts` `assertAllowedBundlePath`), which also
+  makes the preview's `pipelines/` filter and the Phase-2 validators correct by
+  construction. Also fixed: template write symlink/TOCTOU (`lstatSync` + `wx` + 0600),
+  `exportBundle` containment, bounded error echoes.
 
 ## Goals / Non-goals
 
@@ -260,7 +267,8 @@ write-time backstop, Preview is the read-time one. "Save as template" lives on a
 View page (D5): `POST /api/pipelines/:id/template {templateId?, overwrite?}` → writes the bundle
 with `exportBundle` + `stringifyBundle` (201 `{templateId, path}`, 409 exists without overwrite,
 400 on an unsafe id — FR-003). Preview (`#/templates/<id>`) is the read-only workflow view of D5
-rendered from the bundle or the bundled def.
+rendered from the bundle or the bundled def. Bundle entries must be normalised relative paths
+(no `.`/`..` segments); anything else is refused before any write.
 
 **D5 — Workflow view (`#/workflows/<id>`, read-only).** Header: id (mono), description, source,
 actions `Run…`, `Edit` (project only), `Save as template`, `Delete`. Body: the diagram (D7), then
@@ -372,6 +380,7 @@ build runs and commit sets, in order:
 - **Ship 2 — catalogue.** D2 (the `workflows`/`workflow`/`templates`/`template` routes), D3, D4,
   D7. FRs: FR-002, FR-003, FR-006, FR-007, FR-008, FR-009, FR-014, FR-016. The `pipelinesSource`
   flip (D3) and the bundle allowlist (FR-016) are resolved above, not left as build-time decisions.
+  Delivered: 2 — 4fe9279, a56462a, 8fce0a7, 0dd41ec (2026-09-14).
 - **Ship 3 — editor.** D2 (the `workflow-edit` route), D6. FRs: FR-004, FR-005. The only genuinely
   new write surface; the prompt-path containment, conflict handling and regeneration ordering above
   are its acceptance criteria.
@@ -493,14 +502,21 @@ Placeholder — record each gate's mutation-proof run here as it is completed (s
 
 - [x] FR-001 — n8n removal grep gate: `src/serve/no-n8n.test.ts`; mutation: a `// n8n` comment
       turns it red, proven once
-- [ ] FR-002 — bundled pipelines listing
-- [ ] FR-003 — save-as-template round trip
+- [x] FR-002 — bundled pipelines listing: `?source=bundled` enum, 12 rows with `steps`/`inputs`;
+      live smoke `source=x` → 400
+- [x] FR-003 — save-as-template round trip: 201 → 0600 file, 409 without overwrite, 403 on a
+      symlink at the destination, `wx` open closes the TOCTOU; live smoke wrote and deleted
+      `smoke-investigate`
 - [ ] FR-004 — draft preview validation, no write
 - [ ] FR-005 — prompt write route validation and scoping
-- [ ] FR-006 — router new routes
-- [ ] FR-007 — diagram rendering
-- [ ] FR-008 — workflows table row actions by source
-- [ ] FR-009 — run dialog payload and navigation
+- [x] FR-006 — router new routes: `ui-route.js` three routes + inverse test
+- [x] FR-007 — diagram rendering: `ui-graph.js`, 9 tests; mutation: `esc(id)` dropped → red
+      (`escapes a hostile step id in the text node and in data-step`)
+- [x] FR-008 — workflows table row actions by source: `ui-tables.js`, 11 tests; mutation:
+      `esc()` dropped on description → red (`escapes id, description and inputs`)
+- [x] FR-009 — run dialog payload and navigation: string inputs, `models` keys are loaded
+      step ids, values `CLI_MODEL_RE`, echoed keys cut at 100 chars; live smoke:
+      `{"request":1}` → 400 `Input "request" must be a string`
 - [x] FR-010 — runs poller view-gating: `pollersFor` in `ui-route.js`; mutation returning
       `["runs"]` unconditionally → red (`leaves every other view idle, including the run
 details`)
@@ -511,7 +527,13 @@ details`)
 - [x] FR-012 — environment payload and MCP surface unchanged: `/api/n8n/*` → 404;
       `/api/environment` unchanged
 - [ ] FR-013 — shared UI classes and tokens
-- [ ] FR-014 — bundled install calls the existing `POST /api/install` route
+- [x] FR-014 — bundled install calls the existing `POST /api/install` route: flip test —
+      installing `investigate` into a temp project lists only the closure afterwards
 - [x] FR-015 — allowlisted static-module route (ui-route/ui-graph/ui-log/ui-tables): `/ui-log.js`
       200 + `nosniff`, `/ui-other.js` 404
-- [ ] FR-016 — bundle path allowlist and symlink containment
+- [x] FR-016 — bundle path allowlist and symlink containment: allowlist `pipelines/*.ya?ml`,
+      `prompts/**`, `providers.yaml`; normalisation gate rejects `prompts/../config.json`,
+      `prompts/x/../../settings.json`, `prompts/../pipelines/evil.yaml`, `./prompts/a.md`
+      with a byte-identical project tree before and after; realpath containment refuses a
+      `prompts/` symlink and a file-level symlink; mutation: normalisation block removed →
+      5 red
