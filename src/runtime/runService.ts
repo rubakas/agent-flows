@@ -5,7 +5,7 @@
 // for all three surfaces.
 
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getActiveProfile, resolveStepModel } from "../canon/registry.js";
 import { runLlmStep } from "../canon/runStep.js";
 import {
@@ -15,9 +15,17 @@ import {
   readPersistedRun,
 } from "./artifactStore.js";
 import { clearRun, getRun as getStepIntrospection } from "./stepIntrospection.js";
+import {
+  appendRunLogFileEvent,
+  appendStepLog,
+  closeRunLog,
+  openRunLog,
+  subscribeRunLog,
+} from "./stepLog.js";
 import type { ArtifactProvenance, StepProvenance } from "./artifactStore.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepRunnerDeps } from "../canon/runStep.js";
+import type { StepLogEvent, StepLogEventInput } from "../canon/stepLogEvents.js";
 import type { StepDef } from "../canon/types.js";
 import type { WorkflowStreamEvent } from "@mastra/core/stream";
 
@@ -334,6 +342,11 @@ interface RunRecord {
    * Set by persistArtifact after each successful write; absent until first settlement.
    */
   artifactPath?: string;
+  /**
+   * Directory this run's artifact and event log live in, resolved once in start()
+   * (spec 036 D1). Internal: it is not part of GetResult or the artifact.
+   */
+  artifactDir?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -467,6 +480,14 @@ export class RunService {
       ...(opts?.chainArtifactDir !== undefined ? { chainArtifactDir: opts.chainArtifactDir } : {}),
     };
     this.registry.set(runId, record);
+
+    // Spec 036 D1: the events file is opened before the workflow starts, not at
+    // settlement, so a run cancelled or crashing mid-step still has its log.
+    const artifactDir = this.artifactDirFor(record);
+    if (artifactDir !== undefined) {
+      record.artifactDir = artifactDir;
+      openRunLog(runId, { dir: artifactDir, pipelineId });
+    }
 
     // Record-level watch — accumulates per-step state for mid-run observability (FR-006).
     // Runs for the lifetime of the run, regardless of how many SSE subscribers are active.
@@ -615,6 +636,35 @@ export class RunService {
     record.settledAt ??= new Date().toISOString();
     record.steps = this.mergedSteps(record);
     clearRun(record.run.runId);
+    closeRunLog(record.run.runId);
+  }
+
+  /**
+   * Append a decision-shaped event for a gate (FR-005).
+   *
+   * `resolveGate`'s superseded branch fires after settlement has already closed
+   * the log, so a closed run falls back to the file-level path rather than
+   * losing the decision.
+   */
+  private appendDecision(record: RunRecord, stepId: string, input: StepLogEventInput): void {
+    if (appendStepLog(record.run.runId, stepId, input) !== undefined) return;
+    const { artifactDir } = record;
+    if (artifactDir === undefined) return;
+    appendRunLogFileEvent(artifactDir, record.pipelineId, record.run.runId, stepId, input);
+  }
+
+  /** The log event describing one recorded gate decision. */
+  private decisionEvent(decision: GateDecision): StepLogEventInput {
+    return {
+      kind: "decision",
+      gateStepId: decision.gateStepId,
+      mode: decision.mode,
+      decidedBy: decision.decidedBy,
+      approved: decision.approved,
+      ...(decision.reason !== undefined ? { reason: decision.reason } : {}),
+      ...(decision.judgeModelId !== undefined ? { judgeModelId: decision.judgeModelId } : {}),
+      ...(decision.superseded !== undefined ? { superseded: decision.superseded } : {}),
+    };
   }
 
   /**
@@ -745,6 +795,7 @@ export class RunService {
       decidedAt: new Date().toISOString(),
     };
     record.gateDecisions.push(decision);
+    this.appendDecision(record, gateStepId, this.decisionEvent(decision));
 
     const r2 = await record.run.resume({
       step: record.suspendedStep!,
@@ -837,18 +888,33 @@ export class RunService {
       if (state.status !== "started") continue;
       state.status = "cancelled";
       state.finishedAt = at;
+      // FR-014: the same reason the synthetic event exists applies to the log —
+      // the step's own terminal event arrives only once its child process has
+      // died, which is after this cancel has closed the run's log. The builder
+      // still emits its step.result on the abort path; for a run cancelled from
+      // here that one lands in a closed log and is dropped, so exactly one
+      // terminal event per step reaches the file either way.
+      const startedAt = state.startedAt !== undefined ? Date.parse(state.startedAt) : Date.now();
+      appendStepLog(record.run.runId, stepId, {
+        kind: "step.result",
+        status: "cancelled",
+        durationMs: Date.now() - startedAt,
+        ...(record.error !== undefined ? { error: record.error } : {}),
+      });
       for (const listener of record.listeners) listener({ kind: "step-cancelled", stepId });
     }
 
     if (gateStep !== undefined) {
-      record.gateDecisions.push({
+      const decision: GateDecision = {
         gateStepId: gateStep.join("."),
         mode: record.gateMode,
         decidedBy: "human",
         approved: false,
         ...(reason !== undefined ? { reason } : {}),
         decidedAt: at,
-      });
+      };
+      record.gateDecisions.push(decision);
+      this.appendDecision(record, decision.gateStepId, this.decisionEvent(decision));
       try {
         const r2 = await record.run.resume({
           step: gateStep,
@@ -974,11 +1040,13 @@ export class RunService {
       // Race: human beat the judge. Record as superseded, do not apply.
       decision.superseded = true;
       record.gateDecisions.push(decision);
+      this.appendDecision(record, decision.gateStepId, this.decisionEvent(decision));
       return;
     }
     // Single-flight guard — synchronous before first await.
     record.status = "running";
     record.gateDecisions.push(decision);
+    this.appendDecision(record, decision.gateStepId, this.decisionEvent(decision));
 
     try {
       const r2 = await record.run.resume({
@@ -1127,6 +1195,8 @@ export class RunService {
    */
   private degradeToManual(record: RunRecord, error: string): void {
     record.judgeError = error;
+    const gateStepId = record.suspendedStep?.join(".") ?? "unknown";
+    this.appendDecision(record, gateStepId, { kind: "judge.degraded", gateStepId, error });
     const payload = record.suspendPayload as { message?: string; spec?: unknown } | undefined;
     record.settle({
       status: "awaiting_approval",
@@ -1279,10 +1349,15 @@ export class RunService {
     return result;
   }
 
-  /** Returns this run's artifact directory under runsDir, or undefined if not configured. */
-  private getArtifactDir(runId: string): string | undefined {
+  /**
+   * The directory this run writes into: the parent run's when chaining stages
+   * (spec 029 FR-006), otherwise <runsDir>/<runId>. Undefined when no runs
+   * directory is configured, in which case nothing durable is written at all.
+   */
+  private artifactDirFor(record: RunRecord): string | undefined {
+    if (record.chainArtifactDir !== undefined) return record.chainArtifactDir;
     if (this.runsDir === undefined) return undefined;
-    return join(this.runsDir, runId);
+    return join(this.runsDir, record.run.runId);
   }
 
   /**
@@ -1311,8 +1386,7 @@ export class RunService {
    */
   private async persistArtifact(record: RunRecord): Promise<void> {
     const runId = record.run.runId;
-    // When chaining, write into the parent run's directory so stages accumulate.
-    const artifactDir = record.chainArtifactDir ?? this.getArtifactDir(runId);
+    const artifactDir = this.artifactDirFor(record);
     if (!artifactDir) return;
 
     const snapshot = this.get(runId);
@@ -1382,7 +1456,7 @@ export class RunService {
   getManifestPath(runId: string): string | undefined {
     const record = this.registry.get(runId);
     if (!record) return undefined;
-    const artifactDir = record.chainArtifactDir ?? this.getArtifactDir(runId);
+    const artifactDir = this.artifactDirFor(record);
     if (!artifactDir) return undefined;
     return join(artifactDir, "manifest.json");
   }
@@ -1440,6 +1514,35 @@ export class RunService {
       record.listeners.delete(listener);
       unwatch();
     };
+  }
+
+  /**
+   * Subscribe to a live run's step log events (spec 036 D4).
+   *
+   * Returns an unsubscribe function; a no-op for a disk run or an unknown id,
+   * which have no sink to attach to — those readers use the backfill route.
+   */
+  subscribeLog(runId: string, listener: (event: StepLogEvent) => void): () => void {
+    return subscribeRunLog(runId, listener);
+  }
+
+  /**
+   * Where a run's events file and step outputs live, for the routes that serve
+   * them. A run the registry no longer holds is located through its artifact
+   * path, which already passed the state-root containment check (spec 034).
+   */
+  logLocation(runId: string): { dir: string; pipelineId: string } | undefined {
+    const record = this.registry.get(runId);
+    if (record) {
+      if (record.artifactDir === undefined) return undefined;
+      return { dir: record.artifactDir, pipelineId: record.pipelineId };
+    }
+    if (this.runsDir === undefined) return undefined;
+    const persisted = readPersistedRun(this.runsDir, runId);
+    if (!persisted) return undefined;
+    const { artifactPath, pipelineId } = persisted;
+    if (typeof artifactPath !== "string" || typeof pipelineId !== "string") return undefined;
+    return { dir: dirname(artifactPath), pipelineId };
   }
 }
 

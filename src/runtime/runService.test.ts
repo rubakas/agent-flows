@@ -6,7 +6,15 @@
 // resume / LibSQL snapshots) is covered by build.test.ts.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -14,8 +22,10 @@ import { buildLlmStep } from "../bindings/mastra/buildSteps.js";
 import { ModelRegistry } from "../canon/registry.js";
 import { RunService } from "./runService.js";
 import { getRun as getStepIntrospection } from "./stepIntrospection.js";
+import { readRunLog, runLogFile } from "./stepLog.js";
 import type { JudgeDeps, MastraLike, StepEvent } from "./runService.js";
 import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
+import type { StepLogEvent } from "../canon/stepLogEvents.js";
 import type { StepDef } from "../canon/types.js";
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
@@ -2338,6 +2348,158 @@ describe("RunService — persisted runs are listed and readable after a restart"
         undefined,
         "an unknown id is still unknown"
       );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Spec 036: the run's event log ────────────────────────────────────────────
+
+describe("RunService — step log file and decisions", () => {
+  function eventsOf(runsDir: string, runId: string, pipelineId: string): StepLogEvent[] {
+    return readRunLog(runLogFile(join(runsDir, runId), pipelineId));
+  }
+
+  it("opens the events file before the run starts without touching the run state (FR-001/FR-013)", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-log-open-"));
+    try {
+      const run = makeCancellableRun("log-open-run", "test.check");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", { request: "x" });
+
+      const file = runLogFile(join(runsDir, runId), "test-pipeline");
+      assert.equal(existsSync(file), true, "the file must exist before the first step starts");
+      assert.equal(statSync(file).mode & 0o777, 0o600, "the events file must be owner-only");
+      assert.equal(statSync(join(runsDir, runId)).mode & 0o777, 0o700);
+
+      // Let the background run reach its first step before reading the state.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      const got = service.get(runId);
+      assert.ok(got !== undefined);
+      for (const key of ["log", "events", "output"]) {
+        assert.equal(key in got, false, `GetResult must gain no "${key}" field — FR-013`);
+      }
+      assert.equal("log" in got.steps["test.check"], false, "no step gains a log field");
+
+      await service.cancel(runId);
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("records a human approval as a decision event (FR-005)", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-log-approve-"));
+    try {
+      const run = makeMockRun("log-approve-run", suspendedResult("x"), successResult());
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", {});
+      await service.waitForSettled(runId);
+
+      await service.approve(runId, true, "looks right");
+
+      const decisions = eventsOf(runsDir, runId, "test-pipeline").filter(
+        (e) => e.kind === "decision"
+      );
+      assert.equal(decisions.length, 1, "every GateDecision push must reach the log");
+      const [decision] = decisions;
+      assert.equal(decision.kind === "decision" && decision.decidedBy, "human");
+      assert.equal(decision.kind === "decision" && decision.approved, true);
+      assert.equal(decision.kind === "decision" && decision.reason, "looks right");
+      assert.equal(decision.stepId, "approve", "the line is filed under the gate step");
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ends a cancelled run's log with the in-flight step's cancelled result (FR-014)", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-log-cancel-"));
+    try {
+      const run = makeCancellableRun("log-cancel-run", "test.check");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", { request: "x" });
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+      await service.cancel(runId, "operator changed their mind");
+
+      const events = eventsOf(runsDir, runId, "test-pipeline");
+      const last = events[events.length - 1];
+      assert.equal(last.kind, "step.result");
+      assert.equal(last.kind === "step.result" && last.status, "cancelled");
+      assert.equal(last.stepId, "test.check");
+      assert.deepEqual(
+        events.map((e) => e.seq),
+        events.map((_e, i) => i + 1),
+        "the file must be complete up to its last event"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs a superseded judge verdict after the run has settled (FR-005)", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-log-superseded-"));
+    try {
+      let releaseJudge!: (raw: string) => void;
+      const judgePending = new Promise<string>((resolve) => {
+        releaseJudge = resolve;
+      });
+      const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+        runId: "log-superseded-run",
+        watchers: [],
+        start: async () => suspendedResult("log-superseded-run"),
+        resume: async () => successResult(),
+        watch: (_cb: WatchCallback) => () => undefined,
+      };
+      const deps: JudgeDeps = {
+        runner: async () => judgePending,
+        registry: stubRegistry,
+        profile: stubProfile,
+        projectDir: "/tmp",
+        judgePrompt: "You are the gate judge.",
+      };
+
+      const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps, runsDir);
+      const { runId } = await service.start("test-pipeline", {}, { gateMode: "auto" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      // The human beats the judge: the run settles and its log is closed.
+      await service.approve(runId, true);
+      const beforeJudge = eventsOf(runsDir, runId, "test-pipeline");
+
+      releaseJudge('{"verdict":"reject","reason":"Too slow."}');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const events = eventsOf(runsDir, runId, "test-pipeline");
+      const last = events[events.length - 1];
+      assert.equal(events.length, beforeJudge.length + 1, "the late verdict must still be logged");
+      assert.equal(last.kind, "decision");
+      assert.equal(last.kind === "decision" && last.superseded, true);
+      assert.equal(last.kind === "decision" && last.decidedBy, "agent");
+      assert.equal(
+        last.seq,
+        beforeJudge[beforeJudge.length - 1].seq + 1,
+        "the file-level fallback must continue the sequence"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs judge degradation when no judge is configured (FR-005)", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-log-degraded-"));
+    try {
+      const run = makeMockRun("log-degraded-run", suspendedResult("x"), successResult());
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", {}, { gateMode: "auto" });
+      await service.waitForSettled(runId);
+
+      const degraded = eventsOf(runsDir, runId, "test-pipeline").filter(
+        (e) => e.kind === "judge.degraded"
+      );
+      assert.equal(degraded.length, 1);
+      const [event] = degraded;
+      assert.equal(event.kind === "judge.degraded" && event.gateStepId, "approve");
     } finally {
       rmSync(runsDir, { recursive: true, force: true });
     }
