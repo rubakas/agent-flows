@@ -349,16 +349,23 @@ describe("FR-019: content-type and Origin guards on mutating requests", () => {
 
 describe("404 responses for unknown ids", () => {
   let srv: ServeHandle;
+  let tmpPipelinesDir: string;
 
   before(async () => {
+    // A project-mode canon dir: REAL_PIPELINES_DIR is the bundled catalogue, and
+    // the draft routes refuse writes there before an id is ever looked up.
+    tmpPipelinesDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-404-")));
     srv = await startServer({
       state: makeState(REAL_REPO_ROOT),
       port: 0,
       dbPath: ":memory:",
-      pipelinesDir: REAL_PIPELINES_DIR,
+      pipelinesDir: tmpPipelinesDir,
     });
   });
-  after(async () => srv.close());
+  after(async () => {
+    await srv.close();
+    rmSync(tmpPipelinesDir, { recursive: true, force: true });
+  });
 
   it("PUT /api/drafts/99999 → 404 for unknown draft", async () => {
     const res = await mutate(srv.port, "PUT", "/api/drafts/99999", { body: "x" });
@@ -5469,6 +5476,48 @@ describe("POST /api/drafts/:id/preview — validate without writing (037 FR-004)
     const payload = (await res.json()) as Record<string, unknown>;
     assert.deepEqual(payload, { ok: true });
     assert.ok(!existsSync(join(tmpRoot, ".claude")), "no Binding A output at all");
+  });
+});
+
+describe("draft routes against the bundled catalogue are refused (037 FR-005)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-drafts-bundled-")));
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      templatesBase: join(tmpDir, "templates"),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("POST a draft of a bundled workflow → 403 and the catalogue is untouched", async () => {
+    const before = fileSnapshot(REAL_PIPELINES_DIR);
+    const res = await mutate(srv.port, "POST", "/api/pipelines/investigate/drafts", {});
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+    assertSnapshotEqual(before, fileSnapshot(REAL_PIPELINES_DIR));
+  });
+
+  it("PUT a draft body → 403 before the draft is even looked up", async () => {
+    const before = fileSnapshot(REAL_PIPELINES_DIR);
+    const res = await mutate(srv.port, "PUT", "/api/drafts/1", { body: "id: owned\n" });
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+    assertSnapshotEqual(before, fileSnapshot(REAL_PIPELINES_DIR));
+  });
+
+  it("POST a draft save → 403 and no bundled YAML is rewritten", async () => {
+    const before = fileSnapshot(REAL_PIPELINES_DIR);
+    const res = await mutate(srv.port, "POST", "/api/drafts/1/save", {});
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+    assertSnapshotEqual(before, fileSnapshot(REAL_PIPELINES_DIR));
   });
 });
 

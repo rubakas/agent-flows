@@ -1255,6 +1255,13 @@ async function handleRequest(
   const openDraftMatch = RE_PIPELINE_DRAFTS.exec(pathname);
   if (method === "POST" && openDraftMatch) {
     const id = decodeURIComponent(openDraftMatch[1]);
+    // Refuse mutations against the bundled catalog — a draft is the first step
+    // of a write, so it is refused here and not only at save time.
+    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+      json(res, 403, { error: "Cannot open drafts against the bundled pipeline catalog" });
+      return;
+    }
     const entry = findPipelineById(ctx.pipelinesDir, id);
     if (!entry) {
       json(res, 404, { error: `Pipeline "${id}" not found` });
@@ -1360,6 +1367,11 @@ async function handleRequest(
   const updateDraftMatch = RE_DRAFT_BY_ID.exec(pathname);
   if (method === "PUT" && updateDraftMatch) {
     const draftId = parseInt(updateDraftMatch[1], 10);
+    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+      json(res, 403, { error: "Cannot edit drafts of the bundled pipeline catalog" });
+      return;
+    }
     const draft = getDraft(ctx.db, draftId);
     if (!draft) {
       json(res, 404, { error: `Draft ${draftId} not found` });
@@ -1384,6 +1396,11 @@ async function handleRequest(
   const saveDraftMatch = RE_DRAFT_SAVE.exec(pathname);
   if (method === "POST" && saveDraftMatch) {
     const draftId = parseInt(saveDraftMatch[1], 10);
+    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+      json(res, 403, { error: "Cannot save into the bundled pipeline catalog" });
+      return;
+    }
     const draft = getDraft(ctx.db, draftId);
     if (!draft) {
       json(res, 404, { error: `Draft ${draftId} not found` });
