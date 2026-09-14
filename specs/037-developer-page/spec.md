@@ -391,7 +391,7 @@ build runs and commit sets, in order:
   flip (D3) and the bundle allowlist (FR-016) are resolved above, not left as build-time decisions.
   Delivered: 2 — 4fe9279, a56462a, 8fce0a7, 0dd41ec (2026-09-14).
 - **Ship 3 — editor.** D2 (the `workflow-edit` route), D6. FRs: FR-004, FR-005. The only genuinely
-  new write surface; the prompt-path containment, conflict handling and regeneration ordering above
+  new write surface; the prompt-path containment, conflict handling above
   are its acceptance criteria. Delivered: 3 — (commits recorded after merge).
 - **Ship 4 — developer-UI restyle.** D8. FR-013. Pure presentation, kept separate so Ships 1-3 stay
   free of CSS churn in their diffs; the owner's visual pass (V4) applies here and stays DEFERRED
