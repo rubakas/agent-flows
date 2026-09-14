@@ -154,7 +154,7 @@ the only executor; reasons: export covered 8 of 12 pipelines (`pipeline`, `loop`
 semantics had no node), the community node spawned `claude` directly and bypassed the daemon's
 confinement (spec 035 was the fix and is withdrawn with it), the canvas need is met by a generated
 levels diagram, and every n8n surface was a second truth to keep in sync. ADR-0013's superseding
-note is amended to point at 0015. Spec 035 status → `Withdrawn — 2026-09-14 (ADR-0017)`; specs/027
+note is amended to point at 0017. Spec 035 status → `Withdrawn — 2026-09-14 (ADR-0017)`; specs/027
 n8n items closed. The ADR additionally names `~/.agent-flows/n8n.json` and `<stateDir>/n8n.json` as
 leftovers holding an n8n API key, safe to delete (security finding S4) — the Non-goals below keep
 the files themselves but the ADR is the surviving pointer once the README sections that named them
