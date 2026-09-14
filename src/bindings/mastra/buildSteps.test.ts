@@ -12,9 +12,18 @@ import { fileURLToPath } from "node:url";
 import { ModelRegistry } from "../../canon/registry.js";
 import { CREDENTIAL_DENY_PATTERNS, StepTimeoutError, runLlmStep } from "../../canon/runStep.js";
 import { makeFakeChild, makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
+import {
+  closeRunLog,
+  openRunLog,
+  readRunLog,
+  readStepOutput,
+  runLogFile,
+  stepOutputFile,
+} from "../../runtime/stepLog.js";
 import { DEFAULT_CHECK_COMMAND, buildCheckStep, buildLlmStep } from "./buildSteps.js";
 import type { ModelEntry } from "../../canon/registry.js";
 import type { SpawnFn } from "../../canon/runClaudeCli.js";
+import type { StepLogEvent } from "../../canon/stepLogEvents.js";
 import type { StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
 
@@ -764,5 +773,298 @@ describe("buildCheckStep — per-run abortSignal (FR-013)", () => {
     assert.deepEqual(killCalls, ["SIGTERM"], "abort must SIGTERM the check step's child");
     assert.equal(out["test.check"].passed, false);
     assert.match(out["test.check"].output, /cancelled/i);
+  });
+});
+
+// ─── Spec 036 D2/FR-014: the builder owns step.start and step.result ─────────
+
+describe("step builders — one step.start and exactly one terminal step.result", () => {
+  const llmDef: StepDef = {
+    id: "investigate.survey",
+    kind: "llm",
+    prompt: "prompts/survey.md",
+    model: "sonnet",
+  };
+  const prompts = { "investigate.survey": "survey prompt" };
+
+  /** A registered run log in a throwaway directory, with its own reader. */
+  function openTempRunLog(runId: string): {
+    dir: string;
+    events: () => StepLogEvent[];
+    cleanup: () => void;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "af-steplog-builder-"));
+    openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+    return {
+      dir,
+      events: () => readRunLog(runLogFile(dir, "test-pipeline")),
+      cleanup: () => {
+        closeRunLog(runId);
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  function terminalOf(events: StepLogEvent[]): Extract<StepLogEvent, { kind: "step.result" }> {
+    const terminal = events.filter(
+      (e): e is Extract<StepLogEvent, { kind: "step.result" }> => e.kind === "step.result"
+    );
+    assert.equal(terminal.length, 1, "a step must produce exactly one terminal event");
+    return terminal[0];
+  }
+
+  /** Asserts an event's kind and narrows it so its own fields can be read. */
+  function expectKind<K extends StepLogEvent["kind"]>(
+    event: StepLogEvent | undefined,
+    kind: K
+  ): Extract<StepLogEvent, { kind: K }> {
+    assert.ok(event !== undefined, `expected an event of kind ${kind}`);
+    assert.equal(event.kind, kind);
+    return event as Extract<StepLogEvent, { kind: K }>;
+  }
+
+  it("a step that returns logs start, the adapter's events, the result and the output", async () => {
+    const runId = "log-success";
+    const log = openTempRunLog(runId);
+    try {
+      const runner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+        deps?.onEvent?.({ kind: "message", role: "assistant", text: "the answer" });
+        deps?.onEvent?.({ kind: "usage", costUsd: 0.02, turns: 2 });
+        return "the answer";
+      };
+      const llmStep = buildLlmStep(
+        llmDef,
+        prompts,
+        { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+        undefined
+      );
+      await (llmStep as any).execute({ inputData: {}, runId, suspend: () => undefined as never });
+
+      const events = log.events();
+      assert.deepEqual(
+        events.map((e) => e.kind),
+        ["step.start", "message", "usage", "step.result"],
+        "the adapter contributes no start or terminal event of its own"
+      );
+      const start = expectKind(events[0], "step.start");
+      assert.equal(start.model, "sonnet (cli:claude)");
+      assert.equal(start.transport, "cli");
+      assert.equal(terminalOf(events).status, "succeeded");
+
+      assert.deepEqual(
+        readStepOutput(stepOutputFile(log.dir, "test-pipeline", llmDef.id)),
+        {
+          runId,
+          pipelineId: "test-pipeline",
+          stepId: llmDef.id,
+          kind: "text",
+          output: "the answer",
+        },
+        "a returning llm step must persist its full output — FR-008"
+      );
+    } finally {
+      log.cleanup();
+    }
+  });
+
+  it("a step whose runner throws logs one failed result carrying the message", async () => {
+    const runId = "log-failure";
+    const log = openTempRunLog(runId);
+    try {
+      const runner: typeof runLlmStep = async () => {
+        throw new Error("transport exploded");
+      };
+      const llmStep = buildLlmStep(
+        llmDef,
+        prompts,
+        { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+        undefined
+      );
+      await assert.rejects(
+        (llmStep as any).execute({ inputData: {}, runId, suspend: () => undefined as never })
+      );
+
+      const events = log.events();
+      assert.deepEqual(
+        events.map((e) => e.kind),
+        ["step.start", "step.result"]
+      );
+      const terminal = terminalOf(events);
+      assert.equal(terminal.status, "failed");
+      assert.match(terminal.error ?? "", /transport exploded/u);
+    } finally {
+      log.cleanup();
+    }
+  });
+
+  it("a step interrupted by a cancelled run logs a cancelled result (FR-014)", async () => {
+    const runId = "log-cancel";
+    const log = openTempRunLog(runId);
+    try {
+      const controller = new AbortController();
+      const runner: typeof runLlmStep = async () => {
+        // What a cancelled run looks like from inside: the signal fires, then the
+        // transport rejects.
+        controller.abort();
+        throw new Error("Claude CLI aborted");
+      };
+      const llmStep = buildLlmStep(
+        llmDef,
+        prompts,
+        { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+        undefined
+      );
+      await assert.rejects(
+        (llmStep as any).execute({
+          inputData: {},
+          runId,
+          abortSignal: controller.signal,
+          suspend: () => undefined as never,
+        })
+      );
+
+      assert.equal(
+        terminalOf(log.events()).status,
+        "cancelled",
+        "an aborted run must not be reported as an ordinary failure"
+      );
+    } finally {
+      log.cleanup();
+    }
+  });
+
+  it(
+    "watchdog exhaustion over two claude attempts still logs one terminal result",
+    { timeout: 4_000 },
+    async () => {
+      const runId = "log-watchdog";
+      const log = openTempRunLog(runId);
+      try {
+        // A child that emits nothing and only closes when killed: the stall
+        // detector trips on both attempts, so the adapter calls the CLI twice.
+        const spawn = (() => {
+          const emitter = new EventEmitter();
+          const stdout = new PassThrough();
+          const stderr = new PassThrough();
+          return Object.assign(emitter, {
+            stdin: new PassThrough(),
+            stdout,
+            stderr,
+            kill() {
+              setImmediate(() => {
+                if (!stdout.destroyed) stdout.push(null);
+                if (!stderr.destroyed) stderr.push(null);
+                emitter.emit("close", null);
+              });
+            },
+          });
+        }) as unknown as SpawnFn;
+
+        const llmStep = buildLlmStep(
+          llmDef,
+          prompts,
+          {
+            registry: NOOP_REGISTRY,
+            store: NOOP_STORE,
+            runnerDeps: { spawn, _stallSilenceMs: 40 },
+          },
+          undefined
+        );
+        await assert.rejects(
+          (llmStep as any).execute({ inputData: {}, runId, suspend: () => undefined as never })
+        );
+
+        const events = log.events();
+        assert.equal(
+          events.filter((e) => e.kind === "step.start").length,
+          1,
+          "two transport attempts are still one step"
+        );
+        assert.deepEqual(
+          events.flatMap((e) => (e.kind === "watchdog" ? [e.attempt] : [])),
+          [1, 2],
+          "each attempt must record its own trip"
+        );
+        assert.equal(terminalOf(events).status, "failed");
+      } finally {
+        log.cleanup();
+      }
+    }
+  );
+
+  it("a check step logs both output streams, scrubbed of declared env values", async () => {
+    const runId = "log-check";
+    const log = openTempRunLog(runId);
+    const secretKey = "PROBE_SECRET_VALUE";
+    process.env[secretKey] = "hunter2xyz";
+    try {
+      const step: StepDef = {
+        id: "test.check",
+        kind: "check",
+        command: `printf out; printf "$${secretKey}"; printf err >&2`,
+        env: [secretKey],
+      };
+      const checkStep = buildCheckStep(
+        step,
+        { registry: NOOP_REGISTRY, store: NOOP_STORE },
+        undefined
+      );
+      const out = await (checkStep as any).execute({
+        inputData: {},
+        runId,
+        suspend: () => undefined as never,
+      });
+
+      const events = log.events();
+      expectKind(events[0], "step.start");
+      expectKind(events[events.length - 1], "step.result");
+      // Both streams must be logged, each labelled with its own. Their relative
+      // arrival order is the OS's business (two pipes), and a pipe may deliver
+      // two writes as one chunk, so each stream is compared as a whole.
+      const streamText = (stream: "stdout" | "stderr"): string =>
+        events
+          .flatMap((e) => (e.kind === "check.output" && e.stream === stream ? [e.text] : []))
+          .join("");
+      assert.equal(streamText("stdout"), "out[redacted:PROBE_SECRET_VALUE]");
+      assert.equal(streamText("stderr"), "err");
+      assert.equal(
+        readFileSync(runLogFile(log.dir, "test-pipeline"), "utf8").includes("hunter2xyz"),
+        false,
+        "a declared credential must never reach the durable log — FR-015"
+      );
+      assert.equal(
+        out["test.check"].output.includes("hunter2xyz"),
+        false,
+        "the ctx value the next step reads — and the artifact's outputExcerpt — must be scrubbed too"
+      );
+      assert.ok(
+        out["test.check"].output.includes("[redacted:PROBE_SECRET_VALUE]"),
+        "the scrubbed result must still show where the value was"
+      );
+      assert.equal(terminalOf(events).status, "succeeded");
+    } finally {
+      delete process.env[secretKey];
+      log.cleanup();
+    }
+  });
+
+  it("a failing check step logs the exit code as the result error", async () => {
+    const runId = "log-check-fail";
+    const log = openTempRunLog(runId);
+    try {
+      const step: StepDef = { id: "test.check", kind: "check", command: "exit 3" };
+      const checkStep = buildCheckStep(
+        step,
+        { registry: NOOP_REGISTRY, store: NOOP_STORE },
+        undefined
+      );
+      await (checkStep as any).execute({ inputData: {}, runId, suspend: () => undefined as never });
+
+      const terminal = terminalOf(log.events());
+      assert.equal(terminal.status, "failed");
+      assert.equal(terminal.error, "exit 3");
+    } finally {
+      log.cleanup();
+    }
   });
 });

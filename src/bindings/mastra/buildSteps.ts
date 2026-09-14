@@ -13,14 +13,19 @@ import { renderPrompt } from "../../canon/render.js";
 import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
 import { recordStep } from "../../runtime/stepIntrospection.js";
+import { appendStepLog, writeStepOutput } from "../../runtime/stepLog.js";
 import type { ModelRegistry, ProviderProfile } from "../../canon/registry.js";
-import type { StepRunnerDeps } from "../../canon/runStep.js";
+import type { CheckResult, StepRunnerDeps } from "../../canon/runStep.js";
+import type { StepLogEventInput } from "../../canon/stepLogEvents.js";
 import type { HardenedSpec, LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
 
 // Flexible context record used as input/output schema for all steps.
 export const ctx = z.record(z.string(), z.unknown());
 type Ctx = Record<string, unknown>;
+
+/** The terminal outcomes a step's `step.result` log event can report (spec 036 D1). */
+type StepResultStatus = "succeeded" | "failed" | "cancelled";
 
 /**
  * Default convergence gate command, used when no checkCommand is configured in
@@ -259,10 +264,8 @@ export function buildLlmStep(
       // D6: hand the prompt and resolved model to the per-run introspection
       // channel keyed by Mastra's runId — never onto BuildDeps, which is shared
       // by every concurrent run on this workflow.
-      recordStep(runId, step.id, {
-        prompt,
-        model: `${entry.id} (${entry.transport}${entry.cli?.bin ? ":" + entry.cli.bin : ""})`,
-      });
+      const model = `${entry.id} (${entry.transport}${entry.cli?.bin ? ":" + entry.cli.bin : ""})`;
+      recordStep(runId, step.id, { prompt, model });
 
       // Thread per-step and pipeline-level timeouts into the runner deps.
       // runLlmStep resolves the effective timeout as: timeoutMs ?? defaultTimeoutMs.
@@ -279,6 +282,11 @@ export function buildLlmStep(
       const runnerDeps: StepRunnerDeps = {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
         ...(signal ? { signal } : {}),
+        // Spec 036 D2: the sink is bound per execution, exactly like recordStep —
+        // never through BuildDeps, which every concurrent run shares.
+        onEvent: (event: StepLogEventInput) => {
+          appendStepLog(runId, step.id, event);
+        },
         ...(hasContentsAccess
           ? {
               contentsAccess: contentsValue,
@@ -295,54 +303,90 @@ export function buildLlmStep(
           : {}),
       };
 
-      // FR-007: wrap any runner error with the step id so the failure surface
-      // (RunRecord.error, GET /api/runs/:id) names the failing step.
-      // FR-008: for write steps, append workspace state before rethrowing —
-      // the operator needs to know what was left behind after a timeout or crash.
-      let raw: string;
+      // Spec 036 D2: the builder owns step.start and the single terminal
+      // step.result, so the watchdog's second attempt cannot double-count a step
+      // and no failure path can end a step's log without a terminal event.
+      appendStepLog(runId, step.id, { kind: "step.start", model, transport: entry.transport });
+      const startedAt = Date.now();
+      const finishStepLog = (status: StepResultStatus, error?: string): void => {
+        appendStepLog(runId, step.id, {
+          kind: "step.result",
+          status,
+          durationMs: Date.now() - startedAt,
+          ...(error !== undefined ? { error } : {}),
+        });
+      };
+
       try {
-        raw = await runner(entry, prompt, runnerDeps);
-      } catch (err) {
-        const baseMsg = err instanceof Error ? err.message : String(err);
-        const stepMsg = `Step "${step.id}": ${baseMsg}`;
-        if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
-          throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+        // FR-007: wrap any runner error with the step id so the failure surface
+        // (RunRecord.error, GET /api/runs/:id) names the failing step.
+        // FR-008: for write steps, append workspace state before rethrowing —
+        // the operator needs to know what was left behind after a timeout or crash.
+        let raw: string;
+        try {
+          raw = await runner(entry, prompt, runnerDeps);
+        } catch (err) {
+          const baseMsg = err instanceof Error ? err.message : String(err);
+          const stepMsg = `Step "${step.id}": ${baseMsg}`;
+          if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
+            throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+          }
+          throw new Error(stepMsg, { cause: err });
         }
-        throw new Error(stepMsg, { cause: err });
-      }
 
-      let value: unknown = raw;
-      if (step.schema) {
-        const r1 = tryParseSchemaOutput(raw, step.schema);
-        if (!r1.ok) {
-          // One retry with explicit error feedback.
-          const retryPrompt =
-            `${prompt}\n\nYour previous output was not valid JSON (${r1.error}).` +
-            ` Return ONLY the JSON object.`;
-          let retryRaw: string;
-          try {
-            retryRaw = await runner(entry, retryPrompt, runnerDeps);
-          } catch (err) {
-            const baseMsg = err instanceof Error ? err.message : String(err);
-            const stepMsg = `Step "${step.id}": ${baseMsg}`;
-            // FR-008: mirror the write-step workspace report onto the retry path —
-            // a write step that fails during schema retry must also expose workspace state.
-            if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
-              throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+        let value: unknown = raw;
+        if (step.schema) {
+          const r1 = tryParseSchemaOutput(raw, step.schema);
+          if (!r1.ok) {
+            // One retry with explicit error feedback.
+            const retryPrompt =
+              `${prompt}\n\nYour previous output was not valid JSON (${r1.error}).` +
+              ` Return ONLY the JSON object.`;
+            let retryRaw: string;
+            try {
+              retryRaw = await runner(entry, retryPrompt, runnerDeps);
+            } catch (err) {
+              const baseMsg = err instanceof Error ? err.message : String(err);
+              const stepMsg = `Step "${step.id}": ${baseMsg}`;
+              // FR-008: mirror the write-step workspace report onto the retry path —
+              // a write step that fails during schema retry must also expose workspace state.
+              if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
+                throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+              }
+              throw new Error(stepMsg, { cause: err });
             }
-            throw new Error(stepMsg, { cause: err });
+            const r2 = tryParseSchemaOutput(retryRaw, step.schema);
+            if (!r2.ok) {
+              throw new Error(`Step "${step.id}": ${r2.error}`);
+            }
+            value = r2.value;
+          } else {
+            value = r1.value;
           }
-          const r2 = tryParseSchemaOutput(retryRaw, step.schema);
-          if (!r2.ok) {
-            throw new Error(`Step "${step.id}": ${r2.error}`);
-          }
-          value = r2.value;
-        } else {
-          value = r1.value;
         }
-      }
 
-      return { ...rawCtx, [step.id]: value };
+        // D6: the full value lives on disk per step; the run state keeps only
+        // the 2048-character excerpt.
+        try {
+          writeStepOutput(runId, step.id, {
+            kind: step.schema ? "json" : "text",
+            ...(step.schema !== undefined ? { schema: step.schema } : {}),
+            output: value,
+          });
+        } catch (err) {
+          // A step id that cannot be a file name is refused by the sink. That is
+          // worth reporting, but never worth failing a step that already answered.
+          console.error(`[agent-flows] step "${step.id}": output not persisted: ${String(err)}`);
+        }
+        finishStepLog("succeeded");
+        return { ...rawCtx, [step.id]: value };
+      } catch (err) {
+        finishStepLog(
+          signal?.aborted === true ? "cancelled" : "failed",
+          err instanceof Error ? err.message : String(err)
+        );
+        throw err;
+      }
     },
   });
 }
@@ -528,12 +572,45 @@ export function buildCheckStep(
       // FR-013: per-run signal from the execute params, combined with any
       // build-time one; BuildDeps.runnerDeps must not carry a per-run signal.
       const signal = combineSignals(deps.runnerDeps?.signal, abortSignal);
-      const result = await runCheckStep(resolvedCommand, {
-        ...baseRunnerDeps(step, deps, defaultTimeoutMs),
-        ...(signal ? { signal } : {}),
-        cwd: deps.cwd,
-        ...(step.env?.length ? { envAllowlist: step.env } : {}),
-      });
+
+      // Spec 036 D2: start and terminal result belong to the builder, as for llm steps.
+      appendStepLog(runId, step.id, { kind: "step.start", model: "check", transport: "shell" });
+      const startedAt = Date.now();
+      const finishStepLog = (status: StepResultStatus, error?: string): void => {
+        appendStepLog(runId, step.id, {
+          kind: "step.result",
+          status,
+          durationMs: Date.now() - startedAt,
+          ...(error !== undefined ? { error } : {}),
+        });
+      };
+
+      let result: CheckResult;
+      try {
+        result = await runCheckStep(resolvedCommand, {
+          ...baseRunnerDeps(step, deps, defaultTimeoutMs),
+          ...(signal ? { signal } : {}),
+          onEvent: (event: StepLogEventInput) => {
+            appendStepLog(runId, step.id, event);
+          },
+          cwd: deps.cwd,
+          ...(step.env?.length ? { envAllowlist: step.env } : {}),
+        });
+      } catch (err) {
+        finishStepLog(
+          signal?.aborted === true ? "cancelled" : "failed",
+          err instanceof Error ? err.message : String(err)
+        );
+        throw err;
+      }
+
+      if (signal?.aborted === true) {
+        finishStepLog("cancelled");
+      } else if (result.passed) {
+        finishStepLog("succeeded");
+      } else {
+        finishStepLog("failed", `exit ${result.exitCode}`);
+      }
       return { ...rawCtx, [step.id]: result };
     },
   });

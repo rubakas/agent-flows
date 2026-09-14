@@ -158,6 +158,34 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
       "get_run must never forward prompt text to chat — D6"
     );
   });
+
+  it("exposes no log, events, output or prompt key at any level (spec 036 FR-012)", async () => {
+    handler = (_req, res) => {
+      respondJson(res, 200, {
+        runId: "run-6",
+        pipelineId: "develop",
+        status: "succeeded",
+        steps: {
+          "develop.code": {
+            status: "succeeded",
+            prompt: "a very long rendered prompt",
+            outputExcerpt: '{"ok":true}',
+          },
+        },
+      });
+    };
+
+    const forbidden = ["log", "events", "output", "prompt"];
+    const out = (await getRunState("run-6")) as Record<string, unknown> & {
+      steps: Record<string, unknown>[];
+    };
+    for (const key of forbidden) {
+      assert.equal(key in out, false, `get_run must not expose "${key}" at the top level`);
+      for (const step of out.steps) {
+        assert.equal(key in step, false, `get_run must not expose "${key}" on a step`);
+      }
+    }
+  });
 });
 
 describe("run_pipeline polling — 'cancelled' is terminal (FR-010)", () => {
