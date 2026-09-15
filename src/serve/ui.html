@@ -17,8 +17,11 @@
         --accent-bg: #d9e6ef;
         --ok: #2a7a3b;
         --err: #b52d2d;
+        --warn: #9a7318;
         --ui: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
         --mono: ui-monospace, "Cascadia Code", Menlo, monospace;
+        --radius: 3px;
+        --row-h: 30px;
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -33,6 +36,7 @@
           --accent-bg: #17303f;
           --ok: #4db86a;
           --err: #e05555;
+          --warn: #d9a441;
         }
       }
       * {
@@ -42,45 +46,68 @@
       }
       body {
         font-family: var(--ui);
-        font-size: 14px;
+        font-size: 13px;
         background: var(--bg);
         color: var(--ink);
         min-height: 100vh;
       }
+      /* Utility: the two things said over and over — machine text and de-emphasis. */
+      .mono {
+        font-family: var(--mono);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      /* Top bar (037 D8): name, project, state dir, tabs right-aligned. */
       header {
         display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 20px;
+        align-items: baseline;
+        gap: 10px;
+        padding: 8px 16px;
         background: var(--panel);
         border-bottom: 1px solid var(--line);
       }
       header h1 {
-        font-size: 16px;
+        font-size: 14px;
         font-weight: 600;
       }
       header .spacer {
         flex: 1;
       }
+      #project-name {
+        font-family: var(--mono);
+        color: var(--ink-2);
+      }
+      #state-dir {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--muted);
+        max-width: 40ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .btn {
         font: inherit;
-        font-size: 13px;
-        padding: 5px 12px;
+        font-size: 12px;
+        height: 26px;
+        padding: 0 10px;
         border: 1px solid var(--line);
-        border-radius: 5px;
+        border-radius: var(--radius);
         background: var(--panel);
         color: var(--ink);
         cursor: pointer;
         text-decoration: none;
-        display: inline-block;
-        line-height: 1.4;
+        display: inline-flex;
+        align-items: center;
+        white-space: nowrap;
       }
       .btn:hover {
         background: var(--sunk);
       }
       .btn.primary {
         background: var(--accent);
-        color: #fff;
+        color: var(--bg);
         border-color: var(--accent);
       }
       .btn.primary:hover {
@@ -94,8 +121,7 @@
         background: color-mix(in srgb, var(--err) 10%, transparent);
       }
       main {
-        padding: 20px;
-        max-width: 1000px;
+        padding: 16px;
       }
       /* Views and tabs (spec 034 D1/D7) */
       .tabs {
@@ -103,9 +129,9 @@
         gap: 4px;
       }
       .tab {
-        font-size: 13px;
-        padding: 5px 12px;
-        border-radius: 5px;
+        font-size: 12px;
+        padding: 4px 10px;
+        border-radius: var(--radius);
         color: var(--ink-2);
         text-decoration: none;
         border: 1px solid transparent;
@@ -122,40 +148,26 @@
       .view[hidden] {
         display: none;
       }
+      /* Filter and editor toggles: a .btn that can be on. */
       .chips {
         display: flex;
         gap: 4px;
-      }
-      .chip {
-        font: inherit;
-        font-size: 12px;
-        padding: 3px 10px;
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        background: var(--panel);
-        color: var(--ink-2);
-        cursor: pointer;
-      }
-      .chip:hover {
-        background: var(--sunk);
       }
       .chip.active {
         background: var(--accent-bg);
         color: var(--accent);
         border-color: var(--accent);
-        font-weight: 600;
       }
       .card {
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: var(--radius);
         background: var(--panel);
-        padding: 14px 16px;
-        font-size: 13px;
+        padding: 8px 12px;
       }
       .kv {
         display: flex;
         gap: 12px;
-        padding: 3px 0;
+        padding: 2px 0;
       }
       .kv > span:first-child {
         color: var(--muted);
@@ -165,9 +177,6 @@
         font-family: var(--mono);
         font-size: 12px;
         word-break: break-all;
-      }
-      tr[data-run-row] {
-        cursor: pointer;
       }
       /* Split view (spec 034 D9). Below the breakpoint both panes are plain
          blocks, so the narrow layout is the stacked one by default. */
@@ -184,7 +193,10 @@
       }
       #settings-reader-title {
         font-family: var(--mono);
-        font-size: 13px;
+        font-size: 12px;
+        text-transform: none;
+        letter-spacing: 0;
+        color: var(--ink);
       }
       #settings-reader-body {
         max-height: 60vh;
@@ -194,7 +206,7 @@
         font-size: 12px;
         background: var(--sunk);
         border: 1px solid var(--line);
-        border-radius: 3px;
+        border-radius: var(--radius);
         padding: 1px 6px;
         margin: 0 6px 6px 0;
         cursor: pointer;
@@ -207,9 +219,6 @@
         border-color: var(--accent);
       }
       @media (min-width: 1200px) {
-        main {
-          max-width: 1600px;
-        }
         #runs-split,
         #settings-split,
         .workflow-split {
@@ -241,174 +250,93 @@
           padding-left: 16px;
         }
       }
-      tr.selected td {
-        background: color-mix(in srgb, var(--accent) 12%, transparent);
-      }
-      /* A run waiting on a human is the one row that must not blend in (FR-002). */
-      tr.awaiting td {
-        background: color-mix(in srgb, #9a7318 10%, transparent);
-      }
-      tr.awaiting td:first-child {
-        border-left: 3px solid #9a7318;
-      }
       .section {
-        margin-bottom: 28px;
+        margin-bottom: 24px;
       }
       .section-header {
         display: flex;
         align-items: center;
         gap: 10px;
-        margin-bottom: 10px;
+        margin-bottom: 8px;
       }
       .section-header h2 {
-        font-size: 14px;
+        font-size: 12px;
         font-weight: 600;
-      }
-      .tier-badge {
-        font-size: 11px;
-        padding: 2px 7px;
-        border-radius: 10px;
-        background: var(--sunk);
-        color: var(--muted);
-        font-weight: 500;
-      }
-      .tier-project {
-        background: var(--accent-bg);
-        color: var(--accent);
-      }
-      .tier-template {
-        background: color-mix(in srgb, #9a7318 12%, transparent);
-        color: #9a7318;
-      }
-      .tier-bundled {
-        background: color-mix(in srgb, var(--muted) 12%, transparent);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
         color: var(--muted);
       }
-      @media (prefers-color-scheme: dark) {
-        .tier-project {
-          color: var(--accent);
-        }
-        .tier-template {
-          color: #d9a441;
-        }
-        .tier-bundled {
-          color: var(--muted);
-        }
-      }
-      table {
+      /* One table for every list (037 D8/FR-013). */
+      .table {
         width: 100%;
         border-collapse: collapse;
       }
-      th {
+      .table th {
         text-align: left;
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
         color: var(--muted);
-        padding: 4px 10px;
+        padding: 4px 8px;
         border-bottom: 1px solid var(--line);
       }
-      td {
-        padding: 8px 10px;
+      .table td {
+        height: var(--row-h);
+        padding: 4px 8px;
         border-bottom: 1px solid var(--line);
         vertical-align: top;
       }
-      tr:last-child td {
+      .table tr:last-child td {
         border-bottom: none;
       }
-      tr:hover td {
-        background: color-mix(in srgb, var(--accent) 5%, transparent);
+      .table tr:hover td {
+        background: var(--sunk);
+      }
+      .table tr[data-run-row] {
+        cursor: pointer;
+      }
+      .table tr.selected td {
+        background: var(--accent-bg);
+      }
+      /* A run waiting on a human is the one row that must not blend in (FR-002). */
+      .table tr.awaiting td {
+        background: color-mix(in srgb, var(--warn) 10%, transparent);
+      }
+      .table tr.awaiting td:first-child {
+        border-left: 3px solid var(--warn);
       }
       .pipeline-id {
         font-family: var(--mono);
-        font-size: 13px;
-        font-weight: 500;
       }
       .pipeline-desc {
         color: var(--ink-2);
-        font-size: 13px;
       }
       .actions {
         display: flex;
-        gap: 6px;
+        gap: 4px;
         flex-wrap: wrap;
       }
       .empty {
         color: var(--muted);
-        font-style: italic;
-        padding: 12px 10px;
+        padding: 8px;
       }
       .error-box {
         background: color-mix(in srgb, var(--err) 8%, transparent);
         color: var(--err);
         border: 1px solid var(--err);
-        border-radius: 6px;
-        padding: 10px 14px;
+        border-radius: var(--radius);
+        padding: 8px 10px;
         margin: 8px 0;
-        font-size: 13px;
-      }
-      .success-box {
-        background: color-mix(in srgb, var(--ok) 8%, transparent);
-        color: var(--ok);
-        border: 1px solid var(--ok);
-        border-radius: 6px;
-        padding: 10px 14px;
-        margin: 8px 0;
-        font-size: 13px;
-      }
-      /* Detail panel */
-      #detail-panel {
-        position: fixed;
-        top: 0;
-        right: 0;
-        bottom: 0;
-        width: 480px;
-        max-width: 100vw;
-        background: var(--panel);
-        border-left: 1px solid var(--line);
-        box-shadow: -4px 0 16px rgba(0, 0, 0, 0.12);
-        overflow-y: auto;
-        display: none;
-        z-index: 100;
-      }
-      #detail-panel.open {
-        display: block;
-      }
-      #detail-header {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 12px 16px;
-        border-bottom: 1px solid var(--line);
-        position: sticky;
-        top: 0;
-        background: var(--panel);
-      }
-      #detail-header h3 {
-        font-size: 15px;
-        flex: 1;
-        font-family: var(--mono);
-      }
-      #detail-body {
-        padding: 16px;
       }
       .step-row {
-        padding: 8px 10px;
+        padding: 6px 8px;
         border: 1px solid var(--line);
-        border-radius: 6px;
-        margin-bottom: 6px;
-      }
-      .step-kind {
-        font-size: 11px;
-        font-weight: 600;
-        padding: 2px 6px;
-        border-radius: 4px;
-        background: var(--sunk);
-        color: var(--muted);
-        margin-right: 6px;
+        border-radius: var(--radius);
+        margin-bottom: 4px;
       }
       .step-id {
         font-family: var(--mono);
-        font-size: 13px;
       }
       .step-model {
         font-family: var(--mono);
@@ -418,7 +346,7 @@
       }
       /* Run details: invocation and per-step prompt/command blocks (spec 033 FR-019..FR-021) */
       #run-detail-title {
-        font-size: 16px;
+        font-size: 14px;
         display: flex;
         align-items: center;
         gap: 8px;
@@ -437,8 +365,8 @@
         font-size: 11px;
         background: var(--sunk);
         border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 8px;
+        border-radius: var(--radius);
+        padding: 6px 8px;
         margin: 4px 0 8px;
         white-space: pre-wrap;
         word-break: break-word;
@@ -451,12 +379,15 @@
         gap: 8px;
         font-size: 11px;
         font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
         color: var(--muted);
         margin-top: 8px;
       }
       .copy-btn {
         font-size: 11px;
-        padding: 1px 6px;
+        height: 20px;
+        padding: 0 6px;
       }
       .step-detail {
         margin-top: 6px;
@@ -473,9 +404,8 @@
         transform: translateX(-50%);
         background: var(--ink);
         color: var(--bg);
-        padding: 8px 18px;
-        border-radius: 6px;
-        font-size: 13px;
+        padding: 6px 14px;
+        border-radius: var(--radius);
         opacity: 0;
         transition: opacity 0.2s;
         pointer-events: none;
@@ -484,41 +414,44 @@
       #flash.show {
         opacity: 1;
       }
-      /* Run observability */
-      .run-status {
+      /* One badge set for every status chip (037 D8/FR-013). */
+      .badge {
         display: inline-block;
+        font-family: var(--mono);
         font-size: 11px;
-        font-weight: 600;
-        padding: 2px 7px;
-        border-radius: 10px;
+        padding: 1px 6px;
+        border-radius: var(--radius);
         background: var(--sunk);
         color: var(--muted);
       }
-      .run-status.running {
+      .badge.running {
         background: color-mix(in srgb, var(--accent) 15%, transparent);
         color: var(--accent);
       }
-      .run-status.awaiting_approval {
-        background: color-mix(in srgb, #9a7318 15%, transparent);
-        color: #9a7318;
+      .badge.awaiting_approval {
+        background: color-mix(in srgb, var(--warn) 15%, transparent);
+        color: var(--warn);
       }
-      @media (prefers-color-scheme: dark) {
-        .run-status.awaiting_approval {
-          color: #d9a441;
-        }
-      }
-      .run-status.succeeded {
+      .badge.succeeded {
         background: color-mix(in srgb, var(--ok) 15%, transparent);
         color: var(--ok);
       }
-      .run-status.rejected {
+      .badge.failed {
+        background: color-mix(in srgb, var(--err) 15%, transparent);
+        color: var(--err);
+      }
+      .badge.rejected {
         background: color-mix(in srgb, var(--err) 15%, transparent);
         color: var(--err);
         opacity: 0.8;
       }
-      .run-status.failed {
-        background: color-mix(in srgb, var(--err) 15%, transparent);
-        color: var(--err);
+      .badge.cancelled {
+        background: color-mix(in srgb, var(--muted) 15%, transparent);
+        color: var(--muted);
+      }
+      .badge.disk {
+        background: color-mix(in srgb, var(--muted) 15%, transparent);
+        color: var(--muted);
       }
       .step-output {
         font-family: var(--mono);
@@ -529,12 +462,11 @@
         word-break: break-all;
       }
       .gate-box {
-        background: color-mix(in srgb, #9a7318 8%, transparent);
-        border: 1px solid #9a7318;
-        border-radius: 6px;
-        padding: 10px 14px;
+        background: color-mix(in srgb, var(--warn) 8%, transparent);
+        border: 1px solid var(--warn);
+        border-radius: var(--radius);
+        padding: 8px 10px;
         margin: 10px 0;
-        font-size: 13px;
       }
       .gate-box p {
         margin-bottom: 8px;
@@ -574,13 +506,13 @@
       .log-events .warn,
       .log-events .term.stderr,
       .decisions tr.warn td {
-        color: #9a7318;
+        color: var(--warn);
       }
       .log-events .term {
         font-size: 11px;
         background: var(--sunk);
         border: 1px solid var(--line);
-        border-radius: 4px;
+        border-radius: var(--radius);
         padding: 6px;
         white-space: pre-wrap;
         word-break: break-word;
@@ -624,20 +556,12 @@
         white-space: pre-wrap;
         word-break: break-word;
       }
-      .decision-badge {
-        font-size: 11px;
-        padding: 1px 5px;
-        border-radius: 4px;
-        background: var(--sunk);
-        color: var(--muted);
-        margin-left: 6px;
-      }
       /* Levels diagram (037 D7). The container scrolls; the svg keeps its size. */
       .diagram {
         overflow-x: auto;
         background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: 3px;
+        border-radius: var(--radius);
         padding: 4px;
       }
       .levels .node rect {
@@ -673,7 +597,7 @@
         background: var(--panel);
         color: var(--ink);
         border: 1px solid var(--line);
-        border-radius: 6px;
+        border-radius: var(--radius);
         padding: 16px;
         min-width: 320px;
         max-width: 680px;
@@ -681,7 +605,11 @@
         overflow-y: auto;
       }
       dialog h3 {
-        font-size: 14px;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
         margin-bottom: 10px;
       }
       dialog .field {
@@ -699,16 +627,14 @@
       dialog input[type="text"],
       dialog select {
         font: inherit;
-        font-size: 13px;
+        font-family: var(--mono);
+        font-size: 12px;
         width: 100%;
         padding: 4px 6px;
         border: 1px solid var(--line);
-        border-radius: 3px;
+        border-radius: var(--radius);
         background: var(--bg);
         color: var(--ink);
-      }
-      dialog textarea {
-        font-family: var(--mono);
       }
       dialog .dialog-actions {
         display: flex;
@@ -721,7 +647,6 @@
         gap: 8px;
         align-items: flex-start;
         margin-bottom: 8px;
-        font-size: 13px;
       }
       .workflow-head {
         display: flex;
@@ -732,20 +657,19 @@
       }
       .workflow-head h2 {
         font-family: var(--mono);
-        font-size: 14px;
+        font-size: 13px;
       }
       /* Workflow editor (037 D6). The YAML and the prompts are both code, so
-         both tabs are monospace; the tabs themselves reuse the chip styling. */
+         both tabs are monospace; the tabs themselves reuse the toggle styling. */
       .editor-text {
         font: inherit;
         font-family: var(--mono);
         font-size: 12px;
         width: 100%;
-        box-sizing: border-box;
         min-height: 320px;
         padding: 6px 8px;
         border: 1px solid var(--line);
-        border-radius: 3px;
+        border-radius: var(--radius);
         background: var(--bg);
         color: var(--ink);
         resize: vertical;
@@ -774,8 +698,8 @@
   <body>
     <header>
       <h1>agent-flows</h1>
-      <span id="project-name" style="font-size: 13px; color: var(--ink-2)"></span>
-      <span id="state-dir" style="font-size: 12px; color: var(--muted)"></span>
+      <span id="project-name"></span>
+      <span id="state-dir"></span>
       <span class="spacer"></span>
       <nav class="tabs">
         <a class="tab" id="tab-runs" href="#/runs">Runs</a>
@@ -793,9 +717,9 @@
         <div class="section-header">
           <h2>Runs</h2>
           <div class="chips" id="runs-filter">
-            <button class="chip" data-runs-filter="active">Active</button>
-            <button class="chip" data-runs-filter="finished">Finished</button>
-            <button class="chip" data-runs-filter="all">All</button>
+            <button class="btn chip" data-runs-filter="active">Active</button>
+            <button class="btn chip" data-runs-filter="finished">Finished</button>
+            <button class="btn chip" data-runs-filter="all">All</button>
           </div>
           <button class="btn" id="btn-refresh-runs" style="margin-left: auto">Refresh</button>
         </div>
@@ -822,7 +746,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Workflows</h2>
-            <span id="workflows-source-note" style="font-size: 12px; color: var(--muted)"></span>
+            <span class="muted" id="workflows-source-note"></span>
             <span class="actions" style="margin-left: auto">
               <button class="btn" id="btn-new-workflow" hidden>New workflow</button>
               <a class="btn" id="btn-from-template" href="#/templates">From template…</a>
@@ -856,7 +780,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Bundled</h2>
-            <span style="font-size: 12px; color: var(--muted)">the workflows we ship</span>
+            <span class="muted">the workflows we ship</span>
             <button class="btn" id="btn-install-all" style="margin-left: auto">Install all</button>
           </div>
           <div id="bundled-table-wrap">Loading…</div>
@@ -865,7 +789,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Yours</h2>
-            <span style="font-size: 12px; color: var(--muted)">~/.agent-flows/templates/</span>
+            <span class="muted">~/.agent-flows/templates/</span>
           </div>
           <div id="template-table-wrap">Loading…</div>
         </div>
@@ -1049,7 +973,7 @@
             wrap.innerHTML = `<p class="empty">No workflows found.</p>`;
             return;
           }
-          wrap.innerHTML = `<table><thead><tr>
+          wrap.innerHTML = `<table class="table"><thead><tr>
             <th>ID</th><th>Description</th><th>Steps</th><th>Inputs</th><th>Source</th><th>Actions</th>
           </tr></thead><tbody>${rows.map(workflowRow).join("")}</tbody></table>`;
           wireWorkflowsTable(wrap);
@@ -1230,7 +1154,7 @@
             wrap.innerHTML = `<p class="empty">No bundled workflows found.</p>`;
             return;
           }
-          wrap.innerHTML = `<table><thead><tr>
+          wrap.innerHTML = `<table class="table"><thead><tr>
             <th>ID</th><th>Description</th><th>Steps</th><th>Inputs</th><th>Actions</th>
           </tr></thead><tbody>${rows
             .map((r) => templateRow({ ...r, section: "bundled" }))
@@ -1270,7 +1194,7 @@
             wrap.innerHTML = `<p class="empty">No templates saved yet.</p>`;
             return;
           }
-          wrap.innerHTML = `<table><thead><tr>
+          wrap.innerHTML = `<table class="table"><thead><tr>
             <th>Template</th><th>Source workflow</th><th>Exported</th><th>Actions</th>
           </tr></thead><tbody>${templates
             .map((t) => templateRow({ ...t, section: "yours" }))
@@ -1328,7 +1252,7 @@
             : typeof v === "string"
               ? escH(v)
               : escH(JSON.stringify(v));
-        let html = `<table><thead><tr>
+        let html = `<table class="table"><thead><tr>
           <th>Step</th><th>Kind</th><th>Role</th><th>Model</th><th>Depends on</th>
           <th>Permissions</th><th>Schema</th>
         </tr></thead><tbody>`;
@@ -1390,9 +1314,7 @@
           body.innerHTML = `<div class="workflow-head">
             <h2>${escH(d.def.id)}</h2>
             <span class="pipeline-desc">${escH(d.def.description || "")}</span>
-            <span class="tier-badge tier-${isProject ? "project" : "bundled"}">${escH(
-              _pipelinesSource
-            )}</span>
+            <span class="muted mono">${escH(_pipelinesSource)}</span>
             <span class="actions" style="margin-left:auto">
               <button class="btn" data-wf-run>Run…</button>
               ${isProject ? `<button class="btn" data-wf-edit>Edit</button>` : ""}
@@ -1524,8 +1446,8 @@
           </div>
           <div class="workflow-pane-tables">
             <div class="chips editor-tabs">
-              <button class="chip active" data-editor-tab="pipeline">Pipeline</button>
-              <button class="chip" data-editor-tab="prompts">Prompts</button>
+              <button class="btn chip active" data-editor-tab="pipeline">Pipeline</button>
+              <button class="btn chip" data-editor-tab="prompts">Prompts</button>
             </div>
             <div data-editor-panel="pipeline">
               <textarea class="editor-text editor-yaml" spellcheck="false">${escH(body)}</textarea>
@@ -1698,7 +1620,7 @@
           body.innerHTML = `<div class="workflow-head">
             <h2>${escH(d.def.id)}</h2>
             <span class="pipeline-desc">${escH(d.def.description || "")}</span>
-            <span class="tier-badge tier-bundled">bundled</span>
+            <span class="muted mono">bundled</span>
             <span class="actions" style="margin-left:auto">
               <button class="btn" data-tmpl-install-bundled>Install</button>
             </span>
@@ -1724,7 +1646,7 @@
             <span class="pipeline-desc">from ${escH(t.sourcePipeline)}, exported ${escH(
               t.exportedAt
             )}</span>
-            <span class="tier-badge tier-template">template</span>
+            <span class="muted mono">template</span>
             <span class="actions" style="margin-left:auto">
               <button class="btn" data-tmpl-install>Install</button>
             </span>
@@ -1733,7 +1655,7 @@
             <div class="section-header"><h2>Check commands</h2></div>
             ${
               checks.length
-                ? `<table><thead><tr><th>Workflow</th><th>Step</th><th>Command</th></tr></thead><tbody>${checks
+                ? `<table class="table"><thead><tr><th>Workflow</th><th>Step</th><th>Command</th></tr></thead><tbody>${checks
                     .map(
                       (c) =>
                         `<tr><td class="pipeline-id">${escH(c.pipeline)}</td>
@@ -1746,7 +1668,7 @@
           </div>
           <div class="section">
             <div class="section-header"><h2>Files</h2></div>
-            <p class="empty" style="font-style:normal">
+            <p class="empty">
               ${escH(String(files.length))} files, ${escH(String(extras.length))} of them not a workflow definition.
             </p>
             <div>${files.map((f) => `<span class="name-item">${escH(f)}</span>`).join("")}</div>
@@ -1798,7 +1720,7 @@
           </div>`;
         }
         const activeCount = runs.filter((r) => ACTIVE_STATUSES.has(r.status)).length;
-        html += `<p style="font-size:12px;color:var(--muted);margin-bottom:6px">${escH(String(activeCount))} active, ${escH(String(runs.length))} total</p>`;
+        html += `<p class="muted" style="margin-bottom:6px">${escH(String(activeCount))} active, ${escH(String(runs.length))} total</p>`;
 
         if (!shown.length) {
           wrap.innerHTML = `${html}<p class="empty">No ${escH(_runsFilter)} runs.</p>`;
@@ -1806,7 +1728,7 @@
           return;
         }
 
-        html += `<table><thead><tr>
+        html += `<table class="table"><thead><tr>
           <th>Status</th><th>Workflow</th><th>Started</th><th>Duration</th><th>Actions</th>
         </tr></thead><tbody>`;
         for (const r of shown) {
@@ -2289,7 +2211,7 @@
         const stClass = statusClass(st.status || "");
         let html = `<div class="step-row" data-step-id="${escH(sid)}">
           <span class="step-id">${escH(sid)}</span>
-          <span class="run-status ${escH(stClass)}" style="margin-left:6px">${escH(st.status || "pending")}</span>`;
+          <span class="badge ${escH(stClass)}" style="margin-left:6px">${escH(st.status || "pending")}</span>`;
         if (st.model) html += `<span class="step-model">${escH(st.model)}</span>`;
         if (st.outputExcerpt) {
           // step output is untrusted model-produced text — use escH
@@ -2332,7 +2254,7 @@
 
         // FR-019: the workflow name leads, the run id and start time sit under it.
         let html = `<h2 id="run-detail-title">${escH(snapshot.pipelineId || "run")}
-          <span class="run-status ${escH(sc)}">${escH(status)}</span>
+          <span class="badge ${escH(sc)}">${escH(status)}</span>
         </h2>
         <div id="run-detail-id">Run <code>${escH(runId)}</code> ${copyButton(runId)}${
           inv && inv.startedAt ? ` · started ${escH(fmtTime(inv.startedAt))}` : ""
@@ -2344,7 +2266,7 @@
         // gone with the daemon that ran it (FR-011).
         const isDisk = snapshot.source === "disk";
         if (isDisk) {
-          html += `<p style="font-size:12px;color:var(--muted);margin-bottom:10px">Restored from ${escH(snapshot.artifactPath || "its artifact")} — not live, no further updates.</p>`;
+          html += `<p class="muted" style="margin-bottom:10px">Restored from ${escH(snapshot.artifactPath || "its artifact")} — not live, no further updates.</p>`;
         }
 
         // Gate controls — shown only when the run is awaiting approval.
@@ -2375,12 +2297,12 @@
         const steps = snapshot.steps || {};
         const stepIds = Object.keys(steps);
         if (stepIds.length) {
-          html += `<div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px">STEPS</div>`;
+          html += `<div class="block-head">Steps</div>`;
           for (const sid of stepIds) {
             html += stepRowHtml(sid, steps[sid]);
           }
         } else {
-          html += `<p style="color:var(--muted);font-size:13px;margin-top:8px">No steps recorded yet.</p>`;
+          html += `<p class="empty">No steps recorded yet.</p>`;
         }
 
         body.innerHTML = html;
@@ -2468,10 +2390,10 @@
         }
 
         // Update status badge.
-        const badge = row.querySelector(".run-status");
+        const badge = row.querySelector(".badge");
         if (badge) {
           const sc = statusClass(status || "");
-          badge.className = `run-status ${sc}`;
+          badge.className = `badge ${sc}`;
           badge.textContent = status || ""; // .textContent — safe
         }
 

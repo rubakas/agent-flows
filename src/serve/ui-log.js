@@ -218,7 +218,7 @@ export function renderDecisions(gateDecisions, judgeError) {
   for (const d of decisions) {
     const by = d.decidedBy === "human" ? "human" : line("judge", str(d.judgeModelId));
     const verdict = d.approved === true ? "approved" : "rejected";
-    const badge = d.superseded === true ? ` <span class="decision-badge">superseded</span>` : "";
+    const badge = d.superseded === true ? ` <span class="badge">superseded</span>` : "";
     rows += `<tr>
       <td class="pipeline-id">${esc(str(d.gateStepId))}</td>
       <td>${esc(by)}</td>
@@ -236,7 +236,7 @@ export function renderDecisions(gateDecisions, judgeError) {
     </tr>`;
   }
 
-  return `<table class="decisions">
+  return `<table class="table decisions">
     <thead><tr><th>Gate</th><th>By</th><th>Verdict</th><th>Reason</th><th>When</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
@@ -286,7 +286,7 @@ export function renderOutput(payload) {
       }
       rows += `<tr>${cells}</tr>`;
     }
-    return `<table class="output"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+    return `<table class="table output"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
   }
 
   if (kind === "json") {

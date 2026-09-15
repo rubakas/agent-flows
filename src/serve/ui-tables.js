@@ -41,7 +41,8 @@ export function statusClass(s) {
   if (s === "awaiting_approval") return "awaiting_approval";
   if (s === "succeeded" || s === "completed") return "succeeded";
   if (s === "rejected") return "rejected";
-  if (s === "failed" || s === "cancelled" || s === "terminated") return "failed";
+  if (s === "cancelled") return "cancelled";
+  if (s === "failed" || s === "terminated") return "failed";
   return "";
 }
 
@@ -95,7 +96,7 @@ export function workflowRow(wf) {
     `<td class="pipeline-desc">${esc(wf?.description ?? "")}</td>` +
     `<td>${esc(wf?.steps ?? "")}</td>` +
     `<td class="pipeline-id">${esc(inputs)}</td>` +
-    `<td><span class="tier-badge tier-${isProject ? "project" : "bundled"}">${esc(wf?.source ?? "")}</span></td>` +
+    `<td class="muted">${esc(wf?.source ?? "")}</td>` +
     `<td class="actions">${actions}</td>` +
     `</tr>`
   );
@@ -170,7 +171,7 @@ export function runRow(r, opts) {
       : `<span title="no settle time recorded for this run">—</span>`;
   const diskMark =
     r?.source === "disk"
-      ? ` <span class="tier-badge tier-bundled" title="restored from its artifact — this run is not live">disk</span>`
+      ? ` <span class="badge disk" title="restored from its artifact — this run is not live">disk</span>`
       : "";
   const rowClasses = [
     r?.status === "awaiting_approval" ? "awaiting" : "",
@@ -180,10 +181,10 @@ export function runRow(r, opts) {
     .join(" ");
   return (
     `<tr data-run-row="${esc(r?.runId ?? "")}"${rowClasses ? ` class="${rowClasses}"` : ""}>` +
-    `<td><span class="run-status ${esc(sc)}">${esc(r?.status ?? "")}</span>${diskMark}</td>` +
+    `<td><span class="badge ${esc(sc)}">${esc(r?.status ?? "")}</span>${diskMark}</td>` +
     `<td class="pipeline-id">${esc(r?.pipelineId ?? "")}</td>` +
-    `<td style="font-size:12px;color:var(--muted)">${esc(fmtTime(r?.createdAt))}</td>` +
-    `<td style="font-size:12px;color:var(--muted)">${elapsed}</td>` +
+    `<td class="muted">${esc(fmtTime(r?.createdAt))}</td>` +
+    `<td class="muted">${elapsed}</td>` +
     `<td class="actions">${btn("Details", "data-run-details", String(r?.runId ?? ""))}</td>` +
     `</tr>`
   );

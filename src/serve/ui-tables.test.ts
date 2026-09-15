@@ -110,7 +110,7 @@ describe("runRow — unchanged behaviour, including the disk badge", () => {
       createdAt: new Date().toISOString(),
     });
     assert.ok(html.includes('data-run-row="r1"'));
-    assert.ok(html.includes('class="run-status running"'));
+    assert.ok(html.includes('class="badge running"'));
     assert.ok(html.includes('data-run-details="r1"'));
   });
 
@@ -122,6 +122,19 @@ describe("runRow — unchanged behaviour, including the disk badge", () => {
     assert.ok(html.includes(">disk<"), "a persisted run says so in the row");
     assert.ok(html.includes('class="selected"'));
     assert.ok(html.includes("—"), "a run with no settledAt shows no duration");
+  });
+
+  it("gives a cancelled run its own badge class, not the failed one", () => {
+    const html = runRow({
+      runId: "r1",
+      pipelineId: "investigate",
+      status: "cancelled",
+      createdAt: "2026-09-14T10:00:00.000Z",
+    });
+    assert.ok(
+      html.includes('class="badge cancelled"'),
+      `a cancelled run must reach the .badge.cancelled rule: ${html}`
+    );
   });
 
   it("escapes the run id, pipeline id and status", () => {
