@@ -1,11 +1,11 @@
 # 037. Developer page
 
-| Field        | Value                |
-| ------------ | -------------------- |
-| Feature Name | Developer page       |
-| Branch       | `main`               |
-| Status       | Revised — 2026-09-14 |
-| Created      | 2026-09-14           |
+| Field        | Value                                                |
+| ------------ | ---------------------------------------------------- |
+| Feature Name | Developer page                                       |
+| Branch       | `main`                                               |
+| Status       | Implemented — 2026-09-15 (owner visual pass pending) |
+| Created      | 2026-09-14                                           |
 
 ## Problem
 
@@ -141,6 +141,12 @@ exportedAt, sourcePipeline, files:[{path, content}]}` from `src/install/bundle.t
   file a step pointed at, including `providers.yaml`), 2 minor (hard links; non-atomic writes).
   Resolved by dropping regeneration from save, hardening the generator/loader, containing the
   listing, and atomic prompt writes.
+- Test-fixture trap: a serve test built with `pipelinesDir: <repo>/pipelines` and no
+  `bundledPipelinesDir` runs in bundled mode (the default is the same directory), so every
+  guarded mutating route answers 403; tests of those routes must use a mkdtemp project copy
+  (`makeEditorProject`), and a describe that asserts both a bundled refusal and a project
+  success needs two servers (473d4ca).
+- Final: `pnpm check` 1389 tests, 0 failing, at b64600c.
 
 ## Goals / Non-goals
 
@@ -392,10 +398,11 @@ build runs and commit sets, in order:
   Delivered: 2 — 4fe9279, a56462a, 8fce0a7, 0dd41ec (2026-09-14).
 - **Ship 3 — editor.** D2 (the `workflow-edit` route), D6. FRs: FR-004, FR-005. The only genuinely
   new write surface; the prompt-path containment, conflict handling above
-  are its acceptance criteria. Delivered: 3 — (commits recorded after merge).
+  are its acceptance criteria. Delivered: 3 — d9c4545, 7fb6ff8, a67e924; bundled-catalogue draft
+  guard 35f4415; route-test fixture 473d4ca.
 - **Ship 4 — developer-UI restyle.** D8. FR-013. Pure presentation, kept separate so Ships 1-3 stay
   free of CSS churn in their diffs; the owner's visual pass (V4) applies here and stays DEFERRED
-  until an operator session is available, as in spec 034 V3.
+  until an operator session is available, as in spec 034 V3. Delivered: 4 — d6d015f (2026-09-15).
 
 ## Functional Requirements
 
@@ -543,7 +550,14 @@ details`)
       `escapes a message so a script tag cannot reach the DOM`)
 - [x] FR-012 — environment payload and MCP surface unchanged: `/api/n8n/*` → 404;
       `/api/environment` unchanged
-- [ ] FR-013 — shared UI classes and tokens
+- [x] FR-013 — tokens `--warn`/`--radius`/`--row-h` in both themes, base 13px, one `.table`, one
+      `.badge` set incl. `disk`/`cancelled`/`awaiting_approval`, `.btn` primary/danger, no
+      `box-shadow`, `.tier-*` deleted; static gate `src/serve/ui-style.test.ts` (6 assertions);
+      mutation: a `tier-badge` string re-added → red; restored
+- [x] Draft routes refuse the bundled catalogue (35f4415): `POST /api/pipelines/:id/drafts`,
+      `PUT /api/drafts/:id`, `POST /api/drafts/:id/save` → 403 before any lookup; each guard
+      reddens exactly its own test when removed. Found by a curl smoke after Ship 3; the page
+      never exposed it (Edit is project-only).
 - [x] FR-014 — bundled install calls the existing `POST /api/install` route: flip test —
       installing `investigate` into a temp project lists only the closure afterwards
 - [x] FR-015 — allowlisted static-module route (ui-route/ui-graph/ui-log/ui-tables): `/ui-log.js`
@@ -554,3 +568,5 @@ details`)
       with a byte-identical project tree before and after; realpath containment refuses a
       `prompts/` symlink and a file-level symlink; mutation: normalisation block removed →
       5 red
+- [ ] V4 — owner visual pass of the design; request file: `specs/037-developer-page/visual-pass-request.md`
+      (eight views)
