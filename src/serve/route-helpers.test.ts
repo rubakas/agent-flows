@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -195,7 +203,9 @@ describe("dispatch ordering — POST /api/pipelines/:id/template is not captured
 
 describe("dispatch ordering — the editor's suffix routes are not captured by their prefixes", () => {
   let srv: ServeHandle;
+  let projectSrv: ServeHandle;
   let tmpDir: string;
+  let projectRoot: string;
 
   before(async () => {
     tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-route-order-editor-")));
@@ -207,10 +217,31 @@ describe("dispatch ordering — the editor's suffix routes are not captured by t
       bundledPipelinesDir: REAL_PIPELINES_DIR,
       templatesBase: join(tmpDir, "templates"),
     });
+
+    // The draft routes refuse the bundled catalogue, so their ordering is
+    // proven against a project copy of the pipeline instead.
+    projectRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-route-order-project-")));
+    const projectPipelinesDir = join(projectRoot, "pipelines");
+    mkdirSync(projectPipelinesDir);
+    copyFileSync(
+      join(REAL_PIPELINES_DIR, "investigate.yaml"),
+      join(projectPipelinesDir, "investigate.yaml")
+    );
+    cpSync(join(process.cwd(), "prompts"), join(projectRoot, "prompts"), { recursive: true });
+    projectSrv = await startServer({
+      state: makeState(projectRoot, projectRoot),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: projectPipelinesDir,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      templatesBase: join(projectRoot, "templates"),
+    });
   });
   after(async () => {
     await srv.close();
+    await projectSrv.close();
     rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(projectRoot, { recursive: true, force: true });
   });
 
   it("GET /api/pipelines/:id/prompts answers 403 for the bundled catalogue, not the detail payload", async () => {
@@ -221,10 +252,10 @@ describe("dispatch ordering — the editor's suffix routes are not captured by t
   });
 
   it("POST /api/drafts/:id/preview answers with the preview payload, not the draft-save one", async () => {
-    const open = await mutate(srv.port, "POST", "/api/pipelines/investigate/drafts", {});
+    const open = await mutate(projectSrv.port, "POST", "/api/pipelines/investigate/drafts", {});
     assert.equal(open.status, 200);
     const { draftId } = (await open.json()) as { draftId: number };
-    const res = await mutate(srv.port, "POST", `/api/drafts/${draftId}/preview`, {});
+    const res = await mutate(projectSrv.port, "POST", `/api/drafts/${draftId}/preview`, {});
     assert.equal(res.status, 200, `expected 200, got ${res.status}`);
     const body = (await res.json()) as Record<string, unknown>;
     assert.deepEqual(
