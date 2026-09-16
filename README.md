@@ -20,19 +20,26 @@ Node 22 is required for the install itself: the native `better-sqlite3` module i
 
 **The trap:** npm's global prefix follows whichever Node is currently active, so installing without pinning `--prefix` can put the `agent-flows` command somewhere that isn't on your PATH. Pick a prefix once (`~/.local` above) and keep using it.
 
-To uninstall: run `agent-flows setup --remove` **first**, while the command still exists, then `npm rm -g @rubakas/agent-flows`. Skipping the removal step first leaves every harness with a registration pointing at a binary that no longer exists.
+To remove the package: run `agent-flows uninstall` **first**, while the command still exists, then `npm rm -g --prefix ~/.local @rubakas/agent-flows`. Skipping the removal step first leaves every harness with a registration pointing at a binary that no longer exists.
+
+`agent-flows uninstall` always unregisters the MCP server from every harness — that is what the verb means — and then asks two questions, each of which keeps your data unless you answer an explicit yes:
+
+- **Delete the personal workflow library** (`~/.agent-flows/workflows`)? It names the path and how many workflows are in it. Workflows committed inside a repository are never touched by this: they live in the repository, not here.
+- **Delete the per-project state** (`~/.agent-flows/projects`)? This is the databases and the whole run history, it names how many projects are there, and it cannot be undone. Any daemon still running is stopped first; a project whose daemon cannot be identified and stopped keeps its state, and the run says which and why.
+
+A bare newline keeps both. When standard input is not a terminal — a piped or scripted run — nothing is asked and nothing is deleted; the paths that were left behind are printed instead, so a script that wants them gone can remove them itself. There is no flag to force it.
 
 **Developing agent-flows itself** (working on this repository, not using it on another one): a symlink to `bin/agent-flows` also works, but the launcher runs the compiled `dist/` output — run `pnpm build` after every source change, or the symlinked command keeps running the old code. This repository's own `.mcp.json` takes a separate path: it registers `scripts/mcp-serve.sh`, which runs the checkout's source directly under `tsx`, with no build step needed.
 
 ### Register agent-flows with your chat
 
 ```sh
-agent-flows setup
+agent-flows install
 ```
 
-This registers the `agent-flows` MCP server with Claude Code and Codex CLI through their own `mcp add` commands, and with OpenCode by a targeted edit of `~/.config/opencode/opencode.json` (OpenCode's non-interactive `mcp add` form isn't documented, so `setup` writes the `mcp["agent-flows"]` key directly, after a one-time backup, and refuses if your OpenCode config actually lives in `opencode.jsonc` or `config.json`). T3 Code needs nothing of its own — it runs one of the other three harnesses and inherits that harness's configuration.
+This registers the `agent-flows` MCP server with Claude Code and Codex CLI through their own `mcp add` commands, and with OpenCode by a targeted edit of `~/.config/opencode/opencode.json` (OpenCode's non-interactive `mcp add` form isn't documented, so `install` writes the `mcp["agent-flows"]` key directly, after a one-time backup, and refuses if your OpenCode config actually lives in `opencode.jsonc` or `config.json`). T3 Code needs nothing of its own — it runs one of the other three harnesses and inherits that harness's configuration. `install` registers this tool with your chats and nothing more: it installs no package and copies no workflow anywhere.
 
-Running `setup` again makes no further changes; it reports "already-registered" for each harness it already touched. `agent-flows setup --remove` reverses exactly what it wrote — only the entries it created — leaving every other key and the file's own formatting untouched.
+Running `install` again makes no further changes; it reports "already-registered" for each harness it already touched. `agent-flows uninstall` reverses exactly what it wrote — only the entries it created — leaving every other key and the file's own formatting untouched. Neither verb takes any arguments.
 
 This is the entire footprint: agent-flows registers an MCP server and nothing else. It never writes a skill, an agent, a rule, or a settings file into any harness's directory — that belongs to a separate tool (`agent-notes`), which already distributes those to the same four harnesses and registers no MCP server of its own.
 
@@ -137,7 +144,7 @@ agent-flows never edits your `.gitignore`.
 agent-flows doctor
 ```
 
-Reports, per harness (Claude Code, Codex CLI, OpenCode, T3 Code), whether its binary is on PATH, whether `agent-flows` is registered with it, and whether that registration is stale (its command no longer resolves — the sign of an uninstall that skipped `setup --remove`); whether this project's daemon is listening; and whether `better-sqlite3` matches the running Node's ABI, with a hint to reinstall the package rather than rebuild it.
+Reports, per harness (Claude Code, Codex CLI, OpenCode, T3 Code), whether its binary is on PATH, whether `agent-flows` is registered with it, and whether that registration is stale (its command no longer resolves — the sign of a package removal that skipped `agent-flows uninstall`); whether this project's daemon is listening; and whether `better-sqlite3` matches the running Node's ABI, with a hint to reinstall the package rather than rebuild it.
 
 ### Worked example: running your first pipeline
 
@@ -325,7 +332,7 @@ agent-flows doctor            # verify all prerequisites; lists missing items wi
 
 **The editor is the daemon's own page.** The third-party workflow-editor hybrid adopted on 2026-09-04 was retired on 2026-09-14 (ADR-0017): its export covered 8 of 12 pipelines, its community node bypassed the daemon's confinement and run records, and every one of its surfaces was a second representation of the canon to keep in sync. The daemon is the only executor and its web page (`src/serve/`) is the catalogue, the editor and the run monitor — it lists every workflow across the three merged layers (ADR-0018, spec 038 D13), supports creation from templates (shipped and user-saved), edits a workflow with validation before any file is written (forking a bundled one into a writable layer first), shows active runs with their status, streams each step's activity live, and provides approval controls for gates. This resumes the direction of ADR-0013.
 
-Current milestone: [`specs/038-global-package-and-harness-reach`](specs/038-global-package-and-harness-reach/spec.md) — global package and harness reach. Ships 1–4 (real package, reachable-by-default daemon, three-layer workflows, `setup`/`stop`/`doctor`) are implemented; Ship 5 is this documentation. Still outstanding: a live multi-harness proof and the developer page's visual pass (both owner-verified, not yet run). Investigation pipeline reading via `permissions: { contents: read }` is done. [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps.
+Current milestone: [`specs/038-global-package-and-harness-reach`](specs/038-global-package-and-harness-reach/spec.md) — global package and harness reach. Ships 1–4 (real package, reachable-by-default daemon, three-layer workflows, `install`/`uninstall`/`stop`/`doctor`) are implemented; Ship 5 is this documentation. Still outstanding: a live multi-harness proof and the developer page's visual pass (both owner-verified, not yet run). Investigation pipeline reading via `permissions: { contents: read }` is done. [`specs/013-provider-portable-templates`](specs/013-provider-portable-templates/spec.md) is built; [`specs/014-critical-gaps`](specs/014-critical-gaps/spec.md) holds the remaining Charter gaps.
 
 ### Architecture & Design Record
 

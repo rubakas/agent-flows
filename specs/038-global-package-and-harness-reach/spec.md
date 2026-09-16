@@ -297,28 +297,40 @@ identity of the process at that port via `GET /api/daemon`, terminates it, and r
 processes nobody can account for: they outlive the chat that started them, hold an open sqlite
 handle, and after an upgrade keep serving old code forever.
 
-**D10 — `agent-flows setup` registers the MCP server and nothing else; `agent-flows setup --remove`
+**D10 — `agent-flows install` registers the MCP server and nothing else; `agent-flows uninstall`
 reverses exactly those entries.** Per harness: Claude Code and Codex CLI through their own documented
 CLIs (`claude mcp add <name> --scope user -- <cmd>`, `codex mcp add <name> -- <cmd>`) when that
 binary is on PATH; OpenCode by a merge-edit of `~/.config/opencode/opencode.json` (its `mcp add` has
 no documented non-interactive form) writing only the `mcp["agent-flows"]` key, after copying the file
-to `<path>.bak` once. Before editing, `setup` detects whether the user's OpenCode configuration
+to `<path>.bak` once. Before editing, `install` detects whether the user's OpenCode configuration
 actually lives in `opencode.jsonc` or `config.json` rather than `opencode.json`; if so it refuses to
 create a second `opencode.json` that OpenCode would also load, and says so, rather than guessing at a
 round-trip it cannot safely perform. T3 Code needs nothing of its own because it inherits its
 provider's configuration.
 
-Per D17, `setup` never writes into `~/.claude/skills`, `~/.agents/skills`, `~/.claude/agents`,
+Per D17, `install` never writes into `~/.claude/skills`, `~/.agents/skills`, `~/.claude/agents`,
 `~/.claude/rules`, `CLAUDE.md`, `AGENTS.md`, or any harness settings file — those directories belong
 to `agent-notes`, and touching them would both duplicate what that tool already owns and risk being
 swept by its own uninstall (D17).
 
-Setup is idempotent: running it twice changes nothing and reports "already registered" per harness
+`install` is idempotent: running it twice changes nothing and reports "already registered" per harness
 it already touched. `agent-flows doctor` (D11) reports a registered MCP entry whose command is not
-currently resolvable on PATH as stale — uninstalling the package without first running
-`setup --remove` leaves every harness session reporting a failed MCP server forever, and this is the
-detection path for that state; the README states the `setup --remove`-before-uninstall order
+currently resolvable on PATH as stale — removing the package without first running
+`agent-flows uninstall` leaves every harness session reporting a failed MCP server forever, and this
+is the detection path for that state; the README states the `uninstall`-before-package-removal order
 explicitly.
+
+These two verbs were named `setup` and `setup --remove` until after the live install of 2026-09-17
+(V4); the owner then renamed them to `install` and `uninstall`, with no alias and no flags, and the
+workflow-installing `install` verb this spec's second amendment retired left the name free.
+
+After unregistering, `uninstall` offers — one interactive question each, never a flag — to delete the
+personal workflow library (`<stateRoot>/workflows`) and the per-project state (`<stateRoot>/projects`,
+the databases and the run history), naming the path and the count before each. Both are kept unless
+the answer is an explicit yes, a non-terminal stdin is asked nothing and deletes nothing, running
+daemons are stopped through the `stop --all` path before their project's state goes (and a project
+whose daemon cannot be identified keeps its state), and a repository's own `.agent-flows` workflows
+are never touched, because they belong to the repository.
 
 **D11 — `doctor` reports reach.** It prints, per harness, whether the binary is on PATH, whether our
 MCP entry is registered and where, and whether that registration is stale (D10); plus, for the
@@ -477,8 +489,8 @@ time:
   directory**, so the reversal D10/FR-031 promises was not exact. The round-trip test had compared a
   single file (the OpenCode config itself); it now snapshots the whole configuration directory, so a
   leftover backup file is caught as evidence agent-flows was ever there
-  (`src/setup/harnesses.test.ts:417-450`). `removeOpencode` now deletes the backup once the file it
-  restores matches it again (`src/setup/harnesses.ts:598-629`).
+  (`src/harness/harnesses.test.ts:417-450`). `removeOpencode` now deletes the backup once the file it
+  restores matches it again (`src/harness/harnesses.ts:598-629`).
 - **`agent-flows doctor` read providers and workflows from the installed package while reading the
   daemon from the project**, so under a global install one report described two different places. Both
   now resolve through `resolveProjectDir()`, the helper that already existed for exactly this
@@ -613,16 +625,16 @@ so deleting the behaviour would have left the suite green; it now asserts direct
 - **FR-029.** `GET /api/export/:id` resolves which of the three layers owns the requested id via the
   D13 merged view before calling `exportBundle` with that layer's pipelines directory, rather than
   always using `ctx.pipelinesDir` (D16).
-- **FR-030.** `agent-flows setup` registers Claude Code and Codex CLI via their own CLIs when the
+- **FR-030.** `agent-flows install` registers Claude Code and Codex CLI via their own CLIs when the
   respective binary is on PATH, and OpenCode via a merge-edit of `~/.config/opencode/opencode.json`
   that touches only the `mcp["agent-flows"]` key, after writing a one-time `.bak` copy of that file;
-  before editing, `setup` detects an existing `opencode.jsonc` or `config.json` and refuses with a
-  clear message rather than creating a second config file that would also load; running `setup` a
+  before editing, `install` detects an existing `opencode.jsonc` or `config.json` and refuses with a
+  clear message rather than creating a second config file that would also load; running `install` a
   second time makes no further changes and reports "already registered" for every harness it already
-  touched; `setup` writes to no other path — a test asserts it touches none of
+  touched; `install` writes to no other path — a test asserts it touches none of
   `~/.claude/skills`, `~/.agents/skills`, `~/.claude/agents`, `~/.claude/rules`, `CLAUDE.md`,
   `AGENTS.md`, or any harness settings file (D10, D17).
-- **FR-031.** `agent-flows setup --remove` reverses exactly what `setup` wrote for each harness —
+- **FR-031.** `agent-flows uninstall` reverses exactly what `install` wrote for each harness —
   the `claude mcp remove` / `codex mcp remove` equivalent, and deleting only the
   `mcp["agent-flows"]` key from the OpenCode config — leaving every other key in each harness's
   config unchanged (D10).
