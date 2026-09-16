@@ -198,10 +198,9 @@ skill is explicitly out of scope for this spec and belongs to `agent-notes` inst
 copies `src/serve/ui.html` and the four `ui-*.js` page modules verbatim into `dist/serve/` — they
 stay hand-written JavaScript, never compiled, so the browser and the unit tests load the identical
 bytes whether the suite runs from `src/` or `dist/`. `bin/agent-flows` runs the compiled `dist/`
-output directly with a plain `#!/usr/bin/env node` shebang: no `tsx`, no `nvm` sourcing. `engines.node
-
-> = 22`is the contract; the bin checks`process.versions.node`'s major version and exits with a
-> clear message when it is below 22.
+output directly with a plain `#!/usr/bin/env node` shebang: no `tsx`, no `nvm` sourcing. The
+`engines.node` floor of 22 is the contract; the bin checks `process.versions.node`'s major version
+and exits with a clear message when it is below 22.
 
 **D3 — Packaging allowlist.** `package.json`'s `files` field becomes the single enumerated allowlist
 that decides what `npm pack` ships: `dist`, `pipelines`, `prompts`, `bin`, `README.md`, `LICENSE`.
