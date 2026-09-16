@@ -116,8 +116,10 @@ switch (verb) {
     runModule(src("bindings", "mastra", "server.ts"), rest);
     break;
 
+  // list reads the merged layer view (spec 038 D13), not the installer's
+  // installed/available split — that split dies with the install verb.
   case "list":
-    runModule(src("install", "run.ts"), ["list", ...rest]);
+    runModule(src("canon", "list-cli.ts"), rest);
     break;
 
   case "install":
