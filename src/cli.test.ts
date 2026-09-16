@@ -22,7 +22,7 @@ import {
   copyFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { describe, it } from "node:test";
 
 import { packageRoot } from "./packageRoot.js";
@@ -342,6 +342,20 @@ function olderNodeBinary(): string | undefined {
   return undefined;
 }
 
+/**
+ * The environment a harness gives the launcher: an old node first on PATH and
+ * no other node anywhere on it, so the launcher's own search has to do the
+ * work. Inheriting the test runner's PATH would hide that -- it carries the
+ * Node 22 the suite runs under, which would rescue any selection bug.
+ */
+function harnessEnv(oldNode: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, AGENT_FLOWS_PROJECT_DIR: repoRoot };
+  delete env.AGENT_FLOWS_NODE;
+  delete env.AGENT_FLOWS_NODE_REEXEC;
+  env.PATH = [dirname(oldNode), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(delimiter);
+  return env;
+}
+
 describe("bin/agent-flows: symlink resolution and project targeting", () => {
   it("runs the compiled CLI and resolves the invocation directory as the project", () => {
     ensureBuild();
@@ -385,17 +399,89 @@ describe("bin/agent-flows: symlink resolution and project targeting", () => {
     assert.doesNotMatch(source, /nvm\.sh/u, "the launcher must not source nvm");
   });
 
-  it("refuses a node older than 22, naming both versions (FR-003)", (t) => {
+  it("re-execs under a compatible node when the ambient node is too old (FR-003)", (t) => {
+    const oldNode = olderNodeBinary();
+    if (oldNode === undefined) {
+      t.skip("no node older than 22 (and at least 20) is installed on this machine");
+      return;
+    }
+    ensureBuild();
+    // Exactly the harness case: the launcher is started by a node older than 22
+    // whose directory is also the first PATH entry, so nothing on PATH rescues
+    // it -- the launcher's own search must find the interpreter.
+    const childEnv = harnessEnv(oldNode);
+    const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "list"], {
+      env: childEnv,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    const output = (result.stdout ?? "") + (result.stderr ?? "");
+    assert.equal(result.status, 0, `expected the re-exec to succeed:\n${output}`);
+    assert.match(result.stdout ?? "", /AVAILABLE WORKFLOWS/u);
+    // A silent, correct run is the point: no version complaint on the way.
+    assert.doesNotMatch(
+      result.stderr ?? "",
+      /Node 22 or newer is required/u,
+      `the success path must print no version message:\n${result.stderr ?? ""}`
+    );
+  });
+
+  it("re-execs onto an interpreter that can load the native module, not merely a newer one (FR-003)", (t) => {
+    const oldNode = olderNodeBinary();
+    if (oldNode === undefined) {
+      t.skip("no node older than 22 (and at least 20) is installed on this machine");
+      return;
+    }
+    ensureBuild();
+    // "doctor" is the cheapest verb that opens a database, so it is the only
+    // available proof that the chosen interpreter can dlopen better-sqlite3 --
+    // a newer major passes the version floor and still fails here.
+    const childEnv = harnessEnv(oldNode);
+    const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "doctor"], {
+      env: childEnv,
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    const output = (result.stdout ?? "") + (result.stderr ?? "");
+    assert.match(output, /better-sqlite3 \(native ABI\)/u, `doctor did not run at all:\n${output}`);
+    assert.doesNotMatch(
+      output,
+      /ABI mismatch|ERR_DLOPEN_FAILED/u,
+      `the re-exec chose an interpreter that cannot load the database module:\n${output}`
+    );
+  });
+
+  it("fails loudly when AGENT_FLOWS_NODE points at an unusable binary (FR-003)", (t) => {
+    const oldNode = olderNodeBinary();
+    if (oldNode === undefined) {
+      t.skip("no node older than 22 (and at least 20) is installed on this machine");
+      return;
+    }
+    // A file that exists but is not an interpreter: the override must not fall
+    // through to the search, because a wrong explicit setting has to be visible.
+    const bogus = join(repoRoot, "package.json");
+    const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "list"], {
+      env: { ...process.env, AGENT_FLOWS_NODE: bogus },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    const output = (result.stdout ?? "") + (result.stderr ?? "");
+    assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
+    assert.ok(output.includes(bogus), `the message must name ${bogus}:\n${output}`);
+  });
+
+  it("refuses instead of re-execing again once the loop marker is set (FR-003)", (t) => {
     const oldNode = olderNodeBinary();
     if (oldNode === undefined) {
       t.skip("no node older than 22 (and at least 20) is installed on this machine");
       return;
     }
     const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "list"], {
+      env: { ...process.env, AGENT_FLOWS_NODE_REEXEC: "1" },
       encoding: "utf8",
       timeout: 30_000,
     });
-    const output = result.stdout + result.stderr;
+    const output = (result.stdout ?? "") + (result.stderr ?? "");
     assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
     assert.match(output, /Node 22 or newer is required/u);
     const running = execFileSync(oldNode, ["-p", "process.versions.node"], {

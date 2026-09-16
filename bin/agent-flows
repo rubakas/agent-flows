@@ -4,28 +4,32 @@
 // It runs the compiled CLI under the ambient node: no transpiler at runtime and
 // no nvm sourcing, so it works from a global install with no dev dependencies.
 // The engines floor of 22 is enforced here instead, because better-sqlite3 is
-// built for Node 22's ABI (NODE_MODULE_VERSION 127) and an older node fails
-// deep inside a database call with an unreadable dlopen error.
+// built for one Node ABI (NODE_MODULE_VERSION 127 for Node 22) and any other
+// one fails deep inside a database call with an unreadable dlopen error.
+//
+// AI CLI harnesses spawn the registered MCP command with their own PATH, which
+// is usually the machine's default node and may be older than 22. Refusing
+// there would make the command unreachable from every harness, so when the
+// running node is too old this script looks for a working interpreter and
+// re-execs itself under it, silently. It only refuses when it finds none.
+//
+// "Working" is proved by loading better-sqlite3, not by a version number: a
+// Node 24 install satisfies the floor and still cannot open a database built
+// for Node 22, and `serve` -- the daemon every harness talks to -- would then
+// fail at its first query.
 //
 // The project directory is not captured here: this script never changes
 // directory, so process.cwd() in the CLI is already the invocation directory
 // and resolveProjectDir() falls back to it (AGENT_FLOWS_PROJECT_DIR still wins).
 
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REQUIRED_NODE_MAJOR = 22;
-
-const running = process.versions.node;
-const major = Number.parseInt(running.split(".")[0], 10);
-if (!Number.isFinite(major) || major < REQUIRED_NODE_MAJOR) {
-  process.stderr.write(
-    `agent-flows: Node ${String(REQUIRED_NODE_MAJOR)} or newer is required, but this is Node ${running}.\n` +
-      `Switch to Node ${String(REQUIRED_NODE_MAJOR)} (for example: nvm use ${String(REQUIRED_NODE_MAJOR)}) and run the command again.\n`
-  );
-  process.exit(1);
-}
+const REEXEC_MARKER = "AGENT_FLOWS_NODE_REEXEC";
 
 // Walk up to the package root rather than assuming a fixed depth: the command
 // is reached through a symlink on PATH, and node resolves import.meta.url to
@@ -40,6 +44,188 @@ while (!existsSync(join(root, "package.json"))) {
     process.exit(1);
   }
   root = parent;
+}
+
+const running = process.versions.node;
+const major = Number.parseInt(running.split(".")[0], 10);
+if (!Number.isFinite(major) || major < REQUIRED_NODE_MAJOR) {
+  reExecOrRefuse();
+}
+
+/** The major version a node binary reports, or undefined if it is not usable. */
+function probeMajor(binary) {
+  try {
+    const reported = execFileSync(binary, ["-p", "process.versions.node"], {
+      encoding: "utf8",
+      timeout: 5_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    const probed = Number.parseInt(reported.split(".")[0], 10);
+    return Number.isFinite(probed) ? probed : undefined;
+  } catch {
+    // A missing file, a non-executable, a hung binary or anything that is not
+    // node at all: all of them simply mean "not a candidate".
+    return undefined;
+  }
+}
+
+/**
+ * Whether a candidate interpreter can actually run this package.
+ *
+ * Returns "ok", "version" (too old or not a node at all) or "native" (new
+ * enough, but it cannot load the compiled database module). A version number
+ * is not evidence: better-sqlite3 is compiled for whichever node installed it,
+ * so a Node 24 install passes the floor and still fails to dlopen a binary
+ * built for Node 22. Loading the module is the only evidence there is.
+ */
+function qualify(binary) {
+  const probed = probeMajor(binary);
+  if (probed === undefined || probed < REQUIRED_NODE_MAJOR) return "version";
+  return loadsNativeModule(binary) ? "ok" : "native";
+}
+
+/** True when `binary` can open a database with the package's better-sqlite3. */
+function loadsNativeModule(binary) {
+  const modulePath = join(root, "node_modules", "better-sqlite3");
+  // No local copy of the module (a different install layout, or a package
+  // whose dependencies live elsewhere) is not proof of a broken interpreter —
+  // there is nothing to probe, so the version check stands on its own.
+  if (!existsSync(modulePath)) return true;
+  try {
+    // Requiring the module is not enough: the addon is dlopened lazily, on the
+    // first database, so the probe has to open one.
+    execFileSync(
+      binary,
+      ["-e", `new (require(${JSON.stringify(modulePath)}))(":memory:").close()`],
+      { timeout: 5_000, stdio: "ignore" }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve a path for identity comparison, tolerating a missing file. */
+function resolved(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/** The first node on PATH other than the running one that qualifies. */
+function fromPath(rejected) {
+  const self = resolved(process.execPath);
+  for (const entry of (process.env.PATH ?? "").split(delimiter)) {
+    if (entry === "") continue;
+    const candidate = join(entry, "node");
+    if (!existsSync(candidate) || resolved(candidate) === self) continue;
+    if (accept(candidate, rejected)) return candidate;
+  }
+  return undefined;
+}
+
+/** Qualify a candidate, recording it when only the native module load failed. */
+function accept(candidate, rejected) {
+  const verdict = qualify(candidate);
+  if (verdict === "native") rejected.push(candidate);
+  return verdict === "ok";
+}
+
+/**
+ * The first nvm-installed node of major 22 or newer that qualifies.
+ *
+ * Exact major 22 is tried first, then ascending majors above it, newest patch
+ * within each: the engines floor is 22, so that is where the module was most
+ * likely built and where the probe is most likely to succeed on the first try.
+ * With the native-module probe deciding, this order is only an optimisation —
+ * a wrong guess costs one probe, not a broken run.
+ */
+function fromNvm(rejected) {
+  const versionsDir = join(process.env.NVM_DIR ?? join(homedir(), ".nvm"), "versions", "node");
+  if (!existsSync(versionsDir)) return undefined;
+  const parse = (name) => name.replace(/^v/u, "").split(".").map(Number);
+  const entries = readdirSync(versionsDir)
+    .filter((name) => /^v\d+\.\d+\.\d+$/u.test(name))
+    .map(parse)
+    .filter(([entryMajor]) => entryMajor >= REQUIRED_NODE_MAJOR)
+    .sort((a, b) => {
+      const rank = (version) => (version[0] === REQUIRED_NODE_MAJOR ? -1 : version[0]);
+      return rank(a) - rank(b) || b[1] - a[1] || b[2] - a[2];
+    });
+  for (const version of entries) {
+    const candidate = join(versionsDir, `v${version.join(".")}`, "bin", "node");
+    if (existsSync(candidate) && accept(candidate, rejected)) return candidate;
+  }
+  return undefined;
+}
+
+/** Re-exec this CLI under a compatible node, or print why it cannot. */
+function reExecOrRefuse() {
+  // Already re-execed once and still too old: the interpreter we picked was not
+  // what it claimed to be. Refuse rather than fork forever.
+  const alreadyReExeced = process.env[REEXEC_MARKER] !== undefined;
+  const override = process.env.AGENT_FLOWS_NODE;
+  // Interpreters new enough but unable to load the database module, kept so the
+  // refusal can say that rather than the misleading "none found".
+  const rejected = [];
+  if (!alreadyReExeced && override !== undefined && override !== "") {
+    // An explicit override that is wrong must be loud: falling through to the
+    // search would hide a broken configuration behind a working run.
+    const verdict = qualify(override);
+    if (verdict !== "ok") {
+      const probed = probeMajor(override);
+      const reason =
+        verdict === "native"
+          ? `it is Node ${String(probed)}, but it cannot load this package's better-sqlite3 (built for a different Node ABI)`
+          : `it is not a usable Node ${String(REQUIRED_NODE_MAJOR)}+ interpreter${probed === undefined ? "" : ` (it reports Node ${String(probed)})`}`;
+      process.stderr.write(
+        `agent-flows: AGENT_FLOWS_NODE points at ${override}, but ${reason}.\n` +
+          `Point AGENT_FLOWS_NODE at a Node ${String(REQUIRED_NODE_MAJOR)}+ binary that can load the module, or unset it.\n`
+      );
+      process.exit(1);
+    }
+    reExec(override);
+  }
+
+  if (!alreadyReExeced) {
+    const candidate =
+      fromPath(rejected) ??
+      fromNvm(rejected) ??
+      ["/opt/homebrew/bin/node", "/usr/local/bin/node"].find((path) =>
+        existsSync(path) ? accept(path, rejected) : false
+      );
+    if (candidate !== undefined) reExec(candidate);
+  }
+
+  const nvmDir = process.env.NVM_DIR ?? join(homedir(), ".nvm");
+  process.stderr.write(
+    `agent-flows: Node ${String(REQUIRED_NODE_MAJOR)} or newer is required, but this is Node ${running}.\n` +
+      (rejected.length === 0
+        ? `Switch to Node ${String(REQUIRED_NODE_MAJOR)} (for example: nvm use ${String(REQUIRED_NODE_MAJOR)}) and run the command again.\n`
+        : `Found Node ${String(REQUIRED_NODE_MAJOR)}+ interpreters, but none of them could load this package's better-sqlite3, ` +
+          `which is built for one Node ABI: ${rejected.join(", ")}.\n` +
+          `Run the command under the Node that installed the dependencies, or rebuild them for one of these.\n`) +
+      `Looked for one in AGENT_FLOWS_NODE, on PATH, under ${join(nvmDir, "versions", "node")}, /opt/homebrew/bin/node and /usr/local/bin/node.\n`
+  );
+  process.exit(1);
+}
+
+/** Run this same script under `binary`, forwarding everything, and exit with it. */
+function reExec(binary) {
+  const result = spawnSync(binary, [process.argv[1], ...process.argv.slice(2)], {
+    stdio: "inherit",
+    env: { ...process.env, [REEXEC_MARKER]: "1" },
+  });
+  if (result.error !== undefined && result.error !== null) {
+    process.stderr.write(`agent-flows: could not run ${binary}: ${result.error.message}\n`);
+    process.exit(1);
+  }
+  if (result.signal !== null && result.signal !== undefined) {
+    process.kill(process.pid, result.signal);
+  }
+  process.exit(result.status ?? 1);
 }
 
 const cliPath = join(root, "dist", "cli.js");
