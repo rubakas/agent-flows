@@ -3,10 +3,12 @@ import { describe, it } from "node:test";
 import {
   formatReport,
   hasFailures,
+  reachResult,
   runDoctor,
   type CheckResult,
   type DoctorProbes,
 } from "./doctor.js";
+import type { HarnessReach } from "./setup/harnesses.js";
 
 // ── Fake probes ───────────────────────────────────────────────────────────────
 
@@ -37,6 +39,40 @@ function makeOkProbes(overrides: Partial<DoctorProbes> = {}): DoctorProbes {
     requireNative: () => true,
     reachable: async (_url) => true,
     loadCanon: () => ({ loaded: ["spec-creation"], failed: [] }),
+    harnessReach: () => [
+      {
+        harness: "claude-code",
+        label: "Claude Code",
+        binaryPath: "/usr/bin/claude",
+        configPath: "/fake-home/.claude.json",
+        command: ["/pkg/bin/agent-flows", "mcp"],
+        registered: true,
+        stale: false,
+      },
+      {
+        harness: "codex",
+        label: "Codex CLI",
+        binaryPath: "/usr/bin/codex",
+        configPath: "/fake-home/.codex/config.toml",
+        command: ["/pkg/bin/agent-flows", "mcp"],
+        registered: true,
+        stale: false,
+      },
+      {
+        harness: "opencode",
+        label: "OpenCode",
+        registered: false,
+        stale: false,
+      },
+      {
+        harness: "t3-code",
+        label: "T3 Code",
+        registered: false,
+        stale: false,
+        note: "inherits the configuration of whichever harness it runs",
+      },
+    ],
+    projectDaemon: async () => ({ state: "not-running", detail: "not running — no daemon.json" }),
     env: {},
     providers: { models: [], profiles: [] },
     ...overrides,
@@ -190,12 +226,20 @@ describe("runDoctor", () => {
     assert.ok(check.detail.includes("ANTHROPIC_API_KEY"));
   });
 
-  it("better-sqlite3 fails to load → fail with rebuild hint", async () => {
+  it("better-sqlite3 fails to load → fail telling the user to reinstall, not rebuild (FR-032)", async () => {
     const results = await runDoctor(makeOkProbes({ requireNative: () => false }));
     const check = results.find((r) => r.name.includes("better-sqlite3"));
     assert.ok(check);
     assert.equal(check.status, "fail");
-    assert.ok(check.hint?.includes("pnpm rebuild better-sqlite3"));
+    assert.ok(
+      check.hint?.includes("reinstall"),
+      `a global install has no rebuild path — hint must say reinstall: ${check.hint}`
+    );
+    assert.ok(
+      !check.hint?.includes("pnpm rebuild better-sqlite3"),
+      `hint must not send the user to a rebuild: ${check.hint}`
+    );
+    assert.ok(check.detail.includes("NODE_MODULE_VERSION"), check.detail);
   });
 
   // ── Active provider + profile transport checks ────────────────────────────
@@ -376,5 +420,100 @@ describe("hasFailures", () => {
 
   it("returns false for empty array", () => {
     assert.ok(!hasFailures([]));
+  });
+});
+
+// ── Tests: harness reach report (FR-032) ──────────────────────────────────────
+
+function reach(overrides: Partial<HarnessReach> = {}): HarnessReach {
+  return {
+    harness: "claude-code",
+    label: "Claude Code",
+    binaryPath: "/usr/bin/claude",
+    configPath: "/fake-home/.claude.json",
+    command: ["/pkg/bin/agent-flows", "mcp"],
+    registered: true,
+    stale: false,
+    ...overrides,
+  };
+}
+
+describe("doctor: per-harness reach", () => {
+  it("registered and resolvable → ok, naming the config file and the command", () => {
+    const result = reachResult(reach());
+    assert.equal(result.status, "ok");
+    assert.ok(result.detail.includes("/fake-home/.claude.json"), result.detail);
+    assert.ok(result.detail.includes("/pkg/bin/agent-flows mcp"), result.detail);
+  });
+
+  it("registered but the command no longer resolves → fail, flagged stale", () => {
+    const result = reachResult(reach({ stale: true }));
+    assert.equal(result.status, "fail");
+    assert.match(result.detail, /STALE/u);
+    assert.ok(result.detail.includes("/pkg/bin/agent-flows"), result.detail);
+    assert.ok(result.hint?.includes("agent-flows setup"), result.hint);
+  });
+
+  it("harness installed but not registered → warn pointing at setup", () => {
+    const result = reachResult(
+      reach({ registered: false, configPath: undefined, command: undefined })
+    );
+    assert.equal(result.status, "warn");
+    assert.match(result.detail, /not registered/u);
+    assert.equal(result.hint, "agent-flows setup");
+  });
+
+  it("harness not installed → ok, nothing to do", () => {
+    const result = reachResult(
+      reach({ binaryPath: undefined, registered: false, configPath: undefined, command: undefined })
+    );
+    assert.equal(result.status, "ok");
+    assert.match(result.detail, /not installed/u);
+  });
+
+  it("T3 Code reports that it inherits its provider's configuration", () => {
+    const result = reachResult(
+      reach({ harness: "t3-code", label: "T3 Code", registered: false, note: "inherits it" })
+    );
+    assert.equal(result.status, "ok");
+    assert.equal(result.detail, "inherits it");
+  });
+
+  it("runDoctor emits one line per harness the probe reports", async () => {
+    const results = await runDoctor(makeOkProbes());
+    for (const label of ["Claude Code", "Codex CLI", "OpenCode", "T3 Code"]) {
+      assert.ok(
+        results.some((r) => r.name === `${label} (MCP)`),
+        `missing reach line for ${label}`
+      );
+    }
+  });
+});
+
+// ── Tests: the project daemon line (FR-032) ───────────────────────────────────
+
+describe("doctor: this project's daemon", () => {
+  it("listening → ok", async () => {
+    const results = await runDoctor(
+      makeOkProbes({
+        projectDaemon: async () => ({ state: "listening", detail: "listening on port 7411" }),
+      })
+    );
+    const check = results.find((r) => r.name === "This project's daemon");
+    assert.ok(check);
+    assert.equal(check.status, "ok");
+    assert.match(check.detail, /7411/u);
+  });
+
+  it("a record nothing answers → warn pointing at stop", async () => {
+    const results = await runDoctor(
+      makeOkProbes({
+        projectDaemon: async () => ({ state: "stale-record", detail: "nothing answers on 7411" }),
+      })
+    );
+    const check = results.find((r) => r.name === "This project's daemon");
+    assert.ok(check);
+    assert.equal(check.status, "warn");
+    assert.ok(check.hint?.includes("agent-flows stop"), check.hint);
   });
 });

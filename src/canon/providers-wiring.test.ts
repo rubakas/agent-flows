@@ -99,6 +99,8 @@ describe("providers-wiring — doctor root honours providers", () => {
       requireNative: () => true,
       reachable: async (_url: string) => true,
       loadCanon: () => ({ loaded: ["spec-creation"], failed: [] }),
+      harnessReach: () => [],
+      projectDaemon: async () => ({ state: "not-running", detail: "not running" }) as const,
       env: {},
       providers,
     };

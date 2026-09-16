@@ -7,9 +7,14 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { resolveProjectDir } from "./bindings/mastra/projectDir.js";
 import { listPipelines, loadPipeline } from "./canon/load.js";
 import { loadProviders } from "./canon/loadProviders.js";
 import { defaultRegistry, getActiveProfile } from "./canon/registry.js";
+import { packageVersion } from "./packageRoot.js";
+import { classifyIdentity, probeDaemon, readDaemonRecord } from "./runtime/daemonRecord.js";
+import { resolveProjectState } from "./runtime/projectState.js";
+import { harnessReach, resolveSetupEnv, type HarnessReach } from "./setup/harnesses.js";
 import type { ProviderConfig } from "./canon/registry.js";
 
 const execFileAsync = promisify(execFile);
@@ -42,6 +47,54 @@ export interface DoctorProbes {
   env: NodeJS.ProcessEnv;
   /** Project-level provider configuration; empty arrays when no providers.yaml is present. */
   providers: ProviderConfig;
+  /** Per-harness MCP reach: binary on PATH, our entry, and whether it is stale (FR-032). */
+  harnessReach: () => HarnessReach[];
+  /** Whether this project's daemon is listening, via daemon.json + GET /api/daemon (FR-032). */
+  projectDaemon: () => Promise<DaemonStatus>;
+}
+
+/** What the daemon record and the identity route say about this project (FR-032). */
+export interface DaemonStatus {
+  state: "listening" | "not-running" | "stale-record" | "mismatch";
+  detail: string;
+}
+
+/**
+ * One harness's reach, phrased so the failure is unambiguous at a glance: a
+ * stale entry (its command no longer resolves) fails, because every session of
+ * that harness reports a broken MCP server until it is fixed; an installed
+ * harness with no entry only warns, because `setup` fixes it in one command.
+ */
+export function reachResult(reach: HarnessReach): CheckResult {
+  const name = `${reach.label} (MCP)`;
+  if (reach.note !== undefined) {
+    return { name, status: "ok", detail: reach.note };
+  }
+  if (reach.binaryPath === undefined && !reach.registered) {
+    return { name, status: "ok", detail: "not installed — nothing to register" };
+  }
+  const where = reach.configPath ?? "an unknown config";
+  if (reach.registered && reach.stale) {
+    return {
+      name,
+      status: "fail",
+      detail: `registered in ${where} but STALE: ${reach.command?.[0] ?? "its command"} no longer exists`,
+      hint: "agent-flows setup  (re-registers the current install)",
+    };
+  }
+  if (reach.registered) {
+    return {
+      name,
+      status: "ok",
+      detail: `registered in ${where} → ${(reach.command ?? []).join(" ")}`,
+    };
+  }
+  return {
+    name,
+    status: "warn",
+    detail: `${reach.binaryPath ?? "installed"} — not registered`,
+    hint: "agent-flows setup",
+  };
 }
 
 export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
@@ -83,13 +136,37 @@ export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
     if (probes.requireNative()) {
       results.push({ name: "better-sqlite3 (native ABI)", status: "ok", detail: "loads ok" });
     } else {
+      // Reinstall, never rebuild: a globally installed package has no build
+      // step the user can re-run, and `pnpm rebuild` in some unrelated checkout
+      // would not touch the copy the harnesses actually spawn (D11).
       results.push({
         name: "better-sqlite3 (native ABI)",
         status: "fail",
-        detail: "ERR_DLOPEN_FAILED — ABI mismatch",
-        hint: "pnpm rebuild better-sqlite3",
+        detail: `ERR_DLOPEN_FAILED — NODE_MODULE_VERSION mismatch: this module was built for another Node than the running v${probes.nodeVersion().replace(/^v/, "")}`,
+        hint: "reinstall the package under this Node (npm i -g @rubakas/agent-flows); do not try to rebuild it",
       });
     }
+  }
+
+  // 3b. Harness reach: is the MCP server registered where each harness looks (FR-032)?
+  for (const reach of probes.harnessReach()) {
+    results.push(reachResult(reach));
+  }
+
+  // 3c. This project's daemon (FR-032)
+  {
+    const daemon = await probes.projectDaemon();
+    const status: CheckStatus =
+      daemon.state === "listening" || daemon.state === "not-running" ? "ok" : "warn";
+    results.push({
+      name: "This project's daemon",
+      status,
+      detail: daemon.detail,
+      hint:
+        daemon.state === "stale-record" || daemon.state === "mismatch"
+          ? "agent-flows stop  (then let the next tool call start a fresh daemon)"
+          : undefined,
+    });
   }
 
   // 4. Active provider + profile role transport prerequisites (required)
@@ -466,6 +543,41 @@ export function defaultProbes(): DoctorProbes {
         }
       }
       return { loaded, failed };
+    },
+
+    harnessReach: () => harnessReach(resolveSetupEnv()),
+
+    projectDaemon: async () => {
+      const projectDir = resolveProjectDir();
+      const state = resolveProjectState(projectDir);
+      const record = readDaemonRecord(state.dir);
+      if (record === undefined) {
+        return {
+          state: "not-running",
+          detail: `not running — no ${join(state.dir, "daemon.json")} (a tool call starts one)`,
+        };
+      }
+      const identity = await probeDaemon(record.port);
+      if (identity === undefined) {
+        return {
+          state: "stale-record",
+          detail: `daemon.json records pid ${record.pid} on port ${record.port}, but nothing answers there`,
+        };
+      }
+      const verdict = classifyIdentity(identity, { projectDir, version: packageVersion() });
+      if (verdict === "match") {
+        return {
+          state: "listening",
+          detail: `listening on port ${record.port} (pid ${identity.pid}, version ${identity.version})`,
+        };
+      }
+      return {
+        state: "mismatch",
+        detail:
+          verdict === "other-project"
+            ? `port ${record.port} serves ${identity.projectDir}, not this project`
+            : `port ${record.port} runs agent-flows ${identity.version}, not ${packageVersion()}`,
+      };
     },
 
     env: process.env,
