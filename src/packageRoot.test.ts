@@ -8,12 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import {
-  bundledPipelinesDir,
-  bundledPromptsDir,
-  packageRoot,
-  resolvePackageRootFrom,
-} from "./packageRoot.js";
+import { bundledPipelinesDir, packageRoot, resolvePackageRootFrom } from "./packageRoot.js";
 
 const tmpRoots: string[] = [];
 
@@ -39,7 +34,6 @@ describe("FR-004: packageRoot() resolves this package", () => {
 
   it("derives the bundled asset directories from that root", () => {
     assert.equal(bundledPipelinesDir(), join(packageRoot(), "pipelines"));
-    assert.equal(bundledPromptsDir(), join(packageRoot(), "prompts"));
     assert.ok(existsSync(join(bundledPipelinesDir(), "investigate.yaml")));
   });
 

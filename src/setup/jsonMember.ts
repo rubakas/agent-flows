@@ -32,7 +32,6 @@ function skipWhitespace(text: string, index: number): number {
   return i;
 }
 
-/** Index just past the string literal starting at `index` (which must be a quote). */
 function scanString(text: string, index: number): number {
   let i = index + 1;
   while (i < text.length) {
@@ -46,8 +45,7 @@ function scanString(text: string, index: number): number {
   throw new Error("unterminated string");
 }
 
-/** Index just past the JSON value starting at `index`. */
-export function scanValue(text: string, index: number): number {
+function scanValue(text: string, index: number): number {
   const first = text[index];
   if (first === '"') return scanString(text, index);
   if (first !== "{" && first !== "[") {
@@ -73,7 +71,6 @@ export function scanValue(text: string, index: number): number {
   throw new Error("unterminated object or array");
 }
 
-/** Index of the object's opening brace at the top level of `text`, or -1. */
 export function rootObjectStart(text: string): number {
   const start = skipWhitespace(text, 0);
   return text[start] === "{" ? start : -1;
@@ -105,7 +102,6 @@ export function findMember(text: string, open: number, key: string): MemberSpan 
   return undefined;
 }
 
-/** The leading whitespace of the line `index` sits on. */
 function lineIndent(text: string, index: number): string {
   const lineStart = text.lastIndexOf("\n", index) + 1;
   const match = /^[ \t]*/u.exec(text.slice(lineStart, index));

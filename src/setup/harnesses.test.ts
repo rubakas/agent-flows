@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { after, describe, it } from "node:test";
 
 import {
@@ -414,7 +414,7 @@ describe("FR-031: setup --remove reverses exactly what setup wrote", () => {
     assert.equal(readOpencodeRegistration(home), undefined);
   });
 
-  it("leaves an existing OpenCode config byte-identical, formatting included", () => {
+  it("leaves the whole OpenCode config directory as it found it, formatting included", () => {
     const home = makeHome();
     const original = [
       "{",
@@ -431,6 +431,8 @@ describe("FR-031: setup --remove reverses exactly what setup wrote", () => {
       "",
     ].join("\n");
     writeFile(opencodeConfigPath(home), original);
+    const configDir = dirname(opencodeConfigPath(home));
+    const before = snapshot(configDir);
 
     runSetup(fakeEnv(home, { emulate: true }).env);
     assert.notEqual(
@@ -441,6 +443,30 @@ describe("FR-031: setup --remove reverses exactly what setup wrote", () => {
 
     runRemove(fakeEnv(home, { emulate: true }).env);
     assert.equal(readFileSync(opencodeConfigPath(home), "utf8"), original);
+    // The whole directory, not just the file: a leftover .bak is evidence too.
+    assert.deepEqual(
+      changedPaths(before, snapshot(configDir)),
+      [],
+      "remove must leave nothing behind in OpenCode's config directory"
+    );
+  });
+
+  it("keeps the backup when the config changed after setup, and says where it is", () => {
+    const home = makeHome();
+    const original = JSON.stringify({ theme: "tokyonight" }, null, 2) + "\n";
+    writeFile(opencodeConfigPath(home), original);
+    runSetup(fakeEnv(home, { emulate: true }).env);
+
+    // The user edits their own config while our entry sits in it: the restored
+    // file will no longer match the backup, which is then the only copy left of
+    // what was there before setup.
+    const edited = readFileSync(opencodeConfigPath(home), "utf8").replace("tokyonight", "gruvbox");
+    writeFileSync(opencodeConfigPath(home), edited);
+
+    const result = byHarness(runRemove(fakeEnv(home, { emulate: true }).env), "opencode");
+    const backup = `${opencodeConfigPath(home)}.bak`;
+    assert.equal(readFileSync(backup, "utf8"), original, "the backup must survive");
+    assert.ok(result.detail.includes(backup), `the line must name the backup: ${result.detail}`);
   });
 
   it("deletes an OpenCode config that setup itself created", () => {

@@ -13,7 +13,6 @@ export interface WorkflowRowData {
   shadows?: string[];
   /** Hidden from the chat and page listings (spec 038 FR-026). */
   hidden?: boolean;
-  source?: string;
 }
 
 export interface TemplateRowData {

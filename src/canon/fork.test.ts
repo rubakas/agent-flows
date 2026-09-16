@@ -23,8 +23,10 @@ import { describe, it } from "node:test";
 import { packageRoot } from "../packageRoot.js";
 import { assertWritableRoot, forkPipeline, resolveForkTarget } from "./fork.js";
 import {
+  layerFrom,
   loadFromCatalog,
   mergedCatalog,
+  resolveLayers,
   userLibraryRoot,
   type CanonLayer,
   type LayerSource,
@@ -35,12 +37,7 @@ function tempDir(prefix: string): string {
 }
 
 function makeLayer(source: LayerSource, root: string): CanonLayer {
-  const layer = {
-    source,
-    root,
-    pipelinesDir: join(root, "pipelines"),
-    promptsDir: join(root, "prompts"),
-  };
+  const layer = layerFrom(source, root);
   mkdirSync(layer.pipelinesDir, { recursive: true });
   mkdirSync(layer.promptsDir, { recursive: true });
   return layer;
@@ -99,7 +96,7 @@ describe("FR-021: fork copies one workflow and its own prompts into a writable l
       const report = forkPipeline({
         id: "parent",
         catalog: mergedCatalog([source]),
-        target: { target: "user", root: userRoot },
+        target: layerFrom("user", userRoot),
         overwrite: false,
       });
 
@@ -133,7 +130,7 @@ describe("FR-021: fork copies one workflow and its own prompts into a writable l
       const report = forkPipeline({
         id: "parent",
         catalog: mergedCatalog([source]),
-        target: { target: "repo", root: repoRoot },
+        target: layerFrom("repo", repoRoot),
         overwrite: false,
       });
 
@@ -155,7 +152,7 @@ describe("FR-021: fork copies one workflow and its own prompts into a writable l
       forkPipeline({
         id: "parent",
         catalog: mergedCatalog([source]),
-        target: { target: "repo", root: repoRoot },
+        target: layerFrom("repo", repoRoot),
         overwrite: false,
       });
 
@@ -190,8 +187,9 @@ describe("FR-021: the default fork target", () => {
     const dir = tempDir("af-fork-default-repo-");
     try {
       mkdirSync(join(dir, ".agent-flows"), { recursive: true });
-      const target = resolveForkTarget(dir, undefined, { AGENT_FLOWS_HOME: join(dir, "home") });
-      assert.equal(target.target, "repo");
+      const env = { AGENT_FLOWS_HOME: join(dir, "home") };
+      const target = resolveForkTarget(dir, resolveLayers(dir, env), undefined, env);
+      assert.equal(target.source, "repo");
       assert.equal(target.root, join(dir, ".agent-flows"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -201,10 +199,10 @@ describe("FR-021: the default fork target", () => {
   it("is the user library when the project has no canon directory", () => {
     const dir = tempDir("af-fork-default-user-");
     try {
-      const home = join(dir, "home");
-      const target = resolveForkTarget(dir, undefined, { AGENT_FLOWS_HOME: home });
-      assert.equal(target.target, "user");
-      assert.equal(target.root, userLibraryRoot({ AGENT_FLOWS_HOME: home }));
+      const env = { AGENT_FLOWS_HOME: join(dir, "home") };
+      const target = resolveForkTarget(dir, resolveLayers(dir, env), undefined, env);
+      assert.equal(target.source, "user");
+      assert.equal(target.root, userLibraryRoot(env));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -214,11 +212,12 @@ describe("FR-021: the default fork target", () => {
     const dir = tempDir("af-fork-explicit-");
     try {
       mkdirSync(join(dir, ".agent-flows"), { recursive: true });
-      const home = join(dir, "home");
-      const user = resolveForkTarget(dir, "user", { AGENT_FLOWS_HOME: home });
-      assert.equal(user.target, "user", "--to user overrides an existing repository canon");
-      const repo = resolveForkTarget(dir, "repo", { AGENT_FLOWS_HOME: home });
-      assert.equal(repo.target, "repo");
+      const env = { AGENT_FLOWS_HOME: join(dir, "home") };
+      const layers = resolveLayers(dir, env);
+      const user = resolveForkTarget(dir, layers, "user", env);
+      assert.equal(user.source, "user", "--to user overrides an existing repository canon");
+      const repo = resolveForkTarget(dir, layers, "repo", env);
+      assert.equal(repo.source, "repo");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -244,7 +243,7 @@ describe("FR-021: fork refuses to overwrite an id the target layer already holds
           forkPipeline({
             id: "parent",
             catalog,
-            target: { target: "repo", root: repo.root },
+            target: repo,
             overwrite: false,
           }),
         (err: unknown) => {
@@ -262,7 +261,7 @@ describe("FR-021: fork refuses to overwrite an id the target layer already holds
       const report = forkPipeline({
         id: "parent",
         catalog,
-        target: { target: "repo", root: repo.root },
+        target: repo,
         overwrite: true,
       });
       assert.ok(report.written.includes("pipelines/parent.yaml"));
@@ -285,7 +284,7 @@ describe("FR-021: fork refuses to overwrite an id the target layer already holds
           forkPipeline({
             id: "nope",
             catalog: mergedCatalog([source]),
-            target: { target: "repo", root: join(dir, "project", ".agent-flows") },
+            target: layerFrom("repo", join(dir, "project", ".agent-flows")),
             overwrite: false,
           }),
         /no workflow "nope"/u
@@ -336,7 +335,7 @@ describe("FR-023: no code path writes into the package directory", () => {
           forkPipeline({
             id: "parent",
             catalog: mergedCatalog([source]),
-            target: { target: "repo", root: packageRoot() },
+            target: layerFrom("repo", packageRoot()),
             overwrite: true,
           }),
         /refusing to write into the installed package/u

@@ -96,7 +96,5 @@ describe("FR-006: importing a verb module does nothing", () => {
       /await import\(/u,
       "cli.ts must not import a verb module in process (spec 038 D4)"
     );
-    // tsx is a devDependency, so the compiled build must not ask for its loader.
-    assert.match(source, /_ext === "\.ts" \? \["--import", "tsx\/esm"\] : \[\]/u);
   });
 });

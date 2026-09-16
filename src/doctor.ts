@@ -1,26 +1,31 @@
 // FR-008: preflight doctor — checks external prerequisites and reports issues.
 // FR-006: covers prerequisites for both Binding A (claude CLI) and Binding B (codex/ollama).
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveProjectDir } from "./bindings/mastra/projectDir.js";
 import { listPipelines, loadPipeline } from "./canon/load.js";
 import { loadProviders } from "./canon/loadProviders.js";
 import { defaultRegistry, getActiveProfile } from "./canon/registry.js";
-import { packageVersion } from "./packageRoot.js";
+import { bundledPipelinesDir, packageVersion } from "./packageRoot.js";
 import { classifyIdentity, probeDaemon, readDaemonRecord } from "./runtime/daemonRecord.js";
 import { resolveProjectState } from "./runtime/projectState.js";
-import { harnessReach, resolveSetupEnv, type HarnessReach } from "./setup/harnesses.js";
+import {
+  harnessReach,
+  resolveSetupEnv,
+  whichAllOnPath,
+  whichOnPath,
+  type HarnessReach,
+} from "./setup/harnesses.js";
 import type { ProviderConfig } from "./canon/registry.js";
+import type { DaemonIdentity } from "./runtime/daemonRecord.js";
 
 const execFileAsync = promisify(execFile);
 const _require = createRequire(import.meta.url);
-const _doctorDir = dirname(fileURLToPath(import.meta.url));
-const _repoRoot = join(_doctorDir, "..");
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -59,6 +64,56 @@ export interface DaemonStatus {
   detail: string;
 }
 
+/** What `projectDaemonStatus` needs, injected so a test can pin all four states. */
+export interface DaemonProbe {
+  projectDir: string;
+  /** The machine-local state directory holding this project's daemon.json. */
+  stateDir: string;
+  /** The version this process is; a daemon reporting another one is not ours. */
+  version: string;
+  probe: (port: number) => Promise<DaemonIdentity | undefined>;
+}
+
+/**
+ * Read `daemon.json` and ask whatever is on its port who it is (FR-032).
+ *
+ * The record alone proves nothing: it survives a crash, and the port it names
+ * can meanwhile be serving another project or another version of agent-flows.
+ */
+export async function projectDaemonStatus(deps: DaemonProbe): Promise<DaemonStatus> {
+  const record = readDaemonRecord(deps.stateDir);
+  if (record === undefined) {
+    return {
+      state: "not-running",
+      detail: `not running — no ${join(deps.stateDir, "daemon.json")} (a tool call starts one)`,
+    };
+  }
+  const identity = await deps.probe(record.port);
+  if (identity === undefined) {
+    return {
+      state: "stale-record",
+      detail: `daemon.json records pid ${record.pid} on port ${record.port}, but nothing answers there`,
+    };
+  }
+  const verdict = classifyIdentity(identity, {
+    projectDir: deps.projectDir,
+    version: deps.version,
+  });
+  if (verdict === "match") {
+    return {
+      state: "listening",
+      detail: `listening on port ${record.port} (pid ${identity.pid}, version ${identity.version})`,
+    };
+  }
+  return {
+    state: "mismatch",
+    detail:
+      verdict === "other-project"
+        ? `port ${record.port} serves ${identity.projectDir}, not this project`
+        : `port ${record.port} runs agent-flows ${identity.version}, not ${deps.version}`,
+  };
+}
+
 /**
  * One harness's reach, phrased so the failure is unambiguous at a glance: a
  * stale entry (its command no longer resolves) fails, because every session of
@@ -86,7 +141,7 @@ export function reachResult(reach: HarnessReach): CheckResult {
     return {
       name,
       status: "ok",
-      detail: `registered in ${where} → ${(reach.command ?? []).join(" ")}`,
+      detail: `${reach.binaryPath ?? "installed"} — registered in ${where} → ${(reach.command ?? []).join(" ")}`,
     };
   }
   return {
@@ -171,12 +226,9 @@ export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
 
   // 4. Active provider + profile role transport prerequisites (required)
   {
-    let profileOk = false;
-    let profileId = "unknown";
     try {
       const profile = getActiveProfile(probes.env, probes.providers);
       const registry = defaultRegistry(probes.env, probes.providers.models);
-      profileId = profile.id;
 
       const roles = (["reasoner", "worker", "scout"] as const).map((role) => ({
         role,
@@ -190,8 +242,6 @@ export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
         status: "ok",
         detail: `${profile.id} (${roleStr})`,
       });
-
-      profileOk = true;
 
       // Check each unique transport required by this profile
       const checkedTransports = new Set<string>();
@@ -250,9 +300,6 @@ export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
         detail: String(err instanceof Error ? err.message : err),
       });
     }
-
-    void profileOk;
-    void profileId;
   }
 
   // 5. claude CLI on PATH + logged in (required — Binding A)
@@ -457,29 +504,11 @@ export function defaultProbes(): DoctorProbes {
   return {
     nodeVersion: () => process.version.slice(1),
 
-    which: (bin) => {
-      try {
-        const result = execFileSync("which", [bin], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-        return result || undefined;
-      } catch {
-        return undefined;
-      }
-    },
+    // The same in-process PATH scan `setup` registers with, so a binary can
+    // never be present for one check of this report and absent for another.
+    which: (bin) => whichOnPath(bin),
 
-    whichAll: (bin) => {
-      try {
-        const result = execFileSync("bash", ["-lc", `which -a ${bin}`], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-        return result ? result.split("\n").filter(Boolean) : [];
-      } catch {
-        return [];
-      }
-    },
+    whichAll: (bin) => whichAllOnPath(bin),
 
     exec: async (cmd, args) => {
       try {
@@ -522,7 +551,7 @@ export function defaultProbes(): DoctorProbes {
     },
 
     loadCanon: () => {
-      const pipelinesDir = join(_repoRoot, "pipelines");
+      const pipelinesDir = bundledPipelinesDir();
       const loaded: string[] = [];
       const failed: { file: string; error: string }[] = [];
       let files: string[];
@@ -549,39 +578,19 @@ export function defaultProbes(): DoctorProbes {
 
     projectDaemon: async () => {
       const projectDir = resolveProjectDir();
-      const state = resolveProjectState(projectDir);
-      const record = readDaemonRecord(state.dir);
-      if (record === undefined) {
-        return {
-          state: "not-running",
-          detail: `not running — no ${join(state.dir, "daemon.json")} (a tool call starts one)`,
-        };
-      }
-      const identity = await probeDaemon(record.port);
-      if (identity === undefined) {
-        return {
-          state: "stale-record",
-          detail: `daemon.json records pid ${record.pid} on port ${record.port}, but nothing answers there`,
-        };
-      }
-      const verdict = classifyIdentity(identity, { projectDir, version: packageVersion() });
-      if (verdict === "match") {
-        return {
-          state: "listening",
-          detail: `listening on port ${record.port} (pid ${identity.pid}, version ${identity.version})`,
-        };
-      }
-      return {
-        state: "mismatch",
-        detail:
-          verdict === "other-project"
-            ? `port ${record.port} serves ${identity.projectDir}, not this project`
-            : `port ${record.port} runs agent-flows ${identity.version}, not ${packageVersion()}`,
-      };
+      return projectDaemonStatus({
+        projectDir,
+        stateDir: resolveProjectState(projectDir).dir,
+        version: packageVersion(),
+        probe: probeDaemon,
+      });
     },
 
     env: process.env,
-    providers: loadProviders(_repoRoot),
+    // The project's providers, not the package's: under a global install the
+    // package root is the install directory, and this report would describe
+    // the configuration of a project nobody is in.
+    providers: loadProviders(resolveProjectDir()),
   };
 }
 

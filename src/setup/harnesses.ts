@@ -33,21 +33,11 @@ import { delimiter, dirname, join, sep } from "node:path";
 import { packageRoot } from "../packageRoot.js";
 import { deleteMember, findMember, rootObjectStart, setMember } from "./jsonMember.js";
 
-/** The name the server is registered under in every harness. */
 export const SERVER_NAME = "agent-flows";
 
 /** The harnesses this tool knows how to reach. */
 export type HarnessId = "claude-code" | "codex" | "opencode" | "t3-code";
 
-/** Human-facing name per harness, used by both `setup` and `doctor`. */
-export const HARNESS_LABELS: Record<HarnessId, string> = {
-  "claude-code": "Claude Code",
-  codex: "Codex CLI",
-  opencode: "OpenCode",
-  "t3-code": "T3 Code",
-};
-
-/** Result of running a harness's own CLI. */
 export interface RunResult {
   code: number;
   stdout: string;
@@ -68,7 +58,6 @@ export interface SetupEnv {
   run: (bin: string, args: string[]) => RunResult;
 }
 
-/** What happened to one harness during `setup` or `setup --remove`. */
 export type SetupStatus =
   | "registered"
   | "already-registered"
@@ -79,7 +68,6 @@ export type SetupStatus =
   | "refused"
   | "failed";
 
-/** One harness's outcome, one line of output. */
 export interface HarnessResult {
   harness: HarnessId;
   label: string;
@@ -109,17 +97,14 @@ export function claudeConfigPath(home: string): string {
   return join(home, ".claude.json");
 }
 
-/** Codex CLI's configuration. */
 export function codexConfigPath(home: string): string {
   return join(home, ".codex", "config.toml");
 }
 
-/** OpenCode's global configuration directory. */
-export function opencodeConfigDir(home: string): string {
+function opencodeConfigDir(home: string): string {
   return join(home, ".config", "opencode");
 }
 
-/** The OpenCode config file this tool is willing to edit. */
 export function opencodeConfigPath(home: string): string {
   return join(opencodeConfigDir(home), "opencode.json");
 }
@@ -132,24 +117,33 @@ export function opencodeConfigPath(home: string): string {
  * merge-edited safely: `opencode.jsonc` carries comments that a JSON round-trip
  * would delete.
  */
-export const OPENCODE_RIVAL_FILES = ["opencode.jsonc", "config.json"] as const;
+const OPENCODE_RIVAL_FILES = ["opencode.jsonc", "config.json"] as const;
 
 // ── The command that gets registered ─────────────────────────────────────────
 
-/** First executable named `bin` on PATH, without spawning anything. */
-export function whichOnPath(bin: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  for (const dir of (env.PATH ?? "").split(delimiter)) {
-    if (dir === "") continue;
-    const candidate = join(dir, bin);
-    try {
-      if (!statSync(candidate).isFile()) continue;
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Not there, not a file, or not executable: not a candidate.
-    }
+function isExecutableFile(path: string): boolean {
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    // Not there, not a file, or not executable: not a candidate.
+    return false;
   }
-  return undefined;
+}
+
+/** Every executable named `bin` on PATH, in PATH order, without spawning anything. */
+export function whichAllOnPath(bin: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.PATH ?? "")
+    .split(delimiter)
+    .filter((dir) => dir !== "")
+    .map((dir) => join(dir, bin))
+    .filter(isExecutableFile);
+}
+
+/** First executable named `bin` on PATH. */
+export function whichOnPath(bin: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return whichAllOnPath(bin, env)[0];
 }
 
 /**
@@ -268,6 +262,9 @@ export function readClaudeRegistration(home: string): Registration | undefined {
  * whether our table exists and which command it names. Adding a TOML dependency
  * to answer that would put a parser in the dependency tree that nothing else
  * needs, and `codex mcp add`/`remove` — not this code — does every write.
+ *
+ * The limit that follows from that: only single-line `command =` and `args =`
+ * entries are recognised, which is the shape `codex mcp add` itself writes.
  */
 export function readCodexRegistration(home: string): Registration | undefined {
   const configPath = codexConfigPath(home);
@@ -338,7 +335,7 @@ function sameCommand(a: string[], b: string[]): boolean {
 // ── OpenCode config editing ──────────────────────────────────────────────────
 
 /** The entry written under `mcp["agent-flows"]` — OpenCode's local server shape. */
-export function opencodeEntry(command: string[]): Record<string, unknown> {
+function opencodeEntry(command: string[]): Record<string, unknown> {
   return { type: "local", command, enabled: true };
 }
 
@@ -346,7 +343,7 @@ export function opencodeEntry(command: string[]): Record<string, unknown> {
  * The indentation unit an existing JSON file uses, so an inserted member is
  * indented the way the rest of the file is (FR-031).
  */
-export function detectIndentUnit(text: string): string {
+function detectIndentUnit(text: string): string {
   const match = /\n([ \t]+)"/u.exec(text);
   return match ? match[1] : "  ";
 }
@@ -357,12 +354,87 @@ function writeConfigText(path: string, text: string): void {
 }
 
 /** The rival config file present in OpenCode's directory, if any (D10). */
-export function opencodeRivalConfig(home: string): string | undefined {
+function opencodeRivalConfig(home: string): string | undefined {
   for (const name of OPENCODE_RIVAL_FILES) {
     const path = join(opencodeConfigDir(home), name);
     if (existsSync(path)) return path;
   }
   return undefined;
+}
+
+// ── The harnesses ────────────────────────────────────────────────────────────
+
+/**
+ * One harness, as `setup`, `setup --remove` and the reach report all see it.
+ *
+ * `addArgs`/`removeArgs` are absent for a harness whose configuration `setup`
+ * merge-edits instead of driving a CLI (OpenCode), and `note` marks one with no
+ * registration of its own (T3 Code), whose `read` therefore never finds one.
+ */
+interface Harness {
+  id: HarnessId;
+  label: string;
+  bin: string;
+  read: (home: string) => Registration | undefined;
+  addArgs?: (command: string[]) => string[];
+  removeArgs?: string[];
+  note?: string;
+}
+
+/** A harness registered through its own `mcp add` / `mcp remove`. */
+type CliHarness = Harness & {
+  addArgs: (command: string[]) => string[];
+  removeArgs: string[];
+};
+
+/** T3 Code runs another harness and inherits its configuration (research §4). */
+const T3_NOTE = "inherits the configuration of whichever harness it runs — nothing to register";
+
+const HARNESSES: Harness[] = [
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    bin: "claude",
+    read: readClaudeRegistration,
+    addArgs: (command) => ["mcp", "add", SERVER_NAME, "--scope", "user", "--", ...command],
+    removeArgs: ["mcp", "remove", SERVER_NAME, "--scope", "user"],
+  },
+  {
+    id: "codex",
+    label: "Codex CLI",
+    bin: "codex",
+    read: readCodexRegistration,
+    addArgs: (command) => ["mcp", "add", SERVER_NAME, "--", ...command],
+    removeArgs: ["mcp", "remove", SERVER_NAME],
+  },
+  { id: "opencode", label: "OpenCode", bin: "opencode", read: readOpencodeRegistration },
+  { id: "t3-code", label: "T3 Code", bin: "t3", read: () => undefined, note: T3_NOTE },
+];
+
+function hasOwnCli(harness: Harness): harness is CliHarness {
+  return harness.addArgs !== undefined && harness.removeArgs !== undefined;
+}
+
+/** Fills in the harness and the label of every line one harness produces. */
+function resultFor(
+  harness: Harness
+): (status: SetupStatus, detail: string, configPath?: string) => HarnessResult {
+  return (status, detail, configPath) => ({
+    harness: harness.id,
+    label: harness.label,
+    status,
+    detail,
+    configPath,
+  });
+}
+
+function noteResult(harness: Harness, note: string): HarnessResult {
+  return resultFor(harness)("not-applicable", note);
+}
+
+function firstLine(result: RunResult): string {
+  const text = (result.stderr || result.stdout).trim();
+  return text === "" ? `exit code ${result.code}` : text.split("\n")[0];
 }
 
 // ── setup ────────────────────────────────────────────────────────────────────
@@ -375,26 +447,10 @@ export function opencodeRivalConfig(home: string): string | undefined {
  * its CLI is not invoked a second time (D10).
  */
 export function runSetup(env: SetupEnv): HarnessResult[] {
-  return [
-    setupCliHarness(env, "claude-code", "claude", readClaudeRegistration, (command) => [
-      "mcp",
-      "add",
-      SERVER_NAME,
-      "--scope",
-      "user",
-      "--",
-      ...command,
-    ]),
-    setupCliHarness(env, "codex", "codex", readCodexRegistration, (command) => [
-      "mcp",
-      "add",
-      SERVER_NAME,
-      "--",
-      ...command,
-    ]),
-    setupOpencode(env),
-    t3Result(),
-  ];
+  return HARNESSES.map((harness) => {
+    if (harness.note !== undefined) return noteResult(harness, harness.note);
+    return hasOwnCli(harness) ? setupCliHarness(env, harness) : setupOpencode(env, harness);
+  });
 }
 
 /**
@@ -402,77 +458,48 @@ export function runSetup(env: SetupEnv): HarnessResult[] {
  * than by editing their files: both own formats this tool has no business
  * rewriting (`~/.claude.json` holds the user's whole Claude Code state).
  */
-function setupCliHarness(
-  env: SetupEnv,
-  harness: HarnessId,
-  bin: string,
-  read: (home: string) => Registration | undefined,
-  addArgs: (command: string[]) => string[]
-): HarnessResult {
-  const label = HARNESS_LABELS[harness];
-  const binaryPath = env.which(bin);
-  if (binaryPath === undefined) {
-    return { harness, label, status: "not-installed", detail: `${bin} is not on PATH` };
+function setupCliHarness(env: SetupEnv, harness: CliHarness): HarnessResult {
+  const result = resultFor(harness);
+  if (env.which(harness.bin) === undefined) {
+    return result("not-installed", `${harness.bin} is not on PATH`);
   }
 
-  const existing = read(env.home);
+  const existing = harness.read(env.home);
   if (existing !== undefined && sameCommand(existing.command, env.command)) {
-    return {
-      harness,
-      label,
-      status: "already-registered",
-      detail: `already registered in ${existing.configPath}`,
-      configPath: existing.configPath,
-    };
+    return result(
+      "already-registered",
+      `already registered in ${existing.configPath}`,
+      existing.configPath
+    );
   }
 
   // An entry naming a different command is a leftover from an earlier install
   // location; leaving it would keep the harness spawning a command that no
   // longer exists, so it is replaced rather than duplicated.
   const replaced = existing !== undefined;
-  if (replaced) {
-    const removal = env.run(bin, removeArgs(harness));
+  if (existing !== undefined) {
+    const removal = env.run(harness.bin, harness.removeArgs);
     if (removal.code !== 0) {
-      return {
-        harness,
-        label,
-        status: "failed",
-        detail: `could not replace the existing entry: ${firstLine(removal)}`,
-        configPath: existing.configPath,
-      };
+      return result(
+        "failed",
+        `could not replace the existing entry: ${firstLine(removal)}`,
+        existing.configPath
+      );
     }
   }
 
-  const result = env.run(bin, addArgs(env.command));
-  if (result.code !== 0) {
-    return {
-      harness,
-      label,
-      status: "failed",
-      detail: `${bin} mcp add failed: ${firstLine(result)}`,
-    };
+  const added = env.run(harness.bin, harness.addArgs(env.command));
+  if (added.code !== 0) {
+    return result("failed", `${harness.bin} mcp add failed: ${firstLine(added)}`);
   }
-  const written = read(env.home);
-  return {
-    harness,
-    label,
-    status: "registered",
-    detail: replaced
+  const written = harness.read(env.home);
+  return result(
+    "registered",
+    replaced
       ? `replaced a stale entry with ${env.command.join(" ")}`
       : `registered ${env.command.join(" ")}`,
-    configPath: written?.configPath,
-  };
-}
-
-function removeArgs(harness: HarnessId): string[] {
-  return harness === "claude-code"
-    ? ["mcp", "remove", SERVER_NAME, "--scope", "user"]
-    : ["mcp", "remove", SERVER_NAME];
-}
-
-function firstLine(result: RunResult): string {
-  const text = (result.stderr || result.stdout).trim();
-  return text === "" ? `exit code ${result.code}` : text.split("\n")[0];
+    written?.configPath
+  );
 }
 
 /**
@@ -480,61 +507,42 @@ function firstLine(result: RunResult): string {
  * documented non-interactive form. Only `mcp["agent-flows"]` is written; every
  * other key keeps its value, its order and the file's indentation.
  */
-function setupOpencode(env: SetupEnv): HarnessResult {
-  const harness: HarnessId = "opencode";
-  const label = HARNESS_LABELS[harness];
-  const binaryPath = env.which("opencode");
-  if (binaryPath === undefined) {
-    return { harness, label, status: "not-installed", detail: "opencode is not on PATH" };
+function setupOpencode(env: SetupEnv, harness: Harness): HarnessResult {
+  const result = resultFor(harness);
+  if (env.which(harness.bin) === undefined) {
+    return result("not-installed", `${harness.bin} is not on PATH`);
   }
 
   const rival = opencodeRivalConfig(env.home);
   if (rival !== undefined) {
-    return {
-      harness,
-      label,
-      status: "refused",
-      detail:
-        `your OpenCode configuration is ${rival}; writing ${opencodeConfigPath(env.home)} ` +
+    return result(
+      "refused",
+      `your OpenCode configuration is ${rival}; writing ${opencodeConfigPath(env.home)} ` +
         `would create a second config that OpenCode also loads. Add this to ${rival} by hand: ` +
         `"mcp": { "${SERVER_NAME}": ${JSON.stringify(opencodeEntry(env.command))} }`,
-      configPath: rival,
-    };
+      rival
+    );
   }
 
   const configPath = opencodeConfigPath(env.home);
   const exists = existsSync(configPath);
-  // A file we create starts as an empty object, so one code path covers both
-  // "edit the user's config" and "write the first one".
   const text = exists ? readFileSync(configPath, "utf8") : "{}\n";
   const config = parseJsonText(text);
   const open = rootObjectStart(text);
   if (config === undefined || open === -1) {
-    return {
-      harness,
-      label,
-      status: "failed",
-      detail: `${configPath} is not a JSON object — left it alone`,
-      configPath,
-    };
+    return result("failed", `${configPath} is not a JSON object — left it alone`, configPath);
   }
 
   const existing = readOpencodeRegistration(env.home);
   if (existing !== undefined && sameCommand(existing.command, env.command)) {
-    return {
-      harness,
-      label,
-      status: "already-registered",
-      detail: `already registered in ${configPath}`,
-      configPath,
-    };
+    return result("already-registered", `already registered in ${configPath}`, configPath);
   }
 
   // One backup, before the first edit ever made to an existing file. Written
   // once: a second setup must not overwrite the pre-agent-flows copy with a
   // post-agent-flows one.
   if (exists) {
-    const backup = `${configPath}.bak`;
+    const backup = backupPath(configPath);
     if (!existsSync(backup)) copyFileSync(configPath, backup);
   }
 
@@ -551,119 +559,75 @@ function setupOpencode(env: SetupEnv): HarnessResult {
       : setMember(text, mcpSpan.valueStart, SERVER_NAME, entry, unit);
   writeConfigText(configPath, next);
 
-  return {
-    harness,
-    label,
-    status: "registered",
-    detail: `registered ${env.command.join(" ")} in ${configPath}`,
-    configPath,
-  };
-}
-
-/** T3 Code runs another harness and inherits its configuration (research §4). */
-function t3Result(): HarnessResult {
-  return {
-    harness: "t3-code",
-    label: HARNESS_LABELS["t3-code"],
-    status: "not-applicable",
-    detail:
-      "nothing to register — T3 Code runs another harness and inherits whichever " +
-      "configuration that harness uses",
-  };
+  return result("registered", `registered ${env.command.join(" ")} in ${configPath}`, configPath);
 }
 
 // ── setup --remove ───────────────────────────────────────────────────────────
 
 /** Reverse exactly what `runSetup` wrote, per harness (FR-031). */
 export function runRemove(env: SetupEnv): HarnessResult[] {
-  return [
-    removeCliHarness(env, "claude-code", "claude", readClaudeRegistration),
-    removeCliHarness(env, "codex", "codex", readCodexRegistration),
-    removeOpencode(env),
-    t3Result(),
-  ];
+  return HARNESSES.map((harness) => {
+    if (harness.note !== undefined) return noteResult(harness, harness.note);
+    return hasOwnCli(harness) ? removeCliHarness(env, harness) : removeOpencode(env, harness);
+  });
 }
 
-function removeCliHarness(
-  env: SetupEnv,
-  harness: HarnessId,
-  bin: string,
-  read: (home: string) => Registration | undefined
-): HarnessResult {
-  const label = HARNESS_LABELS[harness];
-  const existing = read(env.home);
-  if (existing === undefined) {
-    return { harness, label, status: "not-registered", detail: "no entry to remove" };
-  }
-  const binaryPath = env.which(bin);
-  if (binaryPath === undefined) {
-    return {
-      harness,
-      label,
-      status: "failed",
-      detail:
-        `${existing.configPath} still holds an entry, but ${bin} is not on PATH to remove it — ` +
+function removeCliHarness(env: SetupEnv, harness: CliHarness): HarnessResult {
+  const result = resultFor(harness);
+  const existing = harness.read(env.home);
+  if (existing === undefined) return result("not-registered", "no entry to remove");
+  if (env.which(harness.bin) === undefined) {
+    return result(
+      "failed",
+      `${existing.configPath} still holds an entry, but ${harness.bin} is not on PATH to remove it — ` +
         `delete the "${SERVER_NAME}" entry by hand`,
-      configPath: existing.configPath,
-    };
+      existing.configPath
+    );
   }
-  const result = env.run(bin, removeArgs(harness));
-  if (result.code !== 0) {
-    return {
-      harness,
-      label,
-      status: "failed",
-      detail: `${bin} mcp remove failed: ${firstLine(result)}`,
-      configPath: existing.configPath,
-    };
+  const removal = env.run(harness.bin, harness.removeArgs);
+  if (removal.code !== 0) {
+    return result(
+      "failed",
+      `${harness.bin} mcp remove failed: ${firstLine(removal)}`,
+      existing.configPath
+    );
   }
-  return {
-    harness,
-    label,
-    status: "removed",
-    detail: `removed from ${existing.configPath}`,
-    configPath: existing.configPath,
-  };
+  return result("removed", `removed from ${existing.configPath}`, existing.configPath);
+}
+
+/** The copy `setup` takes of an OpenCode config before its first edit. */
+function backupPath(configPath: string): string {
+  return `${configPath}.bak`;
 }
 
 /**
  * Delete only `mcp["agent-flows"]` from the OpenCode config.
  *
- * An `mcp` object left empty by that deletion is removed too, and a config file
+ * An `mcp` object left empty by that deletion is removed too, a config file
  * that `setup` itself created — the case with no `.bak` beside it — is deleted
- * outright. Both exist so that setup-then-remove leaves the directory exactly
- * as it was found, rather than leaving `{"mcp":{}}` files behind as evidence
- * that agent-flows was once here.
+ * outright, and the backup setup took goes once the file it restores matches it
+ * again. All three exist so that setup-then-remove leaves the directory exactly
+ * as it was found, rather than leaving evidence that agent-flows was once here.
  */
-function removeOpencode(env: SetupEnv): HarnessResult {
-  const harness: HarnessId = "opencode";
-  const label = HARNESS_LABELS[harness];
+function removeOpencode(env: SetupEnv, harness: Harness): HarnessResult {
+  const result = resultFor(harness);
   const configPath = opencodeConfigPath(env.home);
-  if (!existsSync(configPath)) {
-    return { harness, label, status: "not-registered", detail: "no OpenCode config to edit" };
-  }
+  if (!existsSync(configPath)) return result("not-registered", "no OpenCode config to edit");
   const text = readFileSync(configPath, "utf8");
   const config = parseJsonText(text);
   const open = rootObjectStart(text);
   if (config === undefined || open === -1) {
-    return {
-      harness,
-      label,
-      status: "failed",
-      detail: `${configPath} is not a JSON object — left it alone`,
-      configPath,
-    };
+    return result("failed", `${configPath} is not a JSON object — left it alone`, configPath);
   }
   const mcpSpan = findMember(text, open, "mcp");
   if (mcpSpan === undefined || findMember(text, mcpSpan.valueStart, SERVER_NAME) === undefined) {
-    return { harness, label, status: "not-registered", detail: "no entry to remove", configPath };
+    return result("not-registered", "no entry to remove", configPath);
   }
 
   let next = deleteMember(text, mcpSpan.valueStart, SERVER_NAME);
-  // An `mcp` object that setup itself introduced goes with it; one the user
-  // already had stays, even if it is now empty. The backup is the only record
-  // of which of the two it was.
-  const backup = `${configPath}.bak`;
+  // The backup is the only record of which `mcp` object this was: one the user
+  // already had stays, even when it is now empty; one setup introduced goes.
+  const backup = backupPath(configPath);
   const hadBackup = existsSync(backup);
   const mcpWasOurs = !hadBackup || asObject(parseJsonText(readSafely(backup))?.mcp) === undefined;
   const remainingMcp = asObject(parseJsonText(next)?.mcp);
@@ -671,21 +635,29 @@ function removeOpencode(env: SetupEnv): HarnessResult {
     next = deleteMember(next, rootObjectStart(next), "mcp");
   }
 
-  // A file setup created — the case with no backup beside it — is removed
-  // outright rather than left behind as an empty object.
   if (!hadBackup && Object.keys(parseJsonText(next) ?? {}).length === 0) {
     rmSync(configPath);
-    return {
-      harness,
-      label,
-      status: "removed",
-      detail: `removed ${configPath}, which setup had created`,
-      configPath,
-    };
+    return result("removed", `removed ${configPath}, which setup had created`, configPath);
   }
 
   writeConfigText(configPath, next);
-  return { harness, label, status: "removed", detail: `removed from ${configPath}`, configPath };
+  const kept = hadBackup ? discardBackup(backup, next) : "";
+  return result("removed", `removed from ${configPath}${kept}`, configPath);
+}
+
+/**
+ * Drop the backup `setup` took, now that the entry it was taken for is gone.
+ *
+ * Only when the restored file matches it byte for byte: a file edited between
+ * setup and remove differs, and then the backup is the only copy of what was
+ * there before agent-flows, so it stays and the result line says where.
+ */
+function discardBackup(backup: string, restored: string): string {
+  if (readSafely(backup) === restored) {
+    rmSync(backup, { force: true });
+    return "";
+  }
+  return `; kept ${backup}, which no longer matches the restored file`;
 }
 
 // ── doctor's reach report ────────────────────────────────────────────────────
@@ -701,38 +673,19 @@ export function commandResolves(
 
 /** Per-harness reach, as `doctor` prints it (FR-032). */
 export function harnessReach(env: SetupEnv): HarnessReach[] {
-  const entries: {
-    harness: HarnessId;
-    bin: string;
-    read: (home: string) => Registration | undefined;
-  }[] = [
-    { harness: "claude-code", bin: "claude", read: readClaudeRegistration },
-    { harness: "codex", bin: "codex", read: readCodexRegistration },
-    { harness: "opencode", bin: "opencode", read: readOpencodeRegistration },
-  ];
-
-  const reach = entries.map(({ harness, bin, read }): HarnessReach => {
-    const registration = read(env.home);
+  return HARNESSES.map((harness): HarnessReach => {
+    const registration = harness.read(env.home);
     return {
-      harness,
-      label: HARNESS_LABELS[harness],
-      binaryPath: env.which(bin),
+      harness: harness.id,
+      label: harness.label,
+      binaryPath: env.which(harness.bin),
       configPath: registration?.configPath,
       command: registration?.command,
       registered: registration !== undefined,
       stale: registration !== undefined && !commandResolves(registration.command[0], env.which),
+      note: harness.note,
     };
   });
-
-  reach.push({
-    harness: "t3-code",
-    label: HARNESS_LABELS["t3-code"],
-    binaryPath: env.which("t3"),
-    registered: false,
-    stale: false,
-    note: "inherits the configuration of whichever harness it runs — nothing to register",
-  });
-  return reach;
 }
 
 /** One operator-facing line per harness. */

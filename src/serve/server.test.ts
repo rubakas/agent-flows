@@ -33,11 +33,10 @@ import { after, before, describe, it } from "node:test";
 
 import { Mastra } from "@mastra/core";
 import { buildPipelineWorkflow } from "../bindings/mastra/build.js";
-import { BUNDLED_PIPELINES_DIR } from "../bindings/mastra/pipelineLoader.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { loadPipeline } from "../canon/load.js";
 import { ModelRegistry } from "../canon/registry.js";
-import { bundledPipelinesDir, bundledPromptsDir, packageVersion } from "../packageRoot.js";
+import { bundledPipelinesDir, packageRoot, packageVersion } from "../packageRoot.js";
 import { probeDaemon, readDaemonRecord, type DaemonRecord } from "../runtime/daemonRecord.js";
 import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
@@ -2019,7 +2018,7 @@ describe("Template lifecycle (FR-002)", () => {
 
   it("full lifecycle: write → GET list → install → DELETE → 409 on duplicate (manual template write)", async () => {
     // We manually write a valid bundle as a template to test list/install/delete
-    const { exportBundle: eb, stringifyBundle: sb } = await import("../install/bundle.js");
+    const { exportBundle: eb, stringifyBundle: sb } = await import("../bundle/bundle.js");
     mkdirSync(templatesBase, { recursive: true });
     const bundle = eb("investigate", REAL_PIPELINES_DIR);
     const yamlText = sb(bundle);
@@ -2535,7 +2534,7 @@ describe("A restart keeps a real run visible (spec 034 V5)", () => {
     state = makeState(REAL_REPO_ROOT, tmpDir);
 
     // First daemon: a real `test` pipeline (one check step) run to completion.
-    const pipeline = loadPipeline(join(BUNDLED_PIPELINES_DIR, "test.yaml"));
+    const pipeline = loadPipeline(join(bundledPipelinesDir(), "test.yaml"));
     const wf = buildPipelineWorkflow(pipeline, {
       registry: new ModelRegistry([]),
       store: {} as unknown as TicketStore,
@@ -2547,7 +2546,7 @@ describe("A restart keeps a real run visible (spec 034 V5)", () => {
       state,
       port: 0,
       dbPath: ":memory:",
-      pipelinesDir: BUNDLED_PIPELINES_DIR,
+      pipelinesDir: bundledPipelinesDir(),
       runService: svc,
     });
     const started = await fetch(`http://127.0.0.1:${first.port}/api/runs`, {
@@ -2578,7 +2577,7 @@ describe("A restart keeps a real run visible (spec 034 V5)", () => {
       state,
       port: 0,
       dbPath: ":memory:",
-      pipelinesDir: BUNDLED_PIPELINES_DIR,
+      pipelinesDir: bundledPipelinesDir(),
       runService: fresh,
     });
     try {
@@ -4816,7 +4815,7 @@ describe("POST /api/pipelines/:id/template — save as template (037 FR-003)", (
   });
 
   it("a bundled pipeline hidden behind a traversal path still shows its check commands (D4)", async () => {
-    const { stringifyBundle: sb } = await import("../install/bundle.js");
+    const { stringifyBundle: sb } = await import("../bundle/bundle.js");
     mkdirSync(templatesBase, { recursive: true });
     const pipelineYaml = [
       "id: sneaky",
@@ -5486,13 +5485,13 @@ describe("FR-008: the prompts routes refuse the package's own catalogue", () => 
   });
 
   it("PUT /api/pipelines/:id/prompts/:stepId → 403 and changes no bundled prompt", async () => {
-    const before = fileSnapshot(bundledPromptsDir());
+    const before = fileSnapshot(join(packageRoot(), "prompts"));
     const res = await mutate(srv.port, "PUT", "/api/pipelines/investigate/prompts/survey", {
       text: "rewritten for every project on this machine",
       ifMatch: "0".repeat(64),
     });
     assert.equal(res.status, 403, `expected 403, got ${res.status}`);
-    assertSnapshotEqual(before, fileSnapshot(bundledPromptsDir()));
+    assertSnapshotEqual(before, fileSnapshot(join(packageRoot(), "prompts")));
   });
 });
 

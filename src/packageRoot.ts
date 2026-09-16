@@ -23,8 +23,8 @@ function isDir(path: string): boolean {
 }
 
 /**
- * Walks up from `startDir` to the nearest directory holding a package.json and
- * asserts that directory also holds both `pipelines/` and `prompts/`.
+ * The nearest directory above `startDir` holding a package.json, asserted to
+ * also hold both `pipelines/` and `prompts/`.
  *
  * The assertion is the point: a package.json appearing inside `dist/` some day
  * would otherwise resolve silently to a root one level too deep, and every
@@ -72,11 +72,6 @@ export function packageRoot(): string {
 /** The bundled pipeline YAMLs shipped with the package. */
 export function bundledPipelinesDir(): string {
   return join(packageRoot(), "pipelines");
-}
-
-/** The bundled prompt files shipped with the package. */
-export function bundledPromptsDir(): string {
-  return join(packageRoot(), "prompts");
 }
 
 let cachedVersion: string | undefined;

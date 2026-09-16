@@ -1,10 +1,8 @@
 #!/usr/bin/env tsx
 // `agent-flows setup [--remove]` (spec 038 D10, FR-030/FR-031).
 //
-// Registers the MCP server with every installed harness, and nothing else: per
-// D17 no skill, agent, rule or settings file is ever written — those belong to
-// `agent-notes`. Run `setup --remove` BEFORE uninstalling the package, or every
-// harness session keeps reporting a failed MCP server forever.
+// Run `setup --remove` BEFORE uninstalling the package, or every harness
+// session keeps reporting a failed MCP server forever.
 
 import {
   formatHarnessResult,

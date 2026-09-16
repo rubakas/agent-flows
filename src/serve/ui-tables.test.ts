@@ -22,11 +22,11 @@ describe("workflowRow — actions follow the row's own layer (038 D14/D15)", () 
     assert.ok(!html.includes(">Fork…<"), "a workflow already in a writable layer needs no fork");
   });
 
-  it("a bundled row offers Fork… and never Delete", () => {
+  it("a bundled row offers Fork… instead of Edit, and never Delete", () => {
     const html = workflowRow({ id: "investigate", layer: "bundled" });
-    assert.ok(html.includes(">Fork…<"), "a bundled row must offer Fork…");
-    // Edit is offered, but the page forks first — the package is never written.
-    assert.ok(html.includes('data-edit-wf="investigate"'));
+    assert.ok(html.includes('data-fork-wf="investigate"'), "a bundled row must offer Fork…");
+    // Edit on a bundled row went through the fork dialog too: one control, not two.
+    assert.ok(!html.includes("data-edit-wf"), `Fork… is the only way into the editor: ${html}`);
     assert.ok(!html.includes(">Delete<"), "a bundled workflow cannot be deleted");
     assert.ok(!html.includes(">Install<"), "there is no install any more (038 D16)");
   });
@@ -43,6 +43,15 @@ describe("workflowRow — actions follow the row's own layer (038 D14/D15)", () 
     const visible = workflowRow({ id: "investigate", layer: "repo" });
     assert.ok(visible.includes(">Hide<"), "a visible row offers Hide");
     assert.ok(!visible.includes(">hidden</span>"), "a visible row carries no hidden mark");
+  });
+
+  it("carries the visibility state in a data attribute, not in the button label", () => {
+    // The page reads this attribute to decide what a click means; a renamed
+    // label must not be able to invert it.
+    assert.ok(
+      workflowRow({ id: "x", layer: "repo", hidden: true }).includes('data-wf-hidden="true"')
+    );
+    assert.ok(workflowRow({ id: "x", layer: "repo" }).includes('data-wf-hidden="false"'));
   });
 
   it("renders the description, step count and declared inputs", () => {

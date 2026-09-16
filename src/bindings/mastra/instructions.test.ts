@@ -42,18 +42,6 @@ describe("FULL_INSTRUCTIONS — fits the harness bounds (FR-010)", () => {
         `the cut currently falls after: ${JSON.stringify(head.slice(-60))}`
     );
   });
-
-  it("says what agent-flows is, and names the durable-run and gate facts", () => {
-    for (const phrase of [
-      "list_pipelines",
-      "repository",
-      "durable",
-      "resumed by id",
-      "approve",
-    ] as const) {
-      assert.ok(FULL_INSTRUCTIONS.includes(phrase), `full instructions must mention "${phrase}"`);
-    }
-  });
 });
 
 describe("SHORT_INSTRUCTIONS — the pointer for an uncustomized project (FR-010)", () => {

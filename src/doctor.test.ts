@@ -1,14 +1,36 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
 import {
+  defaultProbes,
   formatReport,
   hasFailures,
+  projectDaemonStatus,
   reachResult,
   runDoctor,
   type CheckResult,
   type DoctorProbes,
 } from "./doctor.js";
+import { writeDaemonRecord } from "./runtime/daemonRecord.js";
+import type { DaemonIdentity } from "./runtime/daemonRecord.js";
 import type { HarnessReach } from "./setup/harnesses.js";
+
+// ── Temp directories ──────────────────────────────────────────────────────────
+
+const tempDirs: string[] = [];
+
+/** A fresh directory under the OS temp directory. Never a real project. */
+function makeTempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "agent-flows-doctor-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
+after(() => {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 // ── Fake probes ───────────────────────────────────────────────────────────────
 
@@ -439,9 +461,10 @@ function reach(overrides: Partial<HarnessReach> = {}): HarnessReach {
 }
 
 describe("doctor: per-harness reach", () => {
-  it("registered and resolvable → ok, naming the config file and the command", () => {
+  it("registered and resolvable → ok, naming the binary, the config file and the command", () => {
     const result = reachResult(reach());
     assert.equal(result.status, "ok");
+    assert.ok(result.detail.includes("/usr/bin/claude"), `the binary path: ${result.detail}`);
     assert.ok(result.detail.includes("/fake-home/.claude.json"), result.detail);
     assert.ok(result.detail.includes("/pkg/bin/agent-flows mcp"), result.detail);
   });
@@ -515,5 +538,109 @@ describe("doctor: this project's daemon", () => {
     assert.ok(check);
     assert.equal(check.status, "warn");
     assert.ok(check.hint?.includes("agent-flows stop"), check.hint);
+  });
+});
+
+// ── Tests: the real daemon probe (FR-032) ─────────────────────────────────────
+
+describe("projectDaemonStatus", () => {
+  const IDENTITY: DaemonIdentity = {
+    projectDir: "/projects/app",
+    version: "1.2.3",
+    pid: 4242,
+    startedAt: "2026-09-17T10:00:00.000Z",
+  };
+
+  /** A state directory holding a daemon.json for IDENTITY on `port`. */
+  function stateWith(port: number): string {
+    const dir = makeTempDir();
+    writeDaemonRecord(dir, { ...IDENTITY, port });
+    return dir;
+  }
+
+  function deps(stateDir: string, identity?: DaemonIdentity) {
+    return {
+      projectDir: IDENTITY.projectDir,
+      stateDir,
+      version: IDENTITY.version,
+      probe: async (_port: number) => identity,
+    };
+  }
+
+  it("no record → not running, naming the file a tool call would create", async () => {
+    const stateDir = makeTempDir();
+    const status = await projectDaemonStatus(deps(stateDir));
+    assert.equal(status.state, "not-running");
+    assert.ok(status.detail.includes(join(stateDir, "daemon.json")), status.detail);
+  });
+
+  it("a record nothing answers → stale-record, naming the pid and the port", async () => {
+    const status = await projectDaemonStatus(deps(stateWith(7411)));
+    assert.equal(status.state, "stale-record");
+    assert.ok(status.detail.includes("4242"), status.detail);
+    assert.ok(status.detail.includes("7411"), status.detail);
+  });
+
+  it("the port answers as this project and version → listening", async () => {
+    const status = await projectDaemonStatus(deps(stateWith(7411), IDENTITY));
+    assert.equal(status.state, "listening");
+    assert.ok(status.detail.includes("7411"), status.detail);
+    assert.ok(status.detail.includes("1.2.3"), status.detail);
+  });
+
+  it("the port serves another project → mismatch, naming that project", async () => {
+    const other = { ...IDENTITY, projectDir: "/projects/other" };
+    const status = await projectDaemonStatus(deps(stateWith(7411), other));
+    assert.equal(status.state, "mismatch");
+    assert.ok(status.detail.includes("/projects/other"), status.detail);
+  });
+
+  it("the port runs another version → mismatch, naming both versions", async () => {
+    const other = { ...IDENTITY, version: "9.9.9" };
+    const status = await projectDaemonStatus(deps(stateWith(7411), other));
+    assert.equal(status.state, "mismatch");
+    assert.ok(status.detail.includes("9.9.9"), status.detail);
+    assert.ok(status.detail.includes("1.2.3"), status.detail);
+  });
+});
+
+// ── Tests: the real probes read the project, not the package ──────────────────
+
+describe("defaultProbes", () => {
+  it("loads providers from the project directory, not from the installed package", () => {
+    const projectDir = makeTempDir();
+    mkdirSync(join(projectDir, ".agent-flows"), { recursive: true });
+    writeFileSync(
+      join(projectDir, ".agent-flows", "providers.yaml"),
+      [
+        "version: 1",
+        "models:",
+        "  - id: doctor-probe-model",
+        "    transport: cli",
+        "    cli: { bin: claude, model: claude-test }",
+        "profiles:",
+        "  - id: doctor-probe-profile",
+        "    roles: { reasoner: doctor-probe-model, worker: doctor-probe-model, scout: doctor-probe-model }",
+        "",
+      ].join("\n")
+    );
+
+    const previous = process.env.AGENT_FLOWS_PROJECT_DIR;
+    process.env.AGENT_FLOWS_PROJECT_DIR = projectDir;
+    try {
+      const providers = defaultProbes().providers;
+      assert.deepEqual(
+        providers.models.map((m) => m.id),
+        ["doctor-probe-model"],
+        "the probe must read <projectDir>/.agent-flows/providers.yaml"
+      );
+      assert.deepEqual(
+        providers.profiles.map((p) => p.id),
+        ["doctor-probe-profile"]
+      );
+    } finally {
+      if (previous === undefined) delete process.env.AGENT_FLOWS_PROJECT_DIR;
+      else process.env.AGENT_FLOWS_PROJECT_DIR = previous;
+    }
   });
 });

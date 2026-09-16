@@ -8,7 +8,7 @@ import { join } from "node:path";
 // Replaces a former server.ts-local copy that hardcoded "/" as the separator.
 // This shared version uses path.sep, so containment now works on Windows too —
 // a correctness gain, not a behaviour regression (spec 023 acceptance criterion 6).
-import { isContained } from "../../install/paths.js";
+import { isContained } from "../../bundle/paths.js";
 import { isSafeName, json } from "../route-helpers.js";
 import type { ServerResponse } from "node:http";
 

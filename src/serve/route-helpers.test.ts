@@ -78,7 +78,7 @@ describe("isSafeId and isSafeName — accept-sets diverge as intended", () => {
   });
 });
 
-// ── Capped read-and-discard: 413 on a route other than POST /api/install ──────
+// ── Capped read-and-discard: 413 on a route that takes no body ───────────────
 
 describe("readAndDiscardBody — 413 on an oversized body (DELETE /api/pipelines/:id)", () => {
   let srv: ServeHandle;

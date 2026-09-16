@@ -64,43 +64,48 @@ export function fmtElapsed(startIso, endIso) {
   return `${sec}s`;
 }
 
-function btn(label, attr, value, extraClass) {
-  return `<button class="btn${extraClass ? ` ${extraClass}` : ""}" ${attr}="${esc(value)}">${esc(label)}</button>`;
+function btn(label, attr, value, extraClass, extraAttrs) {
+  return `<button class="btn${extraClass ? ` ${extraClass}` : ""}" ${attr}="${esc(value)}"${
+    extraAttrs ? ` ${extraAttrs}` : ""
+  }>${esc(label)}</button>`;
 }
 
 /**
  * One row of the Workflows table (spec 038 D13/D14/D15).
  *
- * Every row is editable now: `Edit` on a workflow the project cannot write — a
- * bundled one — forks it into a writable layer first and edits the copy, so the
- * package is never written (D14). `Delete` stays off a bundled row because
- * `DELETE /api/pipelines` answers 403 for it and always will.
+ * A workflow the project cannot write — a bundled one — offers `Fork…` where a
+ * writable one offers `Edit`: both end in the editor, but the bundled one goes
+ * through a copy first, so the package is never written (D14). `Delete` stays
+ * off a bundled row because `DELETE /api/pipelines` answers 403 for it and
+ * always will.
  *
  * The layer cell names the layer that owns the id and the layers it shadows
  * (FR-020); `hidden` marks a row this project has hidden from the chat surface
- * and this list (FR-026) — hidden is unlisted, never refused.
+ * and this list (FR-026) — hidden is unlisted, never refused. The toggle
+ * carries that state in `data-wf-hidden` rather than in its label, so renaming
+ * the button cannot invert what clicking it does.
  *
  * @param {{ id: string, description?: string, steps?: number, inputs?: string[],
- *   layer?: string, shadows?: string[], hidden?: boolean, source?: string }} wf
+ *   layer?: string, shadows?: string[], hidden?: boolean }} wf
  * @returns {string}
  */
 export function workflowRow(wf) {
   const id = String(wf?.id ?? "");
-  const layer = String(wf?.layer ?? wf?.source ?? "");
+  const layer = String(wf?.layer ?? "");
   const writable = layer !== "bundled";
+  const hidden = wf?.hidden === true;
   const inputs = Array.isArray(wf?.inputs) ? wf.inputs.join(", ") : "";
   const shadows = Array.isArray(wf?.shadows) && wf.shadows.length > 0 ? wf.shadows.join(", ") : "";
   const actions = [
     btn("Run…", "data-run-wf", id),
     btn("View", "data-view-wf", id),
-    btn("Edit", "data-edit-wf", id),
-    ...(writable ? [] : [btn("Fork…", "data-fork-wf", id)]),
-    btn(wf?.hidden === true ? "Show" : "Hide", "data-toggle-wf", id),
+    writable ? btn("Edit", "data-edit-wf", id) : btn("Fork…", "data-fork-wf", id),
+    btn(hidden ? "Show" : "Hide", "data-toggle-wf", id, "", `data-wf-hidden="${hidden}"`),
     ...(writable ? [btn("Delete", "data-del-wf", id, "danger")] : []),
   ].join("");
   return (
-    `<tr data-wf-row="${esc(id)}"${wf?.hidden === true ? ' class="hidden-row"' : ""}>` +
-    `<td class="pipeline-id">${esc(id)}${wf?.hidden === true ? ' <span class="badge">hidden</span>' : ""}</td>` +
+    `<tr data-wf-row="${esc(id)}">` +
+    `<td class="pipeline-id">${esc(id)}${hidden ? ' <span class="badge">hidden</span>' : ""}</td>` +
     `<td class="pipeline-desc">${esc(wf?.description ?? "")}</td>` +
     `<td>${esc(wf?.steps ?? "")}</td>` +
     `<td class="pipeline-id">${esc(inputs)}</td>` +

@@ -17,7 +17,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { filterVisible, readHidden, setHidden, visibilityPath } from "./visibility.js";
+import { listPipelinesPayload } from "../bindings/mastra/listPipelines.js";
+import { resolveProjectState } from "./projectState.js";
+import { readHidden, setHidden, visibilityPath } from "./visibility.js";
 
 function tempDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(realpathSync(tmpdir()), prefix)));
@@ -66,18 +68,19 @@ describe("FR-024: <stateDir>/visibility.json", () => {
   });
 
   it("an id that no longer exists in the merged view is ignored, not an error", () => {
-    const dir = tempDir("af-vis-unknown-");
+    // AGENT_FLOWS_HOME is pinned so both the state directory this writes into
+    // and the user library layer are the temp tree, never the owner's own.
+    const home = tempDir("af-vis-unknown-home-");
+    const project = tempDir("af-vis-unknown-project-");
     try {
-      setHidden(dir, "workflow-that-vanished", true);
-      const rows = [{ id: "investigate" }, { id: "cycle" }];
-      const visible = filterVisible(rows, readHidden(dir), (r) => r.id);
-      assert.deepEqual(
-        visible.map((r) => r.id),
-        ["investigate", "cycle"],
-        "a hidden id nothing defines any more simply filters nothing"
-      );
+      const env = { AGENT_FLOWS_HOME: home };
+      setHidden(resolveProjectState(project, env).dir, "workflow-that-vanished", true);
+      const ids = listPipelinesPayload(project, env).pipelines.map((p) => p.id);
+      assert.ok(ids.includes("investigate"), "a hidden id nothing defines any more hides nothing");
+      assert.ok(ids.includes("cycle"));
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
     }
   });
 

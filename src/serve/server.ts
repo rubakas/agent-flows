@@ -30,8 +30,15 @@ import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
 
 import { createDynamicMastra } from "../bindings/mastra/dynamicMastra.js";
-import { BUNDLED_PIPELINES_DIR } from "../bindings/mastra/pipelineLoader.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
+import {
+  exportBundle,
+  importBundle,
+  parseBundle,
+  stringifyBundle,
+  type WorkflowBundle,
+} from "../bundle/bundle.js";
+import { assertSafePath, isContained } from "../bundle/paths.js";
 import { saveDraft } from "../canon/canonWriter.js";
 import {
   getDraft,
@@ -61,14 +68,9 @@ import { CLI_MODEL_RE, loadProviders } from "../canon/loadProviders.js";
 import { getActiveProfile } from "../canon/registry.js";
 import { makeDb, type DbInstance } from "../db/index.js";
 import {
-  exportBundle,
-  importBundle,
-  parseBundle,
-  stringifyBundle,
-  type WorkflowBundle,
-} from "../install/bundle.js";
-import { assertSafePath, isContained } from "../install/paths.js";
-import { packageVersion } from "../packageRoot.js";
+  bundledPipelinesDir as defaultBundledPipelinesDir,
+  packageVersion,
+} from "../packageRoot.js";
 import { readManifest } from "../runtime/artifactStore.js";
 import {
   removeDaemonRecordIfOwned,
@@ -502,7 +504,7 @@ function isHardenedSpec(v: Record<string, unknown>): boolean {
  *
  * Absolute paths are allowed — the operator may deliberately cross project
  * boundaries (spec 029 FR-003 Design F). Relative paths must stay inside
- * projectDir; the same containment principle as assertSafePath (install/paths.ts)
+ * projectDir; the same containment principle as assertSafePath (bundle/paths.ts)
  * applies but adapted for the absolute-path cross-project use case.
  */
 /**
@@ -615,7 +617,7 @@ export interface ServeOptions {
   runService?: RunService;
   /** The user's project directory (install target). Defaults to process.cwd(). */
   projectDir?: string;
-  /** The tool's bundled pipeline catalog directory. Defaults to BUNDLED_PIPELINES_DIR. */
+  /** The tool's bundled pipeline catalog directory. Defaults to the package's own. */
   bundledPipelinesDir?: string;
   /** Root directory containing skills/ and agents/ subdirs. Defaults to AGENT_FLOWS_SKILLS_DIR or ~/.claude. */
   skillsBase?: string;
@@ -723,7 +725,7 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
   const db = makeDb(dbPath);
   const runService = opts.runService ?? null;
   const uiPath = join(__dirname, "ui.html");
-  const bundledPipelinesDir = opts.bundledPipelinesDir ?? BUNDLED_PIPELINES_DIR;
+  const bundledPipelinesDir = opts.bundledPipelinesDir ?? defaultBundledPipelinesDir();
 
   const skillsBase =
     opts.skillsBase ?? process.env.AGENT_FLOWS_SKILLS_DIR ?? join(homedir(), ".claude");
@@ -1030,9 +1032,7 @@ async function handleRequest(
   }
 
   // GET /api/daemon — identity, health and version handshake in one route
-  // (spec 038 D8, FR-011). There is no other probe: every other route either
-  // needs a RunService or can 503 on missing page assets, and none of them says
-  // which project this daemon serves. The MCP client refuses to reuse a daemon
+  // (spec 038 D8, FR-011). The MCP client refuses to reuse a daemon
   // whose projectDir or version differs from its own, so this response is what
   // keeps one project's chat from running steps in another project's tree.
   if (method === "GET" && pathname === "/api/daemon") {
@@ -1096,7 +1096,7 @@ async function handleRequest(
       json(res, 400, { error: 'Field "to" must be "user" or "repo"' });
       return;
     }
-    const target = resolveForkTarget(ctx.projectDir, to);
+    const target = resolveForkTarget(ctx.projectDir, ctx.catalog.layers, to);
     try {
       const report = forkPipeline({
         id,
@@ -2649,10 +2649,6 @@ if (process.argv[1] === __filename) {
   const listenOn = async (port: number): Promise<ServeHandle> =>
     startServer({ port, dbPath, runService, projectDir, state });
 
-  // FR-012: an explicitly requested port that is taken stays a loud failure —
-  // the operator asked for that port and nothing else will do. A defaulted 7411
-  // simply steps aside onto an OS-assigned port, which is what lets a second
-  // project's daemon come up on a machine where the first already holds 7411.
   let handle: ServeHandle;
   try {
     handle = await listenOn(portChoice.port);

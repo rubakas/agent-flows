@@ -753,9 +753,6 @@
               <a class="btn" id="btn-from-template" href="#/templates">From template…</a>
             </span>
           </div>
-          <p class="empty" id="workflows-readonly-note">
-            Bundled workflows are read-only — Edit forks a copy into a writable layer first.
-          </p>
           <div id="workflows-table-wrap">Loading…</div>
         </div>
       </section>
@@ -1004,7 +1001,8 @@
           btn.onclick = () => openForkDialog(btn.dataset.forkWf);
         }
         for (const btn of wrap.querySelectorAll("[data-toggle-wf]")) {
-          btn.onclick = () => toggleWorkflowVisibility(btn.dataset.toggleWf, btn.textContent);
+          btn.onclick = () =>
+            toggleWorkflowVisibility(btn.dataset.toggleWf, btn.dataset.wfHidden !== "true");
         }
         for (const btn of wrap.querySelectorAll("[data-del-wf]")) {
           btn.onclick = () => deleteWorkflow(btn.dataset.delWf, loadWorkflows);
@@ -1052,12 +1050,12 @@
       // place: the page asks which layer to fork into, forks, and then opens the
       // editor on the copy. The package is never a write target.
 
-      /** The id waiting on a fork target, and what to do once it is copied. */
-      let _forkTarget = { id: null, onDone: null };
+      /** The id waiting on a fork target. */
+      let _forkId = null;
 
-      function openForkDialog(id, onDone) {
+      function openForkDialog(id) {
         const dlg = document.getElementById("dialog-fork");
-        _forkTarget = { id, onDone: onDone ?? null };
+        _forkId = id;
         // textContent, not innerHTML: these strings carry a pipeline id.
         document.getElementById("dialog-fork-title").textContent = `Fork ${id}`;
         document.getElementById("dialog-fork-note").textContent =
@@ -1070,13 +1068,12 @@
       document.getElementById("btn-fork-confirm").onclick = async () => {
         const dlg = document.getElementById("dialog-fork");
         const to = dlg.querySelector('input[name="fork-target"]:checked').value;
-        const id = _forkTarget.id;
+        const id = _forkId;
         try {
           const r = await api("POST", `/api/pipelines/${encodeURIComponent(id)}/fork`, { to });
           dlg.close();
           flash(`Forked "${id}" into ${r.root}`);
-          if (_forkTarget.onDone) _forkTarget.onDone();
-          else location.hash = hashFor("workflow-edit", id);
+          location.hash = hashFor("workflow-edit", id);
         } catch (e) {
           flash(e.message, true);
         }
@@ -1095,11 +1092,9 @@
       }
 
       /** Hide or show one workflow on the chat and page lists (038 D15). */
-      async function toggleWorkflowVisibility(id, label) {
+      async function toggleWorkflowVisibility(id, hidden) {
         try {
-          await api("POST", `/api/pipelines/${encodeURIComponent(id)}/visibility`, {
-            hidden: label.trim() === "Hide",
-          });
+          await api("POST", `/api/pipelines/${encodeURIComponent(id)}/visibility`, { hidden });
           loadWorkflows();
         } catch (e) {
           flash(e.message, true);

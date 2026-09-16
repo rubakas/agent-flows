@@ -20,10 +20,10 @@ import { LibSQLStore } from "@mastra/libsql";
 import { loadPipeline } from "../../canon/load.js";
 import { ModelRegistry } from "../../canon/registry.js";
 import { makeInMemoryDb } from "../../db/index.js";
+import { bundledPipelinesDir } from "../../packageRoot.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
 import { mastraDbPath } from "./paths.js";
-import { BUNDLED_PIPELINES_DIR } from "./pipelineLoader.js";
 import type { StepRunnerDeps, runLlmStep } from "../../canon/runStep.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 
@@ -2026,7 +2026,7 @@ describe("bundled pipelines — timeoutMs regression guard (CHUNK A)", () => {
       "test.yaml",
     ];
     for (const file of pipelineFiles) {
-      const loaded = loadPipeline(join(BUNDLED_PIPELINES_DIR, file));
+      const loaded = loadPipeline(join(bundledPipelinesDir(), file));
       for (const step of loaded.def.steps) {
         assert.equal(
           step.timeoutMs,
