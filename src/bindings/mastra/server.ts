@@ -8,6 +8,7 @@ import { createTool } from "@mastra/core/tools";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
 import { cancelRun, daemonFetch, getRunState, pollRunUntilTerminal } from "./daemonTools.js";
+import { instructionsFor } from "./instructions.js";
 import { loadCatalog, resolveCanonDir } from "./pipelineLoader.js";
 import { resolveProjectDir } from "./projectDir.js";
 
@@ -221,6 +222,9 @@ const server = new MCPServer({
   id: "agent-flows-mastra",
   name: "Agent Flows Mastra Binding",
   version: "1.0.0",
+  // Scoped at startup (spec 038 D7/FR-010): the short pointer for a project
+  // that has not customized anything, the full text once it has.
+  instructions: instructionsFor(projectDir),
   tools: {
     list_pipelines: listPipelinesTool,
     run_pipeline: runPipelineTool,
