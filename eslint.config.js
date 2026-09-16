@@ -148,6 +148,20 @@ export default tseslint.config(
     },
   },
 
+  // ── The launcher (extensionless plain ESM JavaScript) ─────────────────────
+  // bin/agent-flows has no extension, so no glob matches it and `eslint .` would
+  // skip the one file every harness executes first. It runs under the ambient
+  // node before any build exists, so it is outside tsconfig's TS program like
+  // the files above.
+  {
+    files: ["bin/agent-flows"],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      parserOptions: { projectService: false, project: false },
+      globals: { console: "readonly", process: "readonly" },
+    },
+  },
+
   // ── Prettier LAST — disables all formatting-conflicting rules ────────────
   prettier
 );

@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { PAGE_ASSETS } from "./copy-dist-assets.mjs";
+
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const outDir = mkdtempSync(join(tmpdir(), "af-pack-"));
 const failures = [];
@@ -36,11 +38,7 @@ try {
     "README.md",
     "bin/agent-flows",
     "dist/cli.js",
-    "dist/serve/ui.html",
-    "dist/serve/ui-route.js",
-    "dist/serve/ui-graph.js",
-    "dist/serve/ui-log.js",
-    "dist/serve/ui-tables.js",
+    ...PAGE_ASSETS.map((name) => `dist/serve/${name}`),
   ];
   for (const name of required) {
     if (!files.includes(name)) failures.push(`missing from the tarball: ${name}`);

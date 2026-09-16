@@ -34,6 +34,10 @@ const REEXEC_MARKER = "AGENT_FLOWS_NODE_REEXEC";
 // Walk up to the package root rather than assuming a fixed depth: the command
 // is reached through a symlink on PATH, and node resolves import.meta.url to
 // the real file, so the walk starts inside the real package.
+//
+// This deliberately duplicates src/packageRoot.ts: the launcher runs before a
+// build exists (and under a node that may not be able to load this package at
+// all), so it cannot import the compiled helper. Do not "fix" it by importing.
 let root = dirname(fileURLToPath(import.meta.url));
 while (!existsSync(join(root, "package.json"))) {
   const parent = dirname(root);
@@ -70,18 +74,22 @@ function probeMajor(binary) {
 }
 
 /**
- * Whether a candidate interpreter can actually run this package.
+ * Whether a candidate interpreter can actually run this package, and the major
+ * version it reported — the refusal message needs both, and probing is a
+ * subprocess, so it happens once.
  *
- * Returns "ok", "version" (too old or not a node at all) or "native" (new
- * enough, but it cannot load the compiled database module). A version number
- * is not evidence: better-sqlite3 is compiled for whichever node installed it,
- * so a Node 24 install passes the floor and still fails to dlopen a binary
- * built for Node 22. Loading the module is the only evidence there is.
+ * The verdict is "ok", "version" (too old or not a node at all) or "native"
+ * (new enough, but it cannot load the compiled database module). A version
+ * number is not evidence: better-sqlite3 is compiled for whichever node
+ * installed it, so a Node 24 install passes the floor and still fails to dlopen
+ * a binary built for Node 22. Loading the module is the only evidence there is.
  */
 function qualify(binary) {
   const probed = probeMajor(binary);
-  if (probed === undefined || probed < REQUIRED_NODE_MAJOR) return "version";
-  return loadsNativeModule(binary) ? "ok" : "native";
+  if (probed === undefined || probed < REQUIRED_NODE_MAJOR) {
+    return { verdict: "version", major: probed };
+  }
+  return { verdict: loadsNativeModule(binary) ? "ok" : "native", major: probed };
 }
 
 /** True when `binary` can open a database with the package's better-sqlite3. */
@@ -128,7 +136,7 @@ function fromPath(rejected) {
 
 /** Qualify a candidate, recording it when only the native module load failed. */
 function accept(candidate, rejected) {
-  const verdict = qualify(candidate);
+  const { verdict } = qualify(candidate);
   if (verdict === "native") rejected.push(candidate);
   return verdict === "ok";
 }
@@ -161,44 +169,44 @@ function fromNvm(rejected) {
   return undefined;
 }
 
-/** Re-exec this CLI under a compatible node, or print why it cannot. */
-function reExecOrRefuse() {
-  // Already re-execed once and still too old: the interpreter we picked was not
-  // what it claimed to be. Refuse rather than fork forever.
-  const alreadyReExeced = process.env[REEXEC_MARKER] !== undefined;
-  const override = process.env.AGENT_FLOWS_NODE;
-  // Interpreters new enough but unable to load the database module, kept so the
-  // refusal can say that rather than the misleading "none found".
-  const rejected = [];
-  if (!alreadyReExeced && override !== undefined && override !== "") {
-    // An explicit override that is wrong must be loud: falling through to the
-    // search would hide a broken configuration behind a working run.
-    const verdict = qualify(override);
-    if (verdict !== "ok") {
-      const probed = probeMajor(override);
-      const reason =
-        verdict === "native"
-          ? `it is Node ${String(probed)}, but it cannot load this package's better-sqlite3 (built for a different Node ABI)`
-          : `it is not a usable Node ${String(REQUIRED_NODE_MAJOR)}+ interpreter${probed === undefined ? "" : ` (it reports Node ${String(probed)})`}`;
-      process.stderr.write(
-        `agent-flows: AGENT_FLOWS_NODE points at ${override}, but ${reason}.\n` +
-          `Point AGENT_FLOWS_NODE at a Node ${String(REQUIRED_NODE_MAJOR)}+ binary that can load the module, or unset it.\n`
-      );
-      process.exit(1);
-    }
-    reExec(override);
-  }
+/**
+ * The interpreter AGENT_FLOWS_NODE names, or an exit.
+ *
+ * An explicit override that is wrong must be loud: falling through to the
+ * search would hide a broken configuration behind a working run.
+ */
+function overrideInterpreter(override) {
+  const { verdict, major: probed } = qualify(override);
+  if (verdict === "ok") return override;
+  const reason =
+    verdict === "native"
+      ? `it is Node ${String(probed)}, but it cannot load this package's better-sqlite3 (built for a different Node ABI)`
+      : `it is not a usable Node ${String(REQUIRED_NODE_MAJOR)}+ interpreter${probed === undefined ? "" : ` (it reports Node ${String(probed)})`}`;
+  process.stderr.write(
+    `agent-flows: AGENT_FLOWS_NODE points at ${override}, but ${reason}.\n` +
+      `Point AGENT_FLOWS_NODE at a Node ${String(REQUIRED_NODE_MAJOR)}+ binary that can load the module, or unset it.\n`
+  );
+  process.exit(1);
+}
 
-  if (!alreadyReExeced) {
-    const candidate =
-      fromPath(rejected) ??
-      fromNvm(rejected) ??
-      ["/opt/homebrew/bin/node", "/usr/local/bin/node"].find((path) =>
-        existsSync(path) ? accept(path, rejected) : false
-      );
-    if (candidate !== undefined) reExec(candidate);
-  }
+/**
+ * The first interpreter on this machine that can run the package, or undefined.
+ *
+ * Candidates that are new enough but cannot load the database module are pushed
+ * onto `rejected`, so the refusal can say that rather than "none found".
+ */
+function findInterpreter(rejected) {
+  return (
+    fromPath(rejected) ??
+    fromNvm(rejected) ??
+    ["/opt/homebrew/bin/node", "/usr/local/bin/node"].find((path) =>
+      existsSync(path) ? accept(path, rejected) : false
+    )
+  );
+}
 
+/** Print why this node cannot run the package, and what was looked at, then exit. */
+function refuse(rejected) {
   const nvmDir = process.env.NVM_DIR ?? join(homedir(), ".nvm");
   process.stderr.write(
     `agent-flows: Node ${String(REQUIRED_NODE_MAJOR)} or newer is required, but this is Node ${running}.\n` +
@@ -210,6 +218,21 @@ function reExecOrRefuse() {
       `Looked for one in AGENT_FLOWS_NODE, on PATH, under ${join(nvmDir, "versions", "node")}, /opt/homebrew/bin/node and /usr/local/bin/node.\n`
   );
   process.exit(1);
+}
+
+/** Re-exec this CLI under a compatible node, or refuse with the reason. */
+function reExecOrRefuse() {
+  // Already re-execed once and still too old: the interpreter we picked was not
+  // what it claimed to be. Refuse rather than fork forever.
+  const alreadyReExeced = process.env[REEXEC_MARKER] !== undefined;
+  const rejected = [];
+  if (!alreadyReExeced) {
+    const override = process.env.AGENT_FLOWS_NODE;
+    if (override !== undefined && override !== "") reExec(overrideInterpreter(override));
+    const candidate = findInterpreter(rejected);
+    if (candidate !== undefined) reExec(candidate);
+  }
+  refuse(rejected);
 }
 
 /** Run this same script under `binary`, forwarding everything, and exit with it. */

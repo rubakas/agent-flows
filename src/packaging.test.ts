@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { PAGE_ASSETS } from "../scripts/copy-dist-assets.mjs";
 import { packageRoot } from "./packageRoot.js";
 
 const ROOT = packageRoot();
@@ -80,7 +81,7 @@ describe("FR-005: what npm pack would ship", () => {
       t.skip("no dist/ present — run `pnpm build` first, or use scripts/pack-check.mjs");
       return;
     }
-    for (const name of ["ui.html", "ui-route.js", "ui-graph.js", "ui-log.js", "ui-tables.js"]) {
+    for (const name of PAGE_ASSETS) {
       assert.ok(files.includes(`dist/serve/${name}`), `dist/serve/${name} must ship`);
     }
     assert.ok(files.includes("dist/cli.js"), "dist/cli.js must ship — bin/agent-flows runs it");

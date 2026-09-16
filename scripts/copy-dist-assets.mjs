@@ -6,8 +6,9 @@
 // join(__dirname, "ui.html") and each module as a sibling of it, so without this
 // step every page route on a compiled build answers 503.
 //
-// The files are copied verbatim, never compiled: the browser and the unit tests
-// must load identical bytes whether they come from src/ or dist/.
+// This list is the canonical one: the pack check and the tests import it, so a
+// module added to the server's static map is copied, packed and asserted from
+// one place.
 
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";

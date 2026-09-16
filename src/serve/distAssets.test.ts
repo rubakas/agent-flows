@@ -8,23 +8,26 @@
 // unit tests have to load identical bytes whichever tree they come from.
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 
+import { PAGE_ASSETS, copyPageAssets } from "../../scripts/copy-dist-assets.mjs";
 import { packageRoot } from "../packageRoot.js";
 
 const ROOT = packageRoot();
 const SRC_DIR = join(ROOT, "src", "serve");
-const DIST_DIR = join(ROOT, "dist", "serve");
 
-const PAGE_ASSETS = ["ui.html", "ui-route.js", "ui-graph.js", "ui-log.js", "ui-tables.js"];
+// Run the real build step, but into a throwaway root: asserting a copy this
+// file just made into the repository's own dist/ would both prove less and
+// leave build output behind as a side effect of running the tests.
+const TMP_ROOT = realpathSync(mkdtempSync(join(tmpdir(), "af-dist-assets-")));
+cpSync(SRC_DIR, join(TMP_ROOT, "src", "serve"), { recursive: true });
+const DIST_DIR = copyPageAssets(TMP_ROOT);
 
-// Run the real build step rather than a re-implementation of it: this is the
-// exact command `pnpm build` runs after tsc, and it needs no compiler.
-execFileSync(process.execPath, [join(ROOT, "scripts", "copy-dist-assets.mjs")], {
-  stdio: "pipe",
+after(() => {
+  rmSync(TMP_ROOT, { recursive: true, force: true });
 });
 
 describe("FR-001: the build copies every page asset into dist/serve", () => {
