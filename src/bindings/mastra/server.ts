@@ -7,9 +7,10 @@ import { fileURLToPath } from "node:url";
 import { createTool } from "@mastra/core/tools";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
-import { loadCatalogPipelines, resolveCatalog, resolveLayers } from "../../canon/layers.js";
+import { resolveLayers } from "../../canon/layers.js";
 import { cancelRun, daemonFetch, getRunState, pollRunUntilTerminal } from "./daemonTools.js";
 import { instructionsFor } from "./instructions.js";
+import { listPipelinesPayload } from "./listPipelines.js";
 import { resolveProjectDir } from "./projectDir.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -46,20 +47,10 @@ const listPipelinesTool = createTool({
   description: "List all loaded pipelines with their IDs and descriptions.",
   inputSchema: z.object({}),
   execute: async () => {
-    // Resolve the merged layer view per-call so that a workflow added after the
-    // MCP server started is visible on the very next call — no restart required
-    // (spec 029 FR-010 defect fix; layers per spec 038 D13).
-    const catalog = loadCatalogPipelines(resolveCatalog(projectDir));
-    return {
-      pipelines: catalog.loaded.map(({ entry, loaded }) => ({
-        id: loaded.def.id,
-        description: loaded.def.description,
-        inputs: loaded.def.inputs,
-        layer: entry.layer.source,
-        shadows: entry.shadows,
-      })),
-      errors: catalog.errors.map((e) => ({ file: e.file, error: e.error })),
-    };
+    // Resolved per call, and filtered by this project's visibility list (spec
+    // 038 FR-026) — a hidden workflow is unlisted here and still runs when
+    // run_pipeline names it by id.
+    return listPipelinesPayload(projectDir);
   },
 });
 
