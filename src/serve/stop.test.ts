@@ -229,11 +229,21 @@ describe("stop --all — every project state directory (FR-016)", () => {
 describe("formatStopReport", () => {
   it("says stopped or skipped, with the reason", () => {
     assert.equal(
-      formatStopReport({ stateDir: "/s", stopped: true, reason: "stopped pid 5" }),
+      formatStopReport({
+        stateDir: "/s",
+        stopped: true,
+        outcome: "stopped",
+        reason: "stopped pid 5",
+      }),
       "agent-flows stop: stopped /s: stopped pid 5"
     );
     assert.equal(
-      formatStopReport({ stateDir: "/s", stopped: false, reason: "no daemon.json" }),
+      formatStopReport({
+        stateDir: "/s",
+        stopped: false,
+        outcome: "no-daemon",
+        reason: "no daemon.json",
+      }),
       "agent-flows stop: skipped /s: no daemon.json"
     );
   });

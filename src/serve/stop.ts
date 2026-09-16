@@ -26,10 +26,22 @@ import {
 } from "../runtime/daemonRecord.js";
 import { resolveProjectState, stateRoot, type StateEnv } from "../runtime/projectState.js";
 
+/**
+ * How certain we are that no daemon is holding this project's state.
+ *
+ * `no-daemon` means that was established — there is no record, or nothing
+ * answers the recorded port. `unresolved` means it could not be: a malformed
+ * record, a port held by someone we cannot identify, or a daemon that outlived
+ * its SIGTERM. A caller about to delete the state directory must treat
+ * `unresolved` as "a live daemon may still own this" (D10).
+ */
+export type StopOutcome = "stopped" | "no-daemon" | "unresolved";
+
 /** What happened to one project's recorded daemon. */
 export interface StopReport {
   stateDir: string;
   stopped: boolean;
+  outcome: StopOutcome;
   reason: string;
   projectDir?: string;
   port?: number;
@@ -71,6 +83,7 @@ export async function stopProjectDaemon(
     return {
       stateDir,
       stopped: false,
+      outcome: present ? "unresolved" : "no-daemon",
       reason: present
         ? `${daemonRecordPath(stateDir)} is unreadable or malformed — left it alone`
         : "no daemon.json — no daemon was recorded for this project",
@@ -83,6 +96,7 @@ export async function stopProjectDaemon(
     return {
       ...base,
       stopped: false,
+      outcome: "no-daemon",
       reason:
         `nothing answered GET /api/daemon on port ${record.port} — ` +
         `the record is stale and pid ${record.pid} was NOT signalled`,
@@ -92,6 +106,7 @@ export async function stopProjectDaemon(
     return {
       ...base,
       stopped: false,
+      outcome: "unresolved",
       reason:
         `port ${record.port} is held by pid ${identity.pid}, not the recorded pid ` +
         `${record.pid} — nothing was signalled`,
@@ -101,6 +116,7 @@ export async function stopProjectDaemon(
     return {
       ...base,
       stopped: false,
+      outcome: "unresolved",
       reason:
         `the daemon on port ${record.port} serves ${identity.projectDir}, not the recorded ` +
         `${record.projectDir} — nothing was signalled`,
@@ -117,6 +133,7 @@ export async function stopProjectDaemon(
       return {
         ...base,
         stopped: false,
+        outcome: "unresolved",
         reason: `pid ${record.pid} was sent SIGTERM but is still answering on port ${record.port}`,
       };
     }
@@ -130,6 +147,7 @@ export async function stopProjectDaemon(
   return {
     ...base,
     stopped: true,
+    outcome: "stopped",
     reason: `stopped pid ${record.pid} serving ${record.projectDir} on port ${record.port}`,
   };
 }
