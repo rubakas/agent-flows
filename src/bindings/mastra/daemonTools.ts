@@ -5,17 +5,15 @@
 // over the daemon's HTTP API so the tool behaviour is unit-testable against a
 // fake daemon.
 
-/**
- * Base URL of the HTTP daemon. Read per call rather than at module load so a
- * test (and an operator who exports the variable after import) sees the current
- * value. `AGENT_FLOWS_PORT` is the same variable the daemon itself now reads.
- */
-export function daemonBase(env: NodeJS.ProcessEnv = process.env): string {
-  return `http://127.0.0.1:${env.AGENT_FLOWS_PORT ?? "7411"}`;
-}
+import { resolveDaemonBase } from "./daemonResolver.js";
 
 export async function daemonFetch(path: string, init?: RequestInit): Promise<Response> {
-  const base = daemonBase();
+  // Resolved per call (spec 038 FR-013): the daemon is found by identity — this
+  // project's daemon.json plus a GET /api/daemon handshake — and auto-started
+  // when there is none, instead of the old fixed `AGENT_FLOWS_PORT ?? 7411`
+  // guess, which could hand this project's run to another project's daemon.
+  // The resolution itself is memoized, so this is one probe per process.
+  const base = await resolveDaemonBase();
   const url = `${base}${path}`;
   let res: Response;
   try {
@@ -23,8 +21,8 @@ export async function daemonFetch(path: string, init?: RequestInit): Promise<Res
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `agent-flows MCP: cannot reach daemon at ${base} — start it with ` +
-        `"agent-flows serve" before using run tools. (${msg})`,
+      `agent-flows MCP: cannot reach the daemon at ${base}; it answered the identity ` +
+        `handshake earlier in this session, so it has since stopped or crashed. (${msg})`,
       { cause: err }
     );
   }

@@ -4,8 +4,13 @@
 // their actual fetch/status handling rather than a stubbed transport.
 
 import assert from "node:assert/strict";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { packageVersion } from "../../packageRoot.js";
+import { clearDaemonBaseCache } from "./daemonResolver.js";
 import {
   TERMINAL_RUN_STATUSES,
   cancelRun,
@@ -18,18 +23,47 @@ type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 let server: Server;
 let handler: Handler;
 let previousPort: string | undefined;
+let previousHome: string | undefined;
+let tmpHome: string;
 
 before(async () => {
-  server = createServer((req, res) => handler(req, res));
+  server = createServer((req, res) => {
+    // The fake daemon must pass the spec 038 FR-013 identity handshake, or the
+    // proxies' resolver would (correctly) treat it as someone else's daemon and
+    // try to auto-start a real one.
+    if (req.url === "/api/daemon") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          projectDir: process.cwd(),
+          version: packageVersion(),
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+        })
+      );
+      return;
+    }
+    handler(req, res);
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const { port } = server.address() as { port: number };
   previousPort = process.env.AGENT_FLOWS_PORT;
   process.env.AGENT_FLOWS_PORT = String(port);
+  // Keep the resolver's state-dir reads off the owner's real ~/.agent-flows.
+  previousHome = process.env.AGENT_FLOWS_HOME;
+  tmpHome = mkdtempSync(join(realpathSync(tmpdir()), "af-daemon-tools-"));
+  process.env.AGENT_FLOWS_HOME = tmpHome;
+  clearDaemonBaseCache();
 });
 
 after(async () => {
   if (previousPort === undefined) delete process.env.AGENT_FLOWS_PORT;
   else process.env.AGENT_FLOWS_PORT = previousPort;
+  if (previousHome === undefined) delete process.env.AGENT_FLOWS_HOME;
+  else process.env.AGENT_FLOWS_HOME = previousHome;
+  clearDaemonBaseCache();
+  rmSync(tmpHome, { recursive: true, force: true });
+  server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
