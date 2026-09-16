@@ -1,15 +1,12 @@
 #!/usr/bin/env tsx
 // `agent-flows enable <id>` / `agent-flows disable <id>` (spec 038 FR-025).
-//
-// Edits this project's `<stateDir>/visibility.json`. Hiding declutters the chat
-// surface: a hidden workflow is unlisted, never refused.
 
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import { resolveCatalog } from "../canon/layers.js";
 import { resolveProjectState } from "./projectState.js";
 import { setHidden } from "./visibility.js";
 
-const [, , verb, id] = process.argv;
+const [verb, id] = process.argv.slice(2);
 
 if (verb !== "enable" && verb !== "disable") {
   console.error("Usage: agent-flows enable|disable <id>");

@@ -1,11 +1,5 @@
 #!/usr/bin/env tsx
 // `agent-flows list` — the workflows this project can run (spec 038 FR-020).
-//
-// Every row comes from the merged three-layer view, so the listing is the same
-// set the daemon serves and the MCP tool reports. A row names the layer that
-// owns the id, and one that wins over a same-id workflow in an earlier layer
-// says which layers it shadows — an upgrade that adds a bundled workflow shows
-// up here, and a fork that hides one is visible rather than silent.
 
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import { resolveProjectState } from "../runtime/projectState.js";
