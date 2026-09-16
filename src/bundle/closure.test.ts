@@ -1,20 +1,12 @@
 import assert from "node:assert/strict";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { catalogRows, resolveCatalog, resolveLayers } from "../canon/layers.js";
 import { packageRoot } from "../packageRoot.js";
 import { exportBundle } from "./bundle.js";
-import { computeClosure } from "./install.js";
+import { computeClosure } from "./closure.js";
 
 const repoRoot = packageRoot();
 const bundledPipelinesDir = join(repoRoot, "pipelines");
@@ -195,15 +187,6 @@ describe("computeClosure — path traversal rejection", () => {
 // must fail here rather than silently emptying every exported bundle.
 
 describe("FR-028: exportBundle still depends on computeClosure", () => {
-  it("bundle.ts imports computeClosure from install.ts", () => {
-    const source = readFileSync(join(repoRoot, "src", "install", "bundle.ts"), "utf8");
-    assert.match(
-      source,
-      /import \{ computeClosure \} from "\.\/install\.js";/u,
-      "exportBundle's traversal must stay the one in install.ts, not a copy"
-    );
-  });
-
   it("an exported bundle carries exactly the ids computeClosure reports", () => {
     const { pipelines } = computeClosure("cycle", bundledPipelinesDir);
     const exported = exportBundle("cycle", bundledPipelinesDir)

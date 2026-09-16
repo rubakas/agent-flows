@@ -1,28 +1,10 @@
-// Closure computation for `exportBundle` (spec 038 D16). `installWorkflow`,
-// `listAvailable` and `listInstalled` were removed with the install verb: there
-// is no install any more, and editing forks instead (D14). `computeClosure`
-// stays because the exporter needs it.
+// Closure computation for `exportBundle` (spec 038 D16).
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { parse } from "yaml";
 
+import { readRawPipeline } from "../canon/rawPipeline.js";
 import { assertSafePath } from "./paths.js";
-
-// Minimal raw shape needed for closure computation. Full validation happens at load time.
-interface RawStep {
-  kind?: string;
-  prompt?: string;
-  pipeline?: string;
-}
-
-interface RawPipeline {
-  steps?: RawStep[];
-}
-
-function parseRaw(yamlPath: string): RawPipeline {
-  return parse(readFileSync(yamlPath, "utf8")) as RawPipeline;
-}
 
 export interface PipelineClosure {
   /** Pipeline IDs in the transitive closure (including the root). */
@@ -78,7 +60,7 @@ export function computeClosure(
     // A pipeline's prompts are the sibling prompts/ directory of its own layer
     // root — the parent of the directory the YAML sits in (spec 038 FR-018).
     const root = dirname(dirname(yamlPath));
-    const raw = parseRaw(yamlPath);
+    const raw = readRawPipeline(yamlPath);
     for (const step of raw.steps ?? []) {
       if (step.prompt) {
         assertSafePath(root, step.prompt);

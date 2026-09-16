@@ -23,7 +23,7 @@ import { parse, stringify } from "yaml";
 import { assertWritableRoot } from "../canon/fork.js";
 import { loadPipeline } from "../canon/load.js";
 import { parseProviders } from "../canon/loadProviders.js";
-import { computeClosure } from "./install.js";
+import { computeClosure } from "./closure.js";
 import { assertSafePath, isContained } from "./paths.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
