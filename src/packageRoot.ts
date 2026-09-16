@@ -10,7 +10,7 @@
 // This module deliberately imports nothing from our own tree so canon, the
 // bindings, the installer, and the tests can all use it without a cycle.
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -77,4 +77,34 @@ export function bundledPipelinesDir(): string {
 /** The bundled prompt files shipped with the package. */
 export function bundledPromptsDir(): string {
   return join(packageRoot(), "prompts");
+}
+
+let cachedVersion: string | undefined;
+
+/**
+ * The `version` field of the package's own package.json.
+ *
+ * The daemon identity handshake (spec 038 D8) compares this value, so it is read
+ * from the resolved package root rather than from any caller-supplied path: two
+ * processes must agree on what "this version" means or the handshake is
+ * meaningless.
+ */
+export function packageVersion(): string {
+  if (cachedVersion !== undefined) return cachedVersion;
+  const manifestPath = join(packageRoot(), "package.json");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`agent-flows: cannot read the package version from ${manifestPath}: ${msg}`, {
+      cause: err,
+    });
+  }
+  const version = (parsed as { version?: unknown }).version;
+  if (typeof version !== "string" || version === "") {
+    throw new Error(`agent-flows: ${manifestPath} has no usable "version" field.`);
+  }
+  cachedVersion = version;
+  return cachedVersion;
 }
