@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 // Verb router for the agent-flows CLI.
 //
 // Usage:
@@ -55,10 +55,20 @@ function usage(): void {
   console.log("  generate claude               generate Claude Code workflow bindings");
 }
 
-// Run a module via the same tsx process, forwarding remaining args and
-// inheriting stdio so that the subcommand controls its own output and exit code.
+// Run a module as its own process, forwarding remaining args and inheriting
+// stdio so that the subcommand controls its own output and exit code.
+//
+// Spawning, never importing (spec 038 D4): src/serve/server.ts and src/doctor.ts
+// only act when they are the process entry point, and src/bindings/mastra/server.ts
+// starts its stdio transport at import time — an in-process import would break
+// serve, doctor and mcp in three different ways.
+//
+// Under tsx (source mode) the child needs the tsx ESM loader to read .ts; the
+// compiled build is plain JavaScript and must be run without it, since tsx is a
+// devDependency that an installed package does not have.
 function runModule(modulePath: string, args: string[] = []): void {
-  const child = spawn(process.execPath, ["--import", "tsx/esm", modulePath, ...args], {
+  const loader = _ext === ".ts" ? ["--import", "tsx/esm"] : [];
+  const child = spawn(process.execPath, [...loader, modulePath, ...args], {
     stdio: "inherit",
     env: process.env,
   });

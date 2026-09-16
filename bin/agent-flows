@@ -1,29 +1,54 @@
-#!/usr/bin/env bash
-# Launch the agent-flows CLI under Node 22 regardless of the ambient node.
-# better-sqlite3 is built for Node 22 (NODE_MODULE_VERSION 127); the host's
-# default node is 20, which fails on an ABI mismatch. Force 22 here.
-set -euo pipefail
-# Capture the invocation directory before cd changes it; every verb that
-# targets a project (serve, install, list, validate) uses cwd as the default
-# project directory, and AGENT_FLOWS_PROJECT_DIR overrides that.
-# This is where FR-003's single targeting rule is enforced at the boundary:
-# an explicitly set variable wins; otherwise the project is wherever the user
-# ran the command from.
-AGENT_FLOWS_PROJECT_DIR="${AGENT_FLOWS_PROJECT_DIR:-$PWD}"
-export AGENT_FLOWS_PROJECT_DIR
-# Resolve through symlinks: the command is meant to be installed on PATH
-# (a link in ~/.local/bin or a pnpm global bin), and the repository root must
-# be computed from the real script location, not from the link's parent.
-# readlink -f is not available on stock macOS, so we loop manually.
-SOURCE="${BASH_SOURCE[0]:-$0}"
-while [ -L "$SOURCE" ]; do
-  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-  SOURCE="$(readlink "$SOURCE")"
-  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
-done
-cd "$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
-export NVM_DIR="$HOME/.nvm"
-# shellcheck disable=SC1091
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 22 >/dev/null 2>&1 || true
-exec ./node_modules/.bin/tsx src/cli.ts "$@"
+#!/usr/bin/env node
+// The installed agent-flows command (spec 038 D2, FR-002, FR-003).
+//
+// It runs the compiled CLI under the ambient node: no transpiler at runtime and
+// no nvm sourcing, so it works from a global install with no dev dependencies.
+// The engines floor of 22 is enforced here instead, because better-sqlite3 is
+// built for Node 22's ABI (NODE_MODULE_VERSION 127) and an older node fails
+// deep inside a database call with an unreadable dlopen error.
+//
+// The project directory is not captured here: this script never changes
+// directory, so process.cwd() in the CLI is already the invocation directory
+// and resolveProjectDir() falls back to it (AGENT_FLOWS_PROJECT_DIR still wins).
+
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const REQUIRED_NODE_MAJOR = 22;
+
+const running = process.versions.node;
+const major = Number.parseInt(running.split(".")[0], 10);
+if (!Number.isFinite(major) || major < REQUIRED_NODE_MAJOR) {
+  process.stderr.write(
+    `agent-flows: Node ${String(REQUIRED_NODE_MAJOR)} or newer is required, but this is Node ${running}.\n` +
+      `Switch to Node ${String(REQUIRED_NODE_MAJOR)} (for example: nvm use ${String(REQUIRED_NODE_MAJOR)}) and run the command again.\n`
+  );
+  process.exit(1);
+}
+
+// Walk up to the package root rather than assuming a fixed depth: the command
+// is reached through a symlink on PATH, and node resolves import.meta.url to
+// the real file, so the walk starts inside the real package.
+let root = dirname(fileURLToPath(import.meta.url));
+while (!existsSync(join(root, "package.json"))) {
+  const parent = dirname(root);
+  if (parent === root) {
+    process.stderr.write(
+      "agent-flows: could not locate the package root (no package.json above bin/).\n"
+    );
+    process.exit(1);
+  }
+  root = parent;
+}
+
+const cliPath = join(root, "dist", "cli.js");
+if (!existsSync(cliPath)) {
+  process.stderr.write(
+    `agent-flows: the compiled CLI is missing at ${cliPath}.\n` +
+      `This is a source checkout without a build — run "pnpm build" first.\n`
+  );
+  process.exit(1);
+}
+
+await import(cliPath);

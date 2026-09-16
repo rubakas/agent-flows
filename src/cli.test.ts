@@ -11,20 +11,25 @@ import { execFileSync, spawnSync } from "node:child_process";
 import {
   accessSync,
   constants,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
+  copyFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const repoRoot = join(__dirname, "..");
+import { packageRoot } from "./packageRoot.js";
+
+// Resolved by walking up to package.json (spec 038 FR-004) rather than by a
+// fixed hop count, so this file reads the same root under tsx and compiled.
+const repoRoot = packageRoot();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -300,46 +305,126 @@ describe("FR-009: pnpm built-in name collision guard", () => {
   });
 });
 
-// ── 6. bin/agent-flows: symlink resolution ────────────────────────────────────
+// -- 6. bin/agent-flows: runs the compiled CLI (spec 038 FR-002, FR-003) ------
 //
-// When installed on PATH the command is reached through a symlink. Without
-// explicit resolution $0 points to the link, so "cd $(dirname $0)/.." lands
-// in the link's parent (e.g. ~/.local) rather than the repo root. The fix
-// loops through the symlink chain before computing the repo root.
+// The launcher is a plain node script now: no tsx, no nvm sourcing, and no $PWD
+// capture -- it never changes directory, so the CLI's process.cwd() already is
+// the invocation directory and resolveProjectDir() falls back to it. When
+// installed on PATH the command is reached through a symlink; node resolves
+// import.meta.url to the real file, so the walk up to package.json starts there.
 
-describe("bin/agent-flows: symlink resolution", () => {
-  it("resolves the repository root correctly when invoked through a PATH symlink", () => {
+/** Builds dist/ if it is not there -- bin/agent-flows runs the compiled output. */
+function ensureBuild(): void {
+  if (existsSync(join(repoRoot, "dist", "cli.js"))) return;
+  execFileSync(
+    process.execPath,
+    [join(repoRoot, "node_modules", "typescript", "bin", "tsc"), "-p", "tsconfig.build.json"],
+    { cwd: repoRoot, stdio: "pipe" }
+  );
+  execFileSync(process.execPath, [join(repoRoot, "scripts", "copy-dist-assets.mjs")], {
+    cwd: repoRoot,
+    stdio: "pipe",
+  });
+}
+
+/** An installed node older than 22, if this machine has one. */
+function olderNodeBinary(): string | undefined {
+  const versionsDir = join(homedir(), ".nvm", "versions", "node");
+  if (!existsSync(versionsDir)) return undefined;
+  for (const entry of readdirSync(versionsDir).sort().reverse()) {
+    const major = Number.parseInt(entry.replace(/^v/u, ""), 10);
+    // Below 20 the launcher never reaches its own check: node refuses to load an
+    // extensionless entry point inside a "type": "module" package at all.
+    if (!Number.isFinite(major) || major >= 22 || major < 20) continue;
+    const candidate = join(versionsDir, entry, "bin", "node");
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+describe("bin/agent-flows: symlink resolution and project targeting", () => {
+  it("runs the compiled CLI and resolves the invocation directory as the project", () => {
+    ensureBuild();
     // Fresh temp dirs: one to act as the user's working directory, one to hold
     // the symlink (simulating ~/.local/bin or a pnpm global bin directory).
-    // realpathSync normalises macOS /var → /private/var so the $PWD comparison
-    // does not fail on path aliasing.
+    // realpathSync normalises macOS /var -> /private/var so the comparison does
+    // not fail on path aliasing.
     const invocationDir = realpathSync(mkdtempSync(join(tmpdir(), "af-invoke-")));
     const linkDir = realpathSync(mkdtempSync(join(tmpdir(), "af-bin-")));
     const linkPath = join(linkDir, "agent-flows");
     try {
       symlinkSync(join(repoRoot, "bin", "agent-flows"), linkPath);
+      const childEnv = { ...process.env };
+      delete childEnv.AGENT_FLOWS_PROJECT_DIR;
       const result = spawnSync(linkPath, ["list"], {
         cwd: invocationDir,
-        env: { ...process.env },
+        env: childEnv,
         encoding: "utf8",
-        timeout: 30_000,
+        timeout: 60_000,
       });
       const output = result.stdout + result.stderr;
-      assert.equal(
-        result.status,
-        0,
-        `Expected exit 0; tsx was not found (wrong repo root?):\n${output}`
-      );
-      // list always prints "Project: <AGENT_FLOWS_PROJECT_DIR>" on its first
-      // line; the script must have captured invocationDir ($PWD) before the
-      // cd, proving both the $PWD capture and the symlink resolution work.
+      assert.equal(result.status, 0, `Expected exit 0 (wrong package root?):\n${output}`);
+      // list prints "Project: <resolved project dir>" first: with no explicit
+      // override, that must be where the command was run from.
       assert.ok(
         output.includes(`Project: ${invocationDir}`),
         `Expected "Project: ${invocationDir}" in output:\n${output}`
       );
+      // The pipelines it lists come from the package, reached through the link.
+      assert.match(output, /AVAILABLE WORKFLOWS/u);
     } finally {
       rmSync(invocationDir, { recursive: true, force: true });
       rmSync(linkDir, { recursive: true, force: true });
+    }
+  });
+
+  it("is a node script with no tsx and no nvm in it (FR-002)", () => {
+    const source = readFileSync(join(repoRoot, "bin", "agent-flows"), "utf8");
+    assert.match(source, /^#!\/usr\/bin\/env node\n/u);
+    assert.doesNotMatch(source, /\btsx\b/u, "the launcher must not depend on tsx");
+    assert.doesNotMatch(source, /nvm\.sh/u, "the launcher must not source nvm");
+  });
+
+  it("refuses a node older than 22, naming both versions (FR-003)", (t) => {
+    const oldNode = olderNodeBinary();
+    if (oldNode === undefined) {
+      t.skip("no node older than 22 (and at least 20) is installed on this machine");
+      return;
+    }
+    const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "list"], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    const output = result.stdout + result.stderr;
+    assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
+    assert.match(output, /Node 22 or newer is required/u);
+    const running = execFileSync(oldNode, ["-p", "process.versions.node"], {
+      encoding: "utf8",
+    }).trim();
+    assert.ok(
+      output.includes(running),
+      `the message must name the version found (${running}):\n${output}`
+    );
+  });
+
+  it("refuses to run without a build, naming the command that fixes it", () => {
+    // A package root holding the launcher but no dist/ -- a fresh checkout.
+    const fakeRoot = realpathSync(mkdtempSync(join(tmpdir(), "af-nodist-")));
+    try {
+      mkdirSync(join(fakeRoot, "bin"));
+      mkdirSync(join(fakeRoot, "pipelines"));
+      mkdirSync(join(fakeRoot, "prompts"));
+      copyFileSync(join(repoRoot, "bin", "agent-flows"), join(fakeRoot, "bin", "agent-flows"));
+      copyFileSync(join(repoRoot, "package.json"), join(fakeRoot, "package.json"));
+      const result = spawnSync(process.execPath, [join(fakeRoot, "bin", "agent-flows"), "list"], {
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      const output = result.stdout + result.stderr;
+      assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
+      assert.match(output, /pnpm build/u);
+    } finally {
+      rmSync(fakeRoot, { recursive: true, force: true });
     }
   });
 });
