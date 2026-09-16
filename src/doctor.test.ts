@@ -14,8 +14,8 @@ import {
   type DoctorProbes,
 } from "./doctor.js";
 import { writeDaemonRecord } from "./runtime/daemonRecord.js";
+import type { HarnessReach } from "./harness/harnesses.js";
 import type { DaemonIdentity } from "./runtime/daemonRecord.js";
-import type { HarnessReach } from "./setup/harnesses.js";
 
 // ── Temp directories ──────────────────────────────────────────────────────────
 
@@ -474,16 +474,16 @@ describe("doctor: per-harness reach", () => {
     assert.equal(result.status, "fail");
     assert.match(result.detail, /STALE/u);
     assert.ok(result.detail.includes("/pkg/bin/agent-flows"), result.detail);
-    assert.ok(result.hint?.includes("agent-flows setup"), result.hint);
+    assert.ok(result.hint?.includes("agent-flows install"), result.hint);
   });
 
-  it("harness installed but not registered → warn pointing at setup", () => {
+  it("harness installed but not registered → warn pointing at install", () => {
     const result = reachResult(
       reach({ registered: false, configPath: undefined, command: undefined })
     );
     assert.equal(result.status, "warn");
     assert.match(result.detail, /not registered/u);
-    assert.equal(result.hint, "agent-flows setup");
+    assert.equal(result.hint, "agent-flows install");
   });
 
   it("harness not installed → ok, nothing to do", () => {

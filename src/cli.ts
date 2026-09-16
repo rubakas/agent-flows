@@ -7,7 +7,8 @@
 //
 // Verbs:
 //   doctor               run preflight checks
-//   setup [--remove]     register (or unregister) the MCP server with each harness
+//   install              register the MCP server with every harness on this machine
+//   uninstall            remove those registrations again
 //   serve [--port N] [--db PATH]
 //                        start the HTTP daemon
 //   stop [--all]         stop this project's daemon (or every project's)
@@ -44,7 +45,8 @@ function src(...parts: string[]): string {
 
 const VALID_VERBS = [
   "doctor",
-  "setup",
+  "install",
+  "uninstall",
   "serve",
   "stop",
   "mcp",
@@ -62,7 +64,8 @@ function usage(): void {
   console.log("");
   console.log("Verbs:");
   console.log("  doctor                        run preflight checks");
-  console.log("  setup [--remove]              register the MCP server with each harness");
+  console.log("  install                       register the MCP server with every harness");
+  console.log("  uninstall                     remove those registrations again");
   console.log("  serve [--port N] [--db PATH]  start the HTTP daemon");
   console.log("  stop [--all]                  stop this project's daemon (or every project's)");
   console.log("  mcp                           start the MCP server");
@@ -112,9 +115,15 @@ switch (verb) {
     runModule(src("doctor.ts"));
     break;
 
-  // Registers the MCP server with each harness and nothing else (spec 038 D10).
-  case "setup":
-    runModule(src("setup", "setup-cli.ts"), rest);
+  // Register the MCP server with each harness, and remove exactly those
+  // registrations again — neither verb touches a workflow or a package
+  // (spec 038 D10).
+  case "install":
+    runModule(src("harness", "install-cli.ts"), rest);
+    break;
+
+  case "uninstall":
+    runModule(src("harness", "uninstall-cli.ts"), rest);
     break;
 
   case "serve":
@@ -129,13 +138,13 @@ switch (verb) {
     runModule(src("bindings", "mastra", "server.ts"), rest);
     break;
 
-  // list reads the merged layer view (spec 038 D13), not the installer's
-  // installed/available split — that split dies with the install verb.
+  // list reads the merged layer view (spec 038 D13), not the installed/available
+  // split of the retired workflow installer.
   case "list":
     runModule(src("canon", "list-cli.ts"), rest);
     break;
 
-  // Editing forks; there is no install (spec 038 D14).
+  // Editing forks; no verb copies a workflow into a project (spec 038 D14).
   case "fork":
     runModule(src("canon", "fork-cli.ts"), rest);
     break;

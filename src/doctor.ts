@@ -11,16 +11,16 @@ import { resolveProjectDir } from "./bindings/mastra/projectDir.js";
 import { listPipelines, loadPipeline } from "./canon/load.js";
 import { loadProviders } from "./canon/loadProviders.js";
 import { defaultRegistry, getActiveProfile } from "./canon/registry.js";
-import { bundledPipelinesDir, packageVersion } from "./packageRoot.js";
-import { classifyIdentity, probeDaemon, readDaemonRecord } from "./runtime/daemonRecord.js";
-import { resolveProjectState } from "./runtime/projectState.js";
 import {
   harnessReach,
   resolveSetupEnv,
   whichAllOnPath,
   whichOnPath,
   type HarnessReach,
-} from "./setup/harnesses.js";
+} from "./harness/harnesses.js";
+import { bundledPipelinesDir, packageVersion } from "./packageRoot.js";
+import { classifyIdentity, probeDaemon, readDaemonRecord } from "./runtime/daemonRecord.js";
+import { resolveProjectState } from "./runtime/projectState.js";
 import type { ProviderConfig } from "./canon/registry.js";
 import type { DaemonIdentity } from "./runtime/daemonRecord.js";
 
@@ -118,7 +118,7 @@ export async function projectDaemonStatus(deps: DaemonProbe): Promise<DaemonStat
  * One harness's reach, phrased so the failure is unambiguous at a glance: a
  * stale entry (its command no longer resolves) fails, because every session of
  * that harness reports a broken MCP server until it is fixed; an installed
- * harness with no entry only warns, because `setup` fixes it in one command.
+ * harness with no entry only warns, because `install` fixes it in one command.
  */
 export function reachResult(reach: HarnessReach): CheckResult {
   const name = `${reach.label} (MCP)`;
@@ -134,7 +134,7 @@ export function reachResult(reach: HarnessReach): CheckResult {
       name,
       status: "fail",
       detail: `registered in ${where} but STALE: ${reach.command?.[0] ?? "its command"} no longer exists`,
-      hint: "agent-flows setup  (re-registers the current install)",
+      hint: "agent-flows install  (re-registers the current install)",
     };
   }
   if (reach.registered) {
@@ -148,7 +148,7 @@ export function reachResult(reach: HarnessReach): CheckResult {
     name,
     status: "warn",
     detail: `${reach.binaryPath ?? "installed"} — not registered`,
-    hint: "agent-flows setup",
+    hint: "agent-flows install",
   };
 }
 
@@ -504,7 +504,7 @@ export function defaultProbes(): DoctorProbes {
   return {
     nodeVersion: () => process.version.slice(1),
 
-    // The same in-process PATH scan `setup` registers with, so a binary can
+    // The same in-process PATH scan `install` registers with, so a binary can
     // never be present for one check of this report and absent for another.
     which: (bin) => whichOnPath(bin),
 

@@ -79,7 +79,8 @@ describe("cli: help", () => {
     const { stdout } = runCli(["--help"]);
     for (const verb of [
       "doctor",
-      "setup",
+      "install",
+      "uninstall",
       "serve",
       "mcp",
       "list",
@@ -97,10 +98,18 @@ describe("cli: help", () => {
 // ── 2. Unknown verbs exit non-zero ────────────────────────────────────────────
 
 describe("cli: unknown verb", () => {
-  it("exits non-zero for the removed install verb (spec 038 FR-028)", () => {
+  it("exits non-zero for a workflow id passed to install (spec 038 FR-028)", () => {
+    // `install` now registers harnesses and takes no arguments; installing a
+    // workflow into a project is gone, and editing forks instead.
     const { code, stderr } = runCli(["install", "investigate"]);
-    assert.notEqual(code, 0, "install is gone; editing forks instead");
-    assert.match(stderr, /unknown verb/i);
+    assert.notEqual(code, 0, "install takes no workflow id");
+    assert.match(stderr, /takes no arguments/i);
+  });
+
+  it("exits non-zero when uninstall is given an argument", () => {
+    const { code, stderr } = runCli(["uninstall", "--remove"]);
+    assert.notEqual(code, 0, "uninstall takes no arguments");
+    assert.match(stderr, /takes no arguments/i);
   });
 
   it("exits non-zero for an unknown verb", () => {
@@ -223,6 +232,38 @@ describe("cli: verb routing — fork", () => {
     );
     const output = result.stdout + result.stderr;
     assert.match(output, /Usage: agent-flows fork/);
+  });
+});
+
+describe("cli: verb routing — install/uninstall", () => {
+  it("routes 'install --help' to src/harness/install-cli.ts, which prints its usage", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx/esm", join(repoRoot, "src", "cli.ts"), "install", "--help"],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, AGENT_FLOWS_PROJECT_DIR: repoRoot },
+        encoding: "utf8",
+        timeout: 30_000,
+      }
+    );
+    assert.equal(result.status, 0, "asking what a command does must not be an error");
+    assert.match(result.stdout, /Usage: agent-flows install/);
+  });
+
+  it("routes 'uninstall -h' to src/harness/uninstall-cli.ts, which prints its usage", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx/esm", join(repoRoot, "src", "cli.ts"), "uninstall", "-h"],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, AGENT_FLOWS_PROJECT_DIR: repoRoot },
+        encoding: "utf8",
+        timeout: 30_000,
+      }
+    );
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /Usage: agent-flows uninstall/);
   });
 });
 
