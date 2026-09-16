@@ -1,5 +1,3 @@
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 import { listPipelines, loadPipeline } from "../../canon/load.js";
 import { bundledPipelinesDir } from "../../packageRoot.js";
 import type { LoadedPipeline } from "../../canon/types.js";
@@ -37,30 +35,17 @@ export function loadCatalog(pipelinesDir: string): PipelineCatalog {
   return { loaded, errors };
 }
 
-export interface CanonDirResult {
-  pipelinesDir: string;
-  source: "project" | "bundled";
-}
-
-/**
- * Resolves the directory from which pipeline YAMLs are loaded.
- *
- * Prefers <projectDir>/.agent-flows/pipelines/ when it exists and contains
- * at least one YAML file — the project's installed copy is authoritative.
- * Falls back to the bundled pipelines/ directory (this tool's own checkout).
- *
- * Callers should log the returned source so operators can see which set
- * of pipelines is active.
- */
-export function resolveCanonDir(projectDir: string): CanonDirResult {
-  const projectPipelinesDir = join(projectDir, ".agent-flows", "pipelines");
-  if (existsSync(projectPipelinesDir)) {
-    const hasYaml = readdirSync(projectPipelinesDir).some(
-      (f) => f.endsWith(".yaml") || f.endsWith(".yml")
-    );
-    if (hasYaml) {
-      return { pipelinesDir: projectPipelinesDir, source: "project" };
-    }
-  }
-  return { pipelinesDir: BUNDLED_PIPELINES_DIR, source: "bundled" };
-}
+// `resolveCanonDir` lived here until spec 038 D13 (Ship 3). It returned a single
+// directory and flipped the whole catalogue to <projectDir>/.agent-flows the
+// moment that directory held one YAML file. That exclusive flip is why an
+// install step had to exist at all — a project could only use a bundled
+// workflow by copying it in — and, worse, it made every later package upgrade
+// invisible: a project that had ever installed anything kept answering every
+// query from its own layer, so a newly shipped workflow simply never appeared.
+//
+// It is replaced by the merged three-layer view in src/canon/layers.ts
+// (bundled < user library < repository canon, a later layer winning on an id
+// collision). Every read path — the daemon's listing and detail routes, MCP
+// list_pipelines, run entry resolution, the Mastra rebuild and export — resolves
+// through `resolveCatalog` instead. Nothing resolves a catalogue from one
+// directory any more; do not reintroduce a helper that does.

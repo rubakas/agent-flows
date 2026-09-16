@@ -58,10 +58,27 @@ class PromptPathError extends Error {
   }
 }
 
-export function loadPipeline(
-  yamlPath: string,
-  deps?: { readFile?: (p: string) => string }
-): LoadedPipeline {
+/** Injected dependencies of the loader. */
+export interface LoadDeps {
+  /** Reads one file; injected by the draft preview route so it can load unsaved text. */
+  readFile?: (p: string) => string;
+  /**
+   * Maps a nested pipeline id to the YAML file that defines it (spec 038 D13,
+   * FR-019). Absent means the legacy rule: a sibling file in the parent's own
+   * directory. The merged view passes a resolver over all three layers, so a
+   * forked parent can mount a child from another layer.
+   */
+  resolvePath?: (pipelineId: string) => string | undefined;
+  /**
+   * Pipeline ids currently being loaded, innermost last. Internal: set by the
+   * loader itself when it recurses into a nested pipeline, so a cycle that spans
+   * files — now reachable across layers, where an id collision plus a mount can
+   * form one — is reported instead of exhausting the call stack.
+   */
+  loadStack?: readonly string[];
+}
+
+export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline {
   const readFile = deps?.readFile ?? ((p: string) => readFileSync(p, "utf8"));
 
   const yamlContent = readFile(yamlPath);
@@ -398,11 +415,31 @@ export function loadPipeline(
     }
   }
 
-  // Resolve and expand nested pipelines. The resolve callback loads a sibling
-  // YAML from the same directory as the parent, recursively validated.
+  // Resolve and expand nested pipelines. Without an injected resolver the child
+  // is a sibling YAML in the parent's own directory; with one (the merged view)
+  // it is whichever layer owns that id, and its prompts resolve against that
+  // layer's prompts/ directory because the child is loaded from its own path.
   const pipelineDir = dirname(resolve(yamlPath));
-  const resolveNested = (pipelineId: string): LoadedPipeline =>
-    loadPipeline(join(pipelineDir, `${pipelineId}.yaml`), deps);
+  const loadStack: readonly string[] = [...(deps?.loadStack ?? []), def.id];
+  const resolveNested = (pipelineId: string): LoadedPipeline => {
+    // A cycle is detected here as well as inside expandNested: by the time the
+    // child comes back it is already expanded, so the stack expandNested keeps
+    // never sees the grandchild that closes the loop.
+    const cycleIdx = loadStack.indexOf(pipelineId);
+    if (cycleIdx !== -1) {
+      const chain = [...loadStack.slice(cycleIdx), pipelineId].join(" -> ");
+      throw new GraphError(`cycle detected in nested pipelines: ${chain}`);
+    }
+    const childPath = deps?.resolvePath
+      ? deps.resolvePath(pipelineId)
+      : join(pipelineDir, `${pipelineId}.yaml`);
+    if (childPath === undefined) {
+      throw new Error(
+        `Pipeline "${def.id}": nested pipeline "${pipelineId}" is not defined in any workflow layer`
+      );
+    }
+    return loadPipeline(childPath, { ...deps, loadStack });
+  };
 
   const expanded = expandNested({ def, prompts }, resolveNested);
 
