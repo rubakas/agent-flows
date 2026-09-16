@@ -79,6 +79,7 @@ describe("cli: help", () => {
     const { stdout } = runCli(["--help"]);
     for (const verb of [
       "doctor",
+      "setup",
       "serve",
       "mcp",
       "list",

@@ -7,6 +7,7 @@
 //
 // Verbs:
 //   doctor               run preflight checks
+//   setup [--remove]     register (or unregister) the MCP server with each harness
 //   serve [--port N] [--db PATH]
 //                        start the HTTP daemon
 //   stop [--all]         stop this project's daemon (or every project's)
@@ -43,6 +44,7 @@ function src(...parts: string[]): string {
 
 const VALID_VERBS = [
   "doctor",
+  "setup",
   "serve",
   "stop",
   "mcp",
@@ -60,6 +62,7 @@ function usage(): void {
   console.log("");
   console.log("Verbs:");
   console.log("  doctor                        run preflight checks");
+  console.log("  setup [--remove]              register the MCP server with each harness");
   console.log("  serve [--port N] [--db PATH]  start the HTTP daemon");
   console.log("  stop [--all]                  stop this project's daemon (or every project's)");
   console.log("  mcp                           start the MCP server");
@@ -107,6 +110,11 @@ if (!verb || verb === "--help" || verb === "-h") {
 switch (verb) {
   case "doctor":
     runModule(src("doctor.ts"));
+    break;
+
+  // Registers the MCP server with each harness and nothing else (spec 038 D10).
+  case "setup":
+    runModule(src("setup", "setup-cli.ts"), rest);
     break;
 
   case "serve":
