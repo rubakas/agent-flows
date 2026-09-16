@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
 
 import { createDynamicMastra } from "../bindings/mastra/dynamicMastra.js";
-import { BUNDLED_PIPELINES_DIR, resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
+import { BUNDLED_PIPELINES_DIR } from "../bindings/mastra/pipelineLoader.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import { saveDraft } from "../canon/canonWriter.js";
 import {
@@ -42,6 +42,17 @@ import {
 } from "../canon/draftStore.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
+import {
+  layerForPipelinesDir,
+  loadCatalogPipelines,
+  loadFromCatalog,
+  mergedCatalog,
+  resolveCatalog,
+  writeTargetLayer,
+  type LayerSource,
+  type MergedCatalog,
+  type MergedPipeline,
+} from "../canon/layers.js";
 import { listPipelines, loadPipeline } from "../canon/load.js";
 import { CLI_MODEL_RE, loadProviders } from "../canon/loadProviders.js";
 import { getActiveProfile } from "../canon/registry.js";
@@ -248,13 +259,52 @@ function bundleCheckCommands(
   return checks;
 }
 
-/** One row of the catalogue listing (spec 037 FR-002). */
+/**
+ * Resolve one id through the merged three-layer view (spec 038 D13).
+ *
+ * A pipeline that is defined but fails to load is reported as absent, matching
+ * `findPipelineById`: the routes answer 404 and the broken file stays visible to
+ * `agent-flows validate`.
+ */
+function findMergedPipeline(catalog: MergedCatalog, id: string): MergedPipeline | undefined {
+  try {
+    return loadFromCatalog(catalog, id);
+  } catch {
+    return undefined;
+  }
+}
+
+/** One row of the catalogue listing (spec 037 FR-002, spec 038 FR-020). */
 interface PipelineRow {
   id: string;
   description: string;
   path: string;
   steps: number;
   inputs: string[];
+  /** Which layer owns this id; absent on the bundled-catalogue listing. */
+  layer?: LayerSource;
+  /** Layers holding a same-id workflow this row shadows, lowest precedence first. */
+  shadows?: LayerSource[];
+}
+
+/**
+ * Every workflow the merged view resolves, as catalogue rows (FR-017, FR-020).
+ *
+ * `path` is relative to the owning layer's own root, so a bundled row reads
+ * `pipelines/x.yaml` rather than a chain of `../..` out of the project.
+ */
+function mergedPipelineRows(catalog: MergedCatalog): PipelineRow[] {
+  // A pipeline that fails to load contributes no row; it stays visible as an
+  // error on disk and is flagged by `agent-flows validate`.
+  return loadCatalogPipelines(catalog).loaded.map(({ entry, loaded }) => ({
+    id: loaded.def.id,
+    description: loaded.def.description,
+    path: relative(entry.layer.root, entry.filePath),
+    steps: loaded.def.steps.length,
+    inputs: [...(loaded.def.inputs ?? [])],
+    layer: entry.layer.source,
+    shadows: [...entry.shadows],
+  }));
 }
 
 /**
@@ -576,7 +626,13 @@ export interface ServeHandle {
 // ── Handler context ────────────────────────────────────────────────────────────
 
 interface HandlerCtx {
+  /**
+   * The layer a write targets. Reads go through `catalog`; this is only the
+   * directory the mutation routes create, edit and delete in (seam for D14).
+   */
   pipelinesDir: string;
+  /** The merged three-layer view, resolved per request (spec 038 D13). */
+  catalog: MergedCatalog;
   root: string;
   db: DbInstance;
   runService: RunService | null;
@@ -678,32 +734,31 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
   const version = packageVersion();
   let startedAt = "";
 
-  // FR-004: tracks the last-logged source so we emit one log line per transition,
-  // not one per request. null means no line has been emitted yet.
-  let lastCanonSource: "bundled" | "project" | null = null;
+  // FR-004: tracks the last-logged layer set so we emit one log line per
+  // transition, not one per request. null means no line has been emitted yet.
+  let lastLayerLine: string | null = null;
 
   const server = nodeCreateServer((req, res) => {
-    // FR-004: resolve the pipelines directory per-request so that a workflow
-    // installed while the daemon is running is reflected on the very next request,
-    // with no restart required. When an explicit pipelinesDir was passed (test/legacy
-    // path), skip resolution and use it directly.
-    let pipelinesDir: string;
-    if (explicitPipelinesDir !== undefined) {
-      pipelinesDir = explicitPipelinesDir;
-    } else {
-      const resolved = resolveCanonDir(projectDir);
-      if (resolved.source !== lastCanonSource) {
-        console.log(
-          `agent-flows serve: pipelines from ${resolved.source} (${resolved.pipelinesDir})`
-        );
-        lastCanonSource = resolved.source;
-      }
-      pipelinesDir = resolved.pipelinesDir;
+    // FR-004: resolve the workflow layers per-request so that a workflow added
+    // while the daemon is running is reflected on the very next request, with no
+    // restart required. When an explicit pipelinesDir was passed (test/legacy
+    // path), that single directory is the only layer.
+    const catalog =
+      explicitPipelinesDir !== undefined
+        ? mergedCatalog([layerForPipelinesDir(explicitPipelinesDir)])
+        : resolveCatalog(projectDir);
+    const layerLine = catalog.layers.map((l) => `${l.source} (${l.root})`).join(", ");
+    if (layerLine !== lastLayerLine) {
+      console.log(`agent-flows serve: workflow layers ${layerLine}`);
+      lastLayerLine = layerLine;
     }
+    // Writes still target one directory; reads all go through `catalog`.
+    const pipelinesDir = explicitPipelinesDir ?? writeTargetLayer(catalog.layers).pipelinesDir;
     const root = dirname(pipelinesDir);
 
     void handleRequest(req, res, {
       pipelinesDir,
+      catalog,
       root,
       db,
       runService,
@@ -992,8 +1047,14 @@ async function handleRequest(
       json(res, 400, { error: "invalid source" });
       return;
     }
-    const dir = source === "bundled" ? ctx.bundledPipelinesDir : ctx.pipelinesDir;
-    json(res, 200, { pipelines: listPipelineRows(dir, root) });
+    // ?source=bundled is the Templates view: the package's own catalogue, never
+    // the merge. The default listing is the merged three-layer view (D13).
+    json(res, 200, {
+      pipelines:
+        source === "bundled"
+          ? listPipelineRows(ctx.bundledPipelinesDir, dirname(ctx.bundledPipelinesDir))
+          : mergedPipelineRows(ctx.catalog),
+    });
     return;
   }
 
@@ -1274,13 +1335,15 @@ async function handleRequest(
       json(res, 400, { error: "invalid source" });
       return;
     }
-    const lookupDir = source === "bundled" ? ctx.bundledPipelinesDir : ctx.pipelinesDir;
-    const entry = findPipelineById(lookupDir, id);
-    if (!entry) {
+    const found =
+      source === "bundled"
+        ? findPipelineById(ctx.bundledPipelinesDir, id)
+        : findMergedPipeline(ctx.catalog, id);
+    if (!found) {
       json(res, 404, { error: `Pipeline "${id}" not found` });
       return;
     }
-    const { def, prompts } = entry.loaded;
+    const { def, prompts } = found.loaded;
     json(res, 200, {
       def,
       prompts,
@@ -1570,7 +1633,9 @@ async function handleRequest(
     // to get the declared inputs list for artifact resolution (spec 029 FR-003).
     // If the pipeline is not found (e.g. not yet written to disk), omit steps —
     // transportPerStep will be empty rather than wrong.
-    const pipelineEntry = findPipelineById(ctx.pipelinesDir, pipeline);
+    // Run entry resolution goes through the merged view (D13): a run may name a
+    // workflow from any layer, not only the one writes target.
+    const pipelineEntry = findMergedPipeline(ctx.catalog, pipeline);
     const pipelineDef = pipelineEntry?.loaded.def;
 
     // FR-009/S6: the per-step model override map is a flat step id → model id
@@ -2246,8 +2311,16 @@ async function handleRequest(
       json(res, 400, { error: `Pipeline id "${id}" is invalid` });
       return;
     }
+    // FR-029: the layer that owns the id decides which pipelines directory the
+    // bundle is read from — exporting a bundled workflow from a project that has
+    // a canon of its own must not look for it in that canon.
+    const owner = ctx.catalog.entries.get(id);
+    if (owner === undefined) {
+      json(res, 422, { error: `Pipeline "${id}" not found` });
+      return;
+    }
     try {
-      const bundle = exportBundle(id, ctx.pipelinesDir);
+      const bundle = exportBundle(id, owner.layer.pipelinesDir);
       const yamlText = stringifyBundle(bundle);
       res.writeHead(200, {
         "Content-Type": "application/x-yaml",
@@ -2421,8 +2494,12 @@ if (process.argv[1] === __filename) {
   const portChoice = resolvePortChoice(process.argv, process.env);
   const projectDir = resolveProjectDir();
   console.log(`agent-flows serve: running steps in ${projectDir}`);
-  const { pipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
-  console.log(`agent-flows serve: pipelines from ${pipelinesSource} (${pipelinesDir})`);
+  const startupCatalog = resolveCatalog(projectDir);
+  console.log(
+    `agent-flows serve: workflow layers ${startupCatalog.layers
+      .map((l) => `${l.source} (${l.root})`)
+      .join(", ")}`
+  );
 
   // Spec 032: machine-local state lives outside the project tree.
   const state = ensureProjectState(projectDir, process.env, (m) => {
@@ -2468,10 +2545,9 @@ if (process.argv[1] === __filename) {
   // misconfigured project never silently falls back to the default gate.
   const checkCommand = readAgentFlowsConfig(projectDir);
 
-  const pipelineFiles = listPipelines(pipelinesDir);
-  const loadedPipelines = pipelineFiles.map((f) => loadPipeline(f));
+  const { loaded: startupPipelines } = loadCatalogPipelines(startupCatalog);
   const workflows: Record<string, unknown> = {};
-  for (const loaded of loadedPipelines) {
+  for (const { loaded } of startupPipelines) {
     workflows[loaded.def.id] = buildPipelineWorkflow(loaded, {
       registry,
       store,
