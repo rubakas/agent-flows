@@ -1,11 +1,11 @@
 # 038. Global package and harness reach
 
-| Field        | Value                            |
-| ------------ | -------------------------------- |
-| Feature Name | Global package and harness reach |
-| Branch       | `feat/038-global-package`        |
-| Status       | Draft                            |
-| Created      | 2026-09-16                       |
+| Field        | Value                                                                                                                                              |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Feature Name | Global package and harness reach                                                                                                                   |
+| Branch       | `feat/038-global-package`                                                                                                                          |
+| Status       | Implemented — Ships 1–5 landed; V3 (packaging proof), V4 (live harness proof) and the developer page's visual pass are outstanding, owner-verified |
+| Created      | 2026-09-16                                                                                                                                         |
 
 ## Context
 
@@ -693,10 +693,10 @@ Five ships, in order:
 
 ## Delivery ledger
 
-| Ship | Decisions     | FRs           | Commits |
-| ---- | ------------- | ------------- | ------- |
-| 1    | D1-D6, D12    | FR-001–FR-009 |         |
-| 2    | D7-D9         | FR-010–FR-016 |         |
-| 3    | D13-D16       | FR-017–FR-029 |         |
-| 4    | D10, D11, D17 | FR-030–FR-032 |         |
-| 5    | docs          | —             |         |
+| Ship | Decisions     | FRs           | Commits                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---- | ------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | D1-D6, D12    | FR-001–FR-009 | `4edced5` feat(package): resolve bundled assets from the package root; `b950095` build(package): compile to dist, copy page assets and pin the packing list; `266a17e` feat(cli): run the compiled build from a node launcher; `4bce564` fix(bindings): generate claude into the project, not the tool checkout; `8e688cb` test: resolve fixture roots from the package root; `0e712d2` fix(cli): re-exec under an interpreter that can load the database module; `0c44f02` docs(specs): record the launcher interpreter probe in spec 038                                                                                                                                                                                            |
+| 2    | D7-D9         | FR-010–FR-016 | `fb7da76` feat(runtime): record and verify daemon identity per project; `13a90d1` feat(serve): add the daemon identity route, record file and port fallback; `98d4747` feat(mcp): find or start the daemon that serves the current project; `9f47aaa` feat(mcp): declare server instructions so harnesses surface the tool; `12d18dc` feat(cli): add the stop verb for project daemons                                                                                                                                                                                                                                                                                                                                                |
+| 3    | D13-D16       | FR-017–FR-029 | `4a0faad` feat(canon): merge bundled, user and repository workflow layers; `69de0cb` feat(cli): list workflows with their owning layer; `f2b6bf3` feat(serve): resolve pipelines and export through the merged layers; `6ec2187` feat(mcp): list and rebuild workflows from the merged layers; `07dbd13` test(canon): replace exclusive-flip assertions with layer precedence; `2eb67fb` feat(canon): fork a workflow into a writable layer; `9dddb82` feat(runtime): hide workflows from the chat listing per project; `f0fe0bb` feat(mcp): filter hidden workflows from list_pipelines; `67c479a` feat(serve): fork, hide and import routes replace the install dialog; `f4816ac` chore(cli): drop the install verb and its scripts |
+| 4    | D10, D11, D17 | FR-030–FR-032 | `8404479` feat(setup): splice a json member in place to keep config files byte-identical; `1ec06b1` feat(setup): register the mcp server with each harness and reverse it; `33e8569` feat(doctor): report harness reach, daemon state and native module mismatch                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 5    | docs          | —             | docs(readme,specs): document the global package, harness setup, workflow layers and the daemon (this change — no hash yet, uncommitted)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |

@@ -282,9 +282,9 @@ after each ship.
   binary.
 - Leftover `~/.agent-flows/n8n.json` and `<stateDir>/n8n.json` files (ADR-0017 says safe to delete).
 
-## 2026-09-16 — global package and harness reach
+## 2026-09-16/17 — global package and harness reach
 
-Spec 038 (Draft) and ADR-0018 (Accepted) answer the owner's ask: one global npm install of
+Spec 038 and ADR-0018 (both Accepted) answer the owner's ask: one global npm install of
 `agent-flows`, reached from every harness (Claude Code, Codex CLI, OpenCode, T3 Code) through a
 single user-scope MCP registration and nothing else — no skill, no agent, no rule file. The skill
 question was investigated and closed during the same session (spec 038 D17): the owner's
@@ -293,38 +293,58 @@ harnesses; `agent-flows` and `agent-notes` divide the machine along a clean line
 dot-directory — and do not overlap. `docs/research/2026-09-16-harness-discovery-mechanisms.md` is
 the primary source behind the MCP-registration half.
 
-**OPEN — owner decisions needed (carried as lead assumptions in spec 038, not owner-picked):**
+**DONE — all five ships landed on `feat/038-global-package` (spec 038's own ledger has the full
+commit list):**
 
-- **Package name `@rubakas/agent-flows`** (spec 038 D6). Matches the GitHub org; reversible with a
-  one-field change; the owner has not confirmed it.
-- **The MCP process auto-starts a per-project daemon when none is listening** (spec 038 D8). The
-  lead's recommendation, because "reachable by default" is false otherwise; the design was hardened
-  after a devil pass rejected a simpler port-probe version for the wrong-project write risk it
-  created (spec 038's "Challenged and corrected"), but the underlying choice to auto-start at all is
-  still the lead's call, not the owner's.
+- **Ship 1 — real package.** `bin/agent-flows` runs compiled `dist/` output with a plain node
+  shebang, no `tsx`/`nvm`; re-execs under a qualifying interpreter when the running Node is below 22,
+  proven by loading `better-sqlite3` rather than by comparing version numbers; `package.json`'s
+  `files` allowlist replaces the `.gitignore` fallback; `generate claude` writes into the project
+  directory and does no filesystem work before parsing arguments.
+- **Ship 2 — reachable by default.** `GET /api/daemon` is the identity/health/version handshake;
+  `<stateDir>/daemon.json` records it; the MCP process finds or auto-starts this project's daemon by
+  identity match (project realpath + package version), never reusing or killing a daemon that fails
+  either check; `agent-flows stop`/`stop --all` verify identity before terminating.
+- **Ship 3 — layers and visibility.** The exclusive `resolveCanonDir` flip is gone: bundled, user
+  library (`~/.agent-flows/workflows/`) and repository canon merge, a later layer winning an id
+  collision, including across nested `pipeline`/`loop` mounts. `agent-flows fork` and the page's
+  Edit-on-bundled both copy into a writable layer; the package is never a write target.
+  `enable`/`disable` filter exactly `list_pipelines` and the page's workflow list. The `install` CLI
+  verb and `POST /api/install` are deleted; `computeClosure` stays because `exportBundle` still needs
+  it.
+- **Ship 4 — setup/remove/doctor.** `agent-flows setup` registers Claude Code and Codex via their own
+  `mcp add` CLIs and OpenCode via a targeted JSON-member edit (idempotent, `.bak`'d, refuses on a
+  `.jsonc`/`config.json` rival); `setup --remove` reverses exactly those entries; `doctor` reports
+  per-harness reach, staleness, this project's daemon state, and a `better-sqlite3` ABI mismatch with
+  a reinstall (not rebuild) hint.
+- **Ship 5 — docs.** README's getting-started, file-locations and MCP-registration sections rewritten
+  for the global install; the old per-repository `.mcp.json` walkthrough and the `agent-flows install`
+  workflow walkthrough removed as false rather than annotated. This spec's own Delivery ledger and
+  Status were filled in from `git log` at the same time.
 
-**Spec 038 supersedes part of spec 037, already shipped.** Once one global install means every
-bundled workflow is already present everywhere (owner, 2026-09-16: "since we will use a single
-source of installation there no need for install/uninstall of workflows..."), spec 037's D3
-(Workflows view built around `resolveCanonDir`'s exclusive flip, with `Install`/`Install all` actions
-and a two-radio install dialog) and D4 (Templates view = the bundled catalogue) are replaced by spec
-038's three-layer merge (D13), forking instead of installing to edit (D14), a per-project visibility
-list (D15), and import/export as the only cross-machine path (D16). The shipped install dialog and
-`POST /api/install` route (spec 037 FR-014) are removed, not left dead, once spec 038 Ship 3 lands.
-This is noted in spec 037's own ledger as well.
+**Package name `@rubakas/agent-flows`** (spec 038 D6) shipped as the lead's assumption; the owner has
+not explicitly confirmed it, and it stays a reversible one-field change.
 
-**Same class of bug as spec 038 D12, flag while Ship 1 is in flight:** `saveDraftAndRegenerate` (spec
-037 D6, `src/canon/canonWriter.ts:135-148`) writes generated Binding A scripts into
-`dirname(pipelinesDir)` — for an installed project that resolves to
-`<project>/.agent-flows/.claude/workflows/<id>.js`, not `<project>/.claude/workflows/<id>.js`. Spec
-037 already found this and left it as a non-caller (save no longer triggers regeneration), but it is
-the identical shape of defect spec 038 D12/FR-007 fixes in `write-cli.ts`: an output path computed
-from the tool's own layout instead of the target project. Worth checking whether spec 038's
-package-root/project-dir helper (D5, D12) should also be the thing `canonWriter.ts` derives its own
-(currently unused) output path from, so the fix lands in one place instead of two.
+**STILL OPEN — verification the owner has to run, not a code gap:**
+
+- **V3 (packaging proof)** — `npm pack`, install into a temp prefix, run `doctor`/`list`/`serve`/`mcp`
+  from a project with no agent-flows checkout — not yet executed and recorded in spec 038's ledger.
+- **V4 (live harness proof)** — at least one harness started in a temp project showing the tools and
+  the scoped `instructions` block, with a chat tool call auto-starting the daemon — not yet run.
+- **The developer page's visual pass** — carried over from spec 037/036 (2026-09-14 section below);
+  still the owner's own gate, unrelated to spec 038's own scope.
+
+**Same class of bug as spec 038 D12, still unresolved:** `saveDraftAndRegenerate` (spec 037 D6,
+`src/canon/canonWriter.ts:135-148`) still derives its (currently unused, since save no longer
+triggers regeneration) output path from `dirname(pipelinesDir)` rather than the FR-004
+package-root/project-dir helper `write-cli.ts` now uses. Worth folding in whenever that code path is
+next touched, so the fix lives in one place.
 
 ## Immediate next steps
 
-1. Implement spec 026, starting with cancellation (FR-001 … FR-007) — it is the largest control gap.
+1. Implement spec 026, starting with cancellation (FR-001 … FR-007) — note: `cancel_run` /
+   `POST /api/runs/:id/cancel` shipped as part of spec 033 (2026-09-13, see below); re-check which of
+   spec 026's FRs remain before starting this.
 2. Re-run the two audits listed above.
-3. Implement spec 038 Ship 1 (real package), the two owner decisions above pending confirmation.
+3. Run spec 038's V3 and V4 proofs and record them in its ledger; do the developer page's visual
+   pass.

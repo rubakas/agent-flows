@@ -23,10 +23,15 @@ No credential file was opened. `~/.agent-flows/` does not exist on this machine 
 
 ## 1. What agent-flows puts where today
 
-**F1 — Canon: project first, bundled fallback.** [verified] `resolveCanonDir` prefers
-`<project>/.agent-flows/pipelines/` "when it exists and contains at least one YAML file", else
-`BUNDLED_PIPELINES_DIR` (`src/bindings/mastra/pipelineLoader.ts:57-67`, `:11`). Callers:
-`src/bindings/mastra/server.ts:51,66`, `src/serve/server.ts:1713`.
+**F1 — Canon: project first, bundled fallback.** [verified, superseded 2026-09-16] `resolveCanonDir`
+prefers `<project>/.agent-flows/pipelines/` "when it exists and contains at least one YAML file",
+else `BUNDLED_PIPELINES_DIR` (`src/bindings/mastra/pipelineLoader.ts:57-67`, `:11`). Callers:
+`src/bindings/mastra/server.ts:51,66`, `src/serve/server.ts:1713`. **Superseded by spec
+038 D13** (`docs/decisions/0018-one-global-install-harnesses-hold-pointers.md`): this exclusive flip
+is gone, replaced by a three-layer merge (bundled, `~/.agent-flows/workflows/`, repository canon),
+a later layer winning an id collision. Everything else in this document — the project-state split
+into `~/.agent-flows/projects/<key>/` (§3, O3) — is unaffected and still describes the implemented
+behavior.
 
 **F2 — Run artifacts are in-project, and the runtime edits the project's ignore rules.** [verified]
 `writeRunArtifact` defaults to `<project>/.agent-flows/runs/<runId>/<pipelineId>.json`
