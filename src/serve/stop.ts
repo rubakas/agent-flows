@@ -19,8 +19,9 @@ import {
   daemonRecordPath,
   probeDaemon,
   readDaemonRecord,
-  realPathOf,
   removeDaemonRecordIfOwned,
+  sameProject,
+  sleep,
   type DaemonIdentity,
 } from "../runtime/daemonRecord.js";
 import { resolveProjectState, stateRoot, type StateEnv } from "../runtime/projectState.js";
@@ -46,11 +47,7 @@ export interface StopDeps {
 }
 
 const DEFAULT_WAIT_MS = 5_000;
-const DEFAULT_POLL_MS = 100;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const DEFAULT_LIVENESS_POLL_MS = 100;
 
 /**
  * Verify, terminate and forget the daemon recorded in one state directory.
@@ -66,7 +63,7 @@ export async function stopProjectDaemon(
   const probe = deps.probe ?? ((port: number) => probeDaemon(port));
   const kill = deps.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   const waitMs = deps.waitMs ?? DEFAULT_WAIT_MS;
-  const pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
+  const pollMs = deps.pollMs ?? DEFAULT_LIVENESS_POLL_MS;
 
   const record = readDaemonRecord(stateDir);
   if (record === undefined) {
@@ -100,7 +97,7 @@ export async function stopProjectDaemon(
         `${record.pid} — nothing was signalled`,
     };
   }
-  if (realPathOf(identity.projectDir) !== realPathOf(record.projectDir)) {
+  if (!sameProject(identity.projectDir, record.projectDir)) {
     return {
       ...base,
       stopped: false,

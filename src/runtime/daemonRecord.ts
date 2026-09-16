@@ -13,8 +13,10 @@
 // (which reads and probes it) and `agent-flows stop` (which verifies before it
 // kills), so it imports nothing from any of them.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+
+import { writeStateFile } from "./stateFile.js";
 
 /** What `GET /api/daemon` reports about the process answering it (FR-011). */
 export interface DaemonIdentity {
@@ -30,7 +32,7 @@ export interface DaemonRecord extends DaemonIdentity {
 }
 
 /** File name of the record inside the per-project state directory. */
-export const DAEMON_RECORD_FILE = "daemon.json";
+const DAEMON_RECORD_FILE = "daemon.json";
 
 /** Path of the record for a project's state directory. */
 export function daemonRecordPath(stateDir: string): string {
@@ -38,7 +40,7 @@ export function daemonRecordPath(stateDir: string): string {
 }
 
 /** Realpath when the directory exists, lexical resolution otherwise. */
-export function realPathOf(dir: string): string {
+function realPathOf(dir: string): string {
   try {
     return realpathSync(dir);
   } catch {
@@ -46,18 +48,9 @@ export function realPathOf(dir: string): string {
   }
 }
 
-/**
- * Write `<stateDir>/daemon.json` at listen time, mode 0600 (FR-011).
- *
- * The state directory is created if absent: `resolveProjectState` is pure, so a
- * daemon started against a never-used project would otherwise fail here.
- */
+/** Write `<stateDir>/daemon.json` at listen time, mode 0600 (FR-011). */
 export function writeDaemonRecord(stateDir: string, record: DaemonRecord): void {
-  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  writeFileSync(daemonRecordPath(stateDir), JSON.stringify(record, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  writeStateFile(stateDir, daemonRecordPath(stateDir), JSON.stringify(record, null, 2));
 }
 
 /**
@@ -156,26 +149,30 @@ export async function probeDaemon(
   }
 }
 
+/**
+ * Whether two spellings name the same project directory.
+ *
+ * Compared by realpath on both sides: `/tmp` is a symlink to `/private/tmp` on
+ * macOS, so two spellings of one directory must not read as two projects.
+ */
+export function sameProject(a: string, b: string): boolean {
+  return realPathOf(a) === realPathOf(b);
+}
+
 /** Outcome of comparing a probed identity against what the caller expects. */
 export type IdentityVerdict = "match" | "other-project" | "other-version";
 
-/**
- * Compare a probed identity against the caller's project and version (FR-013).
- *
- * The project comparison is by realpath on both sides: `/tmp` is a symlink to
- * `/private/tmp` on macOS, so two spellings of the same directory must not read
- * as two different projects.
- */
+/** Compare a probed identity against the caller's project and version (FR-013). */
 export function classifyIdentity(
   identity: DaemonIdentity,
   expected: { projectDir: string; version: string }
 ): IdentityVerdict {
-  if (realPathOf(identity.projectDir) !== realPathOf(expected.projectDir)) return "other-project";
+  if (!sameProject(identity.projectDir, expected.projectDir)) return "other-project";
   if (identity.version !== expected.version) return "other-version";
   return "match";
 }
 
-/** True when the state directory currently holds a record. */
-export function hasDaemonRecord(stateDir: string): boolean {
-  return existsSync(daemonRecordPath(stateDir));
+/** Pause for `ms`. Shared by the auto-start poll loop and `stop`'s wait loop. */
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

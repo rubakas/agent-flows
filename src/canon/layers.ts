@@ -1,29 +1,20 @@
 // The merged three-layer workflow view (spec 038 D13, FR-017–FR-020).
 //
-// A layer is a root directory holding `pipelines/` and a sibling `prompts/`.
-// Three of them, in precedence order, a later one winning on an id collision:
-//
-//   1. bundled — the installed package root, always present, never written to;
-//   2. user library — <stateRoot>/workflows (AGENT_FLOWS_HOME honoured);
-//   3. repository canon — <projectDir>/.agent-flows.
-//
-// Keeping all three shaped identically is what makes the sibling-prompts rule
-// uniform: a pipeline's prompts are always the `prompts/` directory of the layer
-// that owns it, so a repository pipeline can never read a bundled prompt file.
-//
-// A layer that does not exist on disk simply contributes nothing — nothing here
-// creates a directory.
+// Keeping all three layers shaped identically is what makes the sibling-prompts
+// rule uniform: a pipeline's prompts are always the `prompts/` directory of the
+// layer that owns it, so a repository pipeline can never read a bundled prompt
+// file.
 //
 // This module deliberately imports neither Mastra nor the server: the daemon,
 // the MCP process and the unit tests all need it.
 
-import { readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { parse } from "yaml";
 
 import { bundledPipelinesDir, packageRoot } from "../packageRoot.js";
 import { stateRoot } from "../runtime/projectState.js";
 import { listPipelines, loadPipeline } from "./load.js";
+import { readRawPipeline } from "./rawPipeline.js";
 import type { LoadDeps } from "./load.js";
 import type { LoadedPipeline } from "./types.js";
 import type { StateEnv } from "../runtime/projectState.js";
@@ -75,6 +66,7 @@ export interface MergedPipeline {
   loaded: LoadedPipeline;
 }
 
+/** True when `path` is an existing directory. A layer that is not contributes nothing. */
 function isDir(path: string): boolean {
   try {
     return statSync(path).isDirectory();
@@ -83,7 +75,8 @@ function isDir(path: string): boolean {
   }
 }
 
-function layerFrom(source: LayerSource, root: string): CanonLayer {
+/** A layer from its root: `<root>/pipelines` and `<root>/prompts`. */
+export function layerFrom(source: LayerSource, root: string): CanonLayer {
   return {
     source,
     root,
@@ -135,8 +128,7 @@ export function layerForPipelinesDir(pipelinesDir: string): CanonLayer {
 
 /** The declared `id` of a pipeline file, without validating the rest of it. */
 function pipelineIdOf(filePath: string): string | undefined {
-  const raw = parse(readFileSync(filePath, "utf8")) as { id?: unknown } | null;
-  const id = raw?.id;
+  const { id } = readRawPipeline(filePath);
   return typeof id === "string" && id !== "" ? id : undefined;
 }
 
