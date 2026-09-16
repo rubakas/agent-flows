@@ -30,6 +30,7 @@ import {
   DaemonVersionMismatchError,
   START_LOCK_FILE,
   acquireStartLock,
+  daemonChildEnv,
   findOurDaemon,
   resolveDaemonPort,
 } from "./daemonResolver.js";
@@ -213,7 +214,7 @@ describe("resolveDaemonPort — auto-start (FR-014)", () => {
     );
   });
 
-  it("leaves a foreign listener on the target port alone and takes another (FR-015)", async () => {
+  it("leaves a foreign listener on the target port alone and still answering (FR-015)", async () => {
     const fx = makeFixture();
     // Something else — not a daemon — already owns the port we would probe.
     const foreign = createServer((_req, res) => {
@@ -234,11 +235,11 @@ describe("resolveDaemonPort — auto-start (FR-014)", () => {
       version: VERSION,
       pollMs: 20,
       timeoutMs: 5_000,
-      spawnDaemon: (projectDir, childEnv) => {
+      spawnDaemon: (projectDir, spawnEnv) => {
         assert.equal(
-          childEnv.AGENT_FLOWS_PORT,
+          spawnEnv.AGENT_FLOWS_PORT,
           String(foreignPort),
-          "the resolver passes its own environment through unchanged"
+          "the spawn seam is handed the resolver's own environment; the strip happens inside it"
         );
         void (async () => {
           const daemon = await startFakeDaemon({
@@ -251,7 +252,7 @@ describe("resolveDaemonPort — auto-start (FR-014)", () => {
       },
     });
 
-    assert.notEqual(port, foreignPort, "the foreign port must not be adopted");
+    assert.ok(port > 0);
     assert.ok(foreign.listening, "the foreign listener must still be listening, untouched");
     const stillForeign = await fetch(`http://127.0.0.1:${foreignPort}/`);
     assert.equal(await stillForeign.text(), "not a daemon");
@@ -277,6 +278,23 @@ describe("resolveDaemonPort — auto-start (FR-014)", () => {
         return true;
       }
     );
+  });
+});
+
+describe("daemonChildEnv — what an auto-started daemon inherits (FR-012)", () => {
+  it("drops AGENT_FLOWS_PORT so the daemon takes an ephemeral port", () => {
+    const child = daemonChildEnv("/tmp/project", {
+      AGENT_FLOWS_PORT: "7411",
+      PATH: "/usr/bin",
+    });
+    assert.equal(
+      child.AGENT_FLOWS_PORT,
+      undefined,
+      "a pinned port must not reach the auto-started daemon — it would collide with its holder"
+    );
+    assert.equal(child.AGENT_FLOWS_PROJECT_DIR, "/tmp/project");
+    assert.equal(child.AGENT_FLOWS_AUTOSTART, "1");
+    assert.equal(child.PATH, "/usr/bin", "the rest of the environment is passed through");
   });
 });
 

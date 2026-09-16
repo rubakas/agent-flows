@@ -4,15 +4,6 @@
 // Lives in its own module so the whole resolution can be unit-tested: the MCP
 // server calls MCPServer.startStdio() at import time, so anything defined there
 // is unreachable from a test.
-//
-// Why the identity handshake is not optional: the daemon resolves its project
-// once at process start and every route reads that one `ctx.projectDir` — no
-// route takes a project from the request. Reusing a daemon that belongs to
-// another project would therefore run this chat's steps with that project's
-// working directory and write its artifacts into that project's repository. The
-// probe's reported projectDir realpath and version, both equal to ours, are the
-// only thing standing between the user and that; a daemon that fails either
-// check is not ours, and is neither reused nor touched.
 
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, rmSync, statSync, writeSync } from "node:fs";
@@ -25,6 +16,7 @@ import {
   daemonBaseUrl,
   probeDaemon,
   readDaemonRecord,
+  sleep,
   type DaemonIdentity,
 } from "../../runtime/daemonRecord.js";
 import { resolveProjectState } from "../../runtime/projectState.js";
@@ -38,7 +30,7 @@ const __dirname = dirname(__filename);
 export const DEFAULT_START_TIMEOUT_MS = 30_000;
 
 /** Delay between polls while waiting for a daemon to come up. */
-export const DEFAULT_POLL_MS = 150;
+export const DEFAULT_START_POLL_MS = 150;
 
 /** Age past which a start lock is treated as abandoned by a crashed starter. */
 export const DEFAULT_LOCK_STALE_MS = 60_000;
@@ -79,11 +71,6 @@ export interface ResolveDaemonDeps {
   spawnDaemon?: (projectDir: string, env: NodeJS.ProcessEnv) => void;
   timeoutMs?: number;
   pollMs?: number;
-  lockStaleMs?: number;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function pinnedPort(env: NodeJS.ProcessEnv): number | undefined {
@@ -95,6 +82,23 @@ function pinnedPort(env: NodeJS.ProcessEnv): number | undefined {
 }
 
 /**
+ * The environment an auto-started daemon is given.
+ *
+ * AGENT_FLOWS_PORT is dropped on purpose: an auto-started daemon always takes an
+ * ephemeral port (FR-012), so it can never collide with whatever is holding the
+ * conventional or pinned port (FR-015).
+ */
+export function daemonChildEnv(projectDir: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const { AGENT_FLOWS_PORT: _pinned, ...rest } = env;
+  return {
+    ...rest,
+    AGENT_FLOWS_PROJECT_DIR: projectDir,
+    AGENT_FLOWS_AUTOSTART: "1",
+    MASTRA_TELEMETRY_DISABLED: "1",
+  };
+}
+
+/**
  * Spawn `agent-flows serve` for `projectDir`, detached and unreferenced.
  *
  * The entry point is resolved from this module's own location — the sibling
@@ -103,25 +107,15 @@ function pinnedPort(env: NodeJS.ProcessEnv): number | undefined {
  * own minimal environment, where PATH may not carry the global bin at all, and
  * `process.execPath` is by construction an interpreter that could load this
  * package (it is running it), so it is also one that can run the daemon.
- *
- * AGENT_FLOWS_PORT is dropped from the child's environment on purpose: an
- * auto-started daemon always takes an ephemeral port (FR-012), so it can never
- * collide with whatever is holding the conventional or pinned port (FR-015).
  */
 function spawnDetachedDaemon(projectDir: string, env: NodeJS.ProcessEnv): void {
   const ext = __filename.endsWith(".ts") ? ".ts" : ".js";
   const serverModule = join(__dirname, "..", "..", "serve", `server${ext}`);
   const loader = ext === ".ts" ? ["--import", "tsx/esm"] : [];
-  const { AGENT_FLOWS_PORT: _pinned, ...rest } = env;
   const child = spawn(process.execPath, [...loader, serverModule], {
     detached: true,
     stdio: "ignore",
-    env: {
-      ...rest,
-      AGENT_FLOWS_PROJECT_DIR: projectDir,
-      AGENT_FLOWS_AUTOSTART: "1",
-      MASTRA_TELEMETRY_DISABLED: "1",
-    },
+    env: daemonChildEnv(projectDir, env),
   });
   // Unreferenced so the MCP process can exit while the daemon keeps running.
   child.unref();
@@ -212,8 +206,7 @@ export async function resolveDaemonPort(deps: ResolveDaemonDeps = {}): Promise<n
   const projectDir = deps.projectDir ?? resolveProjectDir();
   const version = deps.version ?? packageVersion();
   const timeoutMs = deps.timeoutMs ?? DEFAULT_START_TIMEOUT_MS;
-  const pollMs = deps.pollMs ?? DEFAULT_POLL_MS;
-  const lockStaleMs = deps.lockStaleMs ?? DEFAULT_LOCK_STALE_MS;
+  const pollMs = deps.pollMs ?? DEFAULT_START_POLL_MS;
   const spawnDaemon = deps.spawnDaemon ?? spawnDetachedDaemon;
   const search = { ...deps, env, projectDir, version };
 
@@ -223,7 +216,7 @@ export async function resolveDaemonPort(deps: ResolveDaemonDeps = {}): Promise<n
   const state = resolveProjectState(projectDir, env);
   mkdirSync(state.dir, { recursive: true, mode: 0o700 });
   const lockPath = join(state.dir, START_LOCK_FILE);
-  const holdsLock = acquireStartLock(lockPath, lockStaleMs);
+  const holdsLock = acquireStartLock(lockPath, DEFAULT_LOCK_STALE_MS);
 
   try {
     if (holdsLock) spawnDaemon(projectDir, env);
