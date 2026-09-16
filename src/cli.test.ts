@@ -77,7 +77,17 @@ describe("cli: help", () => {
 
   it("help output lists every verb", () => {
     const { stdout } = runCli(["--help"]);
-    for (const verb of ["doctor", "serve", "mcp", "list", "install", "validate", "generate"]) {
+    for (const verb of [
+      "doctor",
+      "serve",
+      "mcp",
+      "list",
+      "fork",
+      "enable",
+      "disable",
+      "validate",
+      "generate",
+    ]) {
       assert.match(stdout, new RegExp(verb), `help output should mention verb: ${verb}`);
     }
   });
@@ -86,6 +96,12 @@ describe("cli: help", () => {
 // ── 2. Unknown verbs exit non-zero ────────────────────────────────────────────
 
 describe("cli: unknown verb", () => {
+  it("exits non-zero for the removed install verb (spec 038 FR-028)", () => {
+    const { code, stderr } = runCli(["install", "investigate"]);
+    assert.notEqual(code, 0, "install is gone; editing forks instead");
+    assert.match(stderr, /unknown verb/i);
+  });
+
   it("exits non-zero for an unknown verb", () => {
     const { code, stderr } = runCli(["nonexistent-verb"]);
     assert.notEqual(code, 0);
@@ -155,7 +171,7 @@ describe("cli: verb routing — doctor", () => {
 });
 
 describe("cli: verb routing — list", () => {
-  it("routes 'list' to src/install/run.ts with 'list' subcommand", () => {
+  it("routes 'list' to src/canon/list-cli.ts", () => {
     const result = spawnSync(
       process.execPath,
       ["--import", "tsx/esm", join(repoRoot, "src", "cli.ts"), "list"],
@@ -167,7 +183,7 @@ describe("cli: verb routing — list", () => {
       }
     );
     const output = result.stdout + result.stderr;
-    // install/run.ts list mode always prints "AVAILABLE WORKFLOWS:"
+    // list-cli.ts always prints "AVAILABLE WORKFLOWS:"
     assert.match(output, /AVAILABLE WORKFLOWS/);
   });
 });
@@ -190,20 +206,13 @@ describe("cli: verb routing — validate", () => {
   });
 });
 
-describe("cli: verb routing — install", () => {
-  it("routes 'install' to src/install/run.ts with 'install' subcommand", () => {
-    // We do not actually install; we pass an id that does not exist so it exits
-    // without writing files, but the routing is confirmed by the output format
-    // from install/run.ts (which prints "Installing into").
+describe("cli: verb routing — fork", () => {
+  it("routes 'fork' to src/canon/fork-cli.ts (spec 038 FR-021)", () => {
+    // No id is passed, so fork-cli prints its usage and exits 0 without writing
+    // anything — enough to prove the routing.
     const result = spawnSync(
       process.execPath,
-      [
-        "--import",
-        "tsx/esm",
-        join(repoRoot, "src", "cli.ts"),
-        "install",
-        "__nonexistent_workflow__",
-      ],
+      ["--import", "tsx/esm", join(repoRoot, "src", "cli.ts"), "fork"],
       {
         cwd: repoRoot,
         env: { ...process.env, AGENT_FLOWS_PROJECT_DIR: repoRoot },
@@ -212,7 +221,25 @@ describe("cli: verb routing — install", () => {
       }
     );
     const output = result.stdout + result.stderr;
-    assert.match(output, /Installing into/);
+    assert.match(output, /Usage: agent-flows fork/);
+  });
+});
+
+describe("cli: verb routing — enable/disable", () => {
+  it("routes 'disable' with no id to src/runtime/visibility-cli.ts", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx/esm", join(repoRoot, "src", "cli.ts"), "disable"],
+      {
+        cwd: repoRoot,
+        env: { ...process.env, AGENT_FLOWS_PROJECT_DIR: repoRoot },
+        encoding: "utf8",
+        timeout: 30_000,
+      }
+    );
+    const output = result.stdout + result.stderr;
+    assert.match(output, /a workflow id is required/);
+    assert.notEqual(result.status, 0);
   });
 });
 

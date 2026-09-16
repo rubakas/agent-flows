@@ -31,6 +31,14 @@ function makeTempDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 }
 
+/**
+ * The repository canon layer root of a project — what `importBundle` is handed
+ * now that the target is a layer root rather than a project (spec 038 FR-027).
+ */
+function canonRoot(projectDir: string): string {
+  return join(projectDir, ".agent-flows");
+}
+
 // ── 1. Bundle contains complete closure for cycle ──────────────────────────────
 
 describe("exportBundle — cycle closure", () => {
@@ -102,7 +110,7 @@ describe("exportBundle + importBundle — round-trip", () => {
     const projectDir = makeTempDir("agent-flows-bundle-roundtrip-");
     try {
       const bundle = exportBundle("cycle", bundledPipelinesDir);
-      const report = importBundle(bundle, projectDir, false);
+      const report = importBundle(bundle, canonRoot(projectDir), false);
 
       // Verify the report is truthful.
       assert.ok(report.written.length > 0, "round-trip must write files");
@@ -153,7 +161,7 @@ describe("importBundle — traversal path rejection", () => {
       };
 
       assert.throws(
-        () => importBundle(maliciousBundle, projectDir, false),
+        () => importBundle(maliciousBundle, canonRoot(projectDir), false),
         (err: unknown) => {
           assert.ok(err instanceof Error, "must throw an Error");
           assert.ok(
@@ -186,7 +194,7 @@ describe("importBundle — traversal path rejection", () => {
       };
 
       assert.throws(
-        () => importBundle(maliciousBundle, projectDir, false),
+        () => importBundle(maliciousBundle, canonRoot(projectDir), false),
         (err: unknown) => {
           assert.ok(err instanceof Error, "must throw an Error");
           return true;
@@ -245,7 +253,7 @@ describe("importBundle / parseBundle — invalid bundle rejection", () => {
       };
 
       assert.throws(
-        () => importBundle(badBundle, projectDir, false),
+        () => importBundle(badBundle, canonRoot(projectDir), false),
         (err: unknown) => {
           assert.ok(err instanceof Error, "must throw an Error");
           assert.ok(
@@ -274,12 +282,12 @@ describe("importBundle — skip-by-default semantics", () => {
       const bundle = exportBundle("investigate", bundledPipelinesDir);
 
       // First import — all files written.
-      const first = importBundle(bundle, projectDir, false);
+      const first = importBundle(bundle, canonRoot(projectDir), false);
       assert.ok(first.written.length > 0, "first import must write files");
       assert.equal(first.skipped.length, 0, "first import must have no skips");
 
       // Second import (same bundle) — all files skipped.
-      const second = importBundle(bundle, projectDir, false);
+      const second = importBundle(bundle, canonRoot(projectDir), false);
       assert.equal(second.written.length, 0, "second import must write nothing");
       assert.ok(second.skipped.length > 0, "second import must skip all files");
       for (const s of second.skipped) {
@@ -303,7 +311,7 @@ describe("importBundle — skip-by-default semantics", () => {
       mkdirSync(destPipelinesDir, { recursive: true });
       writeFileSync(join(destPipelinesDir, "investigate.yaml"), "# pre-existing");
 
-      const report = importBundle(bundle, projectDir, true);
+      const report = importBundle(bundle, canonRoot(projectDir), true);
       assert.ok(
         report.written.includes("pipelines/investigate.yaml"),
         "investigate.yaml must be in written when overwrite=true"
@@ -386,7 +394,7 @@ describe("importBundle — providers.yaml", () => {
       // Inject a providers.yaml into the bundle.
       bundle.files.push({ path: "providers.yaml", content: VALID_PROVIDERS_YAML });
 
-      const report = importBundle(bundle, projectDir, false);
+      const report = importBundle(bundle, canonRoot(projectDir), false);
       assert.ok(
         report.skipped.some((s) => s.startsWith("providers.yaml")),
         `providers.yaml must be in skipped; skipped: ${report.skipped.join(", ")}`
@@ -412,7 +420,7 @@ describe("importBundle — providers.yaml", () => {
       const bundle = exportBundle("investigate", bundledPipelinesDir);
       bundle.files.push({ path: "providers.yaml", content: VALID_PROVIDERS_YAML });
 
-      const report = importBundle(bundle, projectDir, true);
+      const report = importBundle(bundle, canonRoot(projectDir), true);
       assert.ok(
         report.written.some((w) => w === "providers.yaml"),
         `providers.yaml must be in written; written: ${report.written.join(", ")}`
@@ -431,7 +439,7 @@ describe("importBundle — providers.yaml", () => {
       bundle.files.push({ path: "providers.yaml", content: INVALID_PROVIDERS_YAML });
 
       assert.throws(
-        () => importBundle(bundle, projectDir, false),
+        () => importBundle(bundle, canonRoot(projectDir), false),
         (err: unknown) => {
           assert.ok(err instanceof Error, "must throw an Error");
           assert.ok(
@@ -460,7 +468,7 @@ describe("importBundle — providers.yaml", () => {
         "bundled pipelines dir has no providers.yaml"
       );
 
-      const report = importBundle(bundle, projectDir, false);
+      const report = importBundle(bundle, canonRoot(projectDir), false);
       assert.ok(report.written.length > 0, "must have written pipeline files");
       assert.ok(
         !report.written.includes("providers.yaml"),
@@ -482,7 +490,7 @@ describe("importBundle — entry path allowlist (FR-016)", () => {
       bundle.files.push({ path: "config.json", content: '{"checkCommand":"rm -rf /"}' });
 
       assert.throws(
-        () => importBundle(bundle, projectDir, false),
+        () => importBundle(bundle, canonRoot(projectDir), false),
         (err: unknown) => {
           assert.ok(err instanceof Error, "must throw an Error");
           assert.ok(
@@ -522,7 +530,7 @@ describe("importBundle — entry path allowlist (FR-016)", () => {
                 sourcePipeline: "evil",
                 files: [{ path, content: "x" }],
               },
-              projectDir,
+              canonRoot(projectDir),
               false
             ),
           (err: unknown) => {
@@ -546,7 +554,7 @@ describe("importBundle — entry path allowlist (FR-016)", () => {
     const projectDir = makeTempDir("agent-flows-allowlist3-");
     try {
       const bundle = exportBundle("investigate", bundledPipelinesDir);
-      const report = importBundle(bundle, projectDir, false);
+      const report = importBundle(bundle, canonRoot(projectDir), false);
       assert.ok(
         report.written.some((p) => p.startsWith("pipelines/")),
         "pipelines/*.yaml is allowed"
@@ -573,7 +581,7 @@ describe("importBundle — symlink containment (FR-016/S2)", () => {
 
       const bundle = exportBundle("investigate", bundledPipelinesDir);
       assert.throws(
-        () => importBundle(bundle, projectDir, false),
+        () => importBundle(bundle, canonRoot(projectDir), false),
         (err: unknown) => {
           assert.ok(err instanceof Error, "must throw an Error");
           assert.ok(
@@ -635,7 +643,7 @@ describe("importBundle — non-normalised entry paths", () => {
                 sourcePipeline: "evil",
                 files: [{ path, content: "x" }],
               },
-              projectDir,
+              canonRoot(projectDir),
               false
             ),
           (err: unknown) => {

@@ -11,9 +11,11 @@
 //                        start the HTTP daemon
 //   stop [--all]         stop this project's daemon (or every project's)
 //   mcp                  start the MCP server
-//   list                 list installed/available workflows
-//   install [--overwrite-installed] [<id>...]
-//                        install workflows into the project directory
+//   list                 list the workflows this project can run
+//   fork <id> [--to user|repo]
+//                        copy a workflow into a writable layer to edit it
+//   enable <id>          list a workflow on the chat and page surfaces again
+//   disable <id>         hide a workflow from those two surfaces
 //   validate             validate the canon pipelines
 //   generate claude      generate Claude Code workflow bindings
 
@@ -45,7 +47,9 @@ const VALID_VERBS = [
   "stop",
   "mcp",
   "list",
-  "install",
+  "fork",
+  "enable",
+  "disable",
   "validate",
   "generate",
 ] as const;
@@ -59,9 +63,10 @@ function usage(): void {
   console.log("  serve [--port N] [--db PATH]  start the HTTP daemon");
   console.log("  stop [--all]                  stop this project's daemon (or every project's)");
   console.log("  mcp                           start the MCP server");
-  console.log("  list                          list installed/available workflows");
-  console.log("  install [--overwrite-installed] [<id>...]");
-  console.log("                                install workflows into the project");
+  console.log("  list                          list the workflows this project can run");
+  console.log("  fork <id> [--to user|repo]    copy a workflow into a writable layer");
+  console.log("  enable <id>                   list a hidden workflow again");
+  console.log("  disable <id>                  hide a workflow from chat and the page");
   console.log("  validate                      validate the canon pipelines");
   console.log("  generate claude               generate Claude Code workflow bindings");
 }
@@ -122,8 +127,14 @@ switch (verb) {
     runModule(src("canon", "list-cli.ts"), rest);
     break;
 
-  case "install":
-    runModule(src("install", "run.ts"), ["install", ...rest]);
+  // Editing forks; there is no install (spec 038 D14).
+  case "fork":
+    runModule(src("canon", "fork-cli.ts"), rest);
+    break;
+
+  case "enable":
+  case "disable":
+    runModule(src("runtime", "visibility-cli.ts"), [verb, ...rest]);
     break;
 
   case "validate":

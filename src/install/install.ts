@@ -1,4 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+// Closure computation for `exportBundle` (spec 038 D16). `installWorkflow`,
+// `listAvailable` and `listInstalled` were removed with the install verb: there
+// is no install any more, and editing forks instead (D14). `computeClosure`
+// stays because the exporter needs it.
+
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parse } from "yaml";
 
@@ -22,32 +27,65 @@ function parseRaw(yamlPath: string): RawPipeline {
 export interface PipelineClosure {
   /** Pipeline IDs in the transitive closure (including the root). */
   pipelines: Set<string>;
-  /** Prompt paths relative to the bundled root (e.g. "prompts/foo.md"). */
+  /** Prompt paths relative to the owning pipeline's root (e.g. "prompts/foo.md"). */
   prompts: Set<string>;
+  /** Pipeline ID → the YAML file it was read from. */
+  pipelineFiles: Map<string, string>;
+  /** Prompt path → the file it was read from, resolved against its own pipeline's root. */
+  promptFiles: Map<string, string>;
 }
 
 /**
  * Computes the transitive closure of pipeline IDs and prompt paths for the
- * given pipeline, reading from bundledPipelinesDir.
+ * given pipeline, reading from pipelinesDir.
  *
  * Traverses kind:pipeline and kind:loop steps recursively.
  * Does not call loadPipeline — raw parse only, so no validation overhead.
+ *
+ * `resolvePath` maps a nested pipeline id to the file that defines it. The
+ * merged three-layer view (spec 038 D13) passes one, so exporting a repository
+ * parent that mounts a bundled child resolves that child where it actually
+ * lives instead of failing inside one directory. Without it the legacy rule
+ * holds: a sibling file in `pipelinesDir`.
+ *
+ * The two maps record which file each entry came from, because with a resolver
+ * the closure can span layer roots and "the" root is no longer well-defined.
  */
-export function computeClosure(pipelineId: string, bundledPipelinesDir: string): PipelineClosure {
+export function computeClosure(
+  pipelineId: string,
+  pipelinesDir: string,
+  resolvePath?: (id: string) => string | undefined
+): PipelineClosure {
   const pipelines = new Set<string>();
   const prompts = new Set<string>();
+  const pipelineFiles = new Map<string, string>();
+  const promptFiles = new Map<string, string>();
 
   function visit(id: string): void {
     if (pipelines.has(id)) return;
-    const yamlPath = join(bundledPipelinesDir, `${id}.yaml`);
+    const resolved = resolvePath?.(id);
+    // Containment is asserted here, where the directory a path is resolved
+    // against is known — a caller reading the maps afterwards cannot tell which
+    // root an entry came from. A path the resolver supplied came from a
+    // directory listing of a layer, not from the YAML, so it cannot traverse.
+    if (resolved === undefined) assertSafePath(pipelinesDir, `${id}.yaml`);
+    const yamlPath = resolved ?? join(pipelinesDir, `${id}.yaml`);
     if (!existsSync(yamlPath)) {
       throw new Error(`Pipeline "${id}" not found in bundled catalog at ${yamlPath}`);
     }
     pipelines.add(id);
+    pipelineFiles.set(id, yamlPath);
+    // A pipeline's prompts are the sibling prompts/ directory of its own layer
+    // root — the parent of the directory the YAML sits in (spec 038 FR-018).
+    const root = dirname(dirname(yamlPath));
     const raw = parseRaw(yamlPath);
     for (const step of raw.steps ?? []) {
       if (step.prompt) {
+        assertSafePath(root, step.prompt);
         prompts.add(step.prompt);
+        // First writer wins: the root pipeline is visited first, so its own
+        // layer supplies a prompt path two layers happen to share.
+        if (!promptFiles.has(step.prompt)) promptFiles.set(step.prompt, join(root, step.prompt));
       }
       if ((step.kind === "pipeline" || step.kind === "loop") && step.pipeline) {
         visit(step.pipeline);
@@ -56,85 +94,5 @@ export function computeClosure(pipelineId: string, bundledPipelinesDir: string):
   }
 
   visit(pipelineId);
-  return { pipelines, prompts };
-}
-
-export interface InstallReport {
-  written: string[];
-  /** Each entry is "<relative-path> (already exists)" */
-  skipped: string[];
-}
-
-/**
- * Installs one or more workflows (and their transitive closure) into
- * <projectDir>/.agent-flows/.
- *
- * Default: skip files that already exist and report each skip.
- * overwrite=true: overwrite existing files silently.
- */
-export function installWorkflow(
-  pipelineIds: string[],
-  bundledPipelinesDir: string,
-  projectDir: string,
-  overwrite: boolean
-): InstallReport {
-  const bundledRoot = dirname(bundledPipelinesDir);
-  const destRoot = join(projectDir, ".agent-flows");
-
-  const allPipelines = new Set<string>();
-  const allPrompts = new Set<string>();
-  for (const id of pipelineIds) {
-    const { pipelines, prompts } = computeClosure(id, bundledPipelinesDir);
-    for (const p of pipelines) allPipelines.add(p);
-    for (const p of prompts) allPrompts.add(p);
-  }
-
-  const written: string[] = [];
-  const skipped: string[] = [];
-
-  function copyFile(srcPath: string, destPath: string, label: string): void {
-    mkdirSync(dirname(destPath), { recursive: true });
-    if (existsSync(destPath) && !overwrite) {
-      skipped.push(`${label} (already exists)`);
-      return;
-    }
-    writeFileSync(destPath, readFileSync(srcPath));
-    written.push(label);
-  }
-
-  for (const id of [...allPipelines].sort()) {
-    assertSafePath(bundledPipelinesDir, `${id}.yaml`);
-    assertSafePath(destRoot, `pipelines/${id}.yaml`);
-    const src = join(bundledPipelinesDir, `${id}.yaml`);
-    const dest = join(destRoot, "pipelines", `${id}.yaml`);
-    copyFile(src, dest, `pipelines/${id}.yaml`);
-  }
-
-  for (const promptPath of [...allPrompts].sort()) {
-    assertSafePath(bundledRoot, promptPath);
-    assertSafePath(destRoot, promptPath);
-    const src = join(bundledRoot, promptPath);
-    const dest = join(destRoot, promptPath);
-    copyFile(src, dest, promptPath);
-  }
-
-  return { written, skipped };
-}
-
-/** Returns the IDs of all available pipelines in bundledPipelinesDir. */
-export function listAvailable(bundledPipelinesDir: string): string[] {
-  return readdirSync(bundledPipelinesDir)
-    .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
-    .map((f) => f.replace(/\.ya?ml$/u, ""))
-    .sort();
-}
-
-/** Returns the IDs of all installed pipelines in <projectDir>/.agent-flows/pipelines/. */
-export function listInstalled(projectDir: string): string[] {
-  const installedDir = join(projectDir, ".agent-flows", "pipelines");
-  if (!existsSync(installedDir)) return [];
-  return readdirSync(installedDir)
-    .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
-    .map((f) => f.replace(/\.ya?ml$/u, ""))
-    .sort();
+  return { pipelines, prompts, pipelineFiles, promptFiles };
 }

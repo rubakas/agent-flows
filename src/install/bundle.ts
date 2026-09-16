@@ -20,6 +20,7 @@ import { basename, dirname, join, normalize, resolve } from "node:path";
 
 import { parse, stringify } from "yaml";
 
+import { assertWritableRoot } from "../canon/fork.js";
 import { loadPipeline } from "../canon/load.js";
 import { parseProviders } from "../canon/loadProviders.js";
 import { computeClosure } from "./install.js";
@@ -51,23 +52,35 @@ export interface WorkflowBundle {
  * Uses computeClosure from install.ts — no re-implementation of the traversal.
  *
  * @param pipelineId Root pipeline to export.
- * @param pipelinesDir Directory containing the pipeline YAML files.
+ * @param pipelinesDir Directory containing the root pipeline's YAML file.
+ * @param resolvePath Maps a nested pipeline id to the file that defines it
+ *   (spec 038 D13). The daemon passes the merged view's resolver, so exporting
+ *   a repository parent that mounts a bundled child reads that child from the
+ *   bundled layer rather than failing inside one directory.
  */
-export function exportBundle(pipelineId: string, pipelinesDir: string): WorkflowBundle {
-  const { pipelines, prompts } = computeClosure(pipelineId, pipelinesDir);
-  const root = dirname(pipelinesDir); // parent of the pipelines/ directory
+export function exportBundle(
+  pipelineId: string,
+  pipelinesDir: string,
+  resolvePath?: (id: string) => string | undefined
+): WorkflowBundle {
+  const { pipelines, prompts, pipelineFiles, promptFiles } = computeClosure(
+    pipelineId,
+    pipelinesDir,
+    resolvePath
+  );
+  const root = dirname(pipelinesDir); // parent of the root pipeline's directory
 
   const files: BundleFile[] = [];
 
   for (const id of [...pipelines].sort()) {
-    assertSafePath(pipelinesDir, `${id}.yaml`);
-    const filePath = join(pipelinesDir, `${id}.yaml`);
+    const filePath = pipelineFiles.get(id);
+    if (filePath === undefined) continue; // unreachable: computeClosure records every id it visits
     files.push({ path: `pipelines/${id}.yaml`, content: readFileSync(filePath, "utf8") });
   }
 
   for (const promptPath of [...prompts].sort()) {
-    assertSafePath(root, promptPath);
-    const filePath = join(root, promptPath);
+    const filePath = promptFiles.get(promptPath);
+    if (filePath === undefined) continue; // unreachable: every prompt in the set has a file
     files.push({ path: promptPath, content: readFileSync(filePath, "utf8") });
   }
 
@@ -225,28 +238,33 @@ export interface BundleImportReport {
 }
 
 /**
- * Imports a workflow bundle into <projectDir>/.agent-flows/.
+ * Imports a workflow bundle into a layer root — the directory holding
+ * `pipelines/` and `prompts/` (spec 038 FR-027). The daemon passes the user
+ * library by default and the repository canon when the caller asks for it; the
+ * chosen root is what containment is measured against, so a new target changes
+ * where the guards point, never whether they run.
  *
  * Validation-first: writes all bundle files to a temp directory, then calls
  * loadPipeline on every pipeline in the bundle. If any pipeline fails to load,
  * the temp directory is deleted and an error is thrown — nothing is written to
- * the project.
+ * the target.
  *
  * Path containment: every entry path is checked before any I/O. A path that
- * resolves outside .agent-flows/ causes immediate rejection and zero writes.
+ * resolves outside the target root causes immediate rejection and zero writes.
  *
- * Skip semantics: existing files in the project are skipped by default.
+ * Skip semantics: existing files in the target are skipped by default.
  * overwrite=true replaces them.
  *
- * @throws if any path escapes .agent-flows/, if the bundle fails validation,
+ * @throws if any path escapes the target root, if the bundle fails validation,
  *         or if any pipeline in the bundle fails to load.
  */
 export function importBundle(
   bundle: WorkflowBundle,
-  projectDir: string,
+  targetRoot: string,
   overwrite: boolean
 ): BundleImportReport {
-  const destRoot = resolve(join(projectDir, ".agent-flows"));
+  assertWritableRoot(targetRoot);
+  const destRoot = resolve(targetRoot);
 
   // Phase 1: Validate all paths before touching the filesystem — the allowlist
   // (FR-016), the string containment check, and the symlink check that the
