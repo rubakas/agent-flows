@@ -282,7 +282,49 @@ after each ship.
   binary.
 - Leftover `~/.agent-flows/n8n.json` and `<stateDir>/n8n.json` files (ADR-0017 says safe to delete).
 
+## 2026-09-16 — global package and harness reach
+
+Spec 038 (Draft) and ADR-0018 (Accepted) answer the owner's ask: one global npm install of
+`agent-flows`, reached from every harness (Claude Code, Codex CLI, OpenCode, T3 Code) through a
+single user-scope MCP registration and nothing else — no skill, no agent, no rule file. The skill
+question was investigated and closed during the same session (spec 038 D17): the owner's
+`agent-notes` project already owns every harness dot-directory and distributes skills to four
+harnesses; `agent-flows` and `agent-notes` divide the machine along a clean line — MCP vs.
+dot-directory — and do not overlap. `docs/research/2026-09-16-harness-discovery-mechanisms.md` is
+the primary source behind the MCP-registration half.
+
+**OPEN — owner decisions needed (carried as lead assumptions in spec 038, not owner-picked):**
+
+- **Package name `@rubakas/agent-flows`** (spec 038 D6). Matches the GitHub org; reversible with a
+  one-field change; the owner has not confirmed it.
+- **The MCP process auto-starts a per-project daemon when none is listening** (spec 038 D8). The
+  lead's recommendation, because "reachable by default" is false otherwise; the design was hardened
+  after a devil pass rejected a simpler port-probe version for the wrong-project write risk it
+  created (spec 038's "Challenged and corrected"), but the underlying choice to auto-start at all is
+  still the lead's call, not the owner's.
+
+**Spec 038 supersedes part of spec 037, already shipped.** Once one global install means every
+bundled workflow is already present everywhere (owner, 2026-09-16: "since we will use a single
+source of installation there no need for install/uninstall of workflows..."), spec 037's D3
+(Workflows view built around `resolveCanonDir`'s exclusive flip, with `Install`/`Install all` actions
+and a two-radio install dialog) and D4 (Templates view = the bundled catalogue) are replaced by spec
+038's three-layer merge (D13), forking instead of installing to edit (D14), a per-project visibility
+list (D15), and import/export as the only cross-machine path (D16). The shipped install dialog and
+`POST /api/install` route (spec 037 FR-014) are removed, not left dead, once spec 038 Ship 3 lands.
+This is noted in spec 037's own ledger as well.
+
+**Same class of bug as spec 038 D12, flag while Ship 1 is in flight:** `saveDraftAndRegenerate` (spec
+037 D6, `src/canon/canonWriter.ts:135-148`) writes generated Binding A scripts into
+`dirname(pipelinesDir)` — for an installed project that resolves to
+`<project>/.agent-flows/.claude/workflows/<id>.js`, not `<project>/.claude/workflows/<id>.js`. Spec
+037 already found this and left it as a non-caller (save no longer triggers regeneration), but it is
+the identical shape of defect spec 038 D12/FR-007 fixes in `write-cli.ts`: an output path computed
+from the tool's own layout instead of the target project. Worth checking whether spec 038's
+package-root/project-dir helper (D5, D12) should also be the thing `canonWriter.ts` derives its own
+(currently unused) output path from, so the fix lands in one place instead of two.
+
 ## Immediate next steps
 
 1. Implement spec 026, starting with cancellation (FR-001 … FR-007) — it is the largest control gap.
 2. Re-run the two audits listed above.
+3. Implement spec 038 Ship 1 (real package), the two owner decisions above pending confirmation.

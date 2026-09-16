@@ -516,6 +516,16 @@ build runs and commit sets, in order:
 - `/api/models` per-profile list (035 D2) for the Run… dialog.
 - Removing the owner's leftover `n8n.json` files.
 
+**Superseded by spec 038 (2026-09-16), pending Ship 3.** Once `agent-flows` is a single global
+install, every bundled workflow is present in every project and there is no per-project install step
+(owner, spec 038: "no need for install/uninstall of workflows ... all bundled workflows already
+installed"). D3 (Workflows view built on `resolveCanonDir`'s exclusive flip, `Install`/`Install all`
+actions, the two-radio install dialog) and D4 (Templates view = the bundled catalogue) are replaced
+by spec 038's three-layer merge (D13), forking instead of installing to edit (D14), a per-project
+visibility list (D15), and import/export as the only cross-machine path (D16). FR-014
+(`POST /api/install`) and the shipped install dialog are removed, not left dead, when spec 038 Ship 3
+lands — this is not yet done as of this spec's own Delivery ledger above.
+
 ## Verification log
 
 Placeholder — record each gate's mutation-proof run here as it is completed (see V6).
