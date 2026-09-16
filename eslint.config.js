@@ -135,6 +135,19 @@ export default tseslint.config(
     ...tseslint.configs.disableTypeChecked,
   },
 
+  // ── Build scripts (plain ESM JavaScript) ──────────────────────────────────
+  // scripts/*.mjs run under plain node as part of `pnpm build` and are outside
+  // tsconfig's TS program (rootDir is src/), so type-aware linting cannot parse
+  // them — the same situation as the browser-served modules above.
+  {
+    files: ["scripts/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: {
+      parserOptions: { projectService: false, project: false },
+      globals: { console: "readonly", process: "readonly" },
+    },
+  },
+
   // ── Prettier LAST — disables all formatting-conflicting rules ────────────
   prettier
 );

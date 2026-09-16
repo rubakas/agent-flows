@@ -1,16 +1,24 @@
 {
-  "name": "agent-flows",
+  "name": "@rubakas/agent-flows",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.15.0",
   "engines": {
     "node": ">=22"
   },
+  "files": [
+    "dist",
+    "pipelines",
+    "prompts",
+    "bin",
+    "README.md"
+  ],
   "bin": {
     "agent-flows": "bin/agent-flows"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-dist-assets.mjs",
     "typecheck": "tsc --noEmit",
     "test": "bash scripts/test.sh",
     "lint": "eslint .",
