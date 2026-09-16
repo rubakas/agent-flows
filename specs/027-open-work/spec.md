@@ -325,14 +325,40 @@ commit list):**
 **Package name `@rubakas/agent-flows`** (spec 038 D6) shipped as the lead's assumption; the owner has
 not explicitly confirmed it, and it stays a reversible one-field change.
 
-**STILL OPEN — verification the owner has to run, not a code gap:**
+**DONE — 2026-09-17, both proofs run by hand and recorded in spec 038's own Verification section:**
 
-- **V3 (packaging proof)** — `npm pack`, install into a temp prefix, run `doctor`/`list`/`serve`/`mcp`
-  from a project with no agent-flows checkout — not yet executed and recorded in spec 038's ledger.
-- **V4 (live harness proof)** — at least one harness started in a temp project showing the tools and
-  the scoped `instructions` block, with a chat tool call auto-starting the daemon — not yet run.
+- **V3 (packaging proof)** — `npm pack` produced a 228 KB tarball of 105 files; installing it into an
+  isolated prefix under Node 22 added 289 packages in ~24 s; from a directory with no agent-flows
+  checkout and only Node 20 + system directories on `PATH`, the installed command listed all twelve
+  bundled workflows, loaded the native database module, and answered a chat handshake exposing all six
+  tools; the launcher re-executed under Node 22.17.1.
+- **V4 (harness reach proof)** — `agent-flows setup` against a throwaway `HOME`: Claude Code, Codex,
+  and OpenCode each reported the server reachable through their own command. `setup --remove` then left
+  that `HOME` exactly as it was found (OpenCode's file kept only its own schema key, the Codex table
+  was gone, only Claude Code's own log file still mentioned the tool). This ran entirely inside a
+  temporary `HOME`, never the owner's real configuration.
+
+**STILL OPEN:**
+
+- **No pipeline has been run from inside a live chat session in a harness.** V4 proved MCP
+  registration, daemon auto-start, and `instructions` scoping each individually; it did not prove the
+  end-to-end path from a chat message through a tool call to a finished run by direct observation.
 - **The developer page's visual pass** — carried over from spec 037/036 (2026-09-14 section below);
   still the owner's own gate, unrelated to spec 038's own scope.
+- **The editor forks on Edit, not on Save.** Spec 038 D14/FR-022 describe forking as something Save
+  triggers after asking which layer. The shipped page instead shows a "Fork…" button in place of
+  "Edit" on a non-writable (bundled) row (`src/serve/ui-tables.js:102`) and forks immediately when that
+  button is pressed, before any editing happens (`src/serve/ui.html:1000-1002`). Not a defect — the
+  effect (a bundled workflow is never edited in place) is the same — but the trigger point differs from
+  what the spec text says, and the spec was not amended for it.
+- **Owner decision, not a defect: the write-target fallback for a project with neither a repository
+  canon nor a personal library lands on the installed package, not the user library.**
+  `writeTargetLayer` (`src/canon/layers.ts:234-243`) — the resolver the daemon's own mutation routes use
+  — falls back to `layers[0]`, the bundled layer, which every write route already refuses; nothing is
+  damaged. `agent-flows fork`'s own default (`resolveForkTarget`, `src/canon/fork.ts:34-57`) already
+  prefers the user library in the same situation. Now that forking exists, the daemon's fallback would
+  more naturally match fork's — but changing it alters which routes refuse a write, so it was
+  deliberately left alone pending an owner call.
 
 **Same class of bug as spec 038 D12, still unresolved:** `saveDraftAndRegenerate` (spec 037 D6,
 `src/canon/canonWriter.ts:135-148`) still derives its (currently unused, since save no longer
@@ -346,5 +372,5 @@ next touched, so the fix lives in one place.
    `POST /api/runs/:id/cancel` shipped as part of spec 033 (2026-09-13, see below); re-check which of
    spec 026's FRs remain before starting this.
 2. Re-run the two audits listed above.
-3. Run spec 038's V3 and V4 proofs and record them in its ledger; do the developer page's visual
-   pass.
+3. Spec 038's V3 and V4 proofs are done (2026-09-17, recorded in its ledger); still open: the
+   developer page's visual pass, and running a pipeline from inside a live chat session.

@@ -1,11 +1,11 @@
 # 038. Global package and harness reach
 
-| Field        | Value                                                                                                                                              |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Feature Name | Global package and harness reach                                                                                                                   |
-| Branch       | `feat/038-global-package`                                                                                                                          |
-| Status       | Implemented — Ships 1–5 landed; V3 (packaging proof), V4 (live harness proof) and the developer page's visual pass are outstanding, owner-verified |
-| Created      | 2026-09-16                                                                                                                                         |
+| Field        | Value                                                                                                                                                                                   |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Feature Name | Global package and harness reach                                                                                                                                                        |
+| Branch       | `feat/038-global-package`                                                                                                                                                               |
+| Status       | Implemented — Ships 1–5 landed; V3 (packaging proof) and V4 (harness reach proof) both owner-verified by hand and recorded below; the developer page's visual pass is still outstanding |
+| Created      | 2026-09-16                                                                                                                                                                              |
 
 ## Context
 
@@ -218,9 +218,10 @@ with a clear message, naming where it looked and, when that is what happened, sa
 Node 22+ interpreters but none of them could load the database module.
 
 **D3 — Packaging allowlist.** `package.json`'s `files` field becomes the single enumerated allowlist
-that decides what `npm pack` ships: `dist`, `pipelines`, `prompts`, `bin`, `README.md`, `LICENSE`.
-This replaces today's silent fallback to `.gitignore`, which would ship a tarball with no `dist/` in
-it at all.
+that decides what `npm pack` ships: `dist`, `pipelines`, `prompts`, `bin`, `README.md`. This replaces
+today's silent fallback to `.gitignore`, which would ship a tarball with no `dist/` in it at all. The
+repository carries no `LICENSE` file, so none is listed; see Risks and out of scope for the
+consequence.
 
 **D4 — CLI verbs keep spawning a child process.** `runModule()` in `src/cli.ts` continues to `spawn`
 each verb's compiled module as its own process (no `tsx` under the compiled build, but still a
@@ -466,6 +467,30 @@ Five ships, in order:
   install/uninstall walkthrough, and to state the `setup --remove`-before-uninstall order. No FRs of
   its own; gated on Ships 1-4 landing.
 
+### Audit and cleanup, after the five ships
+
+After Ship 5 landed, an audit pass ran over the new modules and entry points this spec added, and its
+findings were applied. Two were real defects, caught by neither the test suite that existed at the
+time:
+
+- **`agent-flows setup --remove` left a `.bak` file behind in the user's OpenCode configuration
+  directory**, so the reversal D10/FR-031 promises was not exact. The round-trip test had compared a
+  single file (the OpenCode config itself); it now snapshots the whole configuration directory, so a
+  leftover backup file is caught as evidence agent-flows was ever there
+  (`src/setup/harnesses.test.ts:417-450`). `removeOpencode` now deletes the backup once the file it
+  restores matches it again (`src/setup/harnesses.ts:598-629`).
+- **`agent-flows doctor` read providers and workflows from the installed package while reading the
+  daemon from the project**, so under a global install one report described two different places. Both
+  now resolve through `resolveProjectDir()`, the helper that already existed for exactly this
+  (`src/doctor.ts:577-593`).
+
+The audit's other findings were mostly a single class of problem, worth naming as a standing lesson:
+several tests could not fail. One asserted that a pinned port was passed through to an auto-started
+daemon when FR-012 requires it to be stripped, and the stripping happened below the test's own seam,
+so deleting the behaviour would have left the suite green; it now asserts directly on
+`daemonChildEnv()`'s output, the function that does the stripping
+(`src/bindings/mastra/daemonResolver.test.ts:284-299`).
+
 ## Functional Requirements
 
 - **FR-001.** `pnpm build` runs `tsc` and then copies `src/serve/ui.html` and the four `ui-*.js`
@@ -492,9 +517,9 @@ Five ships, in order:
   throws a named error at startup if that root's directory does not also contain both `pipelines/`
   and `prompts/`; `pipelineLoader.ts`, `install/run.ts`, and `write-cli.ts` all call it, and each of
   their independent `repoRoot` computations is deleted (D5).
-- **FR-005.** `package.json`'s `files` field ships exactly `dist/`, `pipelines/`, `prompts/`, and
-  `bin/`, plus `README.md` and `LICENSE`, and nothing else (no `src/`, no test files, no
-  `scripts/`); `name` is `@rubakas/agent-flows`; a packed tarball is asserted to contain
+- **FR-005.** `package.json`'s `files` field ships exactly `dist/`, `pipelines/`, `prompts/`, `bin/`,
+  and `README.md`, and nothing else (no `src/`, no test files, no `scripts/`, no `LICENSE` — the
+  repository has none); `name` is `@rubakas/agent-flows`; a packed tarball is asserted to contain
   `dist/serve/ui.html`, all four `dist/serve/ui-*.js`, every `pipelines/*.yaml`, and every
   `prompts/*.md`, and to contain no `specs/`, `docs/`, `src/`, or test file (D3, D6).
 - **FR-006.** `runModule()` in `src/cli.ts` continues to `spawn` each verb's module as a separate
@@ -630,14 +655,27 @@ Five ships, in order:
   against a temp `HOME`, including the idempotence case, the `.bak` write, the `.jsonc` refusal, and
   the no-other-path-touched assertion), FR-032 (`doctor`'s report against a temp `HOME` with a subset
   of harnesses "installed", and against a forced ABI-mismatch fixture).
-- **V3.** A packaging proof executed by hand and recorded in the ledger: `npm pack`, install the
-  tarball into a temp prefix, run `agent-flows doctor`, `agent-flows list`, `agent-flows serve` and
-  one `agent-flows mcp` handshake from a temp project directory that contains no agent-flows
-  checkout (FR-002 through FR-005, FR-007).
-- **V4.** A harness proof recorded in the ledger: at least one harness started in a temp project
-  shows the agent-flows tools and its scoped `instructions` block, and a chat tool call in that
-  project auto-starts the daemon with no manual `agent-flows serve` step (FR-010, FR-013, FR-014,
-  FR-030).
+- **V3. DONE, executed by hand 2026-09-17.** `npm pack` produced a 228 KB tarball of 105 files.
+  Installing that tarball into an isolated prefix under Node 22 added 289 packages in about 24
+  seconds. From a directory containing no agent-flows checkout, with only Node 20 and the system
+  directories on `PATH`, the installed `agent-flows` command listed all twelve bundled workflows, ran
+  `doctor` with the native `better-sqlite3` module loading cleanly, and answered an `agent-flows mcp`
+  chat handshake exposing all six tools; the launcher's own re-exec (FR-003) was observed re-executing
+  under Node 22.17.1 (FR-002 through FR-005, FR-007).
+- **V4. DONE, executed by hand 2026-09-17.** `agent-flows setup` was run against a throwaway `HOME`.
+  Each harness's own command then confirmed reach on its own terms: Claude Code's command reported the
+  server connected after starting it, Codex's command listed it as enabled, and OpenCode's command
+  reported it connected. `agent-flows setup --remove` then left that throwaway `HOME` as it found it —
+  OpenCode's config file retained only the schema key the harness itself had added, the Codex table
+  was gone, and the only remaining mention of the tool anywhere in that `HOME` was Claude Code's own
+  log file. The owner's real configuration was never touched; the whole proof ran inside a temporary
+  `HOME` (FR-010, FR-013, FR-014, FR-030, FR-031).
+
+  **Not covered by V4:** no pipeline was run from inside a live chat session in a harness, so the
+  end-to-end path from a chat message through a tool call to a finished run is still unproven by
+  direct observation, even though every link in that path — MCP registration, daemon auto-start,
+  `instructions` scoping — is proven individually. This remains open in the 027 handoff.
+
 - **V5.** Mutation proofs for the new gates: neuter each new check — the Node-version gate, the
   `instructions` size assertion, the `files` allowlist, the package-root assertion, the daemon
   identity match, the lock file, the setup idempotence check, the `.bak` write, the `.jsonc` refusal,
@@ -682,6 +720,9 @@ Five ships, in order:
   list re-shows); refusing a run whose entry point is hidden. A global scope can be added later as a
   second file (e.g. `~/.agent-flows/visibility.json`) without changing the per-project file's shape.
 - Publishing to the public npm registry is out of scope; install is from a tarball or a git URL.
+- The package ships with no `LICENSE` file, because the repository has none. This is fine for install
+  from a tarball or a git URL, where the license is whatever the repository itself states (or does
+  not); a `LICENSE` file must be added before this package is ever published to a public registry.
 - T3 Code is verified only through whichever one provider is available in this environment — its own
   mechanism is "inherit the provider's configuration" (research §4), so there is no T3-specific
   registration to test beyond that provider's.
@@ -693,10 +734,11 @@ Five ships, in order:
 
 ## Delivery ledger
 
-| Ship | Decisions     | FRs           | Commits                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ---- | ------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | D1-D6, D12    | FR-001–FR-009 | `4edced5` feat(package): resolve bundled assets from the package root; `b950095` build(package): compile to dist, copy page assets and pin the packing list; `266a17e` feat(cli): run the compiled build from a node launcher; `4bce564` fix(bindings): generate claude into the project, not the tool checkout; `8e688cb` test: resolve fixture roots from the package root; `0e712d2` fix(cli): re-exec under an interpreter that can load the database module; `0c44f02` docs(specs): record the launcher interpreter probe in spec 038                                                                                                                                                                                            |
-| 2    | D7-D9         | FR-010–FR-016 | `fb7da76` feat(runtime): record and verify daemon identity per project; `13a90d1` feat(serve): add the daemon identity route, record file and port fallback; `98d4747` feat(mcp): find or start the daemon that serves the current project; `9f47aaa` feat(mcp): declare server instructions so harnesses surface the tool; `12d18dc` feat(cli): add the stop verb for project daemons                                                                                                                                                                                                                                                                                                                                                |
-| 3    | D13-D16       | FR-017–FR-029 | `4a0faad` feat(canon): merge bundled, user and repository workflow layers; `69de0cb` feat(cli): list workflows with their owning layer; `f2b6bf3` feat(serve): resolve pipelines and export through the merged layers; `6ec2187` feat(mcp): list and rebuild workflows from the merged layers; `07dbd13` test(canon): replace exclusive-flip assertions with layer precedence; `2eb67fb` feat(canon): fork a workflow into a writable layer; `9dddb82` feat(runtime): hide workflows from the chat listing per project; `f0fe0bb` feat(mcp): filter hidden workflows from list_pipelines; `67c479a` feat(serve): fork, hide and import routes replace the install dialog; `f4816ac` chore(cli): drop the install verb and its scripts |
-| 4    | D10, D11, D17 | FR-030–FR-032 | `8404479` feat(setup): splice a json member in place to keep config files byte-identical; `1ec06b1` feat(setup): register the mcp server with each harness and reverse it; `33e8569` feat(doctor): report harness reach, daemon state and native module mismatch                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| 5    | docs          | —             | docs(readme,specs): document the global package, harness setup, workflow layers and the daemon (this change — no hash yet, uncommitted)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Ship            | Decisions     | FRs           | Commits                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------- | ------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1               | D1-D6, D12    | FR-001–FR-009 | `4edced5` feat(package): resolve bundled assets from the package root; `b950095` build(package): compile to dist, copy page assets and pin the packing list; `266a17e` feat(cli): run the compiled build from a node launcher; `4bce564` fix(bindings): generate claude into the project, not the tool checkout; `8e688cb` test: resolve fixture roots from the package root; `0e712d2` fix(cli): re-exec under an interpreter that can load the database module; `0c44f02` docs(specs): record the launcher interpreter probe in spec 038                                                                                                                                                                                            |
+| 2               | D7-D9         | FR-010–FR-016 | `fb7da76` feat(runtime): record and verify daemon identity per project; `13a90d1` feat(serve): add the daemon identity route, record file and port fallback; `98d4747` feat(mcp): find or start the daemon that serves the current project; `9f47aaa` feat(mcp): declare server instructions so harnesses surface the tool; `12d18dc` feat(cli): add the stop verb for project daemons                                                                                                                                                                                                                                                                                                                                                |
+| 3               | D13-D16       | FR-017–FR-029 | `4a0faad` feat(canon): merge bundled, user and repository workflow layers; `69de0cb` feat(cli): list workflows with their owning layer; `f2b6bf3` feat(serve): resolve pipelines and export through the merged layers; `6ec2187` feat(mcp): list and rebuild workflows from the merged layers; `07dbd13` test(canon): replace exclusive-flip assertions with layer precedence; `2eb67fb` feat(canon): fork a workflow into a writable layer; `9dddb82` feat(runtime): hide workflows from the chat listing per project; `f0fe0bb` feat(mcp): filter hidden workflows from list_pipelines; `67c479a` feat(serve): fork, hide and import routes replace the install dialog; `f4816ac` chore(cli): drop the install verb and its scripts |
+| 4               | D10, D11, D17 | FR-030–FR-032 | `8404479` feat(setup): splice a json member in place to keep config files byte-identical; `1ec06b1` feat(setup): register the mcp server with each harness and reverse it; `33e8569` feat(doctor): report harness reach, daemon state and native module mismatch                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 5               | docs          | —             | `ee808e6` docs: describe the global install, harness setup and workflow layers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| audit & cleanup | —             | —             | `b054e5a` refactor(bundle): rename the install directory to bundle and closure; `8ca1355` test(mcp): prove the auto-started daemon drops a pinned port; `5f977e1` refactor(runtime): share the private state write, sleep and raw pipeline parse; `d6e47aa` refactor(build): make one page-asset list canonical and lint the launcher; `a9be40e` feat(cli): share option parsing and cover the fork, list and hide commands; `2a51d04` refactor: drop dead exports, unfalsifiable tests and repeated comments                                                                                                                                                                                                                         |
