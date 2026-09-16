@@ -218,17 +218,21 @@ bypass of it: the caller named a real, specific folder, and that folder goes thr
 `add` always does, it is simply triggered by first use instead of by a prior explicit command.
 
 **D6 — The identity handshake narrows to version-only; the project axis retires because it cannot
-recur.** `GET /api/daemon` keeps reporting `{version, pid, startedAt}` and drops the single
-`projectDir` field — there no longer is one, since the daemon serves many. `classifyIdentity`
-(`daemonRecord.ts:166-173`) drops its `"other-project"` branch entirely and keeps `"other-version"`
-unchanged: an old daemon running a stale version is still never reused and never killed, and is still
-reported to the user by name and version exactly as spec 038 FR-015 already does. The project-match
-branch is not merely redundant, it is now provably unnecessary: a client always names its own project
-on every call (D2), and that name is either registered and opened correctly, or refused outright — it
-can no longer be silently answered by a daemon serving someone else's project, because there is only
-one daemon and it never guesses. The record moves from `<stateDir>/daemon.json` (one per project) to
-`<stateRoot>/daemon.json` (one, machine-wide); the start lock moves the same way, from
-`<stateDir>/daemon.start.lock` to `<stateRoot>/daemon.start.lock`.
+recur.** `GET /api/daemon` keeps reporting `{version, pid, startedAt}`, gains an `openProjects` field
+— the realpath of every project with a currently-open engine (D3) — and drops the single `projectDir`
+field, since there no longer is one; the daemon serves many. `openProjects` is what the rewritten
+`stop.ts` (D7) and `uninstall` (D7) use to tell a live engine from an absent one, now that a per-project
+`daemon.json` no longer exists to probe. `classifyIdentity` (`daemonRecord.ts:166-173`) drops its
+`"other-project"` branch entirely and keeps `"other-version"` unchanged: an old daemon running a stale
+version is still never reused and never killed, and is still reported to the user by name and version
+exactly as spec 038 FR-015 already does. The project-match branch is not merely redundant, it is now
+provably unnecessary: a client always names its own project on every call (D2), and that name is
+either registered and opened correctly, or refused outright — it can no longer be silently answered by
+a daemon serving someone else's project, because there is only one daemon and it never guesses. The
+record moves from `<stateDir>/daemon.json` (one per project) to `<stateRoot>/daemon.json` (one,
+machine-wide); the start lock moves the same way, from `<stateDir>/daemon.start.lock` to
+`<stateRoot>/daemon.start.lock`. Both routes this record and its handshake serve are gated by D15's
+token.
 
 **D7 — `agent-flows stop` releases one project; `agent-flows stop --all` shuts the daemon down.**
 `agent-flows stop [dir]` (default: cwd) resolves the registered project, cancels its in-flight runs,
@@ -239,6 +243,22 @@ it, so an operator is never surprised by what a full shutdown interrupted — it
 refuses, matching the "don't overcomplicate" posture the owner set for spec 038 D15. `uninstall`'s
 per-project deletion (D5, reusing spec 038 D10's wording) always releases first via this same path,
 never by killing a shared daemon other projects still depend on.
+
+D6 moving the record breaks `agent-flows uninstall`'s own safety guard, and the fix ships with D6, not
+after it. `uninstall.ts`'s `offerProjects` (`:108-148`, spec 038) deletes a project's state unless
+stopping it reported `"unresolved"` (`:126-141`) — its own comment says why: "deleting a database
+directory out from under a live process is worse than leaving it behind." That verdict comes from
+`stopAllDaemons`/`stopProjectDaemon` (`src/serve/stop.ts`, spec 038), which read a per-project
+`daemon.json` that D6 removes; once it is gone, every project's read finds nothing, every project
+reports `"no-daemon"`, and the bulk delete proceeds — including against a project whose database is
+open right now inside the live shared daemon. This is exactly the case the guard exists to prevent, so
+rewriting `stop.ts` ships in Ship 1, alongside D6, not left for a later ship to discover broken:
+`stopProjectDaemon`/`stopAllDaemons` keep their exact exported shape (`StopReport`, the three
+`outcome`s `stopped`/`no-daemon`/`unresolved`) so `uninstall.ts` needs no change of its own, but their
+internals now ask the one shared daemon's `openProjects` list (D6) whether a given directory's project
+is currently open — reporting `stopped` when it was open and could be released, `no-daemon` when it was
+never open, and `unresolved` whenever the daemon cannot be reached or a release cannot be confirmed,
+never `no-daemon` for a project that is in fact live.
 
 **D8 — Artifacts are contained to their own project; cross-project handoff is removed by choice.**
 `resolveArtifactPath` (`server.ts:566-597`) today contains an absolute artifact path to the shared
@@ -266,6 +286,22 @@ project's engine-cached `ProviderConfig` (`loadProviders(projectDir)`, D3). `age
 daemon line (spec 038 D11/FR-032) changes from "does the daemon report an identity matching THIS
 project" — unanswerable once a daemon reports no single project — to "is a version-matching daemon
 reachable, and is the current directory a registered project."
+
+Threading each project's own `ProviderConfig` into those two call sites is necessary but not
+sufficient. `getActiveProfile`'s own resolution order (`registry.ts:160`) is
+`env.AGENT_FLOWS_PROVIDER ?? config?.defaultProvider ?? "anthropic"` — the environment variable is
+checked first. One shared daemon has exactly one environment for its entire lifetime (D3): whichever
+value `AGENT_FLOWS_PROVIDER` held when the daemon started would win for every open project, regardless
+of what any individual project's own `providers.yaml` says, making the per-project threading above
+cosmetic rather than load-bearing. **Decision: the precedence reverses.** `getActiveProfile`'s
+resolution order becomes `config?.defaultProvider ?? env.AGENT_FLOWS_PROVIDER ?? "anthropic"` — a
+project's own configured default now wins over the process-wide environment variable, which becomes
+the fallback used only when a project specifies none. This is a narrow, low-blast-radius change: every
+existing caller that passes no `config` (today, most call sites outside the two above) is unaffected,
+because `config?.defaultProvider` is `undefined` and resolution falls through to the environment
+variable exactly as before; the behaviour changes only for a caller that supplies both a project's
+config _and_ has `AGENT_FLOWS_PROVIDER` set, which is precisely the case that was silently wrong under
+one shared daemon.
 
 **D10 — Draft and run ids resolve strictly inside the named project's own database file.** Draft ids
 are autoincrement integers scoped to one SQLite file (`canon_draft`, `db/index.ts:80-89`), and each
@@ -316,6 +352,30 @@ a distinct id, and this must be verified against Mastra's source, not assumed sa
 the chat/MCP client process from that process's own project (D11), never inside the shared daemon —
 nothing here changes what it says or when it is computed.
 
+**D15 — A per-daemon authentication token is required on every request, replacing a bound this design
+removes.** `isAllowedOrigin` (`server.ts:198-204`) returns true when the `Origin` header is absent, by
+its own comment "non-browser clients (curl, fetch from localhost) omit it" — the host and origin
+checks defend the daemon against a _browser_, not against another local process; any process on the
+machine can already call it today. That is survivable today only because a daemon can act on exactly
+one directory, the one it was started for. Under this design a caller _names_ the directory, and
+registering an unregistered one on first use (D5) means any path the calling user can read becomes a
+target: the daemon would create state for it and run workflow steps with it as the working directory —
+spawning child processes there — with the results readable back over that same open, unauthenticated
+interface. This is not new paranoia; it is replacing the bound this design's own D2/D5 remove.
+
+The daemon generates a random token at startup and writes it into the daemon record
+(`<stateRoot>/daemon.json`, D6) with the same 0600 permission that record already carries. Every route
+requires it as a `token` query parameter alongside `project` (D2) — a header was rejected for the same
+reason D2 rejected one for `project`: the run-events route is read by `EventSource`, which cannot set
+custom headers — **except** `GET /` and the four static `ui-*.js` module routes, which carry no
+project data and exist only to bootstrap the page before it has the token. The token check runs first
+in the D2 prologue, ahead of the project check: an unauthenticated caller is refused before learning
+whether the project it named is even registered. The CLI reads the token the same way it already reads
+the rest of the daemon record and attaches it to every command it issues. The page cannot know the
+token before its first request, so `GET /` embeds it into the served HTML for the page's own script to
+read and attach to every request it makes afterward — this is how the token is "handed to the page
+when it is served."
+
 ### Ship order: reversed after review
 
 The owner originally chose page-first, in this same session, before any code was written: "the merged
@@ -341,20 +401,43 @@ third, unchanged in scope. This record keeps both decisions and the reasoning th
 because the same question was decided twice, in opposite directions, in one session — the reasoning
 that changed the owner's mind is the part worth keeping, not just the final answer.
 
+### Audited by the project's own `audit` pipeline before implementation
+
+This spec was itself run through `agent-flows`'s `audit` pipeline before any code was written, and the
+lead verified all three of its load-bearing findings against the code directly, the same way the
+earlier devil pass on ship order was verified. One was blocking, two were major, and all three changed
+a decision rather than adding a footnote:
+
+- The daemon has no authentication (`isAllowedOrigin`, `server.ts:198-204`, defends only against a
+  browser), and this design's own D2/D5 remove the bound that made that survivable — a single fixed
+  project per process. **D15** (new) closes it with a startup-generated token required on every route.
+- Moving the daemon record to one machine-wide location (D6) silently breaks `uninstall`'s own
+  live-process safety guard (`uninstall.ts:126-141`), which reads a per-project record that D6 removes
+  — every project would report `no-daemon` and the bulk delete would proceed against one open inside
+  the live daemon. **D7** now includes rewriting `stop.ts`'s internals, in the same ship that moves the
+  record, so the guard `uninstall.ts` already has keeps working unmodified.
+- Threading a project's own provider settings into the two call sites that ignored them (D9) is not
+  sufficient while `getActiveProfile` checks the process-wide environment variable first
+  (`registry.ts:160`): one shared daemon has one environment for its whole lifetime, so that variable
+  would still win for every project. **D9** now also reverses that precedence, so a project's own
+  configuration outranks the environment variable, which becomes a fallback rather than an override.
+
 ## Delivery
 
 Three ships, in the owner's final order:
 
-- **Ship 1 — the shared daemon, the registry, and chats naming their project.** D2–D14. FRs:
-  FR-005–FR-019. Nothing visible changes on the page in this ship. Done means: a request naming an
-  unregistered folder is refused before any handler runs; a registered project's run executes with
-  that project's captured realpath as its working directory and writes only into that project's own
-  state directory; two registered projects are served concurrently by one daemon with no crossing of
-  drafts, runs, provider profile, or artifacts; a pre-upgrade per-project daemon is found and named
-  before the new daemon binds its port; `agent-flows stop`/`remove` release or forget one project
-  without touching any other; removing a project never deletes workflows committed in a repository;
-  every new gate has a mutation proof (its own test goes red when the gate is neutered, then green
-  again once restored).
+- **Ship 1 — the shared daemon, the registry, and chats naming their project.** D2–D15. FRs:
+  FR-005–FR-019, FR-023–FR-025. Nothing visible changes on the page in this ship. Done means: a request
+  naming an unregistered folder is refused before any handler runs; an unauthenticated request is
+  refused before that; a registered project's run executes with that project's captured realpath as
+  its working directory and writes only into that project's own state directory; two registered
+  projects are served concurrently by one daemon with no crossing of drafts, runs, provider profile
+  (including under a process-wide `AGENT_FLOWS_PROVIDER`), or artifacts; a pre-upgrade per-project
+  daemon is found and named before the new daemon binds its port; `agent-flows stop`/`remove` release
+  or forget one project without touching any other; removing a project never deletes workflows
+  committed in a repository, and `uninstall` never deletes a project's state while its engine is open
+  in the shared daemon; every new gate has a mutation proof (its own test goes red when the gate is
+  neutered, then green again once restored).
 - **Ship 2 — the merged page, for whichever project is selected.** D1. FRs: FR-001–FR-004. Built
   directly against Ship 1's `project`-parameter shape, for whichever single project a caller currently
   selects — Ship 3 is what lets that selection change from the page itself. Done means: `#/templates`
@@ -411,8 +494,9 @@ Three ships, in the owner's final order:
 - **FR-010.** Every draft- and run-bearing route requires `project` and resolves the id strictly
   inside that project's own database file; a test proves two projects each holding a "draft 1" (and
   correspondingly shaped run records) never cross (D10).
-- **FR-011.** `GET /api/daemon` reports `{version, pid, startedAt}` with no `projectDir` field, from a
-  single record at `<stateRoot>/daemon.json`; `classifyIdentity` drops its `"other-project"` verdict
+- **FR-011.** `GET /api/daemon` reports `{version, pid, startedAt, openProjects}` — `openProjects` is
+  the realpath of every project with a currently-open engine — with no single `projectDir` field, from
+  a single record at `<stateRoot>/daemon.json`; `classifyIdentity` drops its `"other-project"` verdict
   and keeps `"other-version"` unchanged, including its never-killed, name-and-report-to-the-user
   behaviour; the start lock moves to `<stateRoot>/daemon.start.lock` (D6).
 - **FR-012.** `agent-flows stop [dir]` (default: cwd) releases exactly one registered project —
@@ -430,8 +514,9 @@ Three ships, in the owner's final order:
   marker and state both gone). A test proves both refusals (D8).
 - **FR-015.** `getActiveProfile()` at `server.ts:1837` and `:2307` is called with the named project's
   engine-cached `ProviderConfig` as its second argument; a test with two open projects whose
-  `providers.yaml` name different `defaultProvider` values proves each request reports its own
-  project's profile (D9).
+  `providers.yaml` name different `defaultProvider` values, and with `AGENT_FLOWS_PROVIDER` set in the
+  daemon's own environment to a third value, proves each request reports its own project's profile —
+  not the environment variable's — which requires FR-025's precedence reversal to pass (D9).
 - **FR-016.** `agent-flows doctor`'s daemon line reports whether a version-matching daemon is
   reachable and whether the current directory is a registered project, replacing the now-unanswerable
   "does the daemon's identity match this project" check (D9).
@@ -456,6 +541,23 @@ Three ships, in the owner's final order:
   never-touches-`.agent-flows` guarantee as the CLI verbs.
 - **FR-022.** The Run… dialog's `project` field is always the picker's current selection, never typed
   by hand, and is sent as the `project` parameter on `POST /api/runs` per FR-002's shape.
+- **FR-023.** The daemon generates a random authentication token at startup and writes it into
+  `<stateRoot>/daemon.json` with the same 0600 permission as the rest of that record; every route
+  requires it as a `token` query parameter except `GET /` and the four static `ui-*.js` module routes;
+  the token check runs before the FR-005 project check in the same prologue; the CLI reads the token
+  from the daemon record for every command it issues; `GET /` embeds the token into the served HTML so
+  the page's own script can attach it to every request it makes afterward (D15).
+- **FR-024.** `stopProjectDaemon`/`stopAllDaemons` (`src/serve/stop.ts`) keep their exact exported
+  shape — `StopReport`, with outcomes `stopped`/`no-daemon`/`unresolved` — but their internals query the
+  shared daemon's `openProjects` field (FR-011) instead of a per-project `daemon.json`; a directory the
+  daemon reports as open is released and reported `stopped`, one it reports as not open is `no-daemon`,
+  and anything that cannot be confirmed either way — daemon unreachable, ambiguous response — is
+  `unresolved`; `uninstall.ts`'s `offerProjects` (`:108-148`) requires no code change, because the
+  contract it reads is preserved (D7).
+- **FR-025.** `getActiveProfile`'s resolution order (`registry.ts:160`) changes from
+  `env.AGENT_FLOWS_PROVIDER ?? config?.defaultProvider ?? "anthropic"` to `config?.defaultProvider ??
+env.AGENT_FLOWS_PROVIDER ?? "anthropic"`; a caller that passes no `config` sees no behaviour change
+  (D9).
 
 ## Verification
 
@@ -470,9 +572,10 @@ Three ships, in the owner's final order:
 - **V5.** Mutation proofs, one per new gate, each neutered and confirmed red before being restored and
   confirmed green: the unregistered-project refusal (FR-005/007), the realpath-strictness check
   (FR-007), `classifyIdentity`'s version-only comparison (FR-011), the draft/run project-scoping
-  (FR-010), the provider-profile-per-project fix (FR-015), the artifact-path project containment
-  (FR-014), the pre-upgrade daemon sweep (FR-018), and the engine-map eviction never taking an
-  in-flight project (FR-008).
+  (FR-010), the provider-profile-per-project fix and its precedence reversal (FR-015, FR-025), the
+  artifact-path project containment (FR-014), the pre-upgrade daemon sweep (FR-018), the token check
+  (FR-023), the rewritten `stop.ts`'s open-project detection (FR-024), and the engine-map eviction
+  never taking an in-flight project (FR-008).
 - **V6.** The page halves of all three ships (the merge, the picker, add/remove, the prefilled dialog)
   are not verifiable by the automated suite and need the owner's eyes, as in specs 037 and 038 — a
   request file per ship, DEFERRED until an operator session is available.
@@ -481,9 +584,29 @@ Three ships, in the owner's final order:
   project directory that has since been removed (FR-014) — this is now a boundary this spec enforces,
   not a convention nobody happened to have exploited, so it gets its own proof rather than riding on
   V5's mutation pass alone.
+- **V8.** A request to a project-scoped or mutating route with no `token` parameter, or the wrong one,
+  is refused — and refused before the FR-005 project check runs, proven by a request that is both
+  unauthenticated and names an unregistered project, checking the response identifies the auth failure
+  rather than the registration one (FR-023).
+- **V9.** A project with an open engine in the shared daemon is never deleted by `uninstall`: a test
+  opens a project's engine (e.g. by naming it on a request), then runs `uninstall`'s per-project
+  deletion path against a state root containing it, and proves that directory survives with its
+  outcome reported `unresolved`, not silently reported `no-daemon` the way an unmodified `stop.ts`
+  would report it once the record moves (FR-024).
+- **V10.** Two open projects, one with `providers.yaml` `defaultProvider: X` and the other with
+  `defaultProvider: Y`, both open while the daemon's own process environment has
+  `AGENT_FLOWS_PROVIDER=Z` set, each report their own project's provider — never `Z` — proving the
+  precedence reversal (FR-025) and not just the per-project threading (FR-015) it depends on.
 
 ## Risks and out of scope
 
+- **The D15 token narrows, but does not close, the local-process trust boundary.** It is written to a
+  0600 file readable by the same user the daemon runs as, so it stops a browser tab or a process that
+  cannot read that file from reaching the daemon, but any process already running as that user could
+  read the token exactly as the CLI does — the same trust boundary the file permissions on
+  `daemon.json` already assumed. What it removes is the _ambient_ reach any local process had
+  regardless of file permissions; it is not a defence against a compromised process running as the same
+  user, which was never in scope for a loopback-only, single-user developer tool.
 - One process now holds several projects' databases and Mastra instances: a crash is wider than
   before — a single daemon fault now interrupts every open project's runs at once, not one project's.
 - The engine map needs a bound (FR-008) or it grows with every project ever opened in a session;
