@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { packageRoot } from "../../packageRoot.js";
 import { loadPipeline } from "../load.js";
 import { defaultRegistry, getProfile, resolveStepModel } from "../registry.js";
 import { runLlmStep } from "../runStep.js";
@@ -20,7 +21,7 @@ import { makeFakeChild } from "../testing/fakeSpawn.js";
 import type { SpawnFn } from "../runClaudeCli.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const repoRoot = join(__dirname, "..", "..", "..");
+const repoRoot = packageRoot();
 const fixturePath = join(__dirname, "__fixtures__", "claude-argv.golden.json");
 
 /** Placeholder substituted for the machine-specific workspace path. */

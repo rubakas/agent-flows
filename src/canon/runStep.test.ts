@@ -3,9 +3,10 @@ import { spawn as realSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
+import { packageRoot } from "../packageRoot.js";
 import { StepBudgetExceededError } from "./runClaudeCli.js";
 import {
   BUILD_CONFIG_DENY_PATTERNS,
@@ -769,8 +770,9 @@ describe("runLlmStep — FR-007 budget wiring", () => {
 
 // ── workspace: "read" ─────────────────────────────────────────────────────────
 
-// workspaceDir must be a real directory on disk; use the repo root (always exists).
-const repoRoot = new URL("../../..", import.meta.url).pathname.replace(/\/$/, "");
+// workspaceDir must be a real directory on disk; use the package root's parent
+// (always exists, and deliberately not a git work tree — see the sanitizer test).
+const repoRoot = dirname(packageRoot());
 
 describe('runLlmStep — workspace: "read"', () => {
   it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob,Grep --allowedTools Read,Glob,Grep and cwd=workspaceDir when contentsAccess is "read"', async () => {
@@ -980,7 +982,7 @@ describe('runLlmStep — workspace: "read"', () => {
 
     // The sanitizer shells out to `git ls-files`, so this needs the real repo —
     // `repoRoot` above is its parent and is not a git work tree.
-    const gitRoot = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
+    const gitRoot = packageRoot();
     const result = await runLlmStep(entry, "analyze", {
       spawn,
       contentsAccess: "read",

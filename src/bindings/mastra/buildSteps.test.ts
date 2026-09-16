@@ -5,13 +5,13 @@ import { execSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { ModelRegistry } from "../../canon/registry.js";
 import { CREDENTIAL_DENY_PATTERNS, StepTimeoutError, runLlmStep } from "../../canon/runStep.js";
 import { makeFakeChild, makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
+import { packageRoot } from "../../packageRoot.js";
 import {
   closeRunLog,
   openRunLog,
@@ -242,7 +242,7 @@ describe("buildCheckStep — {{checkCommand}} substitution (FR-003/FR-004)", () 
     // this test goes red, catching the same defect class found on 2026-09-07:
     // a self-run converged with passing tests + clean typecheck but failing
     // format:check because the old default omitted pnpm format:check.
-    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "package.json");
+    const pkgPath = join(packageRoot(), "package.json");
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { scripts: { check: string } };
     assert.equal(
       DEFAULT_CHECK_COMMAND,

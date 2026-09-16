@@ -37,6 +37,7 @@ import { BUNDLED_PIPELINES_DIR } from "../bindings/mastra/pipelineLoader.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { loadPipeline } from "../canon/load.js";
 import { ModelRegistry } from "../canon/registry.js";
+import { bundledPipelinesDir, bundledPromptsDir } from "../packageRoot.js";
 import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
 import { clearRun, recordStep } from "../runtime/stepIntrospection.js";
@@ -5574,5 +5575,58 @@ describe("GET / — the workflow editor is wired in the served HTML (037 D6)", (
       assert.ok(!html.includes(`id="${hook}"`), `"${hook}" must not be an id`);
       assert.ok(html.includes(hook), `the "${hook}" hook must exist`);
     }
+  });
+});
+
+// ── Spec 038 FR-008: the prompt READ route is guarded in bundled mode too ─────
+//
+// Verified before this test was written: the GET route already carries the same
+// `resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)` guard as the
+// PUT route, so this pins existing behaviour rather than adding it. It matters
+// more under a global install than it did before: "bundled" is then one shared
+// directory for every project on the machine, and the editor loads a workflow's
+// prompts through this route before offering to save them.
+
+describe("FR-008: the prompts routes refuse the package's own catalogue", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-pkg-bundled-")));
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT, tmpDir),
+      port: 0,
+      dbPath: ":memory:",
+      // Both directories resolved from the package root (spec 038 D5) — this is
+      // exactly the shape a global install serves with.
+      pipelinesDir: bundledPipelinesDir(),
+      bundledPipelinesDir: bundledPipelinesDir(),
+      templatesBase: join(tmpDir, "templates"),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("GET /api/pipelines/:id/prompts → 403 and returns no prompt text", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/investigate/prompts`);
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.deepEqual(
+      Object.keys(body),
+      ["error"],
+      `no prompt may be returned: ${JSON.stringify(body)}`
+    );
+  });
+
+  it("PUT /api/pipelines/:id/prompts/:stepId → 403 and changes no bundled prompt", async () => {
+    const before = fileSnapshot(bundledPromptsDir());
+    const res = await mutate(srv.port, "PUT", "/api/pipelines/investigate/prompts/survey", {
+      text: "rewritten for every project on this machine",
+      ifMatch: "0".repeat(64),
+    });
+    assert.equal(res.status, 403, `expected 403, got ${res.status}`);
+    assertSnapshotEqual(before, fileSnapshot(bundledPromptsDir()));
   });
 });

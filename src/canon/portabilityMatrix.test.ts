@@ -4,14 +4,14 @@
 // gaining `permissions.contents` must show up here as a diff, with the reason.
 
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { packageRoot } from "../packageRoot.js";
 import { listPipelines, loadPipeline } from "./load.js";
 import { renderPortabilityMatrix } from "./portability.js";
 import { MATRIX_PROFILE_IDS, defaultRegistry, getProfile } from "./registry.js";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const repoRoot = packageRoot();
 
 const EXPECTED_MATRIX = `PIPELINE       PROFILE    VERDICT
 audit          anthropic  runs

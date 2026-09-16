@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { packageRoot } from "../packageRoot.js";
 import auditPlantedDefects from "./fixtures/audit-planted-defects.js";
 import bugMissingDetail from "./fixtures/bug-missing-detail.js";
 import codeReviewCitations from "./fixtures/code-review-citations.js";
@@ -20,10 +20,9 @@ import { stepOutputText } from "./stepOutput.js";
 import type { ClaimedFindings, ConditionalItem, KeyedItem, VerdictExpectation } from "./scorers.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-// Two levels up from src/evals/ → repo root.
-const REPO_ROOT = join(__dirname, "..", "..");
+// Spec 038 FR-004: the package root is found by walking up to package.json.
+const REPO_ROOT = packageRoot();
+const FIXTURES_DIR = join(REPO_ROOT, "src", "evals", "fixtures", "__fixtures__");
 
 // ── citedPathsExist ───────────────────────────────────────────────────────────
 
@@ -1608,10 +1607,7 @@ describe("code-review-citations scored against a real verify run (2026-09-13)", 
   // the genuine policy finding, reporting a misroute for a verifier that had
   // classified everything correctly. Kept as a file, not as a paraphrase: a
   // paraphrase is a second answer key, and it is the paraphrasing that fails.
-  const output = readFileSync(
-    join(__dirname, "fixtures", "__fixtures__", "verify-2026-09-13.json"),
-    "utf8"
-  );
+  const output = readFileSync(join(FIXTURES_DIR, "verify-2026-09-13.json"), "utf8");
 
   it("grades the run as the clean sweep it was", () => {
     const claimed: ClaimedFindings = new Set();
@@ -1637,10 +1633,7 @@ describe("code-review-citations scored against a real verify run (2026-09-13)", 
 
 describe("code-review-citations scored against a real verify run (run 2, 2026-09-13)", () => {
   // The run that motivated `want`/`forbid`. Verbatim again, for the same reason.
-  const output = readFileSync(
-    join(__dirname, "fixtures", "__fixtures__", "verify-2026-09-13-run2.json"),
-    "utf8"
-  );
+  const output = readFileSync(join(FIXTURES_DIR, "verify-2026-09-13-run2.json"), "utf8");
 
   it("routes all three conditional items, failing nothing", () => {
     const claimed: ClaimedFindings = new Set();

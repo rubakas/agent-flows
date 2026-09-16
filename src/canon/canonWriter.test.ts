@@ -12,11 +12,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parseDocument } from "yaml";
 import { makeInMemoryDb } from "../db/index.js";
+import { packageRoot } from "../packageRoot.js";
 import { docToString, hashContent, saveDraft, saveDraftAndRegenerate } from "./canonWriter.js";
 import {
   addDraftOp,
@@ -27,9 +27,7 @@ import {
   updateDraftBody,
 } from "./draftStore.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const REPO_ROOT = join(__dirname, "..", "..");
+const REPO_ROOT = packageRoot();
 const REAL_PIPELINE_PATH = join(REPO_ROOT, "pipelines", "spec-creation.yaml");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

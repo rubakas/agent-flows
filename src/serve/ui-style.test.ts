@@ -9,11 +9,14 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
+import { packageRoot } from "../packageRoot.js";
+
+// The page assets are read from the package root (spec 038 FR-004/FR-009), the
+// same directory the build copies into dist/serve/.
+const HERE = join(packageRoot(), "src", "serve");
 
 const UI = readFileSync(join(HERE, "ui.html"), "utf8");
 const MARKUP = {

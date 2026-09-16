@@ -2,18 +2,16 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
+import { packageRoot } from "../packageRoot.js";
 import { assembleSpec } from "./assemble.js";
 import { pipelineLevels } from "./graph.js";
 import { loadPipeline } from "./load.js";
 import { renderPrompt } from "./render.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const repoRoot = join(__dirname, "..", "..");
+const repoRoot = packageRoot();
 const pipelinesYaml = join(repoRoot, "pipelines", "spec-creation.yaml");
 
 describe("loadPipeline", () => {
@@ -2340,7 +2338,7 @@ steps:
 
 describe("FR-014: ship.yaml approve step declares manualOnly: true", () => {
   it("ship.yaml loads successfully and approve step has manualOnly: true", () => {
-    const { def } = loadPipeline(new URL("../../pipelines/ship.yaml", import.meta.url).pathname);
+    const { def } = loadPipeline(join(repoRoot, "pipelines", "ship.yaml"));
     const approveStep = def.steps.find((s) => s.id === "approve");
     assert.ok(approveStep !== undefined, "approve step must exist in ship.yaml");
     assert.equal(

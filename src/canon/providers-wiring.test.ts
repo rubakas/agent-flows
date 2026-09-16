@@ -142,10 +142,9 @@ describe("providers-wiring — Binding A generateWorkflowScript uses project reg
     const ccMod = await import("../bindings/claudeCode.js");
     const loadMod = await import("./load.js");
     const pathMod = await import("node:path");
-    const urlMod = await import("node:url");
 
-    const thisFile = urlMod.fileURLToPath(import.meta.url);
-    const repoRoot = pathMod.join(pathMod.dirname(thisFile), "..", "..");
+    const rootMod = await import("../packageRoot.js");
+    const repoRoot = rootMod.packageRoot();
     const pipelinesDir = pathMod.join(repoRoot, "pipelines");
 
     // Load any available pipeline to exercise the generator.

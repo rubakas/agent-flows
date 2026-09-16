@@ -15,16 +15,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { loadPipeline } from "../canon/load.js";
+import { packageRoot } from "../packageRoot.js";
 import { exportBundle, importBundle, parseBundle, stringifyBundle } from "./bundle.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const repoRoot = join(__dirname, "..", "..");
+const repoRoot = packageRoot();
 const bundledPipelinesDir = join(repoRoot, "pipelines");
 
 // realpathSync resolves /tmp → /private/tmp on macOS so that loadPipeline's

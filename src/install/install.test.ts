@@ -9,16 +9,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
 import { loadPipeline } from "../canon/load.js";
+import { packageRoot } from "../packageRoot.js";
 import { computeClosure, installWorkflow, listAvailable, listInstalled } from "./install.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const repoRoot = join(__dirname, "..", "..");
+const repoRoot = packageRoot();
 const bundledPipelinesDir = join(repoRoot, "pipelines");
 const bundledPromptsDir = join(repoRoot, "prompts");
 

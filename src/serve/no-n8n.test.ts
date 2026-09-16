@@ -9,12 +9,15 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { packageRoot } from "../packageRoot.js";
+
+const REPO_ROOT = packageRoot();
+// This file names the retired identifier itself and is excluded from its own scan.
 const SELF = fileURLToPath(import.meta.url);
-const REPO_ROOT = join(dirname(SELF), "..", "..");
 
 /** Exactly the roots named by spec 037 V1. */
 const ROOTS = ["src", "scripts", "package.json", "README.md", ".gitignore"];

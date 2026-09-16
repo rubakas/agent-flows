@@ -2,16 +2,14 @@ import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { loadPipeline } from "../canon/load.js";
+import { packageRoot } from "../packageRoot.js";
 import { generateWorkflowScript } from "./claudeCode.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const repoRoot = join(__dirname, "..", "..");
+const repoRoot = packageRoot();
 // audit.yaml is an all-llm pipeline (supported by Binding A) with a parallel
 // level and a sequential level — enough structure to exercise the generator.
 const pipelineYaml = join(repoRoot, "pipelines", "audit.yaml");

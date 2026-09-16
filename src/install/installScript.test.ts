@@ -6,12 +6,12 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
-const __filename = fileURLToPath(import.meta.url);
-const repoRoot = join(dirname(__filename), "..", "..");
+import { packageRoot } from "../packageRoot.js";
+
+const repoRoot = packageRoot();
 
 const tmpProject = realpathSync(mkdtempSync(join(tmpdir(), "af-install-sh-")));
 
