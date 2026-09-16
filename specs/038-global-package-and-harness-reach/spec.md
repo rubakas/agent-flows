@@ -200,7 +200,22 @@ stay hand-written JavaScript, never compiled, so the browser and the unit tests 
 bytes whether the suite runs from `src/` or `dist/`. `bin/agent-flows` runs the compiled `dist/`
 output directly with a plain `#!/usr/bin/env node` shebang: no `tsx`, no `nvm` sourcing. The
 `engines.node` floor of 22 is the contract; the bin checks `process.versions.node`'s major version
-and exits with a clear message when it is below 22.
+and, when it is below 22, re-execs itself under a compatible interpreter rather than refusing —
+harnesses spawn the registered MCP command with their own PATH, which is commonly an older default
+node, so refusing there would put the command out of reach of every harness. The search order is
+`AGENT_FLOWS_NODE`, then any `node` on PATH other than the running one, then
+`${NVM_DIR:-~/.nvm}/versions/node/v*` (exact major 22 first, then ascending majors above it), then
+`/opt/homebrew/bin/node` and `/usr/local/bin/node`. A candidate qualifies only by running it: its
+major version comes from `-p process.versions.node`, never from its path name, and it must then open
+an in-memory database with the package's `better-sqlite3`. The version alone is not evidence — this
+machine's Node 24.20.0 clears the floor of 22 and still fails `ERR_DLOPEN_FAILED` on a module built
+for Node 22, which would break `serve` at its first query — so a highest-version-wins heuristic is
+rejected in favour of the load probe, and the candidate order is only an optimisation. An explicitly
+set `AGENT_FLOWS_NODE` that fails either test fails loudly naming it and the reason instead of
+falling through to the search, a marker in the child's environment stops a second re-exec from
+looping, and the success path prints nothing. Only when no interpreter qualifies does the bin exit
+with a clear message, naming where it looked and, when that is what happened, saying that it found
+Node 22+ interpreters but none of them could load the database module.
 
 **D3 — Packaging allowlist.** `package.json`'s `files` field becomes the single enumerated allowlist
 that decides what `npm pack` ships: `dist`, `pipelines`, `prompts`, `bin`, `README.md`, `LICENSE`.
@@ -458,9 +473,20 @@ Five ships, in order:
   to its `src/serve/` source after a build (D2).
 - **FR-002.** `bin/agent-flows` runs the compiled `dist/` output with a `#!/usr/bin/env node`
   shebang and requires neither `tsx` nor `nvm` sourcing (D2).
-- **FR-003.** `bin/agent-flows` checks `process.versions.node`'s major version at startup and exits
-  non-zero with a message naming the required version (22) and the version found, when the major
-  version is below 22 (D2).
+- **FR-003.** `bin/agent-flows` checks `process.versions.node`'s major version at startup; when it
+  is below 22 it re-execs itself under the first qualifying interpreter it finds — `AGENT_FLOWS_NODE`,
+  then PATH, then the nvm installs (exact major 22 first, then ascending majors above it), then
+  `/opt/homebrew/bin/node` and `/usr/local/bin/node` — forwarding every argument and the environment,
+  inheriting stdio and exiting with the child's status, and printing nothing on that path. An
+  interpreter qualifies by being run, not by its version string: `-p process.versions.node` for the
+  major, and then opening an in-memory database with the package's `better-sqlite3`, because a Node
+  24 install passes the floor and still cannot load a module built for Node 22. When that module is
+  not present under the package root there is nothing to probe and the version check stands alone.
+  An `AGENT_FLOWS_NODE` that fails either test exits non-zero naming it and the reason rather than
+  falling through, a re-exec marker in the child's environment prevents a second re-exec, and with
+  nothing qualifying the bin exits non-zero with a message naming the required version (22), the
+  version found, where it looked, and — when interpreters were found but none could load the module
+  — that this is what happened (D2).
 - **FR-004.** The package-root helper resolves the same logical root — the directory containing
   `package.json` — whether the caller is running under `tsx` (`src/`) or compiled (`dist/`), and
   throws a named error at startup if that root's directory does not also contain both `pipelines/`
@@ -635,7 +661,12 @@ Five ships, in order:
   V3 proves it works or the spec records the fallback that was needed. A node version switch after
   install (e.g. via `nvm`) breaks the installed native binary with an ABI mismatch;
   `pnpm.onlyBuiltDependencies` is pnpm-specific and does nothing under `npm i -g` — D11's
-  ABI-mismatch check in `doctor` is the mitigation, not a rebuild.
+  ABI-mismatch check in `doctor` is the mitigation, not a rebuild. FR-003's re-exec crosses that same
+  boundary, so it proves a candidate by loading `better-sqlite3` rather than by its version: verified
+  on the development machine, Node 24.20.0 fails `ERR_DLOPEN_FAILED` on the module built under Node
+  22 while 22.17.1 loads it, so the highest-version heuristic would have handed every harness a
+  `serve` that dies at its first query. `doctor`'s ABI check stays the diagnosis when no interpreter
+  on the machine can load the module at all.
 - OpenCode's non-interactive `mcp add` is undocumented (research §3.1, P18: "its flags/non-interactive
   form are not documented → UNVERIFIED"), so `setup` edits OpenCode's config as JSON directly rather
   than shelling out to `opencode mcp add`; if the user's OpenCode config is `opencode.jsonc` or
