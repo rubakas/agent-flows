@@ -55,7 +55,13 @@ import {
 } from "../install/bundle.js";
 import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
 import { assertSafePath, isContained } from "../install/paths.js";
+import { packageVersion } from "../packageRoot.js";
 import { readManifest } from "../runtime/artifactStore.js";
+import {
+  removeDaemonRecordIfOwned,
+  writeDaemonRecord,
+  type DaemonIdentity,
+} from "../runtime/daemonRecord.js";
 import { decideEntryPoint } from "../runtime/entryPoint.js";
 import { ensureProjectState, type ProjectState } from "../runtime/projectState.js";
 import {
@@ -585,6 +591,10 @@ interface HandlerCtx {
   skillsBase: string;
   /** Global template store directory (FR-001). */
   templatesBase: string;
+  /** Package version reported by `GET /api/daemon` (spec 038 FR-011). */
+  version: string;
+  /** ISO timestamp fixed when this daemon began listening (spec 038 FR-011). */
+  startedAt: string;
 }
 
 // ── readAgentFlowsConfig ───────────────────────────────────────────────────────
@@ -660,7 +670,13 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
     join(homedir(), ".agent-flows", "templates");
 
   // boundPort is updated once the OS assigns a port (important when port: 0).
-  let boundPort = opts.port ?? 7411;
+  let boundPort = opts.port ?? DEFAULT_PORT;
+
+  // Identity reported by GET /api/daemon and written to daemon.json (FR-011).
+  // startedAt is fixed in the listen callback, not here, so it names the moment
+  // the daemon became reachable rather than the moment it began starting.
+  const version = packageVersion();
+  let startedAt = "";
 
   // FR-004: tracks the last-logged source so we emit one log line per transition,
   // not one per request. null means no line has been emitted yet.
@@ -699,6 +715,8 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
       bundledPipelinesDir,
       skillsBase,
       templatesBase,
+      version,
+      startedAt,
     }).catch((err: unknown) => {
       if (!res.headersSent) {
         if (err instanceof RequestTooLargeError) {
@@ -717,9 +735,17 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
     const onListenError = (err: Error): void => {
       reject(err);
     };
-    server.listen(opts.port ?? 7411, "127.0.0.1", () => {
+    server.listen(opts.port ?? DEFAULT_PORT, "127.0.0.1", () => {
       const info = server.address() as AddressInfo;
       boundPort = info.port;
+      startedAt = new Date().toISOString();
+      writeDaemonRecord(state.dir, {
+        projectDir,
+        version,
+        pid: process.pid,
+        startedAt,
+        port: boundPort,
+      });
       server.off("error", onListenError);
       server.on("error", (err: Error) => {
         console.error(`agent-flows serve: server error: ${err.message}`);
@@ -728,6 +754,10 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
         port: info.port,
         close: () =>
           new Promise<void>((r, e) => {
+            // Graceful exit drops the record — but only if it is still ours, so
+            // a daemon that was replaced while shutting down never deletes the
+            // live one's record (FR-011).
+            removeDaemonRecordIfOwned(state.dir, process.pid);
             // Destroy keep-alive connections immediately so server.close() resolves
             // without waiting for idle timeouts (important for SSE in tests).
             server.closeAllConnections();
@@ -762,29 +792,55 @@ const DEFAULT_CLI_IO: CliIo = {
   exit: (code) => process.exit(code),
 };
 
+/** The conventional daemon port a human-launched `agent-flows serve` prefers. */
+export const DEFAULT_PORT = 7411;
+
 /**
- * Resolve the daemon's listen port: `--port` wins, then `AGENT_FLOWS_PORT`,
- * then 7411. Reading the variable here makes README.md:84's long-standing claim
- * true and matches the MCP client, which already reads the same variable.
+ * Environment marker the MCP process sets on a daemon it starts itself
+ * (spec 038 D8, FR-012). An auto-started daemon never takes the conventional
+ * port, so it can never collide with one a human launched there.
+ */
+export const AUTOSTART_ENV = "AGENT_FLOWS_AUTOSTART";
+
+/** The resolved listen port plus whether the operator asked for that exact port. */
+export interface PortChoice {
+  /** Port to bind. 0 means "let the OS assign an ephemeral port". */
+  port: number;
+  /**
+   * True when `--port` or `AGENT_FLOWS_PORT` named this port. An explicit port
+   * that is taken is a user error and exits loudly; a defaulted one falls back
+   * to an ephemeral port instead.
+   */
+  explicit: boolean;
+}
+
+/**
+ * Resolve the daemon's listen port (spec 038 FR-012): `--port`, then
+ * `AGENT_FLOWS_PORT`, then — for an auto-started daemon — an ephemeral port,
+ * otherwise 7411 with an ephemeral fallback when it is taken.
  *
  * A value that is not a usable TCP port exits 1 with an explanation rather than
  * reaching listen(): `parseInt("abc")` is NaN and `listen(NaN)` silently binds a
  * random ephemeral port, so the daemon would come up somewhere nobody is looking.
  */
-export function resolvePort(
+export function resolvePortChoice(
   argv: readonly string[],
   env: NodeJS.ProcessEnv,
   io: CliIo = DEFAULT_CLI_IO
-): number {
+): PortChoice {
   const idx = argv.indexOf("--port");
   const flagValue = idx !== -1 && idx + 1 < argv.length ? argv[idx + 1] : undefined;
-  const raw = flagValue ?? env.AGENT_FLOWS_PORT ?? "7411";
-  const port = Number(raw);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    io.error(portInvalidMessage(raw));
-    io.exit(1);
+  const raw = flagValue ?? (env.AGENT_FLOWS_PORT !== "" ? env.AGENT_FLOWS_PORT : undefined);
+  if (raw !== undefined) {
+    const port = Number(raw);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      io.error(portInvalidMessage(raw));
+      io.exit(1);
+    }
+    return { port, explicit: true };
   }
-  return port;
+  if (env[AUTOSTART_ENV] === "1") return { port: 0, explicit: false };
+  return { port: DEFAULT_PORT, explicit: false };
 }
 
 /**
@@ -907,6 +963,23 @@ async function handleRequest(
       "Referrer-Policy": "no-referrer",
     });
     res.end(readFileSync(modulePath, "utf8"));
+    return;
+  }
+
+  // GET /api/daemon — identity, health and version handshake in one route
+  // (spec 038 D8, FR-011). There is no other probe: every other route either
+  // needs a RunService or can 503 on missing page assets, and none of them says
+  // which project this daemon serves. The MCP client refuses to reuse a daemon
+  // whose projectDir or version differs from its own, so this response is what
+  // keeps one project's chat from running steps in another project's tree.
+  if (method === "GET" && pathname === "/api/daemon") {
+    const identity: DaemonIdentity = {
+      projectDir: ctx.projectDir,
+      version: ctx.version,
+      pid: process.pid,
+      startedAt: ctx.startedAt,
+    };
+    json(res, 200, identity);
     return;
   }
 
@@ -2345,7 +2418,7 @@ function getArgValue(flag: string, fallback: string): string {
 if (process.argv[1] === __filename) {
   process.env.MASTRA_TELEMETRY_DISABLED = "1";
 
-  const port = resolvePort(process.argv, process.env);
+  const portChoice = resolvePortChoice(process.argv, process.env);
   const projectDir = resolveProjectDir();
   console.log(`agent-flows serve: running steps in ${projectDir}`);
   const { pipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
@@ -2438,17 +2511,49 @@ if (process.argv[1] === __filename) {
   // judgeDeps in production.
   const runService = new RunServiceClass(mastra, undefined, state.runsDir, profile, registry);
 
+  const cliIo: CliIo = {
+    error: (m) => {
+      console.error(m);
+    },
+    exit: (code) => process.exit(code),
+  };
+
   // FR-004: pipelinesDir is NOT passed to startServer so the HTTP layer resolves
   // the canon directory per-request.
-  const handle = await startServer({ port, dbPath, runService, projectDir, state }).catch(
-    (err: unknown) =>
-      handleListenError(err, port, {
-        error: (m) => {
-          console.error(m);
-        },
-        exit: (code) => process.exit(code),
-      })
-  );
+  const listenOn = async (port: number): Promise<ServeHandle> =>
+    startServer({ port, dbPath, runService, projectDir, state });
+
+  // FR-012: an explicitly requested port that is taken stays a loud failure —
+  // the operator asked for that port and nothing else will do. A defaulted 7411
+  // simply steps aside onto an OS-assigned port, which is what lets a second
+  // project's daemon come up on a machine where the first already holds 7411.
+  let handle: ServeHandle;
+  try {
+    handle = await listenOn(portChoice.port);
+  } catch (err: unknown) {
+    if (portChoice.explicit || (err as NodeJS.ErrnoException | null)?.code !== "EADDRINUSE") {
+      handleListenError(err, portChoice.port, cliIo);
+    }
+    console.error(
+      `agent-flows serve: port ${portChoice.port} is in use; taking an OS-assigned port instead.`
+    );
+    handle = await listenOn(0).catch((e: unknown) => handleListenError(e, 0, cliIo));
+  }
   /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call */
   console.log(`agent-flows serve listening on http://127.0.0.1:${handle.port}`);
+
+  // FR-011: drop daemon.json on a graceful exit. Removal is pid-checked, so a
+  // signal arriving after a newer daemon has replaced the record leaves that
+  // record alone. process.exit() in the handler keeps the default termination
+  // behaviour that installing a listener would otherwise suppress.
+  const dropRecord = (): void => {
+    removeDaemonRecordIfOwned(state.dir, process.pid);
+  };
+  process.on("exit", dropRecord);
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => {
+      dropRecord();
+      process.exit(0);
+    });
+  }
 }

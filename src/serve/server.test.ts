@@ -37,7 +37,8 @@ import { BUNDLED_PIPELINES_DIR } from "../bindings/mastra/pipelineLoader.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { loadPipeline } from "../canon/load.js";
 import { ModelRegistry } from "../canon/registry.js";
-import { bundledPipelinesDir, bundledPromptsDir } from "../packageRoot.js";
+import { bundledPipelinesDir, bundledPromptsDir, packageVersion } from "../packageRoot.js";
+import { probeDaemon, readDaemonRecord, type DaemonRecord } from "../runtime/daemonRecord.js";
 import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type JudgeDeps, type MastraLike } from "../runtime/runService.js";
 import { clearRun, recordStep } from "../runtime/stepIntrospection.js";
@@ -50,7 +51,9 @@ import {
   type CliIo,
   handleListenError,
   portInUseMessage,
-  resolvePort,
+  resolvePortChoice,
+  DEFAULT_PORT,
+  AUTOSTART_ENV,
   type ServeHandle,
   CONTENT_CAP,
 } from "./server.js";
@@ -4451,24 +4454,51 @@ describe("POST /api/runs/:id/cancel", () => {
 
 // ── Port resolution and EADDRINUSE (spec 033 D4/FR-011/FR-012) ───────────────
 
-describe("resolvePort — AGENT_FLOWS_PORT is the default, --port overrides it (FR-011)", () => {
-  it("uses AGENT_FLOWS_PORT when --port is absent", () => {
-    assert.equal(resolvePort(["node", "server.ts"], { AGENT_FLOWS_PORT: "8123" }), 8123);
+describe("resolvePortChoice — --port, then AGENT_FLOWS_PORT, then 7411 (spec 038 FR-012)", () => {
+  it("uses AGENT_FLOWS_PORT when --port is absent, and calls it explicit", () => {
+    assert.deepEqual(resolvePortChoice(["node", "server.ts"], { AGENT_FLOWS_PORT: "8123" }), {
+      port: 8123,
+      explicit: true,
+    });
   });
 
   it("--port wins over AGENT_FLOWS_PORT", () => {
-    assert.equal(
-      resolvePort(["node", "server.ts", "--port", "9001"], { AGENT_FLOWS_PORT: "8123" }),
-      9001
+    assert.deepEqual(
+      resolvePortChoice(["node", "server.ts", "--port", "9001"], { AGENT_FLOWS_PORT: "8123" }),
+      { port: 9001, explicit: true }
     );
   });
 
-  it("falls back to 7411 when neither is set", () => {
-    assert.equal(resolvePort(["node", "server.ts"], {}), 7411);
+  it("falls back to 7411 — not explicit, so a taken port steps aside", () => {
+    assert.deepEqual(resolvePortChoice(["node", "server.ts"], {}), {
+      port: DEFAULT_PORT,
+      explicit: false,
+    });
+  });
+
+  it("an auto-started daemon always takes an ephemeral port", () => {
+    assert.deepEqual(resolvePortChoice(["node", "server.ts"], { [AUTOSTART_ENV]: "1" }), {
+      port: 0,
+      explicit: false,
+    });
+  });
+
+  it("an explicit port still wins for an auto-started daemon", () => {
+    assert.deepEqual(
+      resolvePortChoice(["node", "server.ts", "--port", "9100"], { [AUTOSTART_ENV]: "1" }),
+      { port: 9100, explicit: true }
+    );
+  });
+
+  it("an empty AGENT_FLOWS_PORT counts as unset", () => {
+    assert.deepEqual(resolvePortChoice(["node", "server.ts"], { AGENT_FLOWS_PORT: "" }), {
+      port: DEFAULT_PORT,
+      explicit: false,
+    });
   });
 });
 
-describe("resolvePort — an unusable port exits 1 instead of reaching listen()", () => {
+describe("resolvePortChoice — an unusable port exits 1 instead of reaching listen()", () => {
   class Exit extends Error {}
 
   function failingIo(): { printed: string[]; exited: number[]; io: CliIo } {
@@ -4495,7 +4525,7 @@ describe("resolvePort — an unusable port exits 1 instead of reaching listen()"
   ] as [string, string[], NodeJS.ProcessEnv, string][]) {
     it(`rejects ${label}`, () => {
       const { printed, exited, io } = failingIo();
-      assert.throws(() => resolvePort(argv, env, io), Exit);
+      assert.throws(() => resolvePortChoice(argv, env, io), Exit);
       assert.deepEqual(exited, [1], "an unusable port must exit 1");
       assert.deepEqual(printed, [portInvalidMessage(bad)]);
     });
@@ -5628,5 +5658,161 @@ describe("FR-008: the prompts routes refuse the package's own catalogue", () => 
     });
     assert.equal(res.status, 403, `expected 403, got ${res.status}`);
     assertSnapshotEqual(before, fileSnapshot(bundledPromptsDir()));
+  });
+});
+
+// ── Daemon identity route and record (spec 038 D8, FR-011/FR-012) ─────────────
+
+describe("GET /api/daemon — identity, health and version in one route (FR-011)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let state: ProjectState;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-daemon-id-")));
+    state = makeState(REAL_REPO_ROOT, tmpDir);
+    srv = await startServer({
+      state,
+      port: 0,
+      dbPath: ":memory:",
+      projectDir: REAL_REPO_ROOT,
+      pipelinesDir: REAL_PIPELINES_DIR,
+      templatesBase: join(tmpDir, "templates"),
+    });
+  });
+
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns exactly {projectDir, version, pid, startedAt}", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/daemon`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(body).sort(), ["pid", "projectDir", "startedAt", "version"]);
+    assert.equal(body.projectDir, REAL_REPO_ROOT);
+    assert.equal(body.version, packageVersion());
+    assert.equal(body.pid, process.pid);
+    assert.ok(
+      !Number.isNaN(Date.parse(String(body.startedAt))),
+      `startedAt must be an ISO timestamp, got ${String(body.startedAt)}`
+    );
+  });
+
+  it("daemon.json matches the route, adds the port, and is mode 0600", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/daemon`);
+    const identity = (await res.json()) as Record<string, unknown>;
+    const record = readDaemonRecord(state.dir);
+    assert.deepEqual(record, { ...identity, port: srv.port });
+    assert.equal(statSync(join(state.dir, "daemon.json")).mode & 0o777, 0o600);
+  });
+});
+
+describe("daemon.json is removed on a graceful close (FR-011)", () => {
+  it("close() drops the record it wrote", async () => {
+    const tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-daemon-close-")));
+    const state = makeState(REAL_REPO_ROOT, tmpDir);
+    try {
+      const srv = await startServer({
+        state,
+        port: 0,
+        dbPath: ":memory:",
+        projectDir: REAL_REPO_ROOT,
+        pipelinesDir: REAL_PIPELINES_DIR,
+        templatesBase: join(tmpDir, "templates"),
+      });
+      assert.ok(readDaemonRecord(state.dir) !== undefined, "the record must exist while listening");
+      await srv.close();
+      assert.equal(readDaemonRecord(state.dir), undefined);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("live daemon — port selection and record lifecycle (FR-011/FR-012/FR-015)", () => {
+  /**
+   * Spawn the real daemon with an environment built from scratch except for
+   * PATH and HOME: a daemon that inherited the runner's AGENT_FLOWS_* variables
+   * would be testing the runner's configuration, not the port selection.
+   */
+  function spawnDaemon(extra: Record<string, string>): ReturnType<typeof spawn> {
+    return spawn(
+      process.execPath,
+      ["--import", "tsx", join(REAL_REPO_ROOT, "src/serve/server.ts")],
+      {
+        cwd: REAL_REPO_ROOT,
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: process.env.HOME ?? "",
+          ...extra,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+  }
+
+  async function waitForRecord(stateDir: string, timeoutMs = 60_000): Promise<DaemonRecord> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const record = readDaemonRecord(stateDir);
+      if (record !== undefined) return record;
+      if (Date.now() >= deadline)
+        throw new Error(`no daemon.json in ${stateDir} after ${timeoutMs}ms`);
+      await new Promise<void>((r) => setTimeout(r, 100));
+    }
+  }
+
+  it("an auto-started daemon takes an ephemeral port, records it, and cleans up on SIGTERM", async () => {
+    const tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-autostart-")));
+    const project = join(tmpDir, "project");
+    mkdirSync(project);
+    const env = { AGENT_FLOWS_HOME: join(tmpDir, "home"), AGENT_FLOWS_PROJECT_DIR: project };
+    const stateDir = resolveProjectState(project, env).dir;
+    // Hold 7411 when it is free, so "took an ephemeral port" cannot pass by luck;
+    // when something else already holds it, that is the same situation (FR-015).
+    const blocker = createNetServer();
+    const blockerHolds = await new Promise<boolean>((resolve) => {
+      blocker.once("error", () => resolve(false));
+      blocker.listen(DEFAULT_PORT, "127.0.0.1", () => resolve(true));
+    });
+
+    const child = spawnDaemon({ ...env, AGENT_FLOWS_AUTOSTART: "1" });
+    let stderr = "";
+    child.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));
+    child.stdout?.resume();
+
+    try {
+      const record = await waitForRecord(stateDir);
+      assert.notEqual(record.port, DEFAULT_PORT, `stderr:\n${stderr}`);
+      assert.equal(record.pid, child.pid);
+      assert.equal(record.version, packageVersion());
+      assert.equal(realpathSync(record.projectDir), realpathSync(project));
+
+      const identity = await probeDaemon(record.port);
+      assert.deepEqual(identity, {
+        projectDir: record.projectDir,
+        version: record.version,
+        pid: record.pid,
+        startedAt: record.startedAt,
+      });
+
+      if (blockerHolds) {
+        assert.ok(blocker.listening, "a listener on 7411 must never be disturbed");
+      }
+
+      child.kill("SIGTERM");
+      await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+      assert.equal(
+        readDaemonRecord(stateDir),
+        undefined,
+        "a graceful exit must remove the record it wrote"
+      );
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      if (blockerHolds) await new Promise<void>((r) => blocker.close(() => r()));
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
