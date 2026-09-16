@@ -2984,9 +2984,10 @@ describe("GET /api/environment — port and provider profile (D6/FR-007)", () =>
 // To prove the guard can fail: the test was authored against a version of server.ts
 // that resolved pipelinesDir once at startup (the old code). Against that code,
 // step 3 would still return the bundled set because startServer baked in the initial
-// dir. The fix (resolveCanonDir per-request in the nodeCreateServer callback) makes
-// the test pass. Neutering the fix (passing explicitPipelinesDir unconditionally from
-// the bundled initial value) makes it red again — confirmed during development.
+// dir. The fix (resolving the canon per-request in the nodeCreateServer callback —
+// the merged layer view since spec 038 D13) makes the test pass. Neutering the fix
+// (passing explicitPipelinesDir unconditionally from the bundled initial value)
+// makes it red again — confirmed during development.
 
 describe("FR-004: per-request canon resolution — daemon serves installed pipelines without restart", () => {
   let srv: ServeHandle;
@@ -4766,7 +4767,12 @@ describe("GET /api/pipelines?source=bundled — the shipped catalogue (037 FR-00
   });
 });
 
-describe("POST /api/install — the project set becomes authoritative (037 FR-014)", () => {
+// Asserted the exclusive flip — one installed workflow hid the whole bundled
+// catalogue — until spec 038 D13 replaced it with the merged layer view. The
+// install route itself is unchanged here; what it proves is now precedence:
+// the installed copy wins on its own id and the rest of the package stays
+// listed.
+describe("POST /api/install — the installed copy wins its id, the catalogue stays (038 FR-017)", () => {
   let srv: ServeHandle;
   let tmpDir: string;
   let projectDir: string;
@@ -4788,7 +4794,7 @@ describe("POST /api/install — the project set becomes authoritative (037 FR-01
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("installing one workflow writes its closure and hides the rest of the catalogue", async () => {
+  it("installing one workflow writes its closure without hiding the rest of the catalogue", async () => {
     const before = (await (await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`)).json()) as {
       pipelines: { id: string }[];
     };
@@ -4813,15 +4819,21 @@ describe("POST /api/install — the project set becomes authoritative (037 FR-01
       "the installed pipeline is on disk"
     );
 
-    // resolveCanonDir is exclusive: one installed pipeline makes the project dir
-    // authoritative for the listing, MCP and every run (037 D3).
+    // The merged view: the installed copy owns "investigate" from the repository
+    // layer, every other bundled workflow is still listed (038 D13).
     const after = (await (await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`)).json()) as {
-      pipelines: { id: string }[];
+      pipelines: { id: string; layer?: string; shadows?: string[] }[];
     };
-    assert.deepEqual(
-      after.pipelines.map((p) => p.id).sort(),
-      ["investigate"],
-      "only the installed set is listed once the project holds a pipeline"
+    const investigate = after.pipelines.find((p) => p.id === "investigate");
+    assert.equal(investigate?.layer, "repo", "the installed copy owns the id");
+    assert.deepEqual(investigate?.shadows, ["bundled"], "and it shadows the bundled copy");
+    assert.ok(
+      after.pipelines.length >= before.pipelines.length,
+      `installing must not hide the rest of the catalogue; before ${String(before.pipelines.length)}, after ${String(after.pipelines.length)}`
+    );
+    assert.ok(
+      after.pipelines.some((p) => p.id === "spec-creation" && p.layer === "bundled"),
+      `a workflow the project never installed stays listed from the bundled layer; got: ${after.pipelines.map((p) => `${p.id}:${String(p.layer)}`).join(", ")}`
     );
     const stillBundled = (await (
       await fetch(`http://127.0.0.1:${srv.port}/api/pipelines?source=bundled`)

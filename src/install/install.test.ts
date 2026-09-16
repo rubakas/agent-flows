@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { resolveCanonDir } from "../bindings/mastra/pipelineLoader.js";
+import { catalogRows, resolveCatalog, resolveLayers } from "../canon/layers.js";
 import { loadPipeline } from "../canon/load.js";
 import { packageRoot } from "../packageRoot.js";
 import { computeClosure, installWorkflow, listAvailable, listInstalled } from "./install.js";
@@ -213,11 +213,17 @@ describe("installWorkflow — installed pipeline loads via loadPipeline", () => 
   });
 });
 
-// ── 5. Project copies take precedence over bundled ────────────────────────────
+// ── 5. Project copies take precedence, without hiding the bundled set ─────────
+//
+// These three cases asserted `resolveCanonDir`'s exclusive flip until spec 038
+// D13 replaced it. They now assert the merged view's precedence: the project's
+// copy still wins on an id collision, but the bundled catalogue stays visible.
+// AGENT_FLOWS_HOME is pinned so the owner's real user library is never a layer.
 
-describe("resolveCanonDir — project copies take precedence", () => {
-  it("returns project source when .agent-flows/pipelines/ contains YAML files", () => {
+describe("merged layers — project copies take precedence over bundled (038 FR-017)", () => {
+  it("resolves a colliding id to the project copy while keeping the bundled set listed", () => {
     const projectDir = makeTempDir("agent-flows-precedence-");
+    const home = makeTempDir("agent-flows-home-");
     try {
       const projectPipelinesDir = join(projectDir, ".agent-flows", "pipelines");
       mkdirSync(projectPipelinesDir, { recursive: true });
@@ -226,37 +232,53 @@ describe("resolveCanonDir — project copies take precedence", () => {
         "id: investigate\nversion: 1\ndescription: custom\ninputs: []\nsteps: []\n"
       );
 
-      const result = resolveCanonDir(projectDir);
-      assert.equal(result.source, "project");
-      assert.equal(result.pipelinesDir, projectPipelinesDir);
-    } finally {
-      rmSync(projectDir, { recursive: true });
-    }
-  });
+      const catalog = resolveCatalog(projectDir, { AGENT_FLOWS_HOME: home });
+      const investigate = catalog.entries.get("investigate");
+      assert.equal(investigate?.layer.source, "repo");
+      assert.equal(investigate?.filePath, join(projectPipelinesDir, "investigate.yaml"));
+      assert.deepEqual(investigate?.shadows, ["bundled"]);
 
-  it("falls back to bundled when .agent-flows/pipelines/ does not exist", () => {
-    const projectDir = makeTempDir("agent-flows-fallback-");
-    try {
-      const result = resolveCanonDir(projectDir);
-      assert.equal(result.source, "bundled");
+      const ids = catalogRows(catalog).map((e) => e.id);
       assert.ok(
-        result.pipelinesDir.endsWith("pipelines"),
-        "bundled pipelinesDir must end with 'pipelines'"
+        ids.includes("spec-creation"),
+        `the bundled catalogue is not hidden by a project copy; got: ${ids.join(", ")}`
       );
-      assert.ok(existsSync(result.pipelinesDir), "bundled pipelinesDir must exist on disk");
     } finally {
       rmSync(projectDir, { recursive: true });
+      rmSync(home, { recursive: true });
     }
   });
 
-  it("falls back to bundled when .agent-flows/pipelines/ is empty", () => {
+  it("is the bundled layer alone when .agent-flows/ does not exist", () => {
+    const projectDir = makeTempDir("agent-flows-fallback-");
+    const home = makeTempDir("agent-flows-home-");
+    try {
+      const layers = resolveLayers(projectDir, { AGENT_FLOWS_HOME: home });
+      assert.deepEqual(
+        layers.map((l) => l.source),
+        ["bundled"]
+      );
+      assert.ok(existsSync(layers[0].pipelinesDir), "bundled pipelinesDir must exist on disk");
+    } finally {
+      rmSync(projectDir, { recursive: true });
+      rmSync(home, { recursive: true });
+    }
+  });
+
+  it("an empty .agent-flows/pipelines/ contributes no workflow, and hides none", () => {
     const projectDir = makeTempDir("agent-flows-empty-");
+    const home = makeTempDir("agent-flows-home-");
     try {
       mkdirSync(join(projectDir, ".agent-flows", "pipelines"), { recursive: true });
-      const result = resolveCanonDir(projectDir);
-      assert.equal(result.source, "bundled");
+      const catalog = resolveCatalog(projectDir, { AGENT_FLOWS_HOME: home });
+      assert.ok(
+        catalogRows(catalog).every((e) => e.layer.source === "bundled"),
+        "an empty repository canon contributes nothing"
+      );
+      assert.ok(catalog.entries.has("spec-creation"));
     } finally {
       rmSync(projectDir, { recursive: true });
+      rmSync(home, { recursive: true });
     }
   });
 });

@@ -68,25 +68,43 @@ describe("SHORT_INSTRUCTIONS — the pointer for an uncustomized project (FR-010
   });
 });
 
-describe("instructionsFor — scope follows the project (D7)", () => {
-  it("sends the pointer for a project with no canon of its own", () => {
+describe("instructionsFor — scope follows the merged layer view (D7, D13)", () => {
+  // AGENT_FLOWS_HOME is pinned in every case: the user library is one of the
+  // three layers, so an unpinned run would answer from the owner's real one.
+  it("sends the pointer for a project with only the bundled layer", () => {
     const dir = mkdtempSync(join(realpathSync(tmpdir()), "af-instructions-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "af-instructions-home-"));
     try {
-      assert.equal(instructionsFor(dir), SHORT_INSTRUCTIONS);
+      assert.equal(instructionsFor(dir, { AGENT_FLOWS_HOME: home }), SHORT_INSTRUCTIONS);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
     }
   });
 
-  it("sends the full text once the project has workflows of its own", () => {
+  it("sends the full text once the project has a repository canon", () => {
     const dir = mkdtempSync(join(realpathSync(tmpdir()), "af-instructions-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "af-instructions-home-"));
     try {
       const pipelines = join(dir, ".agent-flows", "pipelines");
       mkdirSync(pipelines, { recursive: true });
       writeFileSync(join(pipelines, "own.yaml"), "id: own\nversion: 1\nsteps: []\n");
-      assert.equal(instructionsFor(dir), FULL_INSTRUCTIONS);
+      assert.equal(instructionsFor(dir, { AGENT_FLOWS_HOME: home }), FULL_INSTRUCTIONS);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("sends the full text once the user library contributes a layer (D13)", () => {
+    const dir = mkdtempSync(join(realpathSync(tmpdir()), "af-instructions-"));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), "af-instructions-home-"));
+    try {
+      mkdirSync(join(home, "workflows", "pipelines"), { recursive: true });
+      assert.equal(instructionsFor(dir, { AGENT_FLOWS_HOME: home }), FULL_INSTRUCTIONS);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });

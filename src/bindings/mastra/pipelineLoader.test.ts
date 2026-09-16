@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -103,19 +103,26 @@ describe("loadCatalog — malformed pipeline does not take down valid ones", () 
   });
 });
 
-describe("FR-010 defect fix: list_pipelines resolves pipelinesDir per call (not at startup)", () => {
-  it("resolveCanonDir returns project pipelines after they are installed post-startup", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "agent-flows-mcp-staleness-"));
+// Asserted `resolveCanonDir`'s project/bundled flip until spec 038 D13 removed
+// it; the per-call property it guards — a workflow added after startup is
+// visible on the next call — now belongs to the merged layer view.
+describe("FR-010 defect fix: list_pipelines resolves the layers per call (not at startup)", () => {
+  it("the merged view reports a workflow added to the repository canon post-startup", async () => {
+    const dir = await mkdtemp(join(await realpath(tmpdir()), "agent-flows-mcp-staleness-"));
+    const home = await mkdtemp(join(await realpath(tmpdir()), "agent-flows-mcp-home-"));
     try {
-      // Simulate a project with no .agent-flows/pipelines/ at "startup" time.
+      // A project with no .agent-flows/ at all at "startup" time.
       const projectDir = dir;
-      const { resolveCanonDir } = await import("./pipelineLoader.js");
+      const { resolveCatalog } = await import("../../canon/layers.js");
 
-      const before = resolveCanonDir(projectDir);
-      // Before installation: resolves to bundled (no project copy exists).
-      assert.equal(before.source, "bundled", "before installation, source must be bundled");
+      const before = resolveCatalog(projectDir, { AGENT_FLOWS_HOME: home });
+      assert.deepEqual(
+        before.layers.map((l) => l.source),
+        ["bundled"],
+        "before any customisation only the bundled layer is present"
+      );
+      assert.ok(!before.entries.has("alpha"), "alpha does not exist yet");
 
-      // Simulate installing a pipeline: create .agent-flows/pipelines/ with a YAML file.
       const projectPipelinesDir = join(projectDir, ".agent-flows", "pipelines");
       const { mkdir, writeFile } = await import("node:fs/promises");
       await mkdir(projectPipelinesDir, { recursive: true });
@@ -127,27 +134,22 @@ describe("FR-010 defect fix: list_pipelines resolves pipelinesDir per call (not 
         "utf8"
       );
 
-      // Call resolveCanonDir AGAIN — simulates what the per-call fix inside
-      // list_pipelines's execute() does on each invocation.
-      const after = resolveCanonDir(projectDir);
-      assert.equal(
-        after.source,
-        "project",
-        "after installation, resolveCanonDir must return project source"
+      // Resolve AGAIN — what the per-call resolution inside list_pipelines does.
+      const after = resolveCatalog(projectDir, { AGENT_FLOWS_HOME: home });
+      const alpha = after.entries.get("alpha");
+      assert.equal(alpha?.layer.source, "repo", "the new workflow comes from the repository layer");
+      assert.ok(
+        alpha?.filePath.includes(".agent-flows"),
+        "it is read from the project's .agent-flows/pipelines dir"
       );
       assert.ok(
-        after.pipelinesDir.includes(".agent-flows"),
-        "pipelinesDir must point to the project's .agent-flows/pipelines dir"
+        after.entries.has("spec-creation"),
+        "and the bundled catalogue is still there — no exclusive flip"
       );
-
-      // Verify loadCatalog sees the new pipeline in the updated dir.
-      const { loadCatalog } = await import("./pipelineLoader.js");
-      const catalog = loadCatalog(after.pipelinesDir);
-      const ids = catalog.loaded.map((p) => p.def.id);
-      assert.ok(ids.includes("alpha"), `catalog must include 'alpha'; found: ${ids.join(", ")}`);
     } finally {
       const { rm } = await import("node:fs/promises");
       await rm(dir, { recursive: true });
+      await rm(home, { recursive: true });
     }
   });
 });
