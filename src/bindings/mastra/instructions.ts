@@ -9,7 +9,8 @@
 // whether a server is worth calling — so the first sentence has to carry the
 // entry point on its own.
 
-import { resolveCanonDir } from "./pipelineLoader.js";
+import { resolveLayers } from "../../canon/layers.js";
+import type { StateEnv } from "../../runtime/projectState.js";
 
 /**
  * The full block, sent once a project has workflows of its own. Prose aimed at a
@@ -33,15 +34,14 @@ Prefer these tools over doing the same work turn by turn in chat whenever the us
 export const SHORT_INSTRUCTIONS = `agent-flows runs multi-step engineering workflows over the user's own repository. Call decide_entry_point first with the user's request to find the right pipeline, or list_pipelines to see what is available. Runs are durable, resumable by id, and stop at gates where the human approves.`;
 
 /**
- * Pick the scope for a project (D7).
+ * Pick the scope for a project (D7, D13).
  *
- * D13 (Ship 3) replaces the condition below with the merged-layer view — "has
- * anything beyond the bundled layer been added" — once layers exist. Until then
- * `resolveCanonDir`'s project/bundled flip answers the same question with what
- * is available today, and this one line is the whole seam.
+ * "Customized" is a question about the merged view: the short pointer while only
+ * the bundled layer is present, the full text as soon as a user library or a
+ * repository canon contributes a layer. The environment slice is injected so a
+ * test can pin AGENT_FLOWS_HOME rather than read the owner's real user library.
  */
-export function instructionsFor(projectDir: string): string {
-  // D13 SEAM: replace with the merged view's "anything beyond bundled?" check.
-  const customized = resolveCanonDir(projectDir).source === "project";
+export function instructionsFor(projectDir: string, env: StateEnv = process.env): string {
+  const customized = resolveLayers(projectDir, env).some((l) => l.source !== "bundled");
   return customized ? FULL_INSTRUCTIONS : SHORT_INSTRUCTIONS;
 }

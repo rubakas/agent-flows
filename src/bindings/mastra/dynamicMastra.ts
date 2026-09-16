@@ -7,8 +7,7 @@
 // all workflow objects, and swaps the internal Mastra instance.  The Mastra storage
 // object is reused across rebuilds so LibSQL run snapshots remain consistent.
 
-import { listPipelines, loadPipeline } from "../../canon/load.js";
-import { resolveCanonDir } from "./pipelineLoader.js";
+import { loadCatalogPipelines, resolveCatalog } from "../../canon/layers.js";
 import type { MastraLike } from "../../runtime/runService.js";
 
 export interface DynamicMastraOpts {
@@ -56,11 +55,12 @@ export function createDynamicMastra(initial: MastraLike, opts: DynamicMastraOpts
   let current: MastraLike = initial;
 
   function rebuild(): void {
-    const { pipelinesDir } = resolveCanonDir(opts.projectDir);
-    const files = listPipelines(pipelinesDir);
+    // Spec 038 D13: rebuild from the merged three-layer view, so a workflow
+    // added in any layer becomes executable and a repository fork wins over the
+    // bundled copy of the same id.
+    const { loaded: pipelines } = loadCatalogPipelines(resolveCatalog(opts.projectDir));
     const workflows: Record<string, unknown> = {};
-    for (const f of files) {
-      const loaded = loadPipeline(f);
+    for (const { loaded } of pipelines) {
       workflows[loaded.def.id] = opts.buildFn(loaded, opts.buildDeps);
     }
     current = new opts.MastraClass({

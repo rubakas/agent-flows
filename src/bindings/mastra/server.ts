@@ -7,9 +7,9 @@ import { fileURLToPath } from "node:url";
 import { createTool } from "@mastra/core/tools";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
+import { loadCatalogPipelines, resolveCatalog, resolveLayers } from "../../canon/layers.js";
 import { cancelRun, daemonFetch, getRunState, pollRunUntilTerminal } from "./daemonTools.js";
 import { instructionsFor } from "./instructions.js";
-import { loadCatalog, resolveCanonDir } from "./pipelineLoader.js";
 import { resolveProjectDir } from "./projectDir.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,9 +32,11 @@ console.error(`agent-flows MCP server: running steps in ${projectDir}`);
 // list_pipelines so newly-installed workflows are visible without a restart
 // (spec 029 FR-010: resolve per call, the way the daemon now does).
 
-const { pipelinesDir: _initialPipelinesDir, source: pipelinesSource } = resolveCanonDir(projectDir);
+const initialLayers = resolveLayers(projectDir);
 console.error(
-  `agent-flows MCP server: pipelines from ${pipelinesSource} (${_initialPipelinesDir})`
+  `agent-flows MCP server: workflow layers ${initialLayers
+    .map((l) => `${l.source} (${l.root})`)
+    .join(", ")}`
 );
 
 // ── MCP custom tools ──────────────────────────────────────────────────────────
@@ -44,16 +46,17 @@ const listPipelinesTool = createTool({
   description: "List all loaded pipelines with their IDs and descriptions.",
   inputSchema: z.object({}),
   execute: async () => {
-    // Resolve the pipelines directory per-call so that a workflow installed after
-    // the MCP server started is visible on the very next call — no restart required
-    // (spec 029 FR-010 defect fix).
-    const { pipelinesDir: currentPipelinesDir } = resolveCanonDir(projectDir);
-    const catalog = loadCatalog(currentPipelinesDir);
+    // Resolve the merged layer view per-call so that a workflow added after the
+    // MCP server started is visible on the very next call — no restart required
+    // (spec 029 FR-010 defect fix; layers per spec 038 D13).
+    const catalog = loadCatalogPipelines(resolveCatalog(projectDir));
     return {
-      pipelines: catalog.loaded.map((p) => ({
-        id: p.def.id,
-        description: p.def.description,
-        inputs: p.def.inputs,
+      pipelines: catalog.loaded.map(({ entry, loaded }) => ({
+        id: loaded.def.id,
+        description: loaded.def.description,
+        inputs: loaded.def.inputs,
+        layer: entry.layer.source,
+        shadows: entry.shadows,
       })),
       errors: catalog.errors.map((e) => ({ file: e.file, error: e.error })),
     };
