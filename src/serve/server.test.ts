@@ -1388,106 +1388,6 @@ describe("DELETE /api/pipelines/:id — remove project pipeline", () => {
   });
 });
 
-// ── POST /api/install ─────────────────────────────────────────────────────────
-
-describe("POST /api/install — install from bundled catalog", () => {
-  let srv: ServeHandle;
-  let tmpProjectDir: string;
-
-  before(async () => {
-    tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-install-test-")));
-    srv = await startServer({
-      state: makeState(tmpProjectDir),
-      port: 0,
-      dbPath: ":memory:",
-      pipelinesDir: REAL_PIPELINES_DIR,
-      bundledPipelinesDir: REAL_PIPELINES_DIR,
-      projectDir: tmpProjectDir,
-    });
-  });
-  after(async () => {
-    await srv.close();
-    rmSync(tmpProjectDir, { recursive: true, force: true });
-  });
-
-  it("installs a pipeline and returns written/skipped lists (200)", async () => {
-    const res = await mutate(srv.port, "POST", "/api/install", {
-      ids: ["spec-creation"],
-      overwrite: false,
-    });
-    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
-    const body = (await res.json()) as { written: string[]; skipped: string[] };
-    assert.ok(Array.isArray(body.written), "written must be an array");
-    assert.ok(Array.isArray(body.skipped), "skipped must be an array");
-    assert.ok(body.written.length > 0, "at least one file must be written");
-    assert.ok(
-      body.written.some((p) => p.includes("spec-creation")),
-      "written must include spec-creation.yaml"
-    );
-  });
-
-  it("skips existing files when overwrite is omitted", async () => {
-    const res = await mutate(srv.port, "POST", "/api/install", {
-      ids: ["spec-creation"],
-    });
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as { written: string[]; skipped: string[] };
-    assert.equal(body.written.length, 0, "nothing should be written when files already exist");
-    assert.ok(body.skipped.length > 0, "existing files must be reported as skipped");
-  });
-
-  it("overwrites when overwrite=true", async () => {
-    const res = await mutate(srv.port, "POST", "/api/install", {
-      ids: ["spec-creation"],
-      overwrite: true,
-    });
-    assert.equal(res.status, 200);
-    const body = (await res.json()) as { written: string[]; skipped: string[] };
-    assert.ok(body.written.length > 0, "files must be written when overwrite=true");
-    assert.equal(body.skipped.length, 0, "nothing should be skipped when overwrite=true");
-  });
-
-  it("rejects an unknown pipeline id → 422", async () => {
-    const res = await mutate(srv.port, "POST", "/api/install", {
-      ids: ["does-not-exist"],
-    });
-    assert.equal(res.status, 422);
-    const body = (await res.json()) as { error: string };
-    assert.ok(body.error.length > 0, "error must describe the failure");
-  });
-
-  it("POST without application/json content-type → 403", async () => {
-    const res = await fetch(`http://127.0.0.1:${srv.port}/api/install`, {
-      method: "POST",
-      headers: { "content-type": "text/plain" },
-      body: JSON.stringify({ ids: ["spec-creation"] }),
-    });
-    assert.equal(res.status, 403);
-  });
-
-  it("rejects a path-traversal id in ids with 400", async () => {
-    const res = await mutate(srv.port, "POST", "/api/install", {
-      ids: ["../../etc/passwd"],
-    });
-    assert.equal(res.status, 400, `expected 400, got ${res.status}`);
-    const body = (await res.json()) as { error: string };
-    assert.ok(body.error.length > 0, "error must explain the rejection");
-  });
-
-  it("rejects an oversized body with 413", async () => {
-    // Build a body that exceeds the 64 KB default limit for this route.
-    const oversizedBody = JSON.stringify({ ids: ["a".repeat(70_000)] });
-    const res = await fetch(`http://127.0.0.1:${srv.port}/api/install`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: oversizedBody,
-    });
-    assert.equal(res.status, 413, `expected 413, got ${res.status}`);
-  });
-});
-
-// ── GET / security headers ────────────────────────────────────────────────────
-
 describe("GET / — security headers", () => {
   let srv: ServeHandle;
 
@@ -1556,23 +1456,19 @@ describe("GET /api/environment — launch-point description", () => {
     rmSync(tmpProjectDir, { recursive: true, force: true });
   });
 
-  it("reports pipelinesSource=bundled and lists available pipelines", async () => {
+  it("reports pipelinesSource=bundled, and no installed/available split (038 FR-028)", async () => {
     const res = await fetch(`http://127.0.0.1:${bundledSrv.port}/api/environment`);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as {
+    const body = (await res.json()) as Record<string, unknown> & {
       pipelinesSource: string;
-      available: string[];
-      installed: string[];
       skills: string[];
       agents: string[];
     };
     assert.equal(body.pipelinesSource, "bundled");
-    assert.ok(
-      Array.isArray(body.available) && body.available.length > 0,
-      "available must list the bundled pipelines"
-    );
-    assert.ok(body.available.includes("spec-creation"), "spec-creation must be in available");
-    assert.ok(Array.isArray(body.installed), "installed must be an array");
+    // The installed/available split died with the install verb: every bundled
+    // workflow is present in every project now (D13).
+    assert.ok(!("installed" in body), "installed must be gone from /api/environment");
+    assert.ok(!("available" in body), "available must be gone from /api/environment");
     assert.ok(Array.isArray(body.skills), "skills must be an array");
     assert.ok(Array.isArray(body.agents), "agents must be an array");
     for (const skill of body.skills) {
@@ -1580,15 +1476,11 @@ describe("GET /api/environment — launch-point description", () => {
     }
   });
 
-  it("reports pipelinesSource=project and lists the installed pipeline", async () => {
+  it("reports pipelinesSource=project for a project write target", async () => {
     const res = await fetch(`http://127.0.0.1:${projectSrv.port}/api/environment`);
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { pipelinesSource: string; installed: string[] };
+    const body = (await res.json()) as { pipelinesSource: string };
     assert.equal(body.pipelinesSource, "project");
-    assert.ok(
-      Array.isArray(body.installed) && body.installed.includes("custom"),
-      "installed must include the project pipeline"
-    );
   });
 
   it("bad Host header → 403", async () => {
@@ -1769,6 +1661,10 @@ describe("GET /api/export/:id — export workflow bundle", () => {
   });
 });
 
+// Every case here names target: "repo" deliberately. The route defaults to the
+// machine-wide user library (FR-027), and a test that took the default would
+// read and write the owner's real ~/.agent-flows/workflows. The default target
+// is covered in importTarget.test.ts, which pins AGENT_FLOWS_HOME.
 describe("POST /api/import — import workflow bundle", () => {
   let srv: ServeHandle;
   let tmpProjectDir: string;
@@ -1797,6 +1693,7 @@ describe("POST /api/import — import workflow bundle", () => {
     const importRes = await mutate(srv.port, "POST", "/api/import", {
       bundle: bundleText,
       overwrite: false,
+      target: "repo",
     });
     assert.equal(importRes.status, 200);
     const body = (await importRes.json()) as { written: string[]; skipped: string[] };
@@ -1813,6 +1710,7 @@ describe("POST /api/import — import workflow bundle", () => {
     const importRes = await mutate(srv.port, "POST", "/api/import", {
       bundle: bundleText,
       overwrite: false,
+      target: "repo",
     });
     assert.equal(importRes.status, 200);
     const body = (await importRes.json()) as { written: string[]; skipped: string[] };
@@ -1825,7 +1723,10 @@ describe("POST /api/import — import workflow bundle", () => {
       "bundleVersion: 1\nsourcePipeline: evil\nexportedAt: 2026-01-01T00:00:00.000Z\n" +
       'files:\n  - path: "../evil.txt"\n    content: "# bad"\n';
 
-    const res = await mutate(srv.port, "POST", "/api/import", { bundle: maliciousBundle });
+    const res = await mutate(srv.port, "POST", "/api/import", {
+      bundle: maliciousBundle,
+      target: "repo",
+    });
     assert.equal(res.status, 422);
     const body = (await res.json()) as { error: string };
     assert.ok(body.error.length > 0, "error must be non-empty");
@@ -4764,84 +4665,6 @@ describe("GET /api/pipelines?source=bundled — the shipped catalogue (037 FR-00
     assert.equal(missing.status, 404, "it is not in the project, so the plain route 404s");
     const bad = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/solo?source=nope`);
     assert.equal(bad.status, 400);
-  });
-});
-
-// Asserted the exclusive flip — one installed workflow hid the whole bundled
-// catalogue — until spec 038 D13 replaced it with the merged layer view. The
-// install route itself is unchanged here; what it proves is now precedence:
-// the installed copy wins on its own id and the rest of the package stays
-// listed.
-describe("POST /api/install — the installed copy wins its id, the catalogue stays (038 FR-017)", () => {
-  let srv: ServeHandle;
-  let tmpDir: string;
-  let projectDir: string;
-
-  before(async () => {
-    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-flip-")));
-    projectDir = join(tmpDir, "project");
-    mkdirSync(projectDir, { recursive: true });
-    srv = await startServer({
-      state: makeState(projectDir),
-      port: 0,
-      dbPath: ":memory:",
-      bundledPipelinesDir: REAL_PIPELINES_DIR,
-      projectDir,
-    });
-  });
-  after(async () => {
-    await srv.close();
-    rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("installing one workflow writes its closure without hiding the rest of the catalogue", async () => {
-    const before = (await (await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`)).json()) as {
-      pipelines: { id: string }[];
-    };
-    assert.ok(before.pipelines.length > 1, "with nothing installed the bundled set is served");
-
-    const res = await mutate(srv.port, "POST", "/api/install", {
-      ids: ["investigate"],
-      overwrite: false,
-    });
-    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
-    const report = (await res.json()) as { written: string[] };
-    assert.ok(
-      report.written.includes("pipelines/investigate.yaml"),
-      `the closure must include the pipeline itself: ${report.written.join(", ")}`
-    );
-    assert.ok(
-      report.written.some((p) => p.startsWith("prompts/")),
-      `the closure must include the prompts it references: ${report.written.join(", ")}`
-    );
-    assert.ok(
-      existsSync(join(projectDir, ".agent-flows", "pipelines", "investigate.yaml")),
-      "the installed pipeline is on disk"
-    );
-
-    // The merged view: the installed copy owns "investigate" from the repository
-    // layer, every other bundled workflow is still listed (038 D13).
-    const after = (await (await fetch(`http://127.0.0.1:${srv.port}/api/pipelines`)).json()) as {
-      pipelines: { id: string; layer?: string; shadows?: string[] }[];
-    };
-    const investigate = after.pipelines.find((p) => p.id === "investigate");
-    assert.equal(investigate?.layer, "repo", "the installed copy owns the id");
-    assert.deepEqual(investigate?.shadows, ["bundled"], "and it shadows the bundled copy");
-    assert.ok(
-      after.pipelines.length >= before.pipelines.length,
-      `installing must not hide the rest of the catalogue; before ${String(before.pipelines.length)}, after ${String(after.pipelines.length)}`
-    );
-    assert.ok(
-      after.pipelines.some((p) => p.id === "spec-creation" && p.layer === "bundled"),
-      `a workflow the project never installed stays listed from the bundled layer; got: ${after.pipelines.map((p) => `${p.id}:${String(p.layer)}`).join(", ")}`
-    );
-    const stillBundled = (await (
-      await fetch(`http://127.0.0.1:${srv.port}/api/pipelines?source=bundled`)
-    ).json()) as { pipelines: { id: string }[] };
-    assert.ok(
-      stillBundled.pipelines.length > 1,
-      "the catalogue itself is unaffected — Templates can still show it"
-    );
   });
 });
 

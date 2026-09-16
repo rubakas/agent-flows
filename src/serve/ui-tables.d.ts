@@ -7,6 +7,12 @@ export interface WorkflowRowData {
   description?: string;
   steps?: number;
   inputs?: string[];
+  /** The layer that owns this id (spec 038 FR-020). */
+  layer?: string;
+  /** Layers holding a same-id workflow this row shadows. */
+  shadows?: string[];
+  /** Hidden from the chat and page listings (spec 038 FR-026). */
+  hidden?: boolean;
   source?: string;
 }
 

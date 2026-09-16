@@ -69,41 +69,49 @@ function btn(label, attr, value, extraClass) {
 }
 
 /**
- * One row of the Workflows table (spec 037 D3).
+ * One row of the Workflows table (spec 038 D13/D14/D15).
  *
- * `Edit` and `Delete` exist only for `project` rows: the bundled catalogue is
- * read-only and `POST`/`DELETE /api/pipelines` answer 403 for it, so offering
- * the buttons would only produce an error the operator cannot act on.
+ * Every row is editable now: `Edit` on a workflow the project cannot write — a
+ * bundled one — forks it into a writable layer first and edits the copy, so the
+ * package is never written (D14). `Delete` stays off a bundled row because
+ * `DELETE /api/pipelines` answers 403 for it and always will.
+ *
+ * The layer cell names the layer that owns the id and the layers it shadows
+ * (FR-020); `hidden` marks a row this project has hidden from the chat surface
+ * and this list (FR-026) — hidden is unlisted, never refused.
  *
  * @param {{ id: string, description?: string, steps?: number, inputs?: string[],
- *   source?: string }} wf
+ *   layer?: string, shadows?: string[], hidden?: boolean, source?: string }} wf
  * @returns {string}
  */
 export function workflowRow(wf) {
   const id = String(wf?.id ?? "");
-  const isProject = wf?.source === "project";
+  const layer = String(wf?.layer ?? wf?.source ?? "");
+  const writable = layer !== "bundled";
   const inputs = Array.isArray(wf?.inputs) ? wf.inputs.join(", ") : "";
+  const shadows = Array.isArray(wf?.shadows) && wf.shadows.length > 0 ? wf.shadows.join(", ") : "";
   const actions = [
     btn("Run…", "data-run-wf", id),
     btn("View", "data-view-wf", id),
-    ...(isProject
-      ? [btn("Edit", "data-edit-wf", id), btn("Delete", "data-del-wf", id, "danger")]
-      : [btn("Install", "data-install-wf", id)]),
+    btn("Edit", "data-edit-wf", id),
+    ...(writable ? [] : [btn("Fork…", "data-fork-wf", id)]),
+    btn(wf?.hidden === true ? "Show" : "Hide", "data-toggle-wf", id),
+    ...(writable ? [btn("Delete", "data-del-wf", id, "danger")] : []),
   ].join("");
   return (
-    `<tr data-wf-row="${esc(id)}">` +
-    `<td class="pipeline-id">${esc(id)}</td>` +
+    `<tr data-wf-row="${esc(id)}"${wf?.hidden === true ? ' class="hidden-row"' : ""}>` +
+    `<td class="pipeline-id">${esc(id)}${wf?.hidden === true ? ' <span class="badge">hidden</span>' : ""}</td>` +
     `<td class="pipeline-desc">${esc(wf?.description ?? "")}</td>` +
     `<td>${esc(wf?.steps ?? "")}</td>` +
     `<td class="pipeline-id">${esc(inputs)}</td>` +
-    `<td class="muted">${esc(wf?.source ?? "")}</td>` +
+    `<td class="muted">${esc(layer)}${shadows ? ` (shadows ${esc(shadows)})` : ""}</td>` +
     `<td class="actions">${actions}</td>` +
     `</tr>`
   );
 }
 
 /**
- * One row of a Templates section (spec 037 D4). The two sections carry
+ * One row of a Templates section (spec 037 D4, spec 038 D16). The two sections carry
  * different data: a bundled row is a pipeline we ship, a "yours" row is a saved
  * bundle in ~/.agent-flows/templates.
  *
@@ -117,7 +125,7 @@ export function templateRow(t) {
     const tid = String(t.templateId ?? "");
     const actions = [
       btn("Preview", "data-preview-tmpl", tid),
-      btn("Install", "data-install-tmpl", tid),
+      btn("Import", "data-import-tmpl", tid),
       btn("Delete", "data-del-tmpl", tid, "danger"),
     ].join("");
     return (
@@ -131,9 +139,11 @@ export function templateRow(t) {
   }
   const id = String(t?.id ?? "");
   const inputs = Array.isArray(t?.inputs) ? t.inputs.join(", ") : "";
+  // Import and export only (spec 038 D16): there is no install, and every
+  // bundled workflow is already present in every project through the layers.
   const actions = [
     btn("Preview", "data-preview-bundled", id),
-    btn("Install", "data-install-bundled", id),
+    btn("Export", "data-export-bundled", id),
   ].join("");
   return (
     `<tr data-bundled-row="${esc(id)}">` +

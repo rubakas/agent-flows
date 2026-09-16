@@ -748,12 +748,13 @@
             <h2>Workflows</h2>
             <span class="muted" id="workflows-source-note"></span>
             <span class="actions" style="margin-left: auto">
-              <button class="btn" id="btn-new-workflow" hidden>New workflow</button>
+              <button class="btn" id="btn-new-workflow">New workflow</button>
+              <button class="btn" id="btn-show-hidden">Show hidden</button>
               <a class="btn" id="btn-from-template" href="#/templates">From template…</a>
             </span>
           </div>
-          <p class="empty" id="workflows-readonly-note" hidden>
-            Bundled workflows are read-only; Install to edit.
+          <p class="empty" id="workflows-readonly-note">
+            Bundled workflows are read-only — Edit forks a copy into a writable layer first.
           </p>
           <div id="workflows-table-wrap">Loading…</div>
         </div>
@@ -780,8 +781,7 @@
         <div class="section">
           <div class="section-header">
             <h2>Bundled</h2>
-            <span class="muted">the workflows we ship</span>
-            <button class="btn" id="btn-install-all" style="margin-left: auto">Install all</button>
+            <span class="muted">the workflows we ship — preview and export</span>
           </div>
           <div id="bundled-table-wrap">Loading…</div>
         </div>
@@ -835,20 +835,21 @@
       </section>
     </main>
 
-    <!-- Install scope dialog (037 D3): installing makes the project set authoritative -->
-    <dialog id="dialog-install">
-      <h3>Install bundled workflows</h3>
+    <!-- Fork target dialog (038 D14): editing a read-only workflow copies it first -->
+    <dialog id="dialog-fork">
+      <h3 id="dialog-fork-title">Fork workflow</h3>
+      <p class="empty" id="dialog-fork-note"></p>
       <label class="radio-row">
-        <input type="radio" name="install-scope" value="all" checked />
-        <span class="install-all-label"></span>
+        <input type="radio" name="fork-target" value="repo" checked />
+        <span>This repository — .agent-flows/ (committed, shared with the team)</span>
       </label>
       <label class="radio-row">
-        <input type="radio" name="install-scope" value="one" />
-        <span class="install-one-label"></span>
+        <input type="radio" name="fork-target" value="user" />
+        <span>My library — ~/.agent-flows/workflows/ (this machine, every project)</span>
       </label>
       <div class="dialog-actions">
-        <button class="btn" data-dialog-cancel="dialog-install">Cancel</button>
-        <button class="btn primary" id="btn-install-confirm">Install</button>
+        <button class="btn" data-dialog-cancel="dialog-fork">Cancel</button>
+        <button class="btn primary" id="btn-fork-confirm">Fork and edit</button>
       </div>
     </dialog>
 
@@ -940,47 +941,52 @@
 
       // ── Workflows view (037 D3) ────────────────────────────────────────────
 
-      /**
-       * Which catalogue the daemon is serving right now. resolveCanonDir is
-       * exclusive: the moment the project holds one installed pipeline it alone
-       * feeds the listing, MCP and every run — so the table shows one set, never
-       * a merge of two.
-       */
-      let _pipelinesSource = "bundled";
+      /** The layer each listed id belongs to, so Edit knows whether to fork first. */
+      let _workflowLayers = {};
 
-      /** Every id currently listed, for the "install all" option of the dialog. */
-      let _listedWorkflowIds = [];
+      /**
+       * Whether the table is showing hidden rows too (038 D15). The list itself
+       * is filtered by the daemon: hidden rows only arrive with ?include=hidden,
+       * which is the management view this toggle turns on.
+       */
+      let _showHidden = false;
 
       async function loadWorkflows() {
         const wrap = document.getElementById("workflows-table-wrap");
         const note = document.getElementById("workflows-source-note");
-        const readOnlyNote = document.getElementById("workflows-readonly-note");
         try {
-          const env = await api("GET", "/api/environment");
-          _pipelinesSource = env.pipelinesSource === "project" ? "project" : "bundled";
-          const isProject = _pipelinesSource === "project";
-          const data = await api("GET", "/api/pipelines");
-          const rows = (data.pipelines || []).map((p) => ({ ...p, source: _pipelinesSource }));
-          _listedWorkflowIds = rows.map((r) => r.id);
+          const data = await api(
+            "GET",
+            _showHidden ? "/api/pipelines?include=hidden" : "/api/pipelines"
+          );
+          const rows = data.pipelines || [];
+          _workflowLayers = Object.fromEntries(rows.map((r) => [r.id, r.layer]));
 
-          document.getElementById("btn-new-workflow").hidden = !isProject;
-          note.textContent = isProject
-            ? "Installed in this project — this is the set the daemon runs."
-            : "Install the bundled workflows to start editing.";
-          readOnlyNote.hidden = isProject;
+          const layers = [...new Set(rows.map((r) => r.layer).filter(Boolean))];
+          note.textContent = `${rows.length} workflows from ${layers.join(", ") || "no"} layer${
+            layers.length === 1 ? "" : "s"
+          }`;
+          document.getElementById("btn-show-hidden").textContent = _showHidden
+            ? "Hide hidden"
+            : "Show hidden";
 
           if (!rows.length) {
             wrap.innerHTML = `<p class="empty">No workflows found.</p>`;
             return;
           }
           wrap.innerHTML = `<table class="table"><thead><tr>
-            <th>ID</th><th>Description</th><th>Steps</th><th>Inputs</th><th>Source</th><th>Actions</th>
+            <th>ID</th><th>Description</th><th>Steps</th><th>Inputs</th><th>Layer</th><th>Actions</th>
           </tr></thead><tbody>${rows.map(workflowRow).join("")}</tbody></table>`;
           wireWorkflowsTable(wrap);
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
       }
+
+      document.getElementById("btn-show-hidden").onclick = () => {
+        _showHidden = !_showHidden;
+        loadWorkflows();
+      };
 
       function wireWorkflowsTable(wrap) {
         for (const btn of wrap.querySelectorAll("[data-view-wf]")) {
@@ -989,15 +995,16 @@
           };
         }
         for (const btn of wrap.querySelectorAll("[data-edit-wf]")) {
-          btn.onclick = () => {
-            location.hash = hashFor("workflow-edit", btn.dataset.editWf);
-          };
+          btn.onclick = () => editWorkflow(btn.dataset.editWf);
         }
         for (const btn of wrap.querySelectorAll("[data-run-wf]")) {
           btn.onclick = () => openRunDialog(btn.dataset.runWf);
         }
-        for (const btn of wrap.querySelectorAll("[data-install-wf]")) {
-          btn.onclick = () => openInstallDialog(btn.dataset.installWf, _listedWorkflowIds);
+        for (const btn of wrap.querySelectorAll("[data-fork-wf]")) {
+          btn.onclick = () => openForkDialog(btn.dataset.forkWf);
+        }
+        for (const btn of wrap.querySelectorAll("[data-toggle-wf]")) {
+          btn.onclick = () => toggleWorkflowVisibility(btn.dataset.toggleWf, btn.textContent);
         }
         for (const btn of wrap.querySelectorAll("[data-del-wf]")) {
           btn.onclick = () => deleteWorkflow(btn.dataset.delWf, loadWorkflows);
@@ -1039,38 +1046,65 @@
         }
       };
 
-      // ── Install dialog (037 D3/FR-014) ─────────────────────────────────────
+      // ── Fork dialog (038 D14/FR-022) ───────────────────────────────────────
+      //
+      // Editing a workflow the project cannot write never writes the source in
+      // place: the page asks which layer to fork into, forks, and then opens the
+      // editor on the copy. The package is never a write target.
 
-      /** The pending install choice: the row's id and the full catalogue. */
-      let _installTarget = { id: null, ids: [], onDone: null };
+      /** The id waiting on a fork target, and what to do once it is copied. */
+      let _forkTarget = { id: null, onDone: null };
 
-      function openInstallDialog(id, ids, onDone) {
-        const dlg = document.getElementById("dialog-install");
-        const all = ids.length > 0 ? ids : [id];
-        _installTarget = { id, ids: all, onDone: onDone ?? loadWorkflows };
+      function openForkDialog(id, onDone) {
+        const dlg = document.getElementById("dialog-fork");
+        _forkTarget = { id, onDone: onDone ?? null };
         // textContent, not innerHTML: these strings carry a pipeline id.
-        dlg.querySelector(".install-all-label").textContent =
-          `Install all ${all.length} bundled workflows (recommended)`;
-        dlg.querySelector(".install-one-label").textContent =
-          `Install only ${id} and what it depends on — the other ${all.length - 1} will no ` +
-          `longer be listed or runnable in this project`;
-        dlg.querySelector('input[value="all"]').checked = true;
+        document.getElementById("dialog-fork-title").textContent = `Fork ${id}`;
+        document.getElementById("dialog-fork-note").textContent =
+          `"${id}" is owned by the bundled package, which is never written to. ` +
+          `Choose where the editable copy goes; it keeps mounting the same nested workflows.`;
+        dlg.querySelector('input[value="repo"]').checked = true;
         dlg.showModal();
       }
 
-      document.getElementById("btn-install-confirm").onclick = async () => {
-        const dlg = document.getElementById("dialog-install");
-        const scope = dlg.querySelector('input[name="install-scope"]:checked').value;
-        const ids = scope === "all" ? _installTarget.ids : [_installTarget.id];
+      document.getElementById("btn-fork-confirm").onclick = async () => {
+        const dlg = document.getElementById("dialog-fork");
+        const to = dlg.querySelector('input[name="fork-target"]:checked').value;
+        const id = _forkTarget.id;
         try {
-          const r = await api("POST", "/api/install", { ids, overwrite: false });
+          const r = await api("POST", `/api/pipelines/${encodeURIComponent(id)}/fork`, { to });
           dlg.close();
-          flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
-          _installTarget.onDone();
+          flash(`Forked "${id}" into ${r.root}`);
+          if (_forkTarget.onDone) _forkTarget.onDone();
+          else location.hash = hashFor("workflow-edit", id);
         } catch (e) {
           flash(e.message, true);
         }
       };
+
+      /**
+       * Edit a workflow: straight into the editor when the project owns it, and
+       * through the fork dialog first when the bundled package does (D14).
+       */
+      function editWorkflow(id) {
+        if (_workflowLayers[id] === "bundled") {
+          openForkDialog(id);
+          return;
+        }
+        location.hash = hashFor("workflow-edit", id);
+      }
+
+      /** Hide or show one workflow on the chat and page lists (038 D15). */
+      async function toggleWorkflowVisibility(id, label) {
+        try {
+          await api("POST", `/api/pipelines/${encodeURIComponent(id)}/visibility`, {
+            hidden: label.trim() === "Hide",
+          });
+          loadWorkflows();
+        } catch (e) {
+          flash(e.message, true);
+        }
+      }
 
       // ── Run dialog (037 D3/FR-009) ─────────────────────────────────────────
 
@@ -1133,10 +1167,7 @@
         }
       };
 
-      // ── Templates view (037 D4) ────────────────────────────────────────────
-
-      /** The bundled catalogue as last listed, for Install all. */
-      let _bundledIds = [];
+      // ── Templates view (037 D4, 038 D16 — import and export only) ─────────
 
       async function loadTemplates() {
         loadBundledCatalogue();
@@ -1148,8 +1179,6 @@
         try {
           const data = await api("GET", "/api/pipelines?source=bundled");
           const rows = data.pipelines || [];
-          _bundledIds = rows.map((r) => r.id);
-          document.getElementById("btn-install-all").hidden = rows.length === 0;
           if (!rows.length) {
             wrap.innerHTML = `<p class="empty">No bundled workflows found.</p>`;
             return;
@@ -1164,26 +1193,18 @@
               location.hash = hashFor("template", btn.dataset.previewBundled);
             };
           }
-          for (const btn of wrap.querySelectorAll("[data-install-bundled]")) {
-            btn.onclick = () =>
-              openInstallDialog(btn.dataset.installBundled, _bundledIds, loadTemplates);
+          for (const btn of wrap.querySelectorAll("[data-export-bundled]")) {
+            btn.onclick = () => exportWorkflow(btn.dataset.exportBundled);
           }
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
       }
 
-      // FR-014: one POST carrying every bundled id, not one per row.
-      document.getElementById("btn-install-all").onclick = async () => {
-        if (!confirm(`Install all ${_bundledIds.length} bundled workflows into this project?`))
-          return;
-        try {
-          const r = await api("POST", "/api/install", { ids: _bundledIds, overwrite: false });
-          flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
-        } catch (e) {
-          flash(e.message, true);
-        }
-      };
+      /** Download one workflow's bundle — the other half of import/export (D16). */
+      function exportWorkflow(id) {
+        window.location.href = `/api/export/${encodeURIComponent(id)}`;
+      }
 
       async function loadSavedTemplates() {
         const wrap = document.getElementById("template-table-wrap");
@@ -1204,8 +1225,8 @@
               location.hash = hashFor("template", btn.dataset.previewTmpl);
             };
           }
-          for (const btn of wrap.querySelectorAll("[data-install-tmpl]")) {
-            btn.onclick = () => installSavedTemplate(btn.dataset.installTmpl);
+          for (const btn of wrap.querySelectorAll("[data-import-tmpl]")) {
+            btn.onclick = () => importSavedTemplate(btn.dataset.importTmpl);
           }
           for (const btn of wrap.querySelectorAll("[data-del-tmpl]")) {
             btn.onclick = async () => {
@@ -1225,18 +1246,18 @@
         }
       }
 
-      async function installSavedTemplate(id) {
+      async function importSavedTemplate(id) {
         try {
           const r = await api("POST", `/api/templates/${encodeURIComponent(id)}/install`, {});
           if (r.skipped && r.skipped.length > 0 && r.written.length === 0) {
-            if (!confirm(`"${id}" is already installed. Overwrite the project's files?`)) return;
+            if (!confirm(`"${id}" is already in this repository. Overwrite its files?`)) return;
             const forced = await api("POST", `/api/templates/${encodeURIComponent(id)}/install`, {
               overwrite: true,
             });
-            flash(`Installed: ${forced.written.join(", ")}`);
+            flash(`Imported: ${forced.written.join(", ")}`);
             return;
           }
-          flash(`Installed: ${r.written.join(", ") || "(already up to date)"}`);
+          flash(`Imported: ${r.written.join(", ") || "(already up to date)"}`);
         } catch (e) {
           flash(e.message, true);
         }
@@ -1305,30 +1326,29 @@
         const body = document.getElementById("workflow-view-body");
         body.innerHTML = "Loading…";
         try {
-          // The environment is re-read here because this view is deep-linkable:
-          // arriving straight on #/workflows/<id> must not guess the source.
-          const env = await api("GET", "/api/environment");
-          _pipelinesSource = env.pipelinesSource === "project" ? "project" : "bundled";
+          // The layer list is re-read here because this view is deep-linkable:
+          // arriving straight on #/workflows/<id> must not guess the owner.
+          const list = await api("GET", "/api/pipelines?include=hidden");
+          _workflowLayers = Object.fromEntries((list.pipelines || []).map((r) => [r.id, r.layer]));
           const d = await api("GET", `/api/pipelines/${encodeURIComponent(id)}`);
-          const isProject = _pipelinesSource === "project";
+          const layer = _workflowLayers[id] ?? "bundled";
+          const writable = layer !== "bundled";
           body.innerHTML = `<div class="workflow-head">
             <h2>${escH(d.def.id)}</h2>
             <span class="pipeline-desc">${escH(d.def.description || "")}</span>
-            <span class="muted mono">${escH(_pipelinesSource)}</span>
+            <span class="muted mono">${escH(layer)}</span>
             <span class="actions" style="margin-left:auto">
               <button class="btn" data-wf-run>Run…</button>
-              ${isProject ? `<button class="btn" data-wf-edit>Edit</button>` : ""}
+              <button class="btn" data-wf-edit>Edit</button>
+              <button class="btn" data-wf-export>Export</button>
               <button class="btn" data-wf-template>Save as template</button>
-              ${isProject ? `<button class="btn danger" data-wf-delete>Delete</button>` : ""}
+              ${writable ? `<button class="btn danger" data-wf-delete>Delete</button>` : ""}
             </span>
           </div>${workflowBodyHtml(d)}`;
 
           body.querySelector("[data-wf-run]").onclick = () => openRunDialog(id);
-          const editBtn = body.querySelector("[data-wf-edit]");
-          if (editBtn)
-            editBtn.onclick = () => {
-              location.hash = hashFor("workflow-edit", id);
-            };
+          body.querySelector("[data-wf-export]").onclick = () => exportWorkflow(id);
+          body.querySelector("[data-wf-edit]").onclick = () => editWorkflow(id);
           body.querySelector("[data-wf-template]").onclick = () => saveAsTemplate(id);
           const delBtn = body.querySelector("[data-wf-delete]");
           if (delBtn)
@@ -1613,7 +1633,7 @@
           }
           if (bundle) {
             body.innerHTML = savedTemplateHtml(bundle);
-            body.querySelector("[data-tmpl-install]").onclick = () => installSavedTemplate(id);
+            body.querySelector("[data-tmpl-import]").onclick = () => importSavedTemplate(id);
             return;
           }
           const d = await api("GET", `/api/pipelines/${encodeURIComponent(id)}?source=bundled`);
@@ -1622,11 +1642,10 @@
             <span class="pipeline-desc">${escH(d.def.description || "")}</span>
             <span class="muted mono">bundled</span>
             <span class="actions" style="margin-left:auto">
-              <button class="btn" data-tmpl-install-bundled>Install</button>
+              <button class="btn" data-tmpl-export>Export</button>
             </span>
           </div>${workflowBodyHtml(d)}`;
-          body.querySelector("[data-tmpl-install-bundled]").onclick = () =>
-            openInstallDialog(id, _bundledIds.length ? _bundledIds : [id], loadTemplates);
+          body.querySelector("[data-tmpl-export]").onclick = () => exportWorkflow(id);
         } catch (e) {
           body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
@@ -1634,8 +1653,8 @@
 
       /**
        * A saved bundle is previewed from its manifest: every check command it
-       * would install and every file it carries that is not a pipeline, so
-       * Install is never a blind trust decision (037 D4).
+       * would bring in and every file it carries that is not a pipeline, so
+       * Import is never a blind trust decision (037 D4).
        */
       function savedTemplateHtml(t) {
         const files = t.files || [];
@@ -1648,7 +1667,7 @@
             )}</span>
             <span class="muted mono">template</span>
             <span class="actions" style="margin-left:auto">
-              <button class="btn" data-tmpl-install>Install</button>
+              <button class="btn" data-tmpl-import>Import</button>
             </span>
           </div>
           <div class="section">
@@ -2464,7 +2483,7 @@
           const env = await api("GET", "/api/environment");
           const rows = [
             ["Project dir", env.projectDir],
-            ["Pipelines source", env.pipelinesSource],
+            ["Write target", env.pipelinesSource],
             ["Pipelines dir", env.pipelinesDir],
             ["State dir", env.stateDir],
             ["Runs dir", env.runsDir],

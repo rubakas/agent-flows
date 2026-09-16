@@ -41,13 +41,16 @@ import {
   updateDraftBody,
 } from "../canon/draftStore.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
+import { forkPipeline, resolveForkTarget } from "../canon/fork.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import {
   layerForPipelinesDir,
   loadCatalogPipelines,
   loadFromCatalog,
   mergedCatalog,
+  repoCanonRoot,
   resolveCatalog,
+  userLibraryRoot,
   writeTargetLayer,
   type LayerSource,
   type MergedCatalog,
@@ -64,7 +67,6 @@ import {
   stringifyBundle,
   type WorkflowBundle,
 } from "../install/bundle.js";
-import { installWorkflow, listAvailable, listInstalled } from "../install/install.js";
 import { assertSafePath, isContained } from "../install/paths.js";
 import { packageVersion } from "../packageRoot.js";
 import { readManifest } from "../runtime/artifactStore.js";
@@ -82,6 +84,7 @@ import {
   runLogFile,
   stepOutputFile,
 } from "../runtime/stepLog.js";
+import { readHidden, setHidden } from "../runtime/visibility.js";
 
 import {
   isSafeId,
@@ -120,6 +123,8 @@ const RE_PORT = /:\d+$/u;
 const RE_PORT_CAPTURE = /:(\d+)$/u;
 const RE_PIPELINE_DETAIL = /^\/api\/pipelines\/([^/]+)$/u;
 const RE_PIPELINE_DRAFTS = /^\/api\/pipelines\/([^/]+)\/drafts$/u;
+const RE_PIPELINE_FORK = /^\/api\/pipelines\/([^/]+)\/fork$/u;
+const RE_PIPELINE_VISIBILITY = /^\/api\/pipelines\/([^/]+)\/visibility$/u;
 const RE_PIPELINE_TEMPLATE = /^\/api\/pipelines\/([^/]+)\/template$/u;
 const RE_PIPELINE_PROMPTS = /^\/api\/pipelines\/([^/]+)\/prompts$/u;
 const RE_PIPELINE_PROMPT = /^\/api\/pipelines\/([^/]+)\/prompts\/([^/]+)$/u;
@@ -285,6 +290,8 @@ interface PipelineRow {
   layer?: LayerSource;
   /** Layers holding a same-id workflow this row shadows, lowest precedence first. */
   shadows?: LayerSource[];
+  /** Hidden from the page's workflow list by this project's visibility file (FR-026). */
+  hidden?: boolean;
 }
 
 /**
@@ -293,10 +300,11 @@ interface PipelineRow {
  * `path` is relative to the owning layer's own root, so a bundled row reads
  * `pipelines/x.yaml` rather than a chain of `../..` out of the project.
  */
-function mergedPipelineRows(catalog: MergedCatalog): PipelineRow[] {
+function mergedPipelineRows(catalog: MergedCatalog, hidden: ReadonlySet<string>): PipelineRow[] {
   // A pipeline that fails to load contributes no row; it stays visible as an
   // error on disk and is flagged by `agent-flows validate`.
   return loadCatalogPipelines(catalog).loaded.map(({ entry, loaded }) => ({
+    hidden: hidden.has(loaded.def.id),
     id: loaded.def.id,
     description: loaded.def.description,
     path: relative(entry.layer.root, entry.filePath),
@@ -1047,14 +1055,82 @@ async function handleRequest(
       json(res, 400, { error: "invalid source" });
       return;
     }
-    // ?source=bundled is the Templates view: the package's own catalogue, never
-    // the merge. The default listing is the merged three-layer view (D13).
+    if (source === "bundled") {
+      // The Templates view: the package's own catalogue, never the merge.
+      json(res, 200, {
+        pipelines: listPipelineRows(ctx.bundledPipelinesDir, dirname(ctx.bundledPipelinesDir)),
+      });
+      return;
+    }
+    // The default listing is the merged three-layer view (D13), minus this
+    // project's hidden ids (FR-026) — this is the page's workflow list, one of
+    // the exactly two surfaces visibility filters. `?include=hidden` is the
+    // management view the page's own toggle uses to bring one back; hiding
+    // never refuses a run, so no run route consults this.
+    const hidden = readHidden(ctx.state.dir);
+    const rows = mergedPipelineRows(ctx.catalog, hidden);
+    const includeHidden = url.searchParams.get("include") === "hidden";
     json(res, 200, {
-      pipelines:
-        source === "bundled"
-          ? listPipelineRows(ctx.bundledPipelinesDir, dirname(ctx.bundledPipelinesDir))
-          : mergedPipelineRows(ctx.catalog),
+      pipelines: includeHidden ? rows : rows.filter((row) => row.hidden !== true),
     });
+    return;
+  }
+
+  // POST /api/pipelines/:id/fork — copy a workflow into a writable layer (FR-021,
+  // FR-022). The page's Save on a workflow the project cannot write goes through
+  // here first and then edits the copy; the source is never written in place.
+  const forkMatch = RE_PIPELINE_FORK.exec(pathname);
+  if (method === "POST" && forkMatch) {
+    const id = decodeURIComponent(forkMatch[1]);
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    if (!isSafeId(id)) {
+      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
+      return;
+    }
+    const { to, overwrite } = parsed.value;
+    if (to !== undefined && to !== "user" && to !== "repo") {
+      json(res, 400, { error: 'Field "to" must be "user" or "repo"' });
+      return;
+    }
+    const target = resolveForkTarget(ctx.projectDir, to);
+    try {
+      const report = forkPipeline({
+        id,
+        catalog: ctx.catalog,
+        target,
+        overwrite: overwrite === true,
+      });
+      json(res, 200, report);
+    } catch (err) {
+      const message = (err as Error).message;
+      json(res, message.includes("already exists") ? 409 : 422, { error: message });
+    }
+    return;
+  }
+
+  // POST /api/pipelines/:id/visibility — hide or unhide one workflow (FR-025).
+  const visibilityMatch = RE_PIPELINE_VISIBILITY.exec(pathname);
+  if (method === "POST" && visibilityMatch) {
+    const id = decodeURIComponent(visibilityMatch[1]);
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    if (!isSafeId(id)) {
+      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
+      return;
+    }
+    const { hidden } = parsed.value;
+    if (typeof hidden !== "boolean") {
+      json(res, 400, { error: 'Field "hidden" must be a boolean' });
+      return;
+    }
+    json(res, 200, { id, hidden, allHidden: setHidden(ctx.state.dir, id, hidden) });
     return;
   }
 
@@ -2187,45 +2263,6 @@ async function handleRequest(
     return;
   }
 
-  // POST /api/install — install bundled workflows into the project directory
-  if (method === "POST" && pathname === "/api/install") {
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { ids, overwrite } = parsed.value;
-    if (
-      !Array.isArray(ids) ||
-      ids.length === 0 ||
-      !(ids as unknown[]).every((i) => typeof i === "string")
-    ) {
-      json(res, 400, { error: 'Field "ids" must be a non-empty array of strings' });
-      return;
-    }
-    for (const id of ids as string[]) {
-      if (!isSafeId(id)) {
-        json(res, 400, {
-          error: `Invalid pipeline id "${id}": must be lowercase alphanumeric and hyphens only`,
-        });
-        return;
-      }
-    }
-    const doOverwrite = overwrite === true;
-    try {
-      const report = installWorkflow(
-        ids as string[],
-        ctx.bundledPipelinesDir,
-        ctx.projectDir,
-        doOverwrite
-      );
-      json(res, 200, report);
-    } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, root) });
-    }
-    return;
-  }
-
   // GET /api/environment — describe the launch-point context
   if (method === "GET" && pathname === "/api/environment") {
     const skillsSubdir = join(ctx.skillsBase, "skills");
@@ -2281,8 +2318,6 @@ async function handleRequest(
       pipelinesDir: ctx.pipelinesDir,
       port: ctx.boundPort,
       profile,
-      installed: listInstalled(ctx.projectDir),
-      available: listAvailable(ctx.bundledPipelinesDir),
       skills,
       agents,
     });
@@ -2320,7 +2355,13 @@ async function handleRequest(
       return;
     }
     try {
-      const bundle = exportBundle(id, owner.layer.pipelinesDir);
+      // The closure is resolved through the merged view, so a parent that
+      // mounts a child owned by another layer exports that child too (D13/D16).
+      const bundle = exportBundle(
+        id,
+        owner.layer.pipelinesDir,
+        (nestedId) => ctx.catalog.entries.get(nestedId)?.filePath
+      );
       const yamlText = stringifyBundle(bundle);
       res.writeHead(200, {
         "Content-Type": "application/x-yaml",
@@ -2340,16 +2381,25 @@ async function handleRequest(
       json(res, 400, { error: "Malformed JSON body" });
       return;
     }
-    const { bundle: bundleText, overwrite } = parsed.value;
+    const { bundle: bundleText, overwrite, target } = parsed.value;
     if (typeof bundleText !== "string") {
       json(res, 400, { error: 'Field "bundle" must be a string' });
       return;
     }
+    if (target !== undefined && target !== "user" && target !== "repo") {
+      json(res, 400, { error: 'Field "target" must be "user" or "repo"' });
+      return;
+    }
+    // FR-027: the target layer moves, the guards do not — the allowlist, the
+    // normalisation gate and the realpath containment are all measured against
+    // whichever root is chosen here.
+    const targetRoot =
+      target === "repo" ? repoCanonRoot(ctx.projectDir) : userLibraryRoot(process.env);
     const doOverwrite = overwrite === true;
     try {
       const bundle = parseBundle(bundleText);
-      const report = importBundle(bundle, ctx.projectDir, doOverwrite);
-      json(res, 200, report);
+      const report = importBundle(bundle, targetRoot, doOverwrite);
+      json(res, 200, { ...report, target: target === "repo" ? "repo" : "user", root: targetRoot });
     } catch (err) {
       json(res, 422, { error: safePath((err as Error).message, root) });
     }
@@ -2468,7 +2518,7 @@ async function handleRequest(
     const doOverwrite = bodyParsed.ok && bodyParsed.value.overwrite === true;
     try {
       const bundle = parseBundle(readFileSync(templatePath, "utf8"));
-      const report = importBundle(bundle, ctx.projectDir, doOverwrite);
+      const report = importBundle(bundle, repoCanonRoot(ctx.projectDir), doOverwrite);
       json(res, 200, report);
     } catch (err) {
       json(res, 422, { error: safePath((err as Error).message, root) });
