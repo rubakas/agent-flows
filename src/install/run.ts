@@ -10,16 +10,12 @@
 //          Use --overwrite-installed to replace them.
 // list:    shows which workflows are installed and which are available.
 
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
+import { bundledPipelinesDir as resolveBundledPipelinesDir } from "../packageRoot.js";
 import { resolveProjectState } from "../runtime/projectState.js";
 import { installWorkflow, listAvailable, listInstalled } from "./install.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const repoRoot = join(__dirname, "..", "..");
-const bundledPipelinesDir = join(repoRoot, "pipelines");
+const bundledPipelinesDir = resolveBundledPipelinesDir();
 
 const [, , subcommand, ...rest] = process.argv;
 

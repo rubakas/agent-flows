@@ -1,14 +1,12 @@
 import { existsSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { listPipelines, loadPipeline } from "../../canon/load.js";
+import { bundledPipelinesDir } from "../../packageRoot.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-// When running via tsx (source), __dirname is src/bindings/mastra.
-// Bundled pipelines live three directories up, then pipelines/.
-export const BUNDLED_PIPELINES_DIR = join(__dirname, "..", "..", "..", "pipelines");
+// Resolved from the package root (spec 038 D5) so the same code is correct
+// under tsx from src/ and compiled from dist/, and under a global install.
+export const BUNDLED_PIPELINES_DIR = bundledPipelinesDir();
 
 export interface LoadError {
   file: string;
