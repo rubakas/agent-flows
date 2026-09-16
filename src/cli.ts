@@ -9,6 +9,7 @@
 //   doctor               run preflight checks
 //   serve [--port N] [--db PATH]
 //                        start the HTTP daemon
+//   stop [--all]         stop this project's daemon (or every project's)
 //   mcp                  start the MCP server
 //   list                 list installed/available workflows
 //   install [--overwrite-installed] [<id>...]
@@ -38,7 +39,16 @@ function src(...parts: string[]): string {
   return join(__dirname, ...parts.slice(0, -1), base + _ext);
 }
 
-const VALID_VERBS = ["doctor", "serve", "mcp", "list", "install", "validate", "generate"] as const;
+const VALID_VERBS = [
+  "doctor",
+  "serve",
+  "stop",
+  "mcp",
+  "list",
+  "install",
+  "validate",
+  "generate",
+] as const;
 const VALID_GENERATE_TARGETS = ["claude"] as const;
 
 function usage(): void {
@@ -47,6 +57,7 @@ function usage(): void {
   console.log("Verbs:");
   console.log("  doctor                        run preflight checks");
   console.log("  serve [--port N] [--db PATH]  start the HTTP daemon");
+  console.log("  stop [--all]                  stop this project's daemon (or every project's)");
   console.log("  mcp                           start the MCP server");
   console.log("  list                          list installed/available workflows");
   console.log("  install [--overwrite-installed] [<id>...]");
@@ -95,6 +106,10 @@ switch (verb) {
 
   case "serve":
     runModule(src("serve", "server.ts"), rest);
+    break;
+
+  case "stop":
+    runModule(src("serve", "stop.ts"), rest);
     break;
 
   case "mcp":
