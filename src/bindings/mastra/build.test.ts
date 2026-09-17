@@ -1220,6 +1220,105 @@ describe("buildPipelineWorkflow — loop terminates on check.passed (the converg
   });
 });
 
+// ── Regression: a run must not succeed over a tree the check rejects ─────────
+//
+// build.yaml's shape: a loop that may exit without converging, then a terminal
+// `required` check. An exhausted loop is not an error (buildLoopStep records
+// converged: false and carries on), and a plain check step records passed: false
+// and carries on too — so before `required` existed the run below reported
+// success while the check that just ran had failed.
+
+const VERIFY_AFTER_LOOP_PIPELINE: LoadedPipeline = {
+  def: {
+    id: "verify-after-loop",
+    version: 1,
+    description: "Loop that never converges, followed by a required verification check",
+    inputs: [],
+    steps: [
+      {
+        id: "converge",
+        kind: "loop",
+        pipeline: "check-body-fail",
+        maxIterations: 2,
+        until: "test.passed",
+      },
+      {
+        id: "verify",
+        kind: "check",
+        command: "echo tree-is-broken; exit 1",
+        required: true,
+        dependsOn: ["converge"],
+      },
+    ],
+  },
+  prompts: {},
+  bodies: { converge: CHECK_LOOP_BODY_FAIL },
+};
+
+const VERIFY_PASSES_PIPELINE: LoadedPipeline = {
+  def: {
+    ...VERIFY_AFTER_LOOP_PIPELINE.def,
+    id: "verify-after-loop-pass",
+    steps: [
+      VERIFY_AFTER_LOOP_PIPELINE.def.steps[0],
+      { ...VERIFY_AFTER_LOOP_PIPELINE.def.steps[1], command: "exit 0" },
+    ],
+  },
+  prompts: {},
+  bodies: { converge: CHECK_LOOP_BODY_FAIL },
+};
+
+describe("buildPipelineWorkflow — required check fails the run (unconverged loop)", () => {
+  it("a loop that exits unconverged ends in a failing run, not a successful one", async () => {
+    const { storage, store, cleanup } = makeTestFixture("verify-after-loop-fail");
+    try {
+      const wf = buildPipelineWorkflow(VERIFY_AFTER_LOOP_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+      });
+      const mastra = new Mastra({
+        storage,
+        workflows: { [VERIFY_AFTER_LOOP_PIPELINE.def.id]: wf },
+      });
+      const run = await mastra.getWorkflow(VERIFY_AFTER_LOOP_PIPELINE.def.id).createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(
+        r1.status,
+        "failed",
+        "a required check that fails must fail the run, not be recorded and ignored"
+      );
+      // Mastra hands back an Error-shaped object; RunService reads .message off it
+      // (runService.ts:992-997) and that string is what the operator sees.
+      const message = (r1 as { error?: { message?: string } }).error?.message ?? "";
+      assert.match(message, /Step "verify"/u, "the error must name the failing step");
+      assert.match(message, /exit 1/u, "the error must carry the exit code");
+      assert.match(message, /tree-is-broken/u, "the error must quote the check output");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("the same pipeline succeeds when the verification check passes", async () => {
+    const { storage, store, cleanup } = makeTestFixture("verify-after-loop-pass");
+    try {
+      const wf = buildPipelineWorkflow(VERIFY_PASSES_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+      });
+      const mastra = new Mastra({ storage, workflows: { [VERIFY_PASSES_PIPELINE.def.id]: wf } });
+      const run = await mastra.getWorkflow(VERIFY_PASSES_PIPELINE.def.id).createRun();
+      const r1 = await run.start({ inputData: {} });
+
+      assert.equal(r1.status, "success", "a passing required check must not fail the run");
+      const outcome = (r1.result as Record<string, unknown>).converge as { converged: boolean };
+      assert.equal(outcome.converged, false, "the loop still reports non-convergence");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 // ── Regression: nested-namespace assemble ─────────────────────────────────────
 //
 // When spec-creation is embedded as a `plan` step in a parent pipeline,

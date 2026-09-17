@@ -2013,6 +2013,114 @@ describe("cycle-dev.yaml — build step uses plan.correct.revise (spec 018)", ()
   });
 });
 
+describe("check step — required flag validation", () => {
+  const loadYaml = (yaml: string) =>
+    loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+    });
+
+  it("accepts required: true on a check step", () => {
+    const { def } = loadYaml(`
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: verify
+    kind: check
+    command: "{{checkCommand}}"
+    required: true
+`);
+    assert.equal(def.steps[0].required, true);
+  });
+
+  it("throws on a non-boolean required", () => {
+    assert.throws(
+      () =>
+        loadYaml(`
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: verify
+    kind: check
+    command: echo hi
+    required: "yes"
+`),
+      /verify.*required must be a boolean/u
+    );
+  });
+
+  it("throws on required set on a non-check step — a silently ignored gate flag is worse than none", () => {
+    assert.throws(
+      () =>
+        loadYaml(`
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: g1
+    kind: gate
+    message: ok?
+    required: true
+`),
+      /g1.*cannot set required/u
+    );
+  });
+});
+
+// ── build.yaml — terminal verification check ─────────────────────────────────
+//
+// A live self-run finished with status "succeeded" while the tree failed
+// `pnpm check` on formatting: build-round's `fix` step edits after the `test`
+// check it converged on, and those edits were never checked again. The loop
+// cannot close that hole (the canon has no conditionals), so build.yaml ends
+// with a required check of the project's own command.
+
+describe("build.yaml — terminal verification check (regression: success over a failing tree)", () => {
+  const buildYaml = join(repoRoot, "pipelines", "build.yaml");
+
+  it("the last declared step is a required check of {{checkCommand}} depending on review", () => {
+    const doc = parse(readFileSync(buildYaml, "utf8")) as {
+      steps: Record<string, unknown>[];
+    };
+    const last = doc.steps[doc.steps.length - 1];
+    assert.equal(last.id, "verify", "build.yaml must end with the verification step");
+    assert.equal(last.kind, "check");
+    assert.equal(
+      last.command,
+      "{{checkCommand}}",
+      "the final word must be the project's own check command, not a weaker one"
+    );
+    assert.equal(
+      last.required,
+      true,
+      "without required: true a failing check is recorded in the context and ignored — the run still succeeds"
+    );
+    assert.deepEqual(
+      last.dependsOn,
+      ["review"],
+      "verification depends on the review so the audit still reports findings on a broken tree"
+    );
+  });
+
+  it("nothing runs after the verification check — it is alone in the last level", () => {
+    const { def } = loadPipeline(buildYaml);
+    const levels = pipelineLevels(def.steps);
+    assert.deepEqual(
+      levels[levels.length - 1],
+      ["verify"],
+      "verify must be the last thing the run does"
+    );
+    assert.ok(
+      def.steps.every((s) => !(s.dependsOn ?? []).includes("verify")),
+      "no step may depend on verify"
+    );
+  });
+});
+
 describe("spec 018 — negative: with-value typo is caught by placeholder validation", () => {
   // `with` *values* are not validated by nest.ts (it only checks keys); the
   // placeholder check in load.ts is what catches a dangling reference.

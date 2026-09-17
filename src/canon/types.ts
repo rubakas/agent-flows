@@ -94,7 +94,8 @@ export interface StepDef {
   };
   /**
    * For `kind: "check"` steps: the shell command to execute via `/bin/sh -c`.
-   * A non-zero exit code yields `passed: false`; it is not an error — the run continues.
+   * A non-zero exit code yields `passed: false`; it is not an error — the run continues,
+   * unless the step sets `required: true`, which turns a non-zero exit into a run failure.
    * Required and non-empty. Cannot be combined with `prompt`, `role`, `model`, `schema`,
    * or `permissions`.
    */
@@ -112,6 +113,19 @@ export interface StepDef {
    * rejected on all other step kinds.
    */
   env?: string[];
+  /**
+   * For `kind: "check"` steps only: when true, a non-zero exit fails the whole run
+   * instead of being recorded as `passed: false` and carried on in the context.
+   *
+   * The default (absent or false) is the loop-friendly behaviour: `build-round`'s
+   * `test` step must be allowed to fail so the loop can iterate on it. A terminal
+   * verification check — the last word on whether the tree the run produced is
+   * acceptable — must do the opposite, or the run reports success over a broken tree.
+   *
+   * Must be a boolean; rejected on every step kind other than `check` (FR-004 style
+   * loud load-time validation: a flag that is silently ignored is worse than absent).
+   */
+  required?: boolean;
   /**
    * For `kind: "export-spec"` steps: the directory path to write the Spec Kit
    * `spec.md` file into. The directory is created if it does not exist.

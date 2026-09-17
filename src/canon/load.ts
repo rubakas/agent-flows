@@ -16,7 +16,7 @@ const RE_INPUT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"] as const;
 
 /** Fields that are illegal on every step kind OTHER than "check". */
-const NON_CHECK_FORBIDDEN = ["env"] as const;
+const NON_CHECK_FORBIDDEN = ["env", "required"] as const;
 
 /**
  * Rejects a deadline that is not a positive whole number of milliseconds.
@@ -230,6 +230,13 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
               `Step "${step.id}": command contains unknown placeholder "{{${ph}}}" — only {{checkCommand}} is supported`
             );
           }
+        }
+        // Validate the optional required flag: a terminal check that fails the run.
+        const requiredField = (step as unknown as Record<string, unknown>).required;
+        if (requiredField !== undefined && typeof requiredField !== "boolean") {
+          throw new Error(
+            `Step "${step.id}": required must be a boolean; got ${JSON.stringify(requiredField)}`
+          );
         }
         // Validate the optional env allowlist field.
         const envField = (step as unknown as Record<string, unknown>).env;

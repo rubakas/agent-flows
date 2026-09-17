@@ -39,6 +39,20 @@ export const DEFAULT_CHECK_COMMAND =
   "pnpm lint && pnpm typecheck && pnpm format:check && pnpm test";
 
 /**
+ * How many trailing output lines a failing `required` check quotes in the error it
+ * throws. The error travels in API responses (spec 023 FR-009), so it is capped for
+ * the same reason the dirty-workspace listing is: check output is unbounded.
+ */
+const CHECK_ERROR_OUTPUT_LINES = 20;
+
+/** Returns the last `max` lines of `text`, prefixed with a marker when truncated. */
+function lastLines(text: string, max: number): string {
+  const lines = text.trimEnd().split("\n");
+  if (lines.length <= max) return lines.join("\n");
+  return `…\n${lines.slice(lines.length - max).join("\n")}`;
+}
+
+/**
  * Runs `git status --porcelain` in cwd via spawnSync and returns a human-readable
  * message describing the workspace state. Called from the daemon process (not a
  * sandboxed step) when a write step fails, so the operator knows what was left behind.
@@ -610,6 +624,15 @@ export function buildCheckStep(
         finishStepLog("succeeded");
       } else {
         finishStepLog("failed", `exit ${result.exitCode}`);
+        // A required check is the run's last word on the tree it produced: a
+        // non-zero exit must fail the run, not be recorded in the context and
+        // ignored. Cancellation is not a check failure — it is reported above.
+        if (step.required === true) {
+          throw new Error(
+            `Step "${step.id}": required check failed (exit ${result.exitCode}): ${resolvedCommand}\n` +
+              lastLines(result.output, CHECK_ERROR_OUTPUT_LINES)
+          );
+        }
       }
       return { ...rawCtx, [step.id]: result };
     },
