@@ -33,3 +33,14 @@ steps:
     with:
       plan: plan
     dependsOn: [converge]
+  # The run's last word on the tree as it stands. The loop cannot provide it: its
+  # repair step runs after the check it converged on (build-round.yaml), and an
+  # exhausted loop reports non-convergence without failing anything. `required`
+  # makes a non-zero exit fail the run, so nothing runs after a broken tree.
+  # It depends on `review`, not on `converge`, so the audit still produces its
+  # findings when the tree is broken — that is exactly when they are worth reading.
+  - id: verify
+    kind: check
+    command: "{{checkCommand}}"
+    required: true
+    dependsOn: [review]

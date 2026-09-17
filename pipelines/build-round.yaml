@@ -6,13 +6,15 @@ steps:
   - id: test
     kind: check
     # Command is resolved from .agent-flows/config.json (checkCommand key) or
-    # defaults to: pnpm lint && pnpm typecheck && pnpm test
-    # format:check is excluded: the fix step has no shell access, so a prettier
-    # failure would consume an LLM iteration on whitespace instead of real defects.
+    # defaults to: pnpm lint && pnpm typecheck && pnpm format:check && pnpm test
+    # format:check is part of the gate: a gate weaker than the project's own check
+    # script converges on code the project rejects — a live self-run did exactly
+    # that on unformatted files when the default omitted it (spec 023 FR-003).
     command: "{{checkCommand}}"
-  # Known inefficiency: fix also runs when test has already passed on the loop's
-  # final passing iteration. Without conditionals in the canon this is unavoidable;
-  # build-fix.md instructs the model to change nothing in that case.
+  # fix also runs on the loop's final passing iteration: the canon has no
+  # conditionals, so a step cannot be skipped on the strength of a sibling's
+  # result. Its edits are therefore unchecked here, which is why build.yaml runs
+  # a required verification check after the loop.
   - id: fix
     kind: llm
     role: worker
