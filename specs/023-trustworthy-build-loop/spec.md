@@ -1,11 +1,11 @@
 # 023. Trustworthy build loop
 
-| Field        | Value                        |
-| ------------ | ---------------------------- |
-| Feature Name | Trustworthy build loop       |
-| Branch       | `023-trustworthy-build-loop` |
-| Status       | Draft                        |
-| Created      | 2026-09-07                   |
+| Field        | Value                                                                    |
+| ------------ | ------------------------------------------------------------------------ |
+| Feature Name | Trustworthy build loop                                                   |
+| Branch       | `023-trustworthy-build-loop`                                             |
+| Status       | Implemented — amended 2026-09-17 (required check, terminal verification) |
+| Created      | 2026-09-07                                                               |
 
 > **Note:** FR-001 and FR-002 (per-step duration limits) are superseded by `specs/024-progress-watchdog/spec.md`. The owner requires that steps run with **no duration limit** — a local model may legitimately need hours — with liveness guarded instead by a progress watchdog: event-stream silence, loop detection, and a cost ceiling. The rest of this spec (the convergence command, its portability, and partial-state reporting) stands unchanged.
 
@@ -79,3 +79,62 @@ Two structural facts constrain the design, both verified:
 6. **No-revert guarantee.** After case 5, the modified file's bytes are identical before and after failure handling — the daemon read the workspace state but wrote nothing.
 7. **`.agent-flows` edit-deny.** With `contentsAccess` set, the constructed `--disallowedTools` value contains `Edit(**/.agent-flows/**)` and does not contain `Read(**/.agent-flows/**)` (assert against the args captured by the injected spawn, alongside the existing pattern tests).
 8. **Step id end-to-end.** A timeout in a non-write llm step surfaces through `waitForSettled` and `GET /api/runs/:id` as `Step "<id>": StepTimeoutError: …` with no workspace suffix — FR-007 applies to every step, FR-008 only to write steps.
+
+## Amendment 2026-09-17 — a required check, and a terminal verification after the loop
+
+The convergence gate this spec built (Design B) still could not fail the run, for two independent
+reasons found by running the project's own `build` pipeline against a slice of spec 039
+(`specs/039-one-page-many-projects/spec.md`) and checking the result by hand: the run reported
+success while the working tree failed `pnpm check` on formatting.
+
+**First cause.** A check step's non-zero exit was never an error — FR-005's own doc comment said so
+in as many words ("it is not an error — the run continues") — and `buildLoopStep`'s outcome step
+(`buildSteps.ts`) records `{ converged: false, iterations }` and returns normally when a loop
+exhausts `maxIterations` without converging. Both signals are red; neither raises. A run built on
+`until: test.passed` (FR-005) could report `success` over a tree that never passed.
+
+**Second cause.** `build-round.yaml`'s `fix` step runs after its `test` check (FR-005), so on the
+loop's last iteration `fix` edits the tree after the gate that iteration already passed, and nothing
+checks it again. The pipeline's own comment called this a known inefficiency and relied on the fix
+prompt changing nothing when the check had already passed — relying on a prompt to keep a gate
+honest is not a gate.
+
+**D. A `required` flag on `check` steps, so a failing check can fail the run.** `StepDef.required?:
+boolean` (`types.ts`) is valid only on `kind: "check"`; load-time validation rejects it on every
+other step kind, including `llm` and `loop`, by the same forbidden-field mechanism `env` already
+uses (`NON_CHECK_FORBIDDEN`, `load.ts`) — a flag that would be silently ignored is worse than one
+that is loudly refused. A non-boolean value is also a load error. At runtime (`buildCheckStep`,
+`buildSteps.ts`), a failing check with `required: true` throws `Step "<id>": required check failed
+(exit <code>): <command>` followed by the last 20 lines of the check's output (`lastLines`,
+`CHECK_ERROR_OUTPUT_LINES` — the same 20-line cap FR-008 uses for the dirty-workspace listing, for
+the same reason: the error string travels in API responses and check output is unbounded). A
+cancelled required check does not throw — cancellation is reported separately and is not a check
+failure. The ordinary `test` check inside `build-round.yaml` deliberately stays non-required: the
+loop's whole purpose is to let that check fail and iterate on it (Design B, FR-005); making it
+required would fail the run on the very first non-passing iteration and defeat the loop.
+
+**E. `build.yaml` gains a terminal, required verification step.** A new `verify` step —
+`kind: check`, `command: "{{checkCommand}}"`, `required: true` — is appended to `build.yaml` after
+`review` (the existing `audit` step). It depends on `review`, not on `converge` directly, so the
+audit still runs and produces its findings even when the tree is broken — an audit of broken code is
+exactly when it is worth reading. `verify` is the run's last word on the tree the loop and the audit
+both leave behind: the loop cannot provide that word itself (its `fix` step edits after its own
+check, per the second cause above), so `build.yaml` provides it once, after everything else has run.
+
+### Functional Requirements (amendment)
+
+| ID     | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| FR-010 | `StepDef.required?: boolean` (`types.ts`) is accepted only on `kind: "check"`; load-time validation throws `Step "<id>": required must be a boolean; got <value>` for a non-boolean, and `Step "<id>": <kind> step cannot set required` when declared on any other step kind. When `true` and the check's shell command exits non-zero, `buildCheckStep` throws `Step "<id>": required check failed (exit <code>): <command>` plus the last 20 lines of the check's output, failing the whole run instead of recording `passed: false` in the run context and continuing. Absent or `false` is the unchanged FR-005 behaviour. |
+| FR-011 | `pipelines/build.yaml` ends with a step `id: verify`, `kind: check`, `command: "{{checkCommand}}"`, `required: true`, `dependsOn: [review]`. A build run whose loop exhausts `maxIterations` without converging, or whose `fix` step's final-iteration edits leave the tree failing the project's own check command, ends with run status `failed`, not `success`. `build-round.yaml`'s own `test` check is unchanged by this amendment and stays non-required.                                                                                                                                                                |
+
+### Out of scope (amendment)
+
+- Making `build-round.yaml`'s `test` check itself `required` — it must be allowed to fail so the loop can iterate; only the new terminal `verify` step is required.
+- Reordering `verify` ahead of `review` — the audit is deliberately run on the tree as the loop and its last `fix` left it, broken or not.
+
+### Verification (amendment)
+
+- **V9.** `canon.test.ts` ("check step — required flag validation"): `required: true` on a `check` step loads and round-trips; a non-boolean `required` is a load error naming the step; `required: true` on a `gate` step is a load error naming the step. Mutation: comment out the validation branch → the third case stops throwing → red.
+- **V10.** `canon.test.ts` ("build.yaml — terminal verification check"): the last declared step in `pipelines/build.yaml` is `id: verify`, `kind: check`, `command: "{{checkCommand}}"`, `required: true`, `dependsOn: ["review"]` — read directly off the shipped YAML, not a fixture.
+- **V11.** `build.test.ts` ("buildPipelineWorkflow — required check fails the run (unconverged loop)"): a loop that exhausts `maxIterations` unconverged, followed by a required check that exits 1, ends the run with status `failed` and an error naming the step, the exit code, and the check's output. The same pipeline with the verification check passing ends with status `success` while the loop's own outcome still reports `converged: false` — proving the two signals are independent and the required check is the one that decides the run.

@@ -366,6 +366,17 @@ triggers regeneration) output path from `dirname(pipelinesDir)` rather than the 
 package-root/project-dir helper `write-cli.ts` now uses. Worth folding in whenever that code path is
 next touched, so the fix lives in one place.
 
+**Running the build pipeline on the project itself surfaced a gate that could not fail** (against a
+slice of spec 039, checked by hand: the run reported success while `pnpm check` failed on
+formatting). Two independent causes, both in the step runtime: a failing `check` step was never an
+error by design, and an unconverged loop's outcome step records `converged: false` and returns
+normally rather than raising. Fixed by spec 023's 2026-09-17 amendment — a `required` flag on
+`check` steps and a terminal `verify` step in `build.yaml`. Worth naming alongside "Standing working
+rules" above (2026-09-13: "Two green checks were found that could not turn red; one of them was
+guarding another"): the same falsifiability trap — a gate declared but unable to turn red — keeps
+recurring in different layers of this codebase. Treat "what would make this check fail?" as a
+standing question for every new gate, not a one-time audit.
+
 ## Immediate next steps
 
 1. Implement spec 026, starting with cancellation (FR-001 … FR-007) — note: `cancel_run` /
