@@ -171,6 +171,8 @@ export interface RunInvocation {
   pipeline: string;
   inputs: Record<string, unknown>;
   models?: unknown;
+  /** The provider profile id the run was started under, when the caller named one. */
+  provider?: string;
   gateMode: GateMode;
   artifactPath?: string;
   /** ISO-8601 timestamp of the start() call. */
@@ -295,6 +297,12 @@ interface RunRecord {
   settledAt?: string;
   /** Run-level gate mode (FR-001). */
   gateMode: GateMode;
+  /**
+   * The provider profile this run was started under, when the caller named one.
+   * Set once in start(); never mutated. Provenance reads it rather than the
+   * daemon's startup profile, which is wrong for any run that chose its own.
+   */
+  readonly profile?: ProviderProfile;
   /** Set once in start(); never mutated (spec 033 FR-016). */
   readonly invocation: RunInvocation;
   /** Per-step states accumulated by the record-level watch (FR-006). */
@@ -426,6 +434,13 @@ export class RunService {
        * invocation (spec 033 FR-016) so the run can be reproduced as issued.
        */
       artifactPath?: string;
+      /**
+       * The profile this run was started under, resolved from the caller's
+       * `provider` field. Provenance must name the profile the run actually
+       * uses; the instance-level profile is the daemon's startup default and is
+       * wrong for any run that named its own.
+       */
+      provider?: ProviderProfile;
     }
   ): Promise<StartResult> {
     const gateMode: GateMode = opts?.gateMode ?? "manual";
@@ -445,19 +460,20 @@ export class RunService {
     const transportPerStep = this.computeTransportPerStep(
       opts?.pipelineSteps,
       wfInput.models,
-      this.judgeDeps?.profile ?? this.standaloneProfile,
+      opts?.provider ?? this.judgeDeps?.profile ?? this.standaloneProfile,
       this.judgeDeps?.registry ?? this.standaloneRegistry
     );
 
     // FR-016: the invocation is the run as the operator issued it. `models` is
     // merged into wfInput for the workflow, so it is split back out here rather
     // than left inside the inputs the UI offers for replay.
-    const { models, ...inputsOnly } = wfInput;
+    const { models, provider, ...inputsOnly } = wfInput;
     const createdAt = new Date();
     const invocation: RunInvocation = {
       pipeline: pipelineId,
       inputs: inputsOnly,
       ...(models !== undefined ? { models } : {}),
+      ...(typeof provider === "string" ? { provider } : {}),
       gateMode,
       ...(opts?.artifactPath !== undefined ? { artifactPath: opts.artifactPath } : {}),
       startedAt: createdAt.toISOString(),
@@ -477,6 +493,7 @@ export class RunService {
       settledPromise,
       settle,
       transportPerStep,
+      ...(opts?.provider !== undefined ? { profile: opts.provider } : {}),
       ...(opts?.chainArtifactDir !== undefined ? { chainArtifactDir: opts.chainArtifactDir } : {}),
     };
     this.registry.set(runId, record);
@@ -629,12 +646,38 @@ export class RunService {
    * global, so a run that never clears it leaks its prompts for the daemon's
    * lifetime, and a run cleared without copying loses them from its own state.
    */
+  /**
+   * `transportPerStep` as computed at start, corrected for any step a failover
+   * moved onto another provider (spec 039).
+   *
+   * The start-time map is what the run PLANNED to use; a step that failed over
+   * reports the provider that actually answered through the same per-run
+   * introspection channel its prompt travels on. Read-through for the same
+   * reason `mergedSteps` is: the record only takes ownership at settlement.
+   */
+  private mergedTransportPerStep(record: RunRecord): Record<string, StepProvenance> {
+    const recorded = getStepIntrospection(record.run.runId);
+    if (!recorded) return record.transportPerStep;
+    const merged: Record<string, StepProvenance> = { ...record.transportPerStep };
+    for (const [stepId, info] of Object.entries(recorded)) {
+      const actual = info.actual;
+      if (!actual) continue;
+      merged[stepId] = {
+        transport: actual.transport,
+        modelId: actual.modelId,
+        ...(actual.model !== undefined ? { model: actual.model } : {}),
+      };
+    }
+    return merged;
+  }
+
   private finalizeSettlement(record: RunRecord): void {
     // First terminal transition wins: cancel() resumes a gate, so a second
     // settlement can arrive afterwards and would otherwise restamp the run with
     // a later time than the operator's decision.
     record.settledAt ??= new Date().toISOString();
     record.steps = this.mergedSteps(record);
+    record.transportPerStep = this.mergedTransportPerStep(record);
     clearRun(record.run.runId);
     closeRunLog(record.run.runId);
   }
@@ -1092,7 +1135,13 @@ export class RunService {
   private async runJudgeCore(
     pipelineId: string,
     gateStepId: string,
-    payload: { message?: string; spec?: unknown } | undefined
+    payload: { message?: string; spec?: unknown } | undefined,
+    /**
+     * The profile the RUN was started under. Preferred over the judge's own
+     * default: a run pinned to one provider must not have its gates judged by
+     * another, which is what happened while this argument did not exist.
+     */
+    runProfile?: ProviderProfile
   ): Promise<
     | {
         verdict: "approve" | "reject";
@@ -1107,7 +1156,7 @@ export class RunService {
     const judgePromptText = this.buildJudgePrompt(pipelineId, gateStepId, payload);
 
     const { runner, registry, profile, projectDir } = this.judgeDeps;
-    const activeProfile = profile ?? getActiveProfile();
+    const activeProfile = runProfile ?? profile ?? getActiveProfile();
     const judgeModelId = activeProfile.roles.reasoner;
     const entry = registry.resolve(judgeModelId);
     const isApiTransport = entry.transport === "api";
@@ -1169,7 +1218,7 @@ export class RunService {
     const payload = record.suspendPayload as
       { message?: string; spec?: unknown; manualOnly?: boolean } | undefined;
 
-    const result = await this.runJudgeCore(record.pipelineId, gateStepId, payload);
+    const result = await this.runJudgeCore(record.pipelineId, gateStepId, payload, record.profile);
 
     if ("error" in result) {
       this.degradeToManual(record, result.error);
@@ -1361,11 +1410,12 @@ export class RunService {
   }
 
   /**
-   * Returns the active provider profile id for provenance recording.
-   * Falls back through: judgeDeps.profile → standaloneProfile → getActiveProfile() → "unknown".
+   * Returns the provider profile id for provenance recording.
+   * Falls back through: the run's own profile → judgeDeps.profile →
+   * standaloneProfile → getActiveProfile() → "unknown".
    */
-  private getProfileId(): string {
-    const profile = this.judgeDeps?.profile ?? this.standaloneProfile;
+  private getProfileId(record?: RunRecord): string {
+    const profile = record?.profile ?? this.judgeDeps?.profile ?? this.standaloneProfile;
     if (profile) return profile.id;
     try {
       return getActiveProfile().id;
@@ -1395,9 +1445,11 @@ export class RunService {
     const settledAt = new Date().toISOString();
     const provenance: ArtifactProvenance = {
       pipelineId: record.pipelineId,
-      profileId: this.getProfileId(),
+      profileId: this.getProfileId(record),
       // Shallow-copy so future step additions don't mutate the written value.
-      transportPerStep: { ...record.transportPerStep },
+      // Read through the introspection channel: a gate suspension persists an
+      // artifact without finalizeSettlement having taken ownership yet.
+      transportPerStep: this.mergedTransportPerStep(record),
       startedAt: record.createdAt.toISOString(),
       settledAt,
     };
@@ -1430,7 +1482,7 @@ export class RunService {
       await upsertManifestEntry(artifactDir, record.createdAt.toISOString(), {
         stageId: record.pipelineId,
         artifactPath,
-        profileId: this.getProfileId(),
+        profileId: this.getProfileId(record),
         status: record.status,
         settledAt,
         ...(record.error !== undefined ? { error: record.error } : {}),

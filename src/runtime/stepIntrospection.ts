@@ -10,6 +10,23 @@
 // Leaf module by construction: it imports nothing from runtime, serve or
 // bindings, so both sides can depend on it without an import cycle.
 
+/**
+ * The provider that ACTUALLY answered a step, recorded only when a failover
+ * moved it off the profile the run was started under (spec 039).
+ *
+ * Structurally a `StepProvenance` plus the profile id; declared here rather than
+ * imported so this module stays a leaf and both sides can depend on it.
+ */
+export interface StepActualProvider {
+  /** Fallback profile that answered, e.g. "openai". */
+  profileId: string;
+  transport: "cli" | "api";
+  /** Registry entry id, e.g. "codex" — an identifier, never a credential. */
+  modelId: string;
+  /** Human-readable model name from the registry entry. */
+  model?: string;
+}
+
 /** What one executing step records about how it was invoked (spec 033 FR-017). */
 export interface StepIntrospection {
   /** Rendered prompt text as sent to the model, including any schema suffix (llm steps). */
@@ -18,6 +35,8 @@ export interface StepIntrospection {
   command?: string;
   /** Resolved model: registry id plus transport (and CLI binary when there is one). */
   model?: string;
+  /** Present only when a failover moved the step onto another provider. */
+  actual?: StepActualProvider;
 }
 
 const runs = new Map<string, Record<string, StepIntrospection>>();

@@ -2505,3 +2505,53 @@ describe("RunService — step log file and decisions", () => {
     }
   });
 });
+
+// ── Spec 039: the auto gate judge follows the run's own profile ───────────────
+
+describe("spec 039: an auto gate is judged by the profile the run was started under", () => {
+  it("runJudgeCore resolves the reasoner from record.profile, not the daemon default", async () => {
+    const registry = new ModelRegistry([
+      stubEntry,
+      { id: "other-model", transport: "cli", cli: { bin: "codex" } },
+    ]);
+    const judged: string[] = [];
+    const deps: JudgeDeps = {
+      runner: async (entry) => {
+        judged.push(entry.id);
+        return '{"verdict":"approve","reason":"fine"}';
+      },
+      registry,
+      profile: stubProfile,
+      projectDir: "/tmp",
+      judgePrompt: "You are the gate judge.",
+    };
+
+    const mockRun: Partial<MockRun> & { runId: string; watchers: WatchCallback[] } = {
+      runId: "run-039-judge-profile",
+      watchers: [],
+      start: async () => suspendedResult("run-039-judge-profile"),
+      resume: async () => successResult(),
+      watch: (_cb: WatchCallback) => () => undefined,
+    };
+
+    const service = new RunService(makeMastra(mockRun as unknown as MockRun), deps);
+    await service.start(
+      "p",
+      {},
+      {
+        gateMode: "auto",
+        provider: {
+          id: "openai",
+          roles: { reasoner: "other-model", worker: "other-model", scout: "other-model" },
+        },
+      }
+    );
+    await service.waitForSettled("run-039-judge-profile");
+
+    assert.deepEqual(
+      judged,
+      ["other-model"],
+      "a run pinned to one provider must not have its gates judged by another"
+    );
+  });
+});

@@ -30,6 +30,7 @@ import {
 } from "./artifactStore.js";
 import { ensureProjectState, resolveProjectState } from "./projectState.js";
 import { RunService } from "./runService.js";
+import { recordStep } from "./stepIntrospection.js";
 import type { MastraLike } from "./runService.js";
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
@@ -545,6 +546,61 @@ describe("FR-002: per-run models override is recorded, not the profile default",
       tps["work-step"].modelId,
       "sonnet",
       "non-overridden step must still use the profile default"
+    );
+  });
+});
+
+describe("spec 039: provenance records the per-run provider, not the startup default", () => {
+  it("a run started under another profile records that profile's models", async () => {
+    const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
+    const runId = "run-tps-provider-001";
+    const pipelineId = "tps-provider-pipeline";
+    const mockRun = makeMockRun(runId, successResult());
+    // The daemon's startup profile maps reasoner→opus, worker→sonnet.
+    const service = new RunService(
+      makeMastra(mockRun),
+      undefined,
+      runsDir,
+      testProfileFull,
+      testRegistry
+    );
+
+    // The run names a different profile: every role resolves to haiku.
+    await service.start(
+      pipelineId,
+      { provider: "cheap" },
+      {
+        pipelineSteps: testSteps,
+        provider: { id: "cheap", roles: { reasoner: "haiku", worker: "haiku", scout: "haiku" } },
+      }
+    );
+    await flushAsync();
+
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
+    const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
+    const prov = parsed.provenance as Record<string, unknown>;
+    const tps = prov.transportPerStep as Record<string, StepProvenance>;
+
+    assert.equal(
+      tps["reason-step"].modelId,
+      "haiku",
+      "provenance must name the profile the run actually used"
+    );
+    assert.equal(tps["work-step"].modelId, "haiku");
+
+    assert.equal(
+      prov.profileId,
+      "cheap",
+      "provenance.profileId must name the run's profile, not the daemon default"
+    );
+
+    const invocation = parsed.invocation as Record<string, unknown>;
+    assert.equal(invocation.provider, "cheap", "the invocation must record the provider");
+    assert.equal(
+      (invocation.inputs as Record<string, unknown>).provider,
+      undefined,
+      "provider is a run control field, not a pipeline input"
     );
   });
 });
@@ -1243,5 +1299,49 @@ describe("writeRunArtifact / upsertManifestEntry — owner-only modes", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("spec 039: provenance names the provider that answered after a failover", () => {
+  it("a failed-over step's transportPerStep entry is corrected, the others are not", async () => {
+    const tmpDir = makeTmpDir();
+    const runsDir = makeStateRunsDir(tmpDir);
+    const runId = "run-tps-failover-001";
+    const pipelineId = "tps-failover-pipeline";
+    const mockRun = makeMockRun(runId, successResult());
+    const service = new RunService(
+      makeMastra(mockRun),
+      undefined,
+      runsDir,
+      testProfileFull,
+      testRegistry
+    );
+
+    // The step itself reports the crossing through the same per-run channel its
+    // prompt travels on; the run id is Mastra's and is known before start().
+    recordStep(runId, "work-step", {
+      model: "codex (cli:codex)",
+      actual: { profileId: "openai", transport: "cli", modelId: "codex", model: "gpt-5-codex" },
+    });
+
+    await service.start(pipelineId, {}, { pipelineSteps: testSteps });
+    await flushAsync();
+
+    const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
+    const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
+    const prov = parsed.provenance as Record<string, unknown>;
+    const tps = prov.transportPerStep as Record<string, StepProvenance>;
+
+    assert.equal(
+      tps["work-step"].modelId,
+      "codex",
+      "the artifact must name the provider that actually answered the step"
+    );
+    assert.equal(tps["work-step"].model, "gpt-5-codex");
+    assert.equal(
+      tps["reason-step"].modelId,
+      "opus",
+      "a step that did not fail over keeps its planned entry"
+    );
   });
 });
