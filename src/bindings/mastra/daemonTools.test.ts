@@ -16,6 +16,8 @@ import {
   cancelRun,
   getRunState,
   pollRunUntilTerminal,
+  runPipeline,
+  startRun,
 } from "./daemonTools.js";
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void;
@@ -300,5 +302,96 @@ describe("pollRunUntilTerminal — bounded wall clock (spec 033 review follow-up
 
     const out = await pollRunUntilTerminal("run-7", 1, 10_000);
     assert.deepEqual(out, { runId: "run-7", status: "succeeded", result: { ok: true } });
+  });
+});
+
+describe("start_run — starts the run without blocking on it", () => {
+  it("returns the runId and status 'running' after one POST, with no poll GET", async () => {
+    // Counted separately so a reintroduced poll is observable: the fake daemon
+    // answers a GET, so the only thing keeping the count at zero is start_run
+    // not asking for the run's state.
+    let posts = 0;
+    let gets = 0;
+    let seenBody = "";
+    handler = (req, res) => {
+      if (req.method === "GET") {
+        gets += 1;
+        respondJson(res, 200, { runId: "run-10", pipelineId: "develop", status: "succeeded" });
+        return;
+      }
+      posts += 1;
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        seenBody = Buffer.concat(chunks).toString("utf8");
+        respondJson(res, 200, { runId: "run-10" });
+      });
+    };
+
+    const out = await startRun({
+      pipeline: "develop",
+      inputs: { plan: "ship it" },
+      gateMode: "auto",
+      artifact_path: "/tmp/spec.json",
+    });
+
+    assert.deepEqual(out, { runId: "run-10", status: "running" });
+    assert.equal(posts, 1, "start_run must start the run exactly once");
+    assert.equal(gets, 0, "start_run must not poll — the caller drives progress with get_run");
+    assert.deepEqual(JSON.parse(seenBody), {
+      pipeline: "develop",
+      inputs: { plan: "ship it" },
+      gateMode: "auto",
+      artifactPath: "/tmp/spec.json",
+    });
+  });
+
+  it("surfaces the daemon's error when the POST is refused", async () => {
+    handler = (_req, res) => {
+      respondJson(res, 400, { error: "unknown pipeline 'nope'" });
+    };
+
+    const out = (await startRun({ pipeline: "nope" })) as { error: string };
+    assert.deepEqual(out, { error: "unknown pipeline 'nope'" });
+  });
+});
+
+describe("run_pipeline — still blocks until the run is terminal", () => {
+  it("polls after the POST and returns the terminal state", async () => {
+    let gets = 0;
+    handler = (req, res) => {
+      if (req.method === "GET") {
+        gets += 1;
+        respondJson(res, 200, {
+          runId: "run-11",
+          pipelineId: "develop",
+          status: gets === 1 ? "running" : "succeeded",
+          result: { ok: true },
+        });
+        return;
+      }
+      req.resume();
+      req.on("end", () => respondJson(res, 200, { runId: "run-11" }));
+    };
+
+    const out = await runPipeline({ pipeline: "develop", inputs: { plan: "ship it" } });
+    assert.deepEqual(out, { runId: "run-11", status: "succeeded", result: { ok: true } });
+    assert.equal(gets, 2, "run_pipeline must poll through 'running' and stop at 'succeeded'");
+  });
+
+  it("surfaces the daemon's error without polling when the POST is refused", async () => {
+    let gets = 0;
+    handler = (req, res) => {
+      if (req.method === "GET") {
+        gets += 1;
+        respondJson(res, 200, { runId: "run-12", pipelineId: "develop", status: "succeeded" });
+        return;
+      }
+      respondJson(res, 500, {});
+    };
+
+    const out = (await runPipeline({ pipeline: "develop" })) as { error: string };
+    assert.match(out.error, /HTTP 500/);
+    assert.equal(gets, 0, "a run that never started has nothing to poll");
   });
 });

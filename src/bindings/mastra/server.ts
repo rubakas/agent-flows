@@ -8,7 +8,7 @@ import { createTool } from "@mastra/core/tools";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
 import { resolveLayers } from "../../canon/layers.js";
-import { cancelRun, daemonFetch, getRunState, pollRunUntilTerminal } from "./daemonTools.js";
+import { cancelRun, daemonFetch, getRunState, runPipeline, startRun } from "./daemonTools.js";
 import { instructionsFor } from "./instructions.js";
 import { listPipelinesPayload } from "./listPipelines.js";
 import { resolveProjectDir } from "./projectDir.js";
@@ -54,58 +54,52 @@ const listPipelinesTool = createTool({
   },
 });
 
+// Both start tools take the same inputs — only what they do after the run is
+// started differs — so the schema is declared once.
+const startInputSchema = z.object({
+  pipeline: z.string().describe("Pipeline id (e.g. 'spec-creation')"),
+  inputs: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe("Pipeline input values (optional when artifact_path is provided)"),
+  models: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe("Optional per-step model overrides (step id → registry model id)"),
+  provider: z
+    .string()
+    .optional()
+    .describe(
+      "Optional provider profile id for this run (e.g. 'anthropic', 'openai'). Defaults to the daemon's configured profile."
+    ),
+  gateMode: z
+    .enum(["manual", "auto"])
+    .optional()
+    .describe(
+      'Gate evaluation mode. "manual" (default): gates wait for human approval. "auto": a judge model evaluates each gate; falls back to manual on judge failure.'
+    ),
+  artifact_path: z
+    .string()
+    .optional()
+    .describe(
+      "Optional path to a previous stage's artifact file. When provided, seeds this run's inputs from the artifact (spec 029 FR-010)."
+    ),
+});
+
+const startRunTool = createTool({
+  id: "start_run",
+  description:
+    "Start a pipeline run and return its runId immediately, without waiting for it to finish. Poll get_run with that runId to show step-by-step progress while the run is in flight. The run keeps going on the daemon whether or not you keep polling; use cancel_run to stop it.",
+  inputSchema: startInputSchema,
+  execute: (inputData) => startRun(inputData),
+});
+
 const runPipelineTool = createTool({
   id: "run_pipeline",
   description:
-    "Start a pipeline run. Returns immediately. Terminal statuses: 'awaiting_approval' (suspended at a gate, includes spec for review), 'succeeded' (completed successfully), 'rejected' (gate declined by human or judge), 'failed' (unexpected error), 'cancelled' (stopped by an operator via cancel_run).",
-  inputSchema: z.object({
-    pipeline: z.string().describe("Pipeline id (e.g. 'spec-creation')"),
-    inputs: z
-      .record(z.string(), z.string())
-      .optional()
-      .describe("Pipeline input values (optional when artifact_path is provided)"),
-    models: z
-      .record(z.string(), z.string())
-      .optional()
-      .describe("Optional per-step model overrides (step id → registry model id)"),
-    gateMode: z
-      .enum(["manual", "auto"])
-      .optional()
-      .describe(
-        'Gate evaluation mode. "manual" (default): gates wait for human approval. "auto": a judge model evaluates each gate; falls back to manual on judge failure.'
-      ),
-    artifact_path: z
-      .string()
-      .optional()
-      .describe(
-        "Optional path to a previous stage's artifact file. When provided, seeds this run's inputs from the artifact (spec 029 FR-010)."
-      ),
-  }),
-  execute: async (inputData) => {
-    const { pipeline, inputs, models, gateMode, artifact_path } = inputData;
-    const body = {
-      pipeline,
-      ...(inputs !== undefined ? { inputs } : {}),
-      ...(models ? { models } : {}),
-      ...(gateMode ? { gateMode } : {}),
-      ...(artifact_path ? { artifactPath: artifact_path } : {}),
-    };
-
-    // POST to the daemon — fails loudly if the daemon is not running.
-    const startRes = await daemonFetch("/api/runs", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!startRes.ok) {
-      const e = (await startRes.json().catch(() => ({}))) as { error?: string };
-      return { error: e.error ?? `daemon POST /api/runs returned HTTP ${startRes.status}` };
-    }
-    const { runId } = (await startRes.json()) as { runId: string };
-
-    // Poll until the run reaches a terminal status — preserves the blocking contract.
-    return pollRunUntilTerminal(runId);
-  },
+    "Start a pipeline run and block until it reaches a terminal status, which can take hours. Use start_run plus get_run instead when you want to show progress while the run is in flight. Terminal statuses: 'awaiting_approval' (suspended at a gate, includes spec for review), 'succeeded' (completed successfully), 'rejected' (gate declined by human or judge), 'failed' (unexpected error), 'cancelled' (stopped by an operator via cancel_run).",
+  inputSchema: startInputSchema,
+  execute: (inputData) => runPipeline(inputData),
 });
 
 const approveTool = createTool({
@@ -153,7 +147,7 @@ const approveTool = createTool({
 const getRunTool = createTool({
   id: "get_run",
   description:
-    "Get the current status and result of a pipeline run, including how it was invoked (pipeline, inputs, models, gate mode) and per-step progress (id, status, startedAt, finishedAt, output excerpt, error, resolved model for llm steps, command for check steps). Rendered prompts are not returned — read them from the run page or artifact. When the run is suspended at an approval gate, also returns the gate message and spec so the caller can review them before approving. When the run was cancelled, returns when it was cancelled and why.",
+    "Get the current status and result of a pipeline run. This is the progress companion to start_run: poll it while a run is in flight and its `steps` array carries each step's status and output excerpt as they arrive. Includes how it was invoked (pipeline, inputs, models, gate mode) and per-step progress (id, status, startedAt, finishedAt, output excerpt, error, resolved model for llm steps, command for check steps). Rendered prompts are not returned — read them from the run page or artifact. When the run is suspended at an approval gate, also returns the gate message and spec so the caller can review them before approving. When the run was cancelled, returns when it was cancelled and why.",
   inputSchema: z.object({
     runId: z.string().describe("Run ID returned by run_pipeline"),
   }),
@@ -221,6 +215,7 @@ const server = new MCPServer({
   instructions: instructionsFor(projectDir),
   tools: {
     list_pipelines: listPipelinesTool,
+    start_run: startRunTool,
     run_pipeline: runPipelineTool,
     approve: approveTool,
     get_run: getRunTool,

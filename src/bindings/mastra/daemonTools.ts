@@ -172,6 +172,63 @@ export async function pollRunUntilTerminal(
   }
 }
 
+/** What `start_run` and `run_pipeline` accept, before it is mapped to the daemon's wire shape. */
+export interface StartRunInput {
+  pipeline: string;
+  inputs?: Record<string, string>;
+  models?: Record<string, string>;
+  provider?: string;
+  gateMode?: "manual" | "auto";
+  artifact_path?: string;
+}
+
+/**
+ * POST `/api/runs` and return the new run's id. Shared by both start tools so
+ * they cannot drift in how they build the request body — the only difference
+ * between them is what they do with the id afterwards.
+ */
+async function postRun(input: StartRunInput): Promise<{ runId: string } | { error: string }> {
+  const { pipeline, inputs, models, provider, gateMode, artifact_path } = input;
+  const body = {
+    pipeline,
+    ...(inputs !== undefined ? { inputs } : {}),
+    ...(models ? { models } : {}),
+    ...(provider ? { provider } : {}),
+    ...(gateMode ? { gateMode } : {}),
+    ...(artifact_path ? { artifactPath: artifact_path } : {}),
+  };
+
+  // POST to the daemon — fails loudly if the daemon is not running.
+  const res = await daemonFetch("/api/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const e = (await res.json().catch(() => ({}))) as { error?: string };
+    return { error: e.error ?? `daemon POST /api/runs returned HTTP ${res.status}` };
+  }
+  const { runId } = (await res.json()) as { runId: string };
+  return { runId };
+}
+
+/**
+ * `start_run` body: start the run and hand the id back at once, so a chat client
+ * can poll `get_run` and show progress while the run is still in flight.
+ */
+export async function startRun(input: StartRunInput): Promise<Record<string, unknown>> {
+  const started = await postRun(input);
+  if ("error" in started) return started;
+  return { runId: started.runId, status: "running" };
+}
+
+/** `run_pipeline` body: start the run, then block on it until it stops advancing. */
+export async function runPipeline(input: StartRunInput): Promise<Record<string, unknown>> {
+  const started = await postRun(input);
+  if ("error" in started) return started;
+  return pollRunUntilTerminal(started.runId);
+}
+
 /** `get_run` body: the run's status plus the per-step progress the daemon tracks. */
 export async function getRunState(runId: string): Promise<Record<string, unknown>> {
   const res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}`);
