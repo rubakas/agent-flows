@@ -82,7 +82,7 @@ function buildLevelsOntoBuilder(
   const levels = pipelineLevels(def.steps);
   const stepById = new Map(def.steps.map((s) => [s.id, s]));
   const ancestorMap = pipelineAncestors(def.steps);
-  const alwaysVisible = new Set([...def.inputs, "models"]);
+  const alwaysVisible = new Set([...def.inputs, "models", "provider"]);
 
   for (let i = 0; i < levels.length; i++) {
     const level = levels[i];
@@ -175,6 +175,10 @@ export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): 
     inputShape[inp] = optionalSet.has(inp) ? z.string().optional().default("") : z.string();
   }
   inputShape.models = z.record(z.string(), z.string()).optional();
+  // The per-run provider travels the same way the per-step model overrides do:
+  // as workflow input, read inside each step's execute. A profile captured at
+  // build time is shared by every concurrent run on this workflow.
+  inputShape.provider = z.string().optional();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let builder: any = createWorkflow({

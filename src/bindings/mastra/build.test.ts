@@ -264,6 +264,58 @@ describe("buildPipelineWorkflow — models override", () => {
   });
 });
 
+describe("buildPipelineWorkflow — per-run provider (spec 039)", () => {
+  // Role-based so the profile, not an explicit model id, decides the entry.
+  const ROLE_PIPELINE: LoadedPipeline = {
+    def: {
+      id: "role-pipeline",
+      version: 1,
+      description: "One role-based step",
+      inputs: ["request"],
+      steps: [{ id: "work", kind: "llm", role: "worker", prompt: "prompts/work.md" }],
+    },
+    prompts: { work: "Do: {{request}}" },
+  };
+
+  it("the provider named in the run input decides which model the step uses", async () => {
+    const capturedEntries: string[] = [];
+    const trackingRunner: typeof runLlmStep = async (entry) => {
+      capturedEntries.push(entry.id);
+      return "done";
+    };
+
+    const { storage, store, cleanup } = makeTestFixture("provider");
+    try {
+      const wf = buildPipelineWorkflow(ROLE_PIPELINE, {
+        registry: FAKE_REGISTRY,
+        store,
+        profile: { id: "anthropic", roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" } },
+        providerProfiles: [
+          { id: "house", roles: { reasoner: "big", worker: "small", scout: "small" } },
+        ],
+        runner: trackingRunner,
+      });
+
+      const mastra = new Mastra({ storage, workflows: { [ROLE_PIPELINE.def.id]: wf } });
+      const mastraWf = mastra.getWorkflow(ROLE_PIPELINE.def.id);
+
+      const defaultRun = await mastraWf.createRun();
+      await defaultRun.start({ inputData: { request: "x" } });
+
+      const overriddenRun = await mastraWf.createRun();
+      await overriddenRun.start({ inputData: { request: "x", provider: "house" } });
+
+      assert.deepEqual(
+        capturedEntries,
+        ["sonnet", "small"],
+        "the workflow input schema must carry `provider` through to the step"
+      );
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("buildPipelineWorkflow — schema validation", () => {
   it("fails step when output missing required schema key", async () => {
     const badRunner: typeof runLlmStep = async (entry) => {

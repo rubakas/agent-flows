@@ -8,13 +8,16 @@ import { assembleSpec } from "../../canon/assemble.js";
 import { writeSpecKitSpec } from "../../canon/exportSpec.js";
 import { persistTicket } from "../../canon/persistTicket.js";
 import { checkPortability } from "../../canon/portability.js";
-import { getActiveProfile, resolveStepModel } from "../../canon/registry.js";
+import { getActiveProfile, getProfile, resolveStepModel } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
 import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
+import { emitStepEvent } from "../../canon/stepLogEvents.js";
+import { TransportFailureError } from "../../canon/stepRuntime.js";
 import { recordStep } from "../../runtime/stepIntrospection.js";
 import { appendStepLog, writeStepOutput } from "../../runtime/stepLog.js";
-import type { ModelRegistry, ProviderProfile } from "../../canon/registry.js";
+import type { PortabilityOptions } from "../../canon/portability.js";
+import type { ModelEntry, ModelRegistry, ProviderProfile } from "../../canon/registry.js";
 import type { CheckResult, StepRunnerDeps } from "../../canon/runStep.js";
 import type { StepLogEventInput } from "../../canon/stepLogEvents.js";
 import type { HardenedSpec, LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
@@ -77,7 +80,14 @@ function workspaceDirtyMessage(cwd: string): string {
 export interface BuildDeps {
   registry: ModelRegistry;
   store: TicketStore;
+  /** The daemon's startup profile: the fallback when a run names no `provider`. */
   profile?: ProviderProfile;
+  /**
+   * Project-declared profiles from providers.yaml, searched before the built-ins
+   * when a run names a `provider`. Without them a project profile the daemon
+   * loaded at startup is unknown at execute time.
+   */
+  providerProfiles?: ProviderProfile[];
   runner?: typeof runLlmStep;
   /**
    * Runner deps shared by every step of the built workflow. Build-time and
@@ -142,10 +152,34 @@ function ctxModelOverride(stepId: string, ctxData: Ctx): string | undefined {
   return models?.[stepId];
 }
 
+function ctxProviderOverride(ctxData: Ctx): string | undefined {
+  const provider = ctxData.provider;
+  return typeof provider === "string" && provider.length > 0 ? provider : undefined;
+}
+
+/**
+ * The profile this execution runs under: the run's own `provider` when it named
+ * one, else the daemon's startup profile. Resolved per call — a value captured at
+ * build time is shared by every concurrent run on the workflow.
+ */
+function resolveRunProfile(stepId: string, ctxData: Ctx, deps: BuildDeps): ProviderProfile {
+  const requested = ctxProviderOverride(ctxData);
+  if (requested === undefined) return deps.profile ?? getActiveProfile();
+  try {
+    return getProfile(requested, deps.providerProfiles);
+  } catch (err) {
+    // Falling back to the default here would run the step on a provider the
+    // caller did not ask for — the opposite of what naming one means.
+    throw new Error(`Step "${stepId}": ${err instanceof Error ? err.message : String(err)}`, {
+      cause: err,
+    });
+  }
+}
+
 function ctxVars(ctxData: Ctx): Record<string, string> {
   const vars: Record<string, string> = {};
   for (const [k, v] of Object.entries(ctxData)) {
-    if (k === "models") continue;
+    if (k === "models" || k === "provider") continue;
     let serialized: string;
     if (typeof v === "string") {
       serialized = v;
@@ -204,6 +238,178 @@ function assertNotCancelled(stepId: string, runSignal: AbortSignal | undefined):
   if (runSignal?.aborted) throw new Error(`run cancelled before step ${stepId} started`);
 }
 
+// ── Provider failover (spec 039) ──────────────────────────────────────────────
+
+/**
+ * claude result subtypes that describe the REQUEST rather than the transport.
+ * A second provider handed the same prompt reaches the same place, so the chain
+ * is skipped rather than spending a whole step proving it.
+ *
+ * Only subtypes identifiable positively are listed. `error_during_execution` is
+ * deliberately absent: it also covers a session that crashed, which another
+ * provider may well survive.
+ */
+const REQUEST_SHAPED_SUBTYPES: ReadonlySet<string> = new Set(["error_max_turns"]);
+
+/**
+ * Syscall codes that mean a child or a socket never delivered anything.
+ *
+ * An allowlist rather than `typeof err.code === "string"`: every Node `ERR_*`
+ * error carries a string `code` too, so the broad test made a programming
+ * mistake look like a transport failure and spent a second provider on it.
+ */
+const TRANSPORT_SYSCALL_CODES: ReadonlySet<string> = new Set([
+  "ENOENT",
+  "EACCES",
+  "EPIPE",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+]);
+
+/**
+ * Whether another provider is worth asking after this failure.
+ *
+ * Yes for transport failures and deadlines: they say nothing about the request,
+ * so a different provider may well answer it. No for anything else — an operator
+ * cancellation, a spent budget, a watchdog that already spent its retry on the
+ * same model, a request the model itself could not complete — where a second
+ * provider would either repeat the outcome or override a deliberate decision.
+ *
+ * Decided on the error TYPE, never on its message: the adapters carry
+ * TransportFailureError with `exitCode`/`subtype` as fields, so renaming an
+ * error string can no longer silently disable failover.
+ */
+function isFailoverWorthy(err: unknown, signal: AbortSignal | undefined): boolean {
+  if (signal?.aborted === true) return false;
+  if (!(err instanceof Error)) return false;
+  switch (err.name) {
+    case "AbortError":
+    case "StepBudgetExceededError":
+    case "StepWatchdogError":
+    case "WatchdogTrip":
+      return false;
+    case "StepTimeoutError":
+      return true;
+    default:
+      break;
+  }
+  if (err instanceof TransportFailureError) {
+    return err.subtype === undefined || !REQUEST_SHAPED_SUBTYPES.has(err.subtype);
+  }
+  // A child that could never be spawned rejects with the raw system error.
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === "string" && TRANSPORT_SYSCALL_CODES.has(code);
+}
+
+/** Registry id plus transport, as recorded for the run state and the step log. */
+function describeModel(entry: ModelEntry): string {
+  return `${entry.id} (${entry.transport}${entry.cli?.bin ? ":" + entry.cli.bin : ""})`;
+}
+
+/** Outcome of walking a fallback chain: an answer, or why each candidate did not give one. */
+type FailoverOutcome =
+  | { ok: true; raw: string; profileId: string; entry: ModelEntry }
+  | { ok: false; attempts: string[] };
+
+/**
+ * Walks the active profile's fallback chain after a step's call failed, trying
+ * each candidate once, in order. A candidate is skipped — never attempted — when
+ * it cannot enforce what the step declares: that guard is what stops a
+ * repo-grounded step silently continuing on a text-only model.
+ *
+ * On exhaustion the caller reports the ORIGINAL error, because the chain's last
+ * error describes a provider the operator never chose.
+ */
+async function runFailoverChain(params: {
+  step: StepDef;
+  profile: ProviderProfile;
+  entry: ModelEntry;
+  deps: BuildDeps;
+  prompt: string;
+  runner: typeof runLlmStep;
+  runnerDeps: StepRunnerDeps;
+  portabilityOpts: PortabilityOptions;
+  reason: string;
+  /** When the step's first attempt began, for the remaining-time allowance. */
+  startedAt: number;
+  /** What the step has cost so far, from the usage events the adapters emit. */
+  spentUsd: () => number;
+}): Promise<FailoverOutcome> {
+  const { step, profile, entry, deps, prompt, runner, runnerDeps, portabilityOpts } = params;
+  const attempts: string[] = [];
+
+  // A declared timeout and budget bound the STEP, not each attempt. Every
+  // runner() call builds a fresh full-length deadline of its own, so without
+  // decrementing here an N-long chain would multiply both by N+1 — and this
+  // project's stated position is that a stall is caught by a cost ceiling and
+  // event silence, neither of which a chain may quietly widen.
+  const declaredTimeoutMs = runnerDeps.timeoutMs ?? runnerDeps.defaultTimeoutMs;
+  const declaredBudgetUsd = runnerDeps.maxBudgetUsd;
+
+  for (const candidateId of profile.fallback ?? []) {
+    if (runnerDeps.signal?.aborted === true) break;
+
+    let candidate: ProviderProfile;
+    try {
+      candidate = getProfile(candidateId, deps.providerProfiles);
+    } catch {
+      attempts.push(`${candidateId}: skipped (unknown profile)`);
+      continue;
+    }
+
+    const candidateEntry = resolveStepModel(step, candidate, deps.registry);
+    if (candidateEntry.id === entry.id) {
+      attempts.push(`${candidateId}: skipped (resolves to the same model "${entry.id}")`);
+      continue;
+    }
+
+    const portability = checkPortability(step, candidateEntry, candidate.id, portabilityOpts);
+    if (!portability.ok) {
+      attempts.push(`${candidateId}: skipped (${portability.reason})`);
+      continue;
+    }
+
+    const attemptDeps: StepRunnerDeps = { ...runnerDeps };
+    if (declaredTimeoutMs !== undefined && declaredTimeoutMs > 0) {
+      const remainingMs = declaredTimeoutMs - (Date.now() - params.startedAt);
+      if (remainingMs <= 0) {
+        attempts.push(
+          `${candidateId}: skipped (the step's ${declaredTimeoutMs}ms deadline is spent)`
+        );
+        break;
+      }
+      attemptDeps.timeoutMs = remainingMs;
+    }
+    if (declaredBudgetUsd !== undefined) {
+      const remainingUsd = declaredBudgetUsd - params.spentUsd();
+      if (remainingUsd <= 0) {
+        attempts.push(`${candidateId}: skipped (the step's $${declaredBudgetUsd} budget is spent)`);
+        break;
+      }
+      attemptDeps.maxBudgetUsd = remainingUsd;
+    }
+
+    emitStepEvent(runnerDeps.onEvent, {
+      kind: "failover",
+      stepId: step.id,
+      fromProfile: profile.id,
+      toProfile: candidate.id,
+      reason: params.reason,
+    });
+
+    try {
+      const raw = await runner(candidateEntry, prompt, attemptDeps);
+      return { ok: true, raw, profileId: candidate.id, entry: candidateEntry };
+    } catch (err) {
+      attempts.push(`${candidateId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return { ok: false, attempts };
+}
+
 /** Builds the runner-deps base shared by every step kind (timeout and budget fields). */
 function baseRunnerDeps(
   step: StepDef,
@@ -232,7 +438,6 @@ export function buildLlmStep(
   visibleKeys?: Set<string>
 ) {
   const runner = deps.runner ?? runLlmStep;
-  const profile = deps.profile ?? getActiveProfile();
   return createStep({
     id: step.id,
     inputSchema: ctx,
@@ -243,6 +448,7 @@ export function buildLlmStep(
       const ctxData: Ctx = visibleKeys
         ? (Object.fromEntries(Object.entries(rawCtx).filter(([k]) => visibleKeys.has(k))) as Ctx)
         : rawCtx;
+      const profile = resolveRunProfile(step.id, ctxData, deps);
       const override = ctxModelOverride(step.id, ctxData);
       const entry = override
         ? deps.registry.resolve(override)
@@ -250,11 +456,12 @@ export function buildLlmStep(
 
       // D3: refuse an unportable step before any model call. The adapters throw
       // for the same combinations, but only after a subprocess has been shaped.
-      const portability = checkPortability(step, entry, profile.id, {
+      const portabilityOpts = {
         ...(deps.defaultMaxBudgetUsd !== undefined
           ? { defaultMaxBudgetUsd: deps.defaultMaxBudgetUsd }
           : {}),
-      });
+      };
+      const portability = checkPortability(step, entry, profile.id, portabilityOpts);
       if (!portability.ok) throw new Error(portability.reason);
 
       let prompt = renderPrompt(prompts[step.id], ctxVars(ctxData));
@@ -278,7 +485,7 @@ export function buildLlmStep(
       // D6: hand the prompt and resolved model to the per-run introspection
       // channel keyed by Mastra's runId — never onto BuildDeps, which is shared
       // by every concurrent run on this workflow.
-      const model = `${entry.id} (${entry.transport}${entry.cli?.bin ? ":" + entry.cli.bin : ""})`;
+      const model = describeModel(entry);
       recordStep(runId, step.id, { prompt, model });
 
       // Thread per-step and pipeline-level timeouts into the runner deps.
@@ -293,12 +500,18 @@ export function buildLlmStep(
       // FR-013: the per-run signal comes from the execute params, never from the
       // build-time BuildDeps.runnerDeps shared across concurrent runs.
       const signal = combineSignals(deps.runnerDeps?.signal, abortSignal);
+      let spentUsd = 0;
       const runnerDeps: StepRunnerDeps = {
         ...baseRunnerDeps(step, deps, defaultTimeoutMs),
         ...(signal ? { signal } : {}),
         // Spec 036 D2: the sink is bound per execution, exactly like recordStep —
         // never through BuildDeps, which every concurrent run shares.
         onEvent: (event: StepLogEventInput) => {
+          // The chain's remaining-budget allowance is computed from what the
+          // failed attempts already reported spending.
+          if (event.kind === "usage" && typeof event.costUsd === "number") {
+            spentUsd += event.costUsd;
+          }
           appendStepLog(runId, step.id, event);
         },
         ...(hasContentsAccess
@@ -322,11 +535,17 @@ export function buildLlmStep(
       // and no failure path can end a step's log without a terminal event.
       appendStepLog(runId, step.id, { kind: "step.start", model, transport: entry.transport });
       const startedAt = Date.now();
+      // Set only when a failover moved the step: step.start already named the
+      // model this step was PLANNED to run on, and that event is never rewritten.
+      let actualEntry: ModelEntry | undefined;
       const finishStepLog = (status: StepResultStatus, error?: string): void => {
         appendStepLog(runId, step.id, {
           kind: "step.result",
           status,
           durationMs: Date.now() - startedAt,
+          ...(actualEntry !== undefined
+            ? { model: describeModel(actualEntry), transport: actualEntry.transport }
+            : {}),
           ...(error !== undefined ? { error } : {}),
         });
       };
@@ -341,11 +560,66 @@ export function buildLlmStep(
           raw = await runner(entry, prompt, runnerDeps);
         } catch (err) {
           const baseMsg = err instanceof Error ? err.message : String(err);
-          const stepMsg = `Step "${step.id}": ${baseMsg}`;
-          if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
-            throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+          // The chain is walked only for failures another provider could plausibly
+          // answer; everything else fails here, as it did before.
+          // An explicit per-run `models[stepId]` is a deliberate choice about
+          // WHICH model answers; the chain resolves candidates from their own
+          // profiles and would silently discard it (spec 039 review).
+          // `failover: false` is the step's own refusal to cross vendors: the
+          // prompt a candidate would receive carries this step's upstream
+          // outputs, and a pinned step fails rather than hand them elsewhere.
+          const pinned = step.failover === false;
+          const worthy = isFailoverWorthy(err, signal);
+          const outcome: FailoverOutcome =
+            !pinned && override === undefined && worthy
+              ? await runFailoverChain({
+                  step,
+                  profile,
+                  entry,
+                  deps,
+                  prompt,
+                  runner,
+                  runnerDeps,
+                  portabilityOpts,
+                  reason: baseMsg,
+                  startedAt,
+                  spentUsd: () => spentUsd,
+                })
+              : { ok: false, attempts: [] };
+
+          if (outcome.ok) {
+            raw = outcome.raw;
+            // The step did not run on what step.start named. Correct every
+            // surface that reports the model — the run state, the introspection
+            // channel and, through it, the artifact's provenance — or the run
+            // claims a provider that never answered.
+            actualEntry = outcome.entry;
+            const actualModelName = outcome.entry.cli?.model ?? outcome.entry.api?.model;
+            recordStep(runId, step.id, {
+              model: describeModel(outcome.entry),
+              actual: {
+                profileId: outcome.profileId,
+                transport: outcome.entry.transport,
+                modelId: outcome.entry.id,
+                ...(actualModelName !== undefined ? { model: actualModelName } : {}),
+              },
+            });
+          } else {
+            // An operator reading a failed run must not have to guess whether the
+            // chain was empty, exhausted or refused — name the reason here, on the
+            // message that becomes the step.result error.
+            const tried =
+              outcome.attempts.length > 0
+                ? `\nFailover exhausted: ${outcome.attempts.join("; ")}`
+                : pinned && worthy
+                  ? `\nFailover refused: the step sets failover: false, so it stayed pinned to profile "${profile.id}" and no other provider was tried.`
+                  : "";
+            const stepMsg = `Step "${step.id}": ${baseMsg}${tried}`;
+            if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
+              throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+            }
+            throw new Error(stepMsg, { cause: err });
           }
-          throw new Error(stepMsg, { cause: err });
         }
 
         let value: unknown = raw;

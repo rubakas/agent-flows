@@ -8,10 +8,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { ModelRegistry } from "../../canon/registry.js";
-import { CREDENTIAL_DENY_PATTERNS, StepTimeoutError, runLlmStep } from "../../canon/runStep.js";
+import { ModelRegistry, defaultRegistry, getProfile } from "../../canon/registry.js";
+import { UNRECOGNIZED_MODEL_SUBTYPE } from "../../canon/runClaudeCli.js";
+import {
+  CREDENTIAL_DENY_PATTERNS,
+  StepTimeoutError,
+  TransportFailureError,
+  runLlmStep,
+} from "../../canon/runStep.js";
 import { makeFakeChild, makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
 import { packageRoot } from "../../packageRoot.js";
+import {
+  clearRun as clearStepIntrospection,
+  getRun as getStepIntrospection,
+} from "../../runtime/stepIntrospection.js";
 import {
   closeRunLog,
   openRunLog,
@@ -1065,6 +1075,666 @@ describe("step builders — one step.start and exactly one terminal step.result"
       assert.equal(terminal.error, "exit 3");
     } finally {
       log.cleanup();
+    }
+  });
+});
+
+// ─── Spec 039: the provider profile is resolved per run, not per build ────────
+
+describe("buildLlmStep — per-run provider", () => {
+  const step: StepDef = {
+    id: "investigate.survey",
+    kind: "llm",
+    role: "worker",
+    prompt: "prompts/survey.md",
+  };
+  const prompts = { "investigate.survey": "survey prompt" };
+
+  /** Records the ModelEntry id each call resolved to. */
+  function makeEntryRecordingRunner(): { runner: typeof runLlmStep; entries: string[] } {
+    const entries: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      entries.push(entry.id);
+      return "ok";
+    };
+    return { runner, entries };
+  }
+
+  it("two runs of one built step under different providers resolve different models", async () => {
+    const { runner, entries } = makeEntryRecordingRunner();
+    const llmStep = buildLlmStep(
+      step,
+      prompts,
+      {
+        registry: defaultRegistry({}),
+        store: NOOP_STORE,
+        profile: getProfile("anthropic"),
+        runner,
+      },
+      undefined
+    );
+
+    await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
+    await (llmStep as any).execute({
+      inputData: { provider: "openai" },
+      suspend: () => undefined as never,
+    });
+
+    assert.deepEqual(
+      entries,
+      ["sonnet", "codex"],
+      "the profile must be read per execution, not captured at build time"
+    );
+  });
+
+  it("no provider in the run input keeps the build-time default profile", async () => {
+    const { runner, entries } = makeEntryRecordingRunner();
+    const llmStep = buildLlmStep(
+      step,
+      prompts,
+      {
+        registry: defaultRegistry({}),
+        store: NOOP_STORE,
+        profile: getProfile("openai"),
+        runner,
+      },
+      undefined
+    );
+
+    await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
+
+    assert.deepEqual(entries, ["codex"]);
+  });
+
+  it("an unknown provider throws naming the step and the id, without a model call", async () => {
+    const { runner, entries } = makeEntryRecordingRunner();
+    const llmStep = buildLlmStep(
+      step,
+      prompts,
+      {
+        registry: defaultRegistry({}),
+        store: NOOP_STORE,
+        profile: getProfile("anthropic"),
+        runner,
+      },
+      undefined
+    );
+
+    await assert.rejects(
+      (llmStep as any).execute({
+        inputData: { provider: "nope" },
+        suspend: () => undefined as never,
+      }),
+      (err: Error) => {
+        assert.match(err.message, /investigate\.survey/);
+        assert.match(err.message, /nope/);
+        return true;
+      }
+    );
+    assert.equal(entries.length, 0, "an unknown provider must not reach a model call");
+  });
+
+  it("a project-declared profile is resolvable per run via providerProfiles", async () => {
+    const { runner, entries } = makeEntryRecordingRunner();
+    const llmStep = buildLlmStep(
+      step,
+      prompts,
+      {
+        registry: defaultRegistry({}),
+        store: NOOP_STORE,
+        profile: getProfile("anthropic"),
+        providerProfiles: [
+          { id: "house", roles: { reasoner: "opus", worker: "haiku", scout: "haiku" } },
+        ],
+        runner,
+      },
+      undefined
+    );
+
+    await (llmStep as any).execute({
+      inputData: { provider: "house" },
+      suspend: () => undefined as never,
+    });
+
+    assert.deepEqual(entries, ["haiku"]);
+  });
+});
+
+// ─── Spec 039: step-level failover to the next profile in the chain ───────────
+
+describe("buildLlmStep — provider failover", () => {
+  const PRIMARY = {
+    id: "primary",
+    roles: { reasoner: "m1", worker: "m1", scout: "m1" },
+    fallback: ["secondary"],
+  };
+  const SECONDARY = {
+    id: "secondary",
+    roles: { reasoner: "m2", worker: "m2", scout: "m2" },
+  };
+  /** Text-only: the api transport has no tool loop, so it cannot read a repo. */
+  const TEXT_ONLY = {
+    id: "text-only",
+    roles: { reasoner: "m-api", worker: "m-api", scout: "m-api" },
+  };
+  const REGISTRY = new ModelRegistry([
+    { id: "m1", transport: "cli" as const, cli: { bin: "claude" as const, model: "m1" } },
+    { id: "m2", transport: "cli" as const, cli: { bin: "claude" as const, model: "m2" } },
+    {
+      id: "m-api",
+      transport: "api" as const,
+      api: { endpoint: "http://localhost:11434/v1/chat/completions", model: "qwen" },
+    },
+  ]);
+
+  const step: StepDef = {
+    id: "investigate.survey",
+    kind: "llm",
+    role: "worker",
+    prompt: "prompts/survey.md",
+  };
+  const prompts = { "investigate.survey": "survey prompt" };
+
+  /** A transport failure exactly as the claude adapter reports one. */
+  function transportFailure(): Error {
+    return new TransportFailureError("claude exited with code 1\nstderr: connection reset", {
+      transport: "cli:claude",
+      exitCode: 1,
+    });
+  }
+
+  function makeDeps(
+    runner: typeof runLlmStep,
+    profile: { id: string; roles: Record<string, string>; fallback?: string[] },
+    profiles = [PRIMARY, SECONDARY, TEXT_ONLY]
+  ) {
+    return {
+      registry: REGISTRY,
+      store: NOOP_STORE,
+      profile: profile as never,
+      providerProfiles: profiles as never,
+      runner,
+    };
+  }
+
+  it("a transport failure is retried on the next profile, with a different model", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      if (entry.id === "m1") throw transportFailure();
+      return "answered by the fallback";
+    };
+
+    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+    const out = (await (llmStep as any).execute({
+      inputData: {},
+      suspend: () => undefined as never,
+    })) as Record<string, unknown>;
+
+    assert.deepEqual(seen, ["m1", "m2"], "the fallback must resolve to a different model");
+    assert.equal(out["investigate.survey"], "answered by the fallback");
+  });
+
+  it("a step with failover: false is never handed to a second provider", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      throw transportFailure();
+    };
+    const pinnedStep: StepDef = { ...step, failover: false };
+
+    const llmStep = buildLlmStep(pinnedStep, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      (err: Error) => {
+        assert.match(
+          err.message,
+          /Failover refused: the step sets failover: false/,
+          `the failure must say the step was pinned: ${err.message}`
+        );
+        return true;
+      }
+    );
+    assert.deepEqual(seen, ["m1"], "a pinned step must not attempt any candidate");
+  });
+
+  for (const [label, failover] of [
+    ["failover: true", true],
+    ["no failover field", undefined],
+  ] as const) {
+    it(`a step with ${label} still walks the chain`, async () => {
+      const seen: string[] = [];
+      const runner: typeof runLlmStep = async (entry) => {
+        seen.push(entry.id);
+        if (entry.id === "m1") throw transportFailure();
+        return "answered by the fallback";
+      };
+      const chainedStep: StepDef =
+        failover === undefined ? { ...step } : { ...step, failover: true };
+
+      const llmStep = buildLlmStep(chainedStep, prompts, makeDeps(runner, PRIMARY), undefined);
+      const out = (await (llmStep as any).execute({
+        inputData: {},
+        suspend: () => undefined as never,
+      })) as Record<string, unknown>;
+
+      assert.deepEqual(seen, ["m1", "m2"], "the chain must still be walked");
+      assert.equal(out["investigate.survey"], "answered by the fallback");
+    });
+  }
+
+  it("a step that declares permissions.contents is never failed over onto a text-only profile", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      throw transportFailure();
+    };
+    const readStep: StepDef = { ...step, permissions: { contents: "read" } };
+    const chained = { ...PRIMARY, fallback: ["text-only"] };
+
+    const llmStep = buildLlmStep(readStep, prompts, makeDeps(runner, chained), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      (err: Error) => {
+        assert.match(err.message, /permissions\.contents "read"/);
+        return true;
+      }
+    );
+    assert.deepEqual(seen, ["m1"], "a text-only candidate must be skipped, not attempted");
+  });
+
+  it("a step that declares permissions.deny is never failed over onto a transport that cannot enforce it", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      throw transportFailure();
+    };
+    const denyStep: StepDef = {
+      ...step,
+      permissions: { contents: "read", deny: ["ops/secrets-notes/**"] },
+    };
+    const chained = { ...PRIMARY, fallback: ["text-only"] };
+
+    const llmStep = buildLlmStep(denyStep, prompts, makeDeps(runner, chained), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      (err: Error) => {
+        assert.match(
+          err.message,
+          /permissions\.deny/,
+          `the refusal must name the deny list: ${err.message}`
+        );
+        return true;
+      }
+    );
+    assert.deepEqual(
+      seen,
+      ["m1"],
+      "a candidate that cannot enforce the deny list must be skipped, not attempted"
+    );
+  });
+
+  // Two independent guards stop a cancelled step crossing providers: the error
+  // name, and the run signal. One test covering both stays green when either is
+  // removed, so they are pinned separately.
+  it("an AbortError is not failed over, even with the run signal still live", async () => {
+    const seen: string[] = [];
+    const controller = new AbortController();
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      throw new DOMException("Claude CLI aborted", "AbortError");
+    };
+
+    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({
+        inputData: {},
+        abortSignal: controller.signal,
+        suspend: () => undefined as never,
+      })
+    );
+    assert.equal(controller.signal.aborted, false, "the signal guard must not be what fires here");
+    assert.deepEqual(seen, ["m1"], "an abort must not reach another provider on its name alone");
+  });
+
+  it("a cancelled run is not failed over, even when the failure is a transport failure", async () => {
+    const seen: string[] = [];
+    const controller = new AbortController();
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      controller.abort();
+      // Failover-worthy on its own — only the cancelled run stops it.
+      throw transportFailure();
+    };
+
+    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({
+        inputData: {},
+        abortSignal: controller.signal,
+        suspend: () => undefined as never,
+      })
+    );
+    assert.deepEqual(seen, ["m1"], "an operator cancellation must not reach another provider");
+  });
+
+  it("a request-shaped claude subtype is not failed over", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      throw new TransportFailureError('claude: result subtype "error_max_turns": ran out', {
+        transport: "cli:claude",
+        exitCode: 0,
+        subtype: "error_max_turns",
+      });
+    };
+
+    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never })
+    );
+    assert.deepEqual(
+      seen,
+      ["m1"],
+      "a turn limit is about the request; a second provider would spend a whole step repeating it"
+    );
+  });
+
+  it("a model the local CLI does not recognise is failed over", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      if (entry.id === "m1") {
+        throw new TransportFailureError('claude CLI rejected model "m1": unrecognized_model', {
+          transport: "cli:claude",
+          exitCode: 0,
+          subtype: UNRECOGNIZED_MODEL_SUBTYPE,
+        });
+      }
+      return "answered by the fallback";
+    };
+
+    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+    const out = (await (llmStep as any).execute({
+      inputData: {},
+      suspend: () => undefined as never,
+    })) as Record<string, unknown>;
+
+    assert.deepEqual(seen, ["m1", "m2"], "an alias one CLI lacks is exactly what another may have");
+    assert.equal(out["investigate.survey"], "answered by the fallback");
+  });
+
+  it("a transport syscall code is failed over but an ERR_* programming error is not", async () => {
+    const syscall: string[] = [];
+    const errSeen: string[] = [];
+
+    const syscallRunner: typeof runLlmStep = async (entry) => {
+      syscall.push(entry.id);
+      if (entry.id === "m1") {
+        const err: NodeJS.ErrnoException = new Error("spawn claude ENOENT");
+        err.code = "ENOENT";
+        throw err;
+      }
+      return "ok";
+    };
+    await (buildLlmStep(step, prompts, makeDeps(syscallRunner, PRIMARY), undefined) as any).execute(
+      { inputData: {}, suspend: () => undefined as never }
+    );
+    assert.deepEqual(syscall, ["m1", "m2"], "a child that never spawned is a transport failure");
+
+    const errRunner: typeof runLlmStep = async (entry) => {
+      errSeen.push(entry.id);
+      const err: NodeJS.ErrnoException = new Error('The "path" argument must be of type string');
+      err.code = "ERR_INVALID_ARG_TYPE";
+      throw err;
+    };
+    await assert.rejects(
+      (buildLlmStep(step, prompts, makeDeps(errRunner, PRIMARY), undefined) as any).execute({
+        inputData: {},
+        suspend: () => undefined as never,
+      })
+    );
+    assert.deepEqual(
+      errSeen,
+      ["m1"],
+      "every Node ERR_* error carries a string code; that is not a transport failure"
+    );
+  });
+
+  it("an explicit per-run model override is never failed over", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      throw transportFailure();
+    };
+
+    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({
+        inputData: { models: { "investigate.survey": "m2" } },
+        suspend: () => undefined as never,
+      })
+    );
+    assert.deepEqual(
+      seen,
+      ["m2"],
+      "an operator who pinned a model made a choice the chain must not quietly replace"
+    );
+  });
+
+  it("the step's declared deadline bounds the STEP, not each attempt", async () => {
+    const timeouts: (number | undefined)[] = [];
+    const declaredMs = 5_000;
+    const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
+      timeouts.push(deps!.timeoutMs);
+      if (entry.id === "m1") {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        throw transportFailure();
+      }
+      return "ok";
+    };
+
+    const timedStep: StepDef = { ...step, timeoutMs: declaredMs };
+    const llmStep = buildLlmStep(timedStep, prompts, makeDeps(runner, PRIMARY), undefined);
+    await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
+
+    assert.equal(timeouts[0], declaredMs, "the first attempt gets the whole declared deadline");
+    assert.ok(
+      timeouts[1] !== undefined && timeouts[1] > 0 && timeouts[1] < declaredMs,
+      `the fallback must get what is LEFT of ${declaredMs}ms, got ${String(timeouts[1])}`
+    );
+  });
+
+  it("a chain is not walked once the step's deadline is already spent", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      throw transportFailure();
+    };
+
+    const timedStep: StepDef = { ...step, timeoutMs: 1 };
+    const llmStep = buildLlmStep(timedStep, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      (err: Error) => {
+        assert.match(err.message, /deadline is spent/, err.message);
+        return true;
+      }
+    );
+    assert.deepEqual(seen, ["m1"], "a spent deadline must not buy a second full-length attempt");
+  });
+
+  it("the step's declared budget bounds the STEP, not each attempt", async () => {
+    const budgets: (number | undefined)[] = [];
+    const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
+      budgets.push(deps!.maxBudgetUsd);
+      if (entry.id === "m1") {
+        deps!.onEvent?.({ kind: "usage", costUsd: 0.75 });
+        throw transportFailure();
+      }
+      return "ok";
+    };
+
+    const costedStep: StepDef = { ...step, maxBudgetUsd: 1 };
+    const llmStep = buildLlmStep(costedStep, prompts, makeDeps(runner, PRIMARY), undefined);
+    await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
+
+    assert.equal(budgets[0], 1, "the first attempt gets the whole declared budget");
+    assert.equal(budgets[1], 0.25, "the fallback gets only what the first attempt left");
+  });
+
+  it("a chain is not walked once the step's budget is already spent", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
+      seen.push(entry.id);
+      deps!.onEvent?.({ kind: "usage", costUsd: 1 });
+      throw transportFailure();
+    };
+
+    const costedStep: StepDef = { ...step, maxBudgetUsd: 1 };
+    const llmStep = buildLlmStep(costedStep, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      (err: Error) => {
+        assert.match(err.message, /budget is spent/, err.message);
+        return true;
+      }
+    );
+    assert.deepEqual(seen, ["m1"], "a spent budget must not buy a second full-budget attempt");
+  });
+
+  it("a failed-over step records the provider that actually answered", async () => {
+    const runId = "provenance-failover";
+    const dir = mkdtempSync(join(tmpdir(), "af-steplog-provenance-"));
+    openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+    try {
+      const runner: typeof runLlmStep = async (entry) => {
+        if (entry.id === "m1") throw transportFailure();
+        return "ok";
+      };
+      const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+      await (llmStep as any).execute({
+        inputData: {},
+        runId,
+        suspend: () => undefined as never,
+      });
+
+      const recorded = getStepIntrospection(runId)?.[step.id];
+      assert.ok(recorded, "the step must have recorded its invocation");
+      assert.match(
+        String(recorded.model),
+        /^m2 /,
+        `stepIntrospection must name the winner, not the model that failed: ${String(recorded.model)}`
+      );
+      assert.deepEqual(recorded.actual, {
+        profileId: "secondary",
+        transport: "cli",
+        modelId: "m2",
+        model: "m2",
+      });
+
+      const events = readRunLog(runLogFile(dir, "test-pipeline"));
+      const start = events.find((e) => e.kind === "step.start") as unknown as Record<
+        string,
+        unknown
+      >;
+      assert.match(String(start.model), /^m1 /, "step.start still records what was PLANNED");
+      const result = events.find((e) => e.kind === "step.result") as unknown as Record<
+        string,
+        unknown
+      >;
+      assert.match(
+        String(result.model),
+        /^m2 /,
+        `the terminal event must name the provider that answered: ${JSON.stringify(result)}`
+      );
+      assert.equal(result.transport, "cli");
+    } finally {
+      clearStepIntrospection(runId);
+      closeRunLog(runId);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an exhausted chain throws the original error, naming the attempts", async () => {
+    const runner: typeof runLlmStep = async (entry) => {
+      if (entry.id === "m1") throw transportFailure();
+      throw new TransportFailureError("codex exec: exit 2; no agent_message found.", {
+        transport: "cli:codex",
+        exitCode: 2,
+      });
+    };
+
+    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      (err: Error) => {
+        assert.match(
+          err.message,
+          /claude exited with code 1/,
+          "the original failure is the one the operator must see"
+        );
+        assert.match(err.message, /Failover exhausted: secondary:/);
+        return true;
+      }
+    );
+  });
+
+  it("a budget failure is not failed over", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      const err = new Error("Step exceeded budget limit of $1.0000 USD");
+      err.name = "StepBudgetExceededError";
+      throw err;
+    };
+
+    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never })
+    );
+    assert.deepEqual(seen, ["m1"], "a spent budget is not a transport failure");
+  });
+
+  it("the crossing is recorded in the run's event log", async () => {
+    const runId = "log-failover";
+    const dir = mkdtempSync(join(tmpdir(), "af-steplog-failover-"));
+    openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+    try {
+      const runner: typeof runLlmStep = async (entry) => {
+        if (entry.id === "m1") throw transportFailure();
+        return "ok";
+      };
+      const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
+      await (llmStep as any).execute({
+        inputData: {},
+        runId,
+        suspend: () => undefined as never,
+      });
+
+      const events = readRunLog(runLogFile(dir, "test-pipeline"));
+      const failover = events.find((e) => e.kind === "failover");
+      assert.ok(failover !== undefined, "the failover must appear in the run's event log");
+      const payload = failover as unknown as Record<string, unknown>;
+      assert.equal(payload.fromProfile, "primary");
+      assert.equal(payload.toProfile, "secondary");
+      assert.equal(payload.stepId, step.id);
+      assert.match(String(payload.reason), /claude exited with code 1/);
+    } finally {
+      closeRunLog(runId);
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
