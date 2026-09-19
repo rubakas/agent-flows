@@ -3,6 +3,7 @@
 
 import { spawn as defaultSpawn } from "node:child_process";
 import { emitStepEvent } from "./stepLogEvents.js";
+import { TransportFailureError } from "./stepRuntime.js";
 import type { StepEventSink, StepLogEventInput, UsagePayload } from "./stepLogEvents.js";
 
 export type SpawnFn = typeof defaultSpawn;
@@ -204,6 +205,16 @@ function canonicalJson(value: unknown): string {
 }
 
 // ── Stream result extractor ───────────────────────────────────────────────────
+
+/** Transport label carried on every TransportFailureError this module throws. */
+const CLAUDE_TRANSPORT = "cli:claude";
+
+/**
+ * Synthetic subtype for the exit-0 unrecognized-model failure: the CLI reports
+ * it in the result text rather than as a subtype, and the failover classifier
+ * needs a field to read, not a message to match.
+ */
+export const UNRECOGNIZED_MODEL_SUBTYPE = "unrecognized_model";
 
 interface ClaudeResultEvent {
   type: "result";
@@ -507,7 +518,13 @@ export function runClaudeCli(
     child.on("error", (err) => {
       clearStallTimer();
       if (signal) signal.removeEventListener("abort", onAbort);
-      reject(err);
+      // A child that never started says nothing about the prompt.
+      reject(
+        new TransportFailureError(`claude: spawn error: ${err.message}`, {
+          transport: CLAUDE_TRANSPORT,
+          cause: err,
+        })
+      );
     });
 
     child.on("close", (code) => {
@@ -541,7 +558,13 @@ export function runClaudeCli(
             : ` (subtype: ${String(failure.subtype ?? "error")}): ${String(
                 failure.result ?? ""
               ).slice(0, 300)}`;
-        reject(new Error(`claude exited with code ${exitCode}${why}\nstderr: ${tail}`));
+        reject(
+          new TransportFailureError(`claude exited with code ${exitCode}${why}\nstderr: ${tail}`, {
+            transport: CLAUDE_TRANSPORT,
+            exitCode,
+            ...(failure?.subtype !== undefined ? { subtype: String(failure.subtype) } : {}),
+          })
+        );
         return;
       }
 
@@ -550,7 +573,10 @@ export function runClaudeCli(
 
       if (!resultEvent) {
         reject(
-          new Error(`claude: no result event found in stream output.\nRaw stdout tail:\n${rawTail}`)
+          new TransportFailureError(
+            `claude: no result event found in stream output.\nRaw stdout tail:\n${rawTail}`,
+            { transport: CLAUDE_TRANSPORT, exitCode }
+          )
         );
         return;
       }
@@ -565,7 +591,13 @@ export function runClaudeCli(
       if (resultEvent.is_error || resultEvent.subtype !== "success") {
         const subtype = String(resultEvent.subtype ?? "error");
         const text = String(resultEvent.result ?? "");
-        reject(new Error(`claude: result subtype "${subtype}": ${text.slice(0, 300)}`));
+        reject(
+          new TransportFailureError(`claude: result subtype "${subtype}": ${text.slice(0, 300)}`, {
+            transport: CLAUDE_TRANSPORT,
+            exitCode,
+            subtype,
+          })
+        );
         return;
       }
 
@@ -573,9 +605,13 @@ export function runClaudeCli(
 
       // claude exits 0 even for unrecognized models, embedding the error in result text.
       if (stdout.includes("[claude-code:unrecognized_model]")) {
+        // A model alias the locally installed CLI does not know is a per-provider
+        // problem, so it is the best failover candidate there is — it must carry
+        // the transport type rather than reading as a request error.
         reject(
-          new Error(
-            `claude CLI rejected model ${JSON.stringify(model ?? "(default)")}: ${stdout.trim().slice(0, 300)}`
+          new TransportFailureError(
+            `claude CLI rejected model ${JSON.stringify(model ?? "(default)")}: ${stdout.trim().slice(0, 300)}`,
+            { transport: CLAUDE_TRANSPORT, exitCode, subtype: UNRECOGNIZED_MODEL_SUBTYPE }
           )
         );
         return;

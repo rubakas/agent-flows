@@ -31,6 +31,45 @@ export class StepTimeoutError extends Error {
 }
 
 /**
+ * Thrown when a transport could not deliver an answer: a subprocess that would
+ * not spawn or died, a CLI that exited non-zero, a stream with no result event,
+ * an HTTP call that was refused. It says nothing about the request, which is
+ * exactly what makes another provider worth asking (spec 039).
+ *
+ * A type rather than a message shape: the failover classifier used to match
+ * adapter message text with anchored regexes, so renaming an error string
+ * silently disabled failover for that failure.
+ */
+export class TransportFailureError extends Error {
+  /** `cli:claude`, `cli:codex` or `api` — which transport gave up. */
+  readonly transport: string;
+  /** Child process exit code, when the failure came from one. */
+  readonly exitCode?: number;
+  /** The claude result-event subtype, when the CLI reported one. */
+  readonly subtype?: string;
+  /** HTTP status, when the api transport got a response it could not use. */
+  readonly httpStatus?: number;
+
+  constructor(
+    message: string,
+    details: {
+      transport: string;
+      exitCode?: number;
+      subtype?: string;
+      httpStatus?: number;
+      cause?: unknown;
+    }
+  ) {
+    super(message, details.cause !== undefined ? { cause: details.cause } : undefined);
+    this.name = "TransportFailureError";
+    this.transport = details.transport;
+    if (details.exitCode !== undefined) this.exitCode = details.exitCode;
+    if (details.subtype !== undefined) this.subtype = details.subtype;
+    if (details.httpStatus !== undefined) this.httpStatus = details.httpStatus;
+  }
+}
+
+/**
  * Thrown when the progress watchdog interrupts a claude-transport llm step on
  * both attempts (stall or loop on attempt 1, any pathology on attempt 2), or
  * when attempt 2 returns a BLOCKED: report (FR-006).

@@ -15,7 +15,12 @@ export {
   CREDENTIAL_DENY_PATTERNS,
   operatorDenyRules,
 } from "./denyPatterns.js";
-export { DEFAULT_STEP_TIMEOUT_MS, StepTimeoutError, StepWatchdogError } from "./stepRuntime.js";
+export {
+  DEFAULT_STEP_TIMEOUT_MS,
+  StepTimeoutError,
+  StepWatchdogError,
+  TransportFailureError,
+} from "./stepRuntime.js";
 export type { StepRunnerDeps } from "./stepRuntime.js";
 export { WATCHDOG_DIGEST_CLOSE, WATCHDOG_DIGEST_OPEN } from "./adapters/index.js";
 

@@ -196,7 +196,12 @@ export const claudeAdapter: ProviderAdapter = {
   id: "claude",
   capabilities(): AdapterCapabilities {
     // Native deny flags cover read and edit; --max-budget-usd caps spend.
-    return { workspaceRead: true, workspaceWrite: true, budgetCap: true };
+    return {
+      workspaceRead: true,
+      workspaceWrite: true,
+      budgetCap: true,
+      stepDenyPatterns: true,
+    };
   },
   run: runClaudeStep,
 };
