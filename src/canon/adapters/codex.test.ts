@@ -353,3 +353,60 @@ describe("codex adapter — the empty grant sweeps stale siblings", () => {
     }
   });
 });
+
+describe("codex adapter — the step's own permissions.deny reaches the copy (spec 039)", () => {
+  /** A repo holding one ordinary file and one the step's deny list names. */
+  function buildDenyFixtureRepo(): string {
+    const root = mkdtempSync(join(tmpdir(), "agent-flows-codex-deny-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const repo = join(root, "repo");
+    mkdirSync(join(repo, "ops", "secrets-notes"), { recursive: true });
+    mkdirSync(join(repo, "src"), { recursive: true });
+    git(repo, "init", "-q", "-b", "main");
+    writeFileSync(join(repo, "src", "index.ts"), "export const ok = true;\n");
+    writeFileSync(join(repo, "ops", "secrets-notes", "rotation.md"), "PLANTED\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "fixture");
+    return repo;
+  }
+
+  it("a declared deny glob is excluded from the sanitized copy, not merely unread", async () => {
+    const repo = buildDenyFixtureRepo();
+    let copied: string[] = [];
+    const spawn = ((_cmd: string, _args: string[], opts: { cwd?: string }) => {
+      copied =
+        opts.cwd !== undefined
+          ? readdirSync(opts.cwd, { recursive: true }).map((e) => String(e).replace(/\\/g, "/"))
+          : [];
+      const emitter = new EventEmitter();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const stdin = new PassThrough();
+      const child = Object.assign(emitter, { stdout, stderr, stdin, kill: () => undefined });
+      setImmediate(() => {
+        stdout.push(codexJsonl("OK"));
+        stdout.push(null);
+        stderr.push(null);
+        emitter.emit("close", 0);
+      });
+      return child;
+    }) as unknown as SpawnFn;
+
+    await codexAdapter.run("hi", codexEntry, {
+      spawn,
+      contentsAccess: "read",
+      workspaceDir: repo,
+      denyPatterns: ["ops/secrets-notes/**"],
+      env: {},
+    });
+
+    assert.ok(
+      copied.includes("src/index.ts"),
+      `the ordinary source must still be copied: ${copied.join(", ")}`
+    );
+    assert.ok(
+      !copied.includes("ops/secrets-notes/rotation.md"),
+      `a denied path must not exist inside the grant: ${copied.join(", ")}`
+    );
+  });
+});

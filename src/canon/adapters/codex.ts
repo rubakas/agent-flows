@@ -21,7 +21,12 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { emitStepEvent } from "../stepLogEvents.js";
-import { DEFAULT_STEP_TIMEOUT_MS, resolveWorkspaceDir, withDeadline } from "../stepRuntime.js";
+import {
+  DEFAULT_STEP_TIMEOUT_MS,
+  TransportFailureError,
+  resolveWorkspaceDir,
+  withDeadline,
+} from "../stepRuntime.js";
 import { codexConfinementArgs } from "../workspace/codexProfile.js";
 import { materializeSanitizedWorkspace, sweepStaleWorkspaces } from "../workspace/sanitize.js";
 import { DEFAULT_ADAPTER_CONFIG } from "./types.js";
@@ -58,6 +63,9 @@ export const CODEX_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
   "LOGNAME",
   "CODEX_HOME",
 ]);
+
+/** Transport label carried on every TransportFailureError this adapter throws. */
+const CODEX_TRANSPORT = "cli:codex";
 
 /** Project variables are forwarded by prefix so a step can read its own run context. */
 const AGENT_FLOWS_PREFIX = "AGENT_FLOWS_";
@@ -245,7 +253,12 @@ function runCodexCli(
     child.stdin.end();
 
     child.on("error", (err) => {
-      reject(new Error(`codex exec: spawn error: ${err.message}`));
+      reject(
+        new TransportFailureError(`codex exec: spawn error: ${err.message}`, {
+          transport: CODEX_TRANSPORT,
+          cause: err,
+        })
+      );
     });
 
     child.on("close", (code) => {
@@ -255,8 +268,9 @@ function runCodexCli(
       } catch {
         const tail = stderr.slice(-400);
         reject(
-          new Error(
-            `codex exec: exit ${code ?? -1}; no agent_message found.\nstderr: ${tail}\nstdout: ${stdout.slice(-400)}`
+          new TransportFailureError(
+            `codex exec: exit ${code ?? -1}; no agent_message found.\nstderr: ${tail}\nstdout: ${stdout.slice(-400)}`,
+            { transport: CODEX_TRANSPORT, exitCode: code ?? -1 }
           )
         );
       }
@@ -297,10 +311,18 @@ function emptyGrant(): CodexGrant {
   };
 }
 
-function resolveGrant(workspaceDir: string | undefined): CodexGrant {
+function resolveGrant(
+  workspaceDir: string | undefined,
+  extraDenyGlobs: readonly string[] | undefined
+): CodexGrant {
   if (workspaceDir === undefined) return emptyGrant();
 
-  const workspace = materializeSanitizedWorkspace(workspaceDir);
+  // The step's own deny list travels into the copy: on the claude path it
+  // narrows the grant through `--disallowedTools`, and a list that only binds on
+  // one provider is not a deny list at all (spec 039 audit).
+  const workspace = materializeSanitizedWorkspace(workspaceDir, {
+    ...(extraDenyGlobs?.length ? { extraDenyGlobs } : {}),
+  });
   const { denied, symlinks, gitlinks } = workspace.skipped;
   // No logger travels in StepRunnerDeps; one line on stderr keeps the exclusions
   // visible — a copy that silently loses a source directory is the failure mode
@@ -346,7 +368,7 @@ async function runCodexStep(
       );
     }
 
-    const grant = resolveGrant(resolvedWorkspaceDir);
+    const grant = resolveGrant(resolvedWorkspaceDir, deps.denyPatterns);
     try {
       return await runCodexCli(prompt, entry.cli?.model, deps, effectiveSignal, grant.dir);
     } finally {
@@ -366,6 +388,9 @@ export const codexAdapter: ProviderAdapter = {
       workspaceRead: config.codexConfinement,
       workspaceWrite: false,
       budgetCap: false,
+      // The step's deny globs are excluded from the sanitized copy, so a denied
+      // path is not merely unreadable — it is not there.
+      stepDenyPatterns: true,
     };
   },
   run: runCodexStep,

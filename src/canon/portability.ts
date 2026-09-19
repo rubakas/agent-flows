@@ -47,6 +47,13 @@ export function checkPortability(
       `(transport ${transportLabel(entry)}), which cannot enforce ${requirement}`,
   });
 
+  // Checked before `contents` so the refusal names the deny list rather than the
+  // access mode: without this guard the failover chain has no guard for the
+  // class at all, and the next adapter added inherits the same hole.
+  if (step.permissions?.deny?.length && !capabilities.stepDenyPatterns) {
+    return refuse("the step's declared permissions.deny globs");
+  }
+
   const contents = step.permissions?.contents;
   if (contents === "read" && !capabilities.workspaceRead) {
     return refuse(`permissions.contents "read"`);

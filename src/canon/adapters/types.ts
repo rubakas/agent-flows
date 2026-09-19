@@ -20,6 +20,12 @@ export interface AdapterCapabilities {
   workspaceWrite: boolean;
   /** Can enforce a per-step cost cap (`maxBudgetUsd`). */
   budgetCap: boolean;
+  /**
+   * Can enforce the step's own `permissions.deny` globs. A transport that cannot
+   * must never be handed a step that declares one — a deny list the operator
+   * wrote is a boundary, and a boundary only one provider honours is none.
+   */
+  stepDenyPatterns: boolean;
 }
 
 /** Adapter-level configuration resolved by the caller, not by the adapter. */

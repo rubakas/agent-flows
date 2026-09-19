@@ -65,6 +65,12 @@ export interface MaterializeOptions {
    * `process.env`; injected in tests so the copy does not depend on the machine.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The step's own `permissions.deny` globs. The claude path composes these into
+   * `--disallowedTools`; the copy must exclude the same paths, or a step's
+   * declared deny list evaporates the moment the step runs under codex.
+   */
+  extraDenyGlobs?: readonly string[];
 }
 
 /**
@@ -84,7 +90,11 @@ export function materializeSanitizedWorkspace(
   opts: MaterializeOptions = {}
 ): SanitizedWorkspace {
   const tmpRoot = opts.tmpRoot ?? os.tmpdir();
-  const denyPatterns = [...BASE_DENY_PATTERNS, ...operatorReadDenyGlobs(opts.env ?? process.env)];
+  const denyPatterns = [
+    ...BASE_DENY_PATTERNS,
+    ...operatorReadDenyGlobs(opts.env ?? process.env),
+    ...(opts.extraDenyGlobs ?? []),
+  ];
   const entries = listRepoEntries(repoDir);
 
   sweepStaleWorkspaces(tmpRoot, opts.now ?? Date.now(), opts.staleMs ?? DEFAULT_STALE_MS);

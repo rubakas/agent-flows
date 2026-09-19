@@ -52,6 +52,19 @@ describe("checkPortability — refusals (V4)", () => {
     assert.match(reason, /permissions\.contents "write"/);
   });
 
+  it("refuses a transport that cannot enforce the step's declared permissions.deny", () => {
+    const reason = reasonOf(
+      checkPortability(
+        step({ permissions: { contents: "none", deny: ["ops/secrets-notes/**"] } }),
+        api,
+        "local"
+      )
+    );
+    assert.match(reason, /"verify"/);
+    assert.match(reason, /"local"/);
+    assert.match(reason, /permissions\.deny/);
+  });
+
   it("refuses codex with maxBudgetUsd", () => {
     const reason = reasonOf(checkPortability(step({ maxBudgetUsd: 0.5 }), codex, "openai"));
     assert.match(reason, /"verify"/);
@@ -96,6 +109,17 @@ describe("checkPortability — accepted combinations", () => {
     assert.deepEqual(checkPortability(step({ maxBudgetUsd: 1 }), claude, "anthropic"), {
       ok: true,
     });
+  });
+
+  it("accepts codex with a declared permissions.deny — the copy excludes those globs", () => {
+    assert.deepEqual(
+      checkPortability(
+        step({ permissions: { contents: "read", deny: ["ops/secrets-notes/**"] } }),
+        codex,
+        "openai"
+      ),
+      { ok: true }
+    );
   });
 
   it("accepts every transport for a step declaring no contents", () => {
