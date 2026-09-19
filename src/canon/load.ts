@@ -172,6 +172,10 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
       if ((step as unknown as Record<string, unknown>).maxBudgetUsd !== undefined) {
         throw new Error(`Step "${step.id}": maxBudgetUsd is only allowed on llm steps`);
       }
+      // failover is llm-only: no other step kind is dispatched to a provider.
+      if ((step as unknown as Record<string, unknown>).failover !== undefined) {
+        throw new Error(`Step "${step.id}": failover is only allowed on llm steps`);
+      }
       // env is only valid on check steps; reject it on all other non-llm kinds.
       if (step.kind !== "check") {
         for (const field of NON_CHECK_FORBIDDEN) {
@@ -300,6 +304,14 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
       const timeoutField = (step as unknown as Record<string, unknown>).timeoutMs;
       if (timeoutField !== undefined) {
         assertPositiveTimeout(`Step "${step.id}"`, "timeoutMs", timeoutField);
+      }
+
+      // Validate the optional failover flag: false pins the step to one provider.
+      const failoverField = (step as unknown as Record<string, unknown>).failover;
+      if (failoverField !== undefined && typeof failoverField !== "boolean") {
+        throw new Error(
+          `Step "${step.id}": failover must be a boolean; got ${JSON.stringify(failoverField)}`
+        );
       }
 
       // Validate maxBudgetUsd if present

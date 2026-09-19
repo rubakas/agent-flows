@@ -88,6 +88,12 @@ export function defaultRegistry(
 export interface ProviderProfile {
   id: string;
   roles: Record<Role, string>;
+  /**
+   * Ordered profile ids to try when a step fails on this profile (spec 039).
+   * Each candidate is tried once, in order; the first one that answers wins.
+   * Absent or empty means the profile has no failover — its failures are final.
+   */
+  fallback?: string[];
 }
 
 /**
@@ -110,10 +116,16 @@ const DEFAULT_PROFILES: ProviderProfile[] = [
     // scout=haiku: fast survey and condensing steps. fable is intentionally excluded from
     // all role profiles — owner decision, see registry comment on the fable entry.
     roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
+    // The two CLI profiles cover for each other. `local` is deliberately absent
+    // from every chain: the api transport is a single POST with no tool loop, so
+    // a local model cannot read files or run commands. It is a text-only reserve,
+    // never a substitute for a repo-grounded step (owner decision, spec 039).
+    fallback: ["openai"],
   },
   {
     id: "openai",
     roles: { reasoner: "codex", worker: "codex", scout: "codex" },
+    fallback: ["anthropic"],
   },
   {
     id: "local",

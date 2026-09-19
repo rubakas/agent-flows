@@ -196,6 +196,72 @@ defaultProvider: nonexistent
   });
 });
 
+// ── parseProviders: fallback chains (spec 039) ────────────────────────────────
+
+describe("parseProviders — profile fallback chains", () => {
+  function rejectsWithField(yaml: string, field: string): void {
+    assert.throws(
+      () => parseProviders(yaml, "providers.yaml"),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof ProvidersValidationError,
+          `not a validation error: ${String(err)}`
+        );
+        assert.ok(err.message.includes(field), `error does not mention "${field}": ${err.message}`);
+        return true;
+      }
+    );
+  }
+
+  it("accepts a chain naming a project profile and a built-in", () => {
+    const yaml = `
+version: 1
+profiles:
+  - id: house
+    roles: { reasoner: opus, worker: sonnet, scout: haiku }
+    fallback: [spare, openai]
+  - id: spare
+    roles: { reasoner: codex, worker: codex, scout: codex }
+`;
+    const result = parseProviders(yaml, "test");
+    assert.deepEqual(result.profiles[0].fallback, ["spare", "openai"]);
+    assert.equal(result.profiles[1].fallback, undefined);
+  });
+
+  it("rejects a chain naming an unknown profile", () => {
+    const yaml = `
+version: 1
+profiles:
+  - id: house
+    roles: { reasoner: opus, worker: sonnet, scout: haiku }
+    fallback: [nonexistent]
+`;
+    rejectsWithField(yaml, "fallback");
+  });
+
+  it("rejects a profile listing itself in its own chain", () => {
+    const yaml = `
+version: 1
+profiles:
+  - id: house
+    roles: { reasoner: opus, worker: sonnet, scout: haiku }
+    fallback: [house]
+`;
+    rejectsWithField(yaml, "fallback");
+  });
+
+  it("rejects a chain that is not an array of non-empty strings", () => {
+    const yaml = `
+version: 1
+profiles:
+  - id: house
+    roles: { reasoner: opus, worker: sonnet, scout: haiku }
+    fallback: openai
+`;
+    rejectsWithField(yaml, "fallback");
+  });
+});
+
 // ── parseProviders: passthrough role values ───────────────────────────────────
 
 describe("parseProviders — role passthrough", () => {

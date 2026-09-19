@@ -160,6 +160,21 @@ export interface StepDef {
    */
   until?: string;
   /**
+   * For `kind: "llm"` steps: whether this step may be retried on a different provider
+   * when its first attempt fails with a transport-level error. Defaults to true — an
+   * absent field keeps the provider profile's `fallback` chain.
+   *
+   * Set to `false` to pin the step to the provider the run chose. The prompt a failover
+   * hands the second vendor is the SAME rendered prompt, upstream step outputs included —
+   * on a `contents: read` pipeline that is repository content the first provider read.
+   * A step whose prompt carries content that must not reach a second vendor says so here;
+   * it then fails as if the chain were exhausted rather than crossing providers.
+   *
+   * Must be a boolean; rejected on every step kind other than `llm` — a flag that is
+   * silently ignored is worse than one that is absent.
+   */
+  failover?: boolean;
+  /**
    * Per-step cost cap for claude-transport llm steps. Passed as `--max-budget-usd`
    * to the CLI; the CLI trips it and emits a result event with subtype
    * `error_max_budget_usd`, which the parser maps to `StepBudgetExceededError`.

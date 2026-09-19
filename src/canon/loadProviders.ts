@@ -220,7 +220,7 @@ function parseModelEntry(raw: unknown, index: number, sourceLabel: string): Mode
 function parseProfileEntry(raw: unknown, index: number, sourceLabel: string): ProviderProfile {
   const fp = `profiles[${index}]`;
   if (!isPlainObject(raw)) fail(sourceLabel, fp, "must be an object");
-  rejectUnknownKeys(raw, ["id", "roles"], sourceLabel, fp);
+  rejectUnknownKeys(raw, ["id", "roles", "fallback"], sourceLabel, fp);
   const id = validateId(raw.id, sourceLabel, `${fp}.id`);
 
   if (!isPlainObject(raw.roles)) fail(sourceLabel, `${fp}.roles`, "must be an object");
@@ -246,7 +246,31 @@ function parseProfileEntry(raw: unknown, index: number, sourceLabel: string): Pr
     // stricter than the runtime.
     roles[role] = value;
   }
-  return { id, roles };
+
+  // The ids a fallback names are cross-checked against the whole document after
+  // every profile has been parsed — here only the shape is known to be right.
+  let fallback: string[] | undefined;
+  if (raw.fallback !== undefined) {
+    if (!Array.isArray(raw.fallback)) fail(sourceLabel, `${fp}.fallback`, "must be an array");
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    raw.fallback.forEach((candidate: unknown, i: number) => {
+      if (typeof candidate !== "string" || candidate.length === 0) {
+        fail(sourceLabel, `${fp}.fallback[${i}]`, "must be a non-empty string");
+      }
+      if (candidate === id) {
+        fail(sourceLabel, `${fp}.fallback[${i}]`, `must not name its own profile "${id}"`);
+      }
+      if (seen.has(candidate)) {
+        fail(sourceLabel, `${fp}.fallback[${i}]`, `duplicate id "${candidate}"`);
+      }
+      seen.add(candidate);
+      ids.push(candidate);
+    });
+    fallback = ids;
+  }
+
+  return { id, roles, ...(fallback !== undefined ? { fallback } : {}) };
 }
 
 // ── Pure parser ───────────────────────────────────────────────────────────────
@@ -315,14 +339,28 @@ export function parseProviders(text: string, sourceLabel: string): ProviderConfi
     profiles.push(entry);
   });
 
+  // A fallback chain is only usable if every id in it resolves, so it is checked
+  // against the same set defaultProvider is: this file's profiles plus the built-ins.
+  const knownProfileIds = new Set([...seenProfileIds, ...builtInProfileIds()]);
+  profiles.forEach((profile, i) => {
+    profile.fallback?.forEach((candidate, j) => {
+      if (!knownProfileIds.has(candidate)) {
+        fail(
+          sourceLabel,
+          `profiles[${i}].fallback[${j}]`,
+          `does not name a profile in this file or a built-in profile ("${candidate}")`
+        );
+      }
+    });
+  });
+
   let defaultProvider: string | undefined;
   if (raw.defaultProvider !== undefined) {
     if (typeof raw.defaultProvider !== "string" || raw.defaultProvider.length === 0) {
       fail(sourceLabel, "defaultProvider", "must be a non-empty string");
     }
     // Validate against the union of project-declared and built-in profile ids.
-    const availableProfileIds = new Set([...seenProfileIds, ...builtInProfileIds()]);
-    if (!availableProfileIds.has(raw.defaultProvider)) {
+    if (!knownProfileIds.has(raw.defaultProvider)) {
       fail(
         sourceLabel,
         "defaultProvider",

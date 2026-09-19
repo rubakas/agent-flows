@@ -14,6 +14,7 @@ export type StepLogKind =
   | "watchdog"
   | "usage"
   | "step.result"
+  | "failover"
   | "decision"
   | "judge.degraded"
   | "log.truncated";
@@ -81,6 +82,26 @@ export interface StepResultPayload {
   status: "succeeded" | "failed" | "cancelled";
   durationMs: number;
   error?: string;
+  /**
+   * The model and transport that actually answered, present only when a
+   * failover moved the step off the one `step.start` named (spec 039).
+   * `step.start` is never rewritten — it records what was PLANNED.
+   */
+  model?: string;
+  transport?: string;
+}
+
+/**
+ * Emitted by the step builder when a step's failure is retried on the next
+ * profile in the active profile's fallback chain (spec 039). One per crossing,
+ * so the log shows which provider actually answered and why the first did not.
+ */
+export interface FailoverPayload {
+  stepId: string;
+  fromProfile: string;
+  toProfile: string;
+  /** The failure that triggered the crossing. */
+  reason: string;
 }
 
 export interface DecisionPayload {
@@ -117,6 +138,7 @@ export type StepLogEventInput =
   | Tagged<"watchdog", WatchdogPayload>
   | Tagged<"usage", UsagePayload>
   | Tagged<"step.result", StepResultPayload>
+  | Tagged<"failover", FailoverPayload>
   | Tagged<"decision", DecisionPayload>
   | Tagged<"judge.degraded", JudgeDegradedPayload>
   | Tagged<"log.truncated", LogTruncatedPayload>;

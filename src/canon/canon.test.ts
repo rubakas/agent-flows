@@ -2071,6 +2071,66 @@ steps:
   });
 });
 
+describe("llm step — failover flag validation", () => {
+  const loadYaml = (yaml: string) =>
+    loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "survey"),
+    });
+
+  it("accepts failover: false on an llm step", () => {
+    const { def } = loadYaml(`
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: survey
+    kind: llm
+    role: worker
+    prompt: prompts/survey.md
+    failover: false
+`);
+    assert.equal(def.steps[0].failover, false);
+  });
+
+  it("throws on a non-boolean failover", () => {
+    assert.throws(
+      () =>
+        loadYaml(`
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: survey
+    kind: llm
+    role: worker
+    prompt: prompts/survey.md
+    failover: "no"
+`),
+      /survey.*failover must be a boolean/u
+    );
+  });
+
+  it("throws on failover set on a non-llm step — no other kind is dispatched to a provider", () => {
+    assert.throws(
+      () =>
+        loadYaml(`
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: g1
+    kind: gate
+    message: ok?
+    failover: false
+`),
+      /g1.*failover is only allowed on llm steps/u
+    );
+  });
+});
+
 // ── build.yaml — terminal verification check ─────────────────────────────────
 //
 // A live self-run finished with status "succeeded" while the tree failed
