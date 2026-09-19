@@ -489,10 +489,12 @@ describe("POST /api/runs — non-blocking start + SSE step events", () => {
   let srv: ServeHandle;
   let mockRun: MockRun;
   let svcRunId: string;
+  let runService: RunService;
 
   before(async () => {
     mockRun = makeMockRun("http-sse-run-01", successResult(), successResult());
     const service = new RunService(makeMastra(mockRun));
+    runService = service;
     // Register the run via service.start() directly so it is in the registry
     // before the HTTP tests run. The run settles to success immediately (mock).
     const startResult = await service.start("spec-creation", { request: "test" });
@@ -527,6 +529,97 @@ describe("POST /api/runs — non-blocking start + SSE step events", () => {
       typeof body.runId === "string" && body.runId.length > 0,
       "runId must be present in response"
     );
+  });
+
+  it("POST /api/runs with an unknown provider → 400 naming the field", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "spec-creation",
+      inputs: { request: "test" },
+      provider: "no-such-profile",
+    });
+    assert.equal(res.status, 400, "an unknown provider must fail at the boundary");
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /no-such-profile/);
+  });
+
+  it("POST /api/runs with a non-string provider → 400", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "spec-creation",
+      inputs: { request: "test" },
+      provider: 7,
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /provider/);
+  });
+
+  it("POST /api/runs with a built-in provider reaches both the workflow input and the run options", async () => {
+    // A 200 alone cannot tell a wired provider from one dropped between the
+    // validation above and the two places it has to land (spec 039 review).
+    const original = runService.start.bind(runService);
+    let seen: { wfInput: Record<string, unknown>; providerId?: string } | undefined;
+    runService.start = (pipelineId, wfInput, opts) => {
+      seen = { wfInput, ...(opts?.provider ? { providerId: opts.provider.id } : {}) };
+      return original(pipelineId, wfInput, opts);
+    };
+
+    let res: Response;
+    try {
+      res = await mutate(srv.port, "POST", "/api/runs", {
+        pipeline: "spec-creation",
+        inputs: { request: "test" },
+        provider: "openai",
+      });
+    } finally {
+      runService.start = original;
+    }
+
+    assert.equal(res.status, 200, "a known profile id must be accepted");
+    assert.ok(seen, "the route must have started a run");
+    assert.equal(
+      seen.wfInput.provider,
+      "openai",
+      "the validated provider must reach the workflow context the steps resolve from"
+    );
+    assert.equal(
+      seen.providerId,
+      "openai",
+      "the resolved profile must reach opts.provider, which provenance is written from"
+    );
+  });
+
+  it("POST /api/runs cannot smuggle a provider through inputs", async () => {
+    const original = runService.start.bind(runService);
+    let started = false;
+    runService.start = (pipelineId, wfInput, opts) => {
+      started = true;
+      return original(pipelineId, wfInput, opts);
+    };
+
+    let res: Response;
+    try {
+      res = await mutate(srv.port, "POST", "/api/runs", {
+        pipeline: "spec-creation",
+        inputs: { request: "test", provider: "local" },
+      });
+    } finally {
+      runService.start = original;
+    }
+
+    assert.equal(res.status, 400, "a reserved key inside inputs must be refused at the boundary");
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /provider/, `the error must name the key: ${body.error}`);
+    assert.equal(started, false, "the run must never reach the workflow");
+  });
+
+  it("POST /api/runs refuses an input the pipeline does not declare", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "spec-creation",
+      inputs: { request: "test", models: { intake: "haiku" } },
+    });
+    assert.equal(res.status, 400, "`models` inside inputs is the same bypass as `provider`");
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /models/);
   });
 
   it("SSE /api/runs/:id/events delivers step events for a running run", async () => {
@@ -2844,7 +2937,7 @@ describe("GET /ui-*.js — the page's ESM helpers are served next to it (D7, 037
 
   it("404s a module name that is not on the allowlist (FR-015)", async () => {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ui-other.js`);
-    assert.equal(res.status, 404, "only the four listed module names are served");
+    assert.equal(res.status, 404, "only the listed module names are served");
     await res.text();
   });
 });
@@ -2871,6 +2964,195 @@ describe("GET /api/environment — port and provider profile (D6/FR-007)", () =>
       typeof body.profile === "string" && body.profile.length > 0,
       `profile must be a non-empty string; got ${JSON.stringify(body.profile)}`
     );
+  });
+});
+
+// ── GET/PUT /api/providers (spec 039) ────────────────────────────────────────
+
+describe("GET/PUT /api/providers — the provider matrix", () => {
+  let srv: ServeHandle;
+  let tmpProjectDir: string;
+  let providersPath: string;
+  // A value that stands in for a real API key. Nothing in any response body may
+  // ever contain it — the daemon reports the variable's NAME, never its value.
+  const FAKE_KEY = "s3cr3t-value-that-must-never-leave-the-daemon";
+
+  const DOC = [
+    "version: 1",
+    "models:",
+    "  - id: house-llm",
+    "    transport: api",
+    "    api:",
+    "      endpoint: https://models.example.com/v1/chat/completions",
+    "      keyEnv: AGENT_FLOWS_TEST_FAKE_KEY",
+    "profiles:",
+    "  - id: house",
+    "    roles:",
+    "      reasoner: house-llm",
+    "      worker: house-llm",
+    "      scout: house-llm",
+    "    fallback:",
+    "      - anthropic",
+    "",
+  ].join("\n");
+
+  async function getProviders(): Promise<Record<string, unknown>> {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/providers`);
+    assert.equal(res.status, 200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  async function putProviders(
+    body: unknown
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/providers`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  }
+
+  before(async () => {
+    tmpProjectDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-providers-")));
+    mkdirSync(join(tmpProjectDir, ".agent-flows"), { recursive: true });
+    providersPath = join(tmpProjectDir, ".agent-flows", "providers.yaml");
+    writeFileSync(providersPath, DOC);
+    process.env.AGENT_FLOWS_TEST_FAKE_KEY = FAKE_KEY;
+    srv = await startServer({
+      state: makeState(tmpProjectDir),
+      port: 0,
+      dbPath: ":memory:",
+      projectDir: tmpProjectDir,
+    });
+  });
+
+  after(async () => {
+    await srv.close();
+    delete process.env.AGENT_FLOWS_TEST_FAKE_KEY;
+    rmSync(tmpProjectDir, { recursive: true, force: true });
+  });
+
+  it("merges project-declared profiles with the built-ins and marks each source", async () => {
+    const body = (await getProviders()) as {
+      profiles: { id: string; source: string; fallback: string[] }[];
+      models: { id: string; source: string }[];
+      roles: string[];
+      defaultProvider?: string;
+    };
+    const project = body.profiles.filter((p) => p.source === "project").map((p) => p.id);
+    const builtin = body.profiles.filter((p) => p.source === "builtin").map((p) => p.id);
+    assert.deepEqual(project, ["house"], "the project profile must come first and be marked");
+    for (const id of ["anthropic", "openai", "local"]) {
+      assert.ok(builtin.includes(id), `built-in profile "${id}" must be in the merged view`);
+    }
+    assert.deepEqual(body.roles, ["reasoner", "worker", "scout"]);
+    // The chain is what drives failover, so the page has to be able to show it.
+    const house = body.profiles.find((p) => p.id === "house" && p.source === "project");
+    assert.deepEqual(house?.fallback, ["anthropic"]);
+    const anthropic = body.profiles.find((p) => p.id === "anthropic");
+    assert.deepEqual(anthropic?.fallback, ["openai"]);
+
+    assert.equal(
+      body.models[0]?.id,
+      "house-llm",
+      "project models are prepended, as in the registry"
+    );
+    assert.ok(
+      body.models.some((m) => m.id === "opus" && m.source === "builtin"),
+      "the built-in registry entries must be listed too"
+    );
+  });
+
+  it("reports a keyEnv by NAME and never returns its value", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/providers`);
+    assert.equal(res.status, 200);
+    const raw = await res.text();
+    assert.ok(
+      raw.includes("AGENT_FLOWS_TEST_FAKE_KEY"),
+      "the env var NAME is what the editor needs"
+    );
+    assert.ok(!raw.includes(FAKE_KEY), "the key VALUE must appear nowhere in the response body");
+    const body = JSON.parse(raw) as {
+      models: { id: string; api?: { keyEnv?: string; keyEnvSet?: boolean } }[];
+    };
+    const entry = body.models.find((m) => m.id === "house-llm");
+    assert.equal(entry?.api?.keyEnv, "AGENT_FLOWS_TEST_FAKE_KEY");
+    assert.equal(entry?.api?.keyEnvSet, true, "presence is reported as a boolean, not a value");
+  });
+
+  it("round-trips a matrix change through PUT and back into the file", async () => {
+    const before = (await getProviders()) as { hash: string };
+    const written = await putProviders({
+      ifMatch: before.hash,
+      config: {
+        version: 1,
+        models: [
+          {
+            id: "house-llm",
+            transport: "api",
+            api: {
+              endpoint: "https://models.example.com/v1/chat/completions",
+              keyEnv: "AGENT_FLOWS_TEST_FAKE_KEY",
+            },
+          },
+        ],
+        profiles: [
+          {
+            id: "house",
+            roles: { reasoner: "opus", worker: "house-llm", scout: "house-llm" },
+            fallback: ["anthropic"],
+          },
+        ],
+      },
+    });
+    assert.equal(written.status, 200, JSON.stringify(written.body));
+    assert.equal(written.body.ok, true);
+
+    const onDisk = readFileSync(providersPath, "utf8");
+    assert.match(onDisk, /reasoner:\s*opus/u, "the edited cell must have landed in the file");
+
+    const after = (await getProviders()) as {
+      profiles: { id: string; source: string; roles: Record<string, string> }[];
+      hash: string;
+    };
+    const house = after.profiles.find((p) => p.id === "house" && p.source === "project");
+    assert.equal(house?.roles.reasoner, "opus", "the read API must reflect the write");
+    assert.notEqual(after.hash, before.hash, "the hash must move with the file");
+  });
+
+  it("rejects an invalid document with 400 and leaves the file byte-identical", async () => {
+    const current = (await getProviders()) as { hash: string };
+    const bytesBefore = readFileSync(providersPath);
+    const result = await putProviders({
+      ifMatch: current.hash,
+      config: {
+        version: 1,
+        models: [],
+        // Missing "scout" — the loader's own validator is what refuses this.
+        profiles: [{ id: "house", roles: { reasoner: "opus", worker: "opus" } }],
+      },
+    });
+    assert.equal(result.status, 400);
+    assert.match(String(result.body.error), /scout/u, "the parse error must be returned verbatim");
+    assert.deepEqual(
+      readFileSync(providersPath),
+      bytesBefore,
+      "a rejected document must not have been written — validation runs before any write"
+    );
+  });
+
+  it("refuses a stale write with 409 rather than clobbering the other editor", async () => {
+    const result = await putProviders({
+      ifMatch: "0".repeat(64),
+      config: {
+        version: 1,
+        models: [],
+        profiles: [{ id: "house", roles: { reasoner: "opus", worker: "opus", scout: "opus" } }],
+      },
+    });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.reason, "conflict");
   });
 });
 
@@ -4856,6 +5138,70 @@ describe("POST /api/pipelines/:id/template — save as template (037 FR-003)", (
   });
 });
 
+describe("POST /api/runs — the provider is validated against the snapshot the steps use", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-provider-snapshot-")));
+    // providers.yaml on disk declares a profile the running workflows were NOT
+    // built with — exactly the state after an edit without a daemon restart.
+    mkdirSync(join(tmpDir, ".agent-flows"), { recursive: true });
+    writeFileSync(
+      join(tmpDir, ".agent-flows", "providers.yaml"),
+      [
+        "profiles:",
+        "  added-after-startup:",
+        "    reasoner: claude-opus-4-1",
+        "    worker: claude-sonnet-4-5",
+        "    scout: claude-haiku-4-5",
+      ].join("\n") + "\n",
+      "utf8"
+    );
+    srv = await startServer({
+      state: makeState(tmpDir),
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      bundledPipelinesDir: REAL_PIPELINES_DIR,
+      projectDir: tmpDir,
+      // The startup snapshot: no project profiles at all.
+      providerProfiles: [],
+      runService: new RunService(
+        makeMastra(makeMockRun("run-provider-snapshot-01", successResult(), successResult()))
+      ),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("a profile added to providers.yaml after startup is refused at the boundary, not mid-run", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "investigate",
+      inputs: { request: "t" },
+      provider: "added-after-startup",
+    });
+    assert.equal(
+      res.status,
+      400,
+      "a profile the running workflows cannot resolve must fail at the boundary"
+    );
+    const body = (await res.json()) as { error: string };
+    assert.match(body.error, /added-after-startup/);
+  });
+
+  it("a built-in profile is still accepted", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "investigate",
+      inputs: { request: "t" },
+      provider: "anthropic",
+    });
+    assert.equal(res.status, 200, `expected 200, got ${res.status}`);
+  });
+});
+
 describe("POST /api/runs — inputs and model overrides are validated (037 FR-009)", () => {
   let srv: ServeHandle;
   let tmpDir: string;
@@ -4921,7 +5267,7 @@ describe("POST /api/runs — inputs and model overrides are validated (037 FR-00
     ).json()) as { def: { steps: { id: string }[] } };
     const stepId = def.def.steps[0].id;
     const res = await start({
-      inputs: { task: "t" },
+      inputs: { request: "t" },
       models: { [stepId]: "claude-sonnet-4-5" },
     });
     assert.equal(res.status, 200, `expected 200, got ${res.status}`);

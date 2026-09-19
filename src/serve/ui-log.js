@@ -147,6 +147,11 @@ export function renderLogEvent(event) {
           event.decidedBy === "human" ? "human" : "judge"
         }`
       );
+    case "failover":
+      return muted(
+        kind,
+        `failover: ${str(event.fromProfile)} → ${str(event.toProfile)} after ${str(event.reason)}`
+      );
     case "judge.degraded":
       return muted(kind, `judge degraded: ${str(event.error)}`);
     case "log.truncated":

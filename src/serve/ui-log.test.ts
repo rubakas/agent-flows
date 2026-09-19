@@ -90,6 +90,20 @@ describe("renderLogEvent — escaping on every path (spec 036 Escaping, V5)", ()
     assert.ok(watchdog.includes("warn"), "a watchdog line is a warning line");
   });
 
+  it("renders a provider failover and escapes its reason (spec 039)", () => {
+    const html = renderLogEvent({
+      kind: "failover",
+      stepId: "develop.implement",
+      fromProfile: "anthropic",
+      toProfile: "openai",
+      reason: "<b>claude exited with code 1</b>",
+    });
+    assert.ok(html.includes("anthropic"), `the origin profile must be named: ${html}`);
+    assert.ok(html.includes("openai"), "the destination profile must be named");
+    assert.ok(html.includes("&lt;b&gt;claude exited"), "the reason must be escaped");
+    assert.ok(!html.includes("<b>"), "no live markup from a provider error message");
+  });
+
   it("escapes a tool result excerpt and marks a denied call", () => {
     const result = renderLogEvent({ kind: "tool.result", ok: false, excerpt: "<hr>fail" });
     assert.ok(result.includes("result · error"), `an error result says so: ${result}`);

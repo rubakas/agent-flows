@@ -1,0 +1,280 @@
+// Tests for the provider matrix editor's renderers and document builder
+// (spec 039 V5).
+//
+// The matrix is the only place the page builds HTML from providers.yaml, and
+// the document builder is what decides which bytes get written back — so both
+// the escaping and the "which columns are emitted" rule are asserted here,
+// without a DOM.
+
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import {
+  PROVIDER_ROLES,
+  collectProviderDocument,
+  parseProviderError,
+  providerColumns,
+  renderProviderMatrix,
+  renderProviderModels,
+} from "./ui-providers.js";
+
+/** A GET /api/providers body with one project profile shadowing a built-in. */
+function sampleData() {
+  return {
+    activeProfile: "anthropic",
+    profiles: [
+      {
+        id: "anthropic",
+        roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
+        fallback: ["openai"],
+        source: "project",
+        overridesBuiltIn: true,
+      },
+      {
+        id: "anthropic",
+        roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
+        fallback: ["openai"],
+        source: "builtin",
+        overriddenByProject: true,
+      },
+      {
+        id: "openai",
+        roles: { reasoner: "codex", worker: "codex", scout: "codex" },
+        fallback: ["anthropic"],
+        source: "builtin",
+        overriddenByProject: false,
+      },
+    ],
+    models: [{ id: "opus", transport: "cli", cli: { bin: "claude" }, source: "builtin" }],
+  };
+}
+
+describe("providerColumns — one column per id, project wins (3.5)", () => {
+  it("puts project-declared profiles first and keeps the built-in it shadows", () => {
+    const columns = providerColumns(sampleData());
+    assert.deepEqual(
+      columns.map((c) => [c.id, c.source]),
+      [
+        ["anthropic", "project"],
+        ["openai", "builtin"],
+      ]
+    );
+    assert.equal(columns[0].overridesBuiltIn, true, "the shadowed built-in must be reported");
+    assert.deepEqual(columns[0].builtin?.roles.worker, "sonnet");
+    assert.equal(columns[1].overridesBuiltIn, false);
+  });
+
+  it("returns no columns for an empty document", () => {
+    assert.deepEqual(providerColumns({}), []);
+  });
+});
+
+describe("renderProviderMatrix — roles are rows, profiles are columns (3.1)", () => {
+  it("renders one row per role and one column per profile", () => {
+    const html = renderProviderMatrix(providerColumns(sampleData()), {
+      modelIds: ["opus", "codex"],
+      activeProfile: "anthropic",
+    });
+    for (const role of PROVIDER_ROLES) {
+      assert.ok(html.includes(`data-cell-role="${role}"`), `no cell for role ${role}`);
+    }
+    assert.ok(html.includes('data-profile-col="anthropic"'));
+    assert.ok(html.includes('data-profile-col="openai"'));
+    // Reading the reasoner row across the columns is the equivalence view.
+    assert.ok(html.includes('data-cell-profile="anthropic" data-cell-role="reasoner"'));
+    assert.ok(html.includes('data-cell-profile="openai" data-cell-role="reasoner"'));
+  });
+
+  it("marks built-in columns and the ones a project profile overrides", () => {
+    const html = renderProviderMatrix(providerColumns(sampleData()));
+    assert.ok(html.includes("built-in"), "the built-in column must be labelled");
+    assert.ok(html.includes("overrides the built-in"), "the override must be visible");
+  });
+
+  it("renders the fallback chain as an editable field", () => {
+    const html = renderProviderMatrix(providerColumns(sampleData()));
+    assert.ok(html.includes('data-fallback-profile="anthropic"'));
+    assert.ok(html.includes('value="openai"'), "the chain must be pre-filled");
+  });
+
+  it("escapes every interpolated value", () => {
+    const html = renderProviderMatrix([
+      {
+        id: "<img src=x onerror=alert(1)>",
+        roles: { reasoner: '"><script>bad()</script>', worker: "", scout: "" },
+        fallback: ["<b>"],
+        source: "project",
+        overridesBuiltIn: false,
+        builtin: null,
+      },
+    ]);
+    assert.ok(!html.includes("<img"), "a profile id must not reach the DOM as markup");
+    assert.ok(!html.includes("<script>"), "a role value must not reach the DOM as markup");
+    assert.ok(html.includes("&lt;img"), "the id must appear escaped");
+  });
+
+  it("says so rather than rendering an empty table", () => {
+    assert.match(renderProviderMatrix([]), /No provider profiles/u);
+  });
+});
+
+describe("renderProviderModels — project entries edit, built-ins read (3.4)", () => {
+  it("renders an editable row per project entry and a read-only row per built-in", () => {
+    const html = renderProviderModels(
+      [{ id: "mine", transport: "cli", cli: { bin: "codex", model: "" }, api: {} }],
+      [
+        {
+          id: "litellm",
+          transport: "api",
+          api: {
+            endpoint: "http://localhost:4000/v1",
+            keyEnv: "LITELLM_VIRTUAL_KEY",
+            keyEnvSet: true,
+          },
+        },
+      ]
+    );
+    assert.ok(html.includes('data-model-id="0"'), "the project entry must be editable");
+    assert.ok(html.includes('data-remove-model="0"'));
+    assert.ok(html.includes("LITELLM_VIRTUAL_KEY"), "the key env NAME is shown");
+    assert.ok(!html.includes('data-model-id="1"'), "a built-in entry must not be editable");
+  });
+
+  it("never renders a field that could carry a key value", () => {
+    const html = renderProviderModels([
+      {
+        id: "x",
+        transport: "api",
+        cli: {},
+        api: { endpoint: "https://h/v1", keyEnv: "MY_KEY", model: "" },
+      },
+    ]);
+    assert.ok(html.includes('data-model-keyenv="0"'), "the NAME is editable");
+    assert.ok(!/data-model-key(value|secret)/u.test(html), "no field may hold a key value");
+  });
+
+  it("escapes model fields", () => {
+    const html = renderProviderModels(
+      [],
+      [{ id: "<i>x</i>", transport: "cli", cli: { bin: "claude" } }]
+    );
+    assert.ok(!html.includes("<i>"), "a model id must not reach the DOM as markup");
+  });
+});
+
+describe("collectProviderDocument — what actually gets written (2.x)", () => {
+  it("emits a project profile and drops an unchanged built-in column", () => {
+    const built = collectProviderDocument({
+      defaultProvider: "mine",
+      profiles: [
+        {
+          id: "mine",
+          roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
+          fallback: ["anthropic"],
+          source: "project",
+          builtin: null,
+        },
+        {
+          id: "openai",
+          roles: { reasoner: "codex", worker: "codex", scout: "codex" },
+          fallback: ["anthropic"],
+          source: "builtin",
+          builtin: {
+            roles: { reasoner: "codex", worker: "codex", scout: "codex" },
+            fallback: ["anthropic"],
+          },
+        },
+      ],
+      models: [],
+    });
+    assert.deepEqual(built.profileIds, ["mine"]);
+    assert.deepEqual(built.document, {
+      version: 1,
+      models: [],
+      profiles: [
+        {
+          id: "mine",
+          roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
+          fallback: ["anthropic"],
+        },
+      ],
+      defaultProvider: "mine",
+    });
+  });
+
+  it("emits a built-in column once it is edited, so the override is persisted", () => {
+    const built = collectProviderDocument({
+      profiles: [
+        {
+          id: "anthropic",
+          roles: { reasoner: "fable", worker: "sonnet", scout: "haiku" },
+          fallback: ["openai"],
+          source: "builtin",
+          builtin: {
+            roles: { reasoner: "opus", worker: "sonnet", scout: "haiku" },
+            fallback: ["openai"],
+          },
+        },
+      ],
+      models: [],
+    });
+    assert.deepEqual(built.profileIds, ["anthropic"]);
+    const profiles = built.document.profiles as { roles: Record<string, string> }[];
+    assert.equal(profiles[0].roles.reasoner, "fable");
+  });
+
+  it("drops empty optional fields so the validator never sees a blank string", () => {
+    const built = collectProviderDocument({
+      profiles: [],
+      models: [
+        { id: "a", transport: "cli", cli: { bin: "claude", model: "" }, api: {} },
+        {
+          id: "b",
+          transport: "api",
+          cli: {},
+          api: { endpoint: "https://h/v1", keyEnv: "  ", model: "m" },
+        },
+      ],
+    });
+    assert.deepEqual(built.document.models, [
+      { id: "a", transport: "cli", cli: { bin: "claude" } },
+      { id: "b", transport: "api", api: { endpoint: "https://h/v1", model: "m" } },
+    ]);
+    assert.deepEqual(built.modelIds, ["a", "b"]);
+  });
+
+  it("omits defaultProvider when none is chosen", () => {
+    const built = collectProviderDocument({ defaultProvider: "", profiles: [], models: [] });
+    assert.ok(!("defaultProvider" in built.document));
+  });
+});
+
+describe("parseProviderError — anchoring a 400 to a field (3.6)", () => {
+  it("locates a profile field", () => {
+    const where = parseProviderError(
+      ".agent-flows/providers.yaml: profiles[1].roles.worker: must be a non-empty string"
+    );
+    assert.deepEqual(where, {
+      scope: "profiles",
+      index: 1,
+      field: "roles.worker",
+      reason: "must be a non-empty string",
+    });
+  });
+
+  it("locates a model field", () => {
+    const where = parseProviderError(
+      ".agent-flows/providers.yaml: models[0].api.endpoint: must be an absolute URL"
+    );
+    assert.equal(where.scope, "models");
+    assert.equal(where.index, 0);
+    assert.equal(where.field, "api.endpoint");
+  });
+
+  it("falls back to the whole document when there is no field path", () => {
+    const where = parseProviderError(".agent-flows/providers.yaml: version: is required");
+    assert.equal(where.scope, "document");
+    assert.equal(where.index, null);
+    assert.match(where.reason, /version/u);
+  });
+});

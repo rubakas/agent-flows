@@ -201,6 +201,25 @@
       #settings-reader-body {
         max-height: 60vh;
       }
+      /* Provider matrix fields (039). Inputs outside a dialog get the same
+         monospace, bordered treatment the dialog fields already have. */
+      .cfg-input {
+        font: inherit;
+        font-family: var(--mono);
+        font-size: 12px;
+        width: 100%;
+        padding: 3px 5px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--bg);
+        color: var(--ink);
+      }
+      .cfg-head {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
       .name-item {
         font-family: var(--mono);
         font-size: 12px;
@@ -807,6 +826,36 @@
           <div class="card" id="env-card">Loading…</div>
         </div>
 
+        <!-- Providers (039): the role × profile matrix. Reading one role row
+             across the columns is what shows the equivalent model per provider. -->
+        <div class="section">
+          <div class="section-header">
+            <h2>Providers</h2>
+            <span class="muted" id="providers-path">.agent-flows/providers.yaml</span>
+            <button class="btn" id="btn-add-profile">Add profile</button>
+            <button class="btn" id="btn-add-model">Add model</button>
+            <button class="btn primary" id="btn-save-providers" style="margin-left: auto">
+              Save
+            </button>
+          </div>
+          <div class="error-box" id="providers-error" hidden></div>
+          <p class="muted" id="providers-restart" hidden></p>
+          <div class="card">
+            <label class="field">
+              <span>default provider</span>
+              <select class="cfg-input" id="providers-default"></select>
+            </label>
+          </div>
+          <div id="providers-matrix-wrap">Loading…</div>
+          <div class="section-header" style="margin-top: 12px">
+            <h2>Models</h2>
+            <span class="muted"
+              >built-in entries are read-only — declare one with the same id to override it</span
+            >
+          </div>
+          <div id="providers-models-wrap"></div>
+        </div>
+
         <div class="section" id="settings-split">
           <div id="settings-pane-list">
             <div id="skills-section" hidden>
@@ -898,6 +947,13 @@
         renderOutput,
         renderStepFooter,
       } from "/ui-log.js";
+      import {
+        collectProviderDocument,
+        parseProviderError,
+        providerColumns,
+        renderProviderMatrix,
+        renderProviderModels,
+      } from "/ui-providers.js";
 
       // ── DOM helpers ────────────────────────────────────────────────────────
 
@@ -1104,15 +1160,58 @@
       // ── Run dialog (037 D3/FR-009) ─────────────────────────────────────────
 
       let _runTarget = null;
+      /** The steps of the workflow in the open dialog, for the model placeholders. */
+      let _runSteps = [];
+
+      /**
+       * The model a step would run on under `profileId` — what the per-step
+       * picker shows as its placeholder, so leaving a field empty is visibly
+       * "whatever the provider resolves" rather than a blank.
+       */
+      function resolvedStepModel(step, profileId) {
+        if (step.model) return step.model;
+        const profile = (_providers?.profiles || []).find(
+          (p) => p.id === profileId && p.source === "project"
+        );
+        const builtin = (_providers?.profiles || []).find((p) => p.id === profileId);
+        return (profile ?? builtin)?.roles?.[step.role] ?? "default";
+      }
+
+      /** Repoint every per-step placeholder at the newly selected provider. */
+      function updateRunModelPlaceholders() {
+        const profileId =
+          document.getElementById("run-provider")?.value || _providers?.activeProfile;
+        for (const el of document.querySelectorAll("[data-run-model]")) {
+          const step = _runSteps.find((s) => s.id === el.dataset.runModel);
+          if (step) el.placeholder = resolvedStepModel(step, profileId);
+        }
+      }
 
       async function openRunDialog(id) {
         try {
           const d = await api("GET", `/api/pipelines/${encodeURIComponent(id)}`);
+          // The picker lists what this daemon can resolve; a failed load leaves
+          // the fields as free text rather than blocking the run.
+          if (!_providers) {
+            try {
+              _providers = await api("GET", "/api/providers");
+            } catch {
+              _providers = { profiles: [], models: [], activeProfile: "" };
+            }
+          }
           _runTarget = id;
+          _runSteps = d.def.steps || [];
           document.getElementById("dialog-run-title").textContent = `Run ${id}`;
           const inputs = d.def.inputs || [];
-          const steps = d.def.steps || [];
-          let html = inputs
+          const profileIds = [...new Set((_providers.profiles || []).map((p) => p.id))];
+          let html = `<label class="field"><span>provider</span>
+            <select id="run-provider">
+              <option value="">default — ${escH(_providers.activeProfile || "anthropic")}</option>
+              ${profileIds
+                .map((pid) => `<option value="${escH(pid)}">${escH(pid)}</option>`)
+                .join("")}
+            </select></label>`;
+          html += inputs
             .map(
               (name) =>
                 `<label class="field"><span>${escH(name)}</span>
@@ -1125,12 +1224,20 @@
               <option value="auto">auto</option>
             </select></label>`;
           html += `<div class="field"><span style="display:block;font-size:12px;color:var(--muted)">model overrides (optional)</span>`;
-          for (const st of steps) {
+          // A datalist, not a select: the daemon accepts any registry-shaped id
+          // and falls through to a claude-CLI passthrough, so an id that is not
+          // on the list must stay typeable.
+          html += `<datalist id="run-model-ids">${(_providers.models || [])
+            .map((m) => `<option value="${escH(m.id)}"></option>`)
+            .join("")}</datalist>`;
+          for (const st of _runSteps) {
             html += `<label class="field"><span>${escH(st.id)}</span>
-              <input type="text" data-run-model="${escH(st.id)}" placeholder="default" /></label>`;
+              <input type="text" list="run-model-ids" data-run-model="${escH(st.id)}" /></label>`;
           }
           html += `</div>`;
           document.getElementById("dialog-run-fields").innerHTML = html;
+          updateRunModelPlaceholders();
+          document.getElementById("run-provider").onchange = updateRunModelPlaceholders;
           document.getElementById("dialog-run").showModal();
         } catch (e) {
           flash(e.message, true);
@@ -1147,10 +1254,12 @@
         for (const el of dlg.querySelectorAll("[data-run-model]")) {
           if (el.value.trim() !== "") models[el.dataset.runModel] = el.value.trim();
         }
+        const provider = document.getElementById("run-provider").value;
         const body = {
           pipeline: _runTarget,
           inputs,
           gateMode: document.getElementById("run-gate-mode").value,
+          ...(provider !== "" ? { provider } : {}),
           ...(Object.keys(models).length > 0 ? { models } : {}),
         };
         try {
@@ -2500,6 +2609,224 @@
         }
       }
 
+      // ── Providers editor (039) ─────────────────────────────────────────────
+
+      /** The last GET /api/providers body — its `hash` is the write's ifMatch. */
+      let _providers = null;
+      /** The edited state: matrix columns plus the project model entries. */
+      let _providerForm = null;
+
+      /** A GET model view flattened into the shape the editable row reads. */
+      function providerModelForm(m) {
+        return {
+          id: m.id ?? "",
+          transport: m.transport === "api" ? "api" : "cli",
+          cli: { bin: m.cli?.bin === "codex" ? "codex" : "claude", model: m.cli?.model ?? "" },
+          api: {
+            endpoint: m.api?.endpoint ?? "",
+            // The NAME of the env var holding the key. The daemon never sends
+            // its value and this form never asks for one.
+            keyEnv: m.api?.keyEnv ?? "",
+            model: m.api?.model ?? "",
+          },
+        };
+      }
+
+      async function loadProviderConfig() {
+        const wrap = document.getElementById("providers-matrix-wrap");
+        try {
+          const data = await api("GET", "/api/providers");
+          _providers = data;
+          _providerForm = {
+            defaultProvider: data.defaultProvider || "",
+            profiles: providerColumns(data),
+            models: (data.models || [])
+              .filter((m) => m.source === "project")
+              .map(providerModelForm),
+          };
+          renderProviderEditor();
+          if (data.fileError) setProviderError(data.fileError);
+          setRestartNote(data.restartRequired);
+        } catch (e) {
+          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      function renderProviderEditor() {
+        const builtinModels = (_providers.models || []).filter((m) => m.source !== "project");
+        const modelIds = [
+          ..._providerForm.models.map((m) => m.id),
+          ...builtinModels.map((m) => m.id),
+        ].filter((id) => id !== "");
+        document.getElementById("providers-matrix-wrap").innerHTML = renderProviderMatrix(
+          _providerForm.profiles,
+          { modelIds, activeProfile: _providers.activeProfile }
+        );
+        document.getElementById("providers-models-wrap").innerHTML = renderProviderModels(
+          _providerForm.models,
+          builtinModels
+        );
+
+        const sel = document.getElementById("providers-default");
+        const ids = _providerForm.profiles.map((p) => p.id);
+        sel.innerHTML = [
+          `<option value="">(none — falls back to anthropic)</option>`,
+          ...ids.map(
+            (id) =>
+              `<option value="${escH(id)}"${id === _providerForm.defaultProvider ? " selected" : ""}>${escH(id)}</option>`
+          ),
+        ].join("");
+
+        for (const btn of document.querySelectorAll("[data-remove-profile]")) {
+          btn.onclick = () => {
+            syncProviderFormFromDom();
+            const id = btn.dataset.removeProfile;
+            _providerForm.profiles = _providerForm.profiles.filter((p) => p.id !== id);
+            renderProviderEditor();
+          };
+        }
+        for (const btn of document.querySelectorAll("[data-remove-model]")) {
+          btn.onclick = () => {
+            syncProviderFormFromDom();
+            _providerForm.models.splice(Number(btn.dataset.removeModel), 1);
+            renderProviderEditor();
+          };
+        }
+        for (const el of document.querySelectorAll("[data-model-transport]")) {
+          el.onchange = () => {
+            syncProviderFormFromDom();
+            renderProviderEditor();
+          };
+        }
+      }
+
+      /**
+       * Read every field back into `_providerForm`. The form state is rebuilt
+       * from the DOM before any add, remove or save so an in-progress edit
+       * survives the re-render that follows.
+       */
+      function syncProviderFormFromDom() {
+        if (!_providerForm) return;
+        const byId = (id) => _providerForm.profiles.find((p) => p.id === id);
+        for (const el of document.querySelectorAll("[data-cell-profile]")) {
+          const col = byId(el.dataset.cellProfile);
+          if (col) col.roles[el.dataset.cellRole] = el.value;
+        }
+        for (const el of document.querySelectorAll("[data-fallback-profile]")) {
+          const col = byId(el.dataset.fallbackProfile);
+          if (col) {
+            col.fallback = el.value
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s !== "");
+          }
+        }
+        const field = (attr, apply) => {
+          for (const el of document.querySelectorAll(`[${attr}]`)) {
+            const m = _providerForm.models[Number(el.getAttribute(attr))];
+            if (m) apply(m, el.value);
+          }
+        };
+        field("data-model-id", (m, v) => (m.id = v));
+        field("data-model-transport", (m, v) => (m.transport = v === "api" ? "api" : "cli"));
+        field("data-model-bin", (m, v) => (m.cli.bin = v));
+        field("data-model-climodel", (m, v) => (m.cli.model = v));
+        field("data-model-endpoint", (m, v) => (m.api.endpoint = v));
+        field("data-model-keyenv", (m, v) => (m.api.keyEnv = v));
+        field("data-model-apimodel", (m, v) => (m.api.model = v));
+        _providerForm.defaultProvider = document.getElementById("providers-default").value;
+      }
+
+      function setProviderError(message) {
+        const box = document.getElementById("providers-error");
+        box.hidden = message === "";
+        box.textContent = message; // .textContent — a parser message, never markup
+      }
+
+      function setRestartNote(required) {
+        const note = document.getElementById("providers-restart");
+        note.hidden = !required;
+        note.textContent = required
+          ? "Saved to disk. The daemon resolves models and profiles from its startup snapshot — restart it for this to take effect."
+          : "";
+      }
+
+      /** Clear the inline anchors so a second save does not show a stale error. */
+      function clearProviderErrors() {
+        setProviderError("");
+        for (const el of document.querySelectorAll("[data-profile-error], [data-model-error]")) {
+          el.hidden = true;
+          el.textContent = "";
+        }
+      }
+
+      /**
+       * Show a rejected write next to what was wrong. The daemon's 400 carries
+       * the validator's own field path, so it is anchored rather than reduced to
+       * "save failed" — the whole message stays visible above the table too.
+       */
+      function showProviderFailure(err, profileIds) {
+        setProviderError(err.message);
+        if (err.status !== 400) return;
+        const where = parseProviderError(err.message);
+        if (where.index === null) return;
+        const anchorId = where.scope === "profiles" ? `data-profile-error` : `data-model-error`;
+        const key = where.scope === "profiles" ? profileIds[where.index] : String(where.index);
+        for (const el of document.querySelectorAll(`[${anchorId}]`)) {
+          if (el.getAttribute(anchorId) !== key) continue;
+          el.hidden = false;
+          el.textContent = `${where.field}: ${where.reason}`;
+        }
+      }
+
+      async function saveProviderConfig() {
+        syncProviderFormFromDom();
+        clearProviderErrors();
+        const built = collectProviderDocument(_providerForm);
+        try {
+          const result = await api("PUT", "/api/providers", {
+            config: built.document,
+            ifMatch: _providers.hash,
+          });
+          flash("Providers saved");
+          setRestartNote(result.restartRequired);
+          const keepRestartNote = result.restartRequired;
+          await loadProviderConfig();
+          setRestartNote(keepRestartNote);
+        } catch (e) {
+          showProviderFailure(e, built.profileIds);
+        }
+      }
+
+      document.getElementById("btn-save-providers").onclick = saveProviderConfig;
+
+      document.getElementById("btn-add-profile").onclick = () => {
+        if (!_providerForm) return;
+        syncProviderFormFromDom();
+        const id = (prompt("New profile id") || "").trim();
+        if (id === "") return;
+        if (_providerForm.profiles.some((p) => p.id === id)) {
+          flash(`Profile "${id}" is already a column`, true);
+          return;
+        }
+        _providerForm.profiles.unshift({
+          id,
+          roles: { reasoner: "", worker: "", scout: "" },
+          fallback: [],
+          source: "project",
+          overridesBuiltIn: false,
+          builtin: null,
+        });
+        renderProviderEditor();
+      };
+
+      document.getElementById("btn-add-model").onclick = () => {
+        if (!_providerForm) return;
+        syncProviderFormFromDom();
+        _providerForm.models.push(providerModelForm({ transport: "cli" }));
+        renderProviderEditor();
+      };
+
       /**
        * Show a names-only list (skills, agents); the section hides when empty.
        * Each name opens its content in the reader pane (FR-014) — the endpoint
@@ -2673,6 +3000,7 @@
           openTemplateView(id);
         } else if (view === "settings") {
           loadEnvironment();
+          loadProviderConfig();
         }
       }
 

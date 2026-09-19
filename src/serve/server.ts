@@ -64,8 +64,18 @@ import {
   type MergedPipeline,
 } from "../canon/layers.js";
 import { listPipelines, loadPipeline } from "../canon/load.js";
-import { CLI_MODEL_RE, loadProviders } from "../canon/loadProviders.js";
-import { getActiveProfile } from "../canon/registry.js";
+import {
+  CLI_MODEL_RE,
+  PROVIDERS_RELATIVE_PATH,
+  loadProviders,
+  parseProviders,
+} from "../canon/loadProviders.js";
+import {
+  builtInProfileIds,
+  defaultRegistry,
+  getActiveProfile,
+  getProfile,
+} from "../canon/registry.js";
 import { makeDb, type DbInstance } from "../db/index.js";
 import {
   bundledPipelinesDir as defaultBundledPipelinesDir,
@@ -100,7 +110,8 @@ import {
   safePath,
 } from "./route-helpers.js";
 import { CONTENT_CAP, handleNamedContent } from "./routes/content.js";
-import type { HardenedSpec } from "../canon/types.js";
+import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
+import type { HardenedSpec, Role } from "../canon/types.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -157,6 +168,7 @@ const STATIC_MODULES: ReadonlyMap<string, string> = new Map([
   ["/ui-graph.js", "ui-graph.js"],
   ["/ui-log.js", "ui-log.js"],
   ["/ui-tables.js", "ui-tables.js"],
+  ["/ui-providers.js", "ui-providers.js"],
 ]);
 
 const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
@@ -489,6 +501,14 @@ const ARTIFACT_INPUT_FIELDS: Readonly<Record<string, "spec" | "result">> = {
   findings: "result",
 };
 
+/**
+ * Context keys the run itself owns. They are merged into the workflow input
+ * alongside the caller's `inputs`, so an `inputs` entry of the same name would
+ * override the validated top-level field and reach the step runner having passed
+ * through none of its checks.
+ */
+const RESERVED_CONTEXT_KEYS: ReadonlySet<string> = new Set(["provider", "models"]);
+
 // Recognises a HardenedSpec by its two required fields. Optional fields
 // (requirements, acceptanceCriteria, weaknesses, securityFindings) are not
 // checked — the renderer handles absent optionals gracefully. Checking the
@@ -626,6 +646,17 @@ export interface ServeOptions {
    * Each template is one `<templateId>.yaml` bundle file (FR-001).
    */
   templatesBase?: string;
+  /**
+   * The provider profiles the running workflows were BUILT with — the daemon's
+   * startup `providers.yaml` snapshot, the same array handed to BuildDeps.
+   *
+   * Passed in rather than re-read per request so the boundary validates against
+   * the list the steps will actually resolve from: a profile added to
+   * providers.yaml without a restart used to pass validation here and then
+   * throw "Unknown provider" inside the first step, failing the run mid-flight
+   * instead of at the boundary.
+   */
+  providerProfiles?: ProviderProfile[];
 }
 
 export interface ServeHandle {
@@ -661,6 +692,12 @@ interface HandlerCtx {
   version: string;
   /** ISO timestamp fixed when this daemon began listening (spec 038 FR-011). */
   startedAt: string;
+  /**
+   * The startup providers.yaml snapshot the workflows were built with, when the
+   * caller supplied one. Absent only on the legacy/test path, where the file is
+   * re-read per request as before.
+   */
+  providerProfiles?: ProviderProfile[];
 }
 
 // ── readAgentFlowsConfig ───────────────────────────────────────────────────────
@@ -782,6 +819,7 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
       templatesBase,
       version,
       startedAt,
+      ...(opts.providerProfiles !== undefined ? { providerProfiles: opts.providerProfiles } : {}),
     }).catch((err: unknown) => {
       if (!res.headersSent) {
         if (err instanceof RequestTooLargeError) {
@@ -948,6 +986,126 @@ export function handleListenError(err: unknown, port: number, io: CliIo): never 
     io.exit(1);
   }
   throw err;
+}
+
+// ── Provider configuration routes (spec 039) ───────────────────────────────────
+
+/** The roles a profile maps, in the order the page renders them as matrix rows. */
+const PROVIDER_ROLE_IDS: readonly Role[] = ["reasoner", "worker", "scout"];
+
+/** The one file the provider routes read and write — no caller-supplied component. */
+function providersFilePath(projectDir: string): string {
+  return join(projectDir, PROVIDERS_RELATIVE_PATH);
+}
+
+/** Current providers.yaml text, or undefined when the file is absent. Other IO errors throw. */
+function readProvidersText(projectDir: string): string | undefined {
+  try {
+    return readFileSync(providersFilePath(projectDir), "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+    throw err;
+  }
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * An endpoint stripped of any userinfo component before it leaves the daemon.
+ *
+ * The built-in api entries assemble their endpoint from OLLAMA_BASE_URL /
+ * LITELLM_BASE_URL, which never pass through validateEndpoint's userinfo ban —
+ * so a `https://user:pass@host` in the operator's environment would otherwise
+ * put a password on the page.
+ */
+function redactEndpoint(endpoint: string): string {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return endpoint;
+  }
+  if (!url.username && !url.password) return endpoint;
+  url.username = "";
+  url.password = "";
+  return url.toString();
+}
+
+/**
+ * One model entry as the page sees it.
+ *
+ * `keyEnv` is reported by NAME only, plus whether that variable currently holds
+ * a value. The value itself must never reach the page, a log or an error — a
+ * credential belongs in the environment, and the editor only ever names it.
+ */
+function providerModelView(
+  entry: ModelEntry,
+  source: "project" | "builtin",
+  env: NodeJS.ProcessEnv
+): Record<string, unknown> {
+  const base = { id: entry.id, transport: entry.transport, source };
+  if (entry.transport === "cli") {
+    return {
+      ...base,
+      cli: {
+        bin: entry.cli?.bin ?? "claude",
+        ...(entry.cli?.model !== undefined ? { model: entry.cli.model } : {}),
+      },
+    };
+  }
+  const keyEnv = entry.api?.keyEnv;
+  return {
+    ...base,
+    api: {
+      endpoint: redactEndpoint(entry.api?.endpoint ?? ""),
+      ...(keyEnv !== undefined ? { keyEnv, keyEnvSet: (env[keyEnv] ?? "") !== "" } : {}),
+      ...(entry.api?.model !== undefined ? { model: entry.api.model } : {}),
+    },
+  };
+}
+
+/**
+ * The merged provider view: project-declared entries first, then the built-ins,
+ * each marked with its source. Order is `getProfile`/`ModelRegistry` order, so
+ * the page's "project overrides a built-in of the same id" badge describes what
+ * resolution actually does rather than restating the rule.
+ */
+function providerView(
+  config: ProviderConfig,
+  env: NodeJS.ProcessEnv
+): { profiles: Record<string, unknown>[]; models: Record<string, unknown>[] } {
+  const builtinProfiles = builtInProfileIds().map((id) => getProfile(id));
+  const builtinProfileIds = new Set(builtinProfiles.map((p) => p.id));
+  const projectProfileIds = new Set(config.profiles.map((p) => p.id));
+  const profiles = [
+    ...config.profiles.map((p) => ({
+      ...p,
+      fallback: p.fallback ?? [],
+      source: "project",
+      overridesBuiltIn: builtinProfileIds.has(p.id),
+    })),
+    ...builtinProfiles.map((p) => ({
+      ...p,
+      fallback: p.fallback ?? [],
+      source: "builtin",
+      overriddenByProject: projectProfileIds.has(p.id),
+    })),
+  ];
+
+  const builtinModels = defaultRegistry(env).list();
+  const projectModelIds = new Set(config.models.map((m) => m.id));
+  const models = [
+    ...config.models.map((m) => providerModelView(m, "project", env)),
+    ...builtinModels.map((m) => ({
+      ...providerModelView(m, "builtin", env),
+      overriddenByProject: projectModelIds.has(m.id),
+    })),
+  ];
+
+  return { profiles, models };
 }
 
 // ── Request handler ────────────────────────────────────────────────────────────
@@ -1678,10 +1836,11 @@ async function handleRequest(
       json(res, 400, { error: "Malformed JSON body" });
       return;
     }
-    const { pipeline, inputs, models, gateMode, artifactPath } = parsed.value as {
+    const { pipeline, inputs, models, provider, gateMode, artifactPath } = parsed.value as {
       pipeline?: unknown;
       inputs?: unknown;
       models?: unknown;
+      provider?: unknown;
       gateMode?: unknown;
       artifactPath?: unknown;
     };
@@ -1748,12 +1907,78 @@ async function handleRequest(
       }
     }
 
+    // The per-run provider names a profile, not a model. It is resolved here so
+    // an unknown id fails at the boundary rather than inside a step, and so the
+    // run's provenance records the profile the run will actually use.
+    let runProfile: ProviderProfile | undefined;
+    if (provider !== undefined) {
+      if (typeof provider !== "string") {
+        json(res, 400, { error: 'Field "provider" must be a string' });
+        return;
+      }
+      // The same array the workflows were built with, so validation and
+      // execution can never disagree about which profiles exist.
+      let declaredProfiles: ProviderProfile[];
+      if (ctx.providerProfiles !== undefined) {
+        declaredProfiles = ctx.providerProfiles;
+      } else {
+        try {
+          declaredProfiles = loadProviders(ctx.projectDir).profiles;
+        } catch (err) {
+          json(res, 400, {
+            error: `Field "provider" cannot be validated: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          return;
+        }
+      }
+      const known = new Set([...declaredProfiles.map((p) => p.id), ...builtInProfileIds()]);
+      if (!known.has(provider)) {
+        json(res, 400, {
+          error: `Provider "${provider.slice(0, 100)}" does not name a known profile. Available: ${[...known].join(", ")}`,
+        });
+        return;
+      }
+      runProfile = getProfile(provider, declaredProfiles);
+    }
+
     // Extract explicit inputs early so the artifact check can skip inputs that
     // the operator already provided — those don't need to come from the artifact.
     const explicitInputs =
       typeof inputs === "object" && inputs !== null && !Array.isArray(inputs)
         ? (inputs as Record<string, unknown>)
         : {};
+
+    // `inputs` is spread straight into the workflow context, which is also where
+    // `provider` and `models` live — so an unfiltered object is a second door
+    // onto both, bypassing every check above it. Keys are refused rather than
+    // dropped: a silently discarded input is the failure mode this repo has been
+    // bitten by, and a run whose provenance names a provider it never used is
+    // worse than a 400.
+    const explicitInputKeys = Object.keys(explicitInputs);
+    const reservedKey = explicitInputKeys.find((key) => RESERVED_CONTEXT_KEYS.has(key));
+    if (reservedKey !== undefined) {
+      json(res, 400, {
+        error: `Input "${reservedKey}" is reserved — pass it as the top-level "${reservedKey}" field instead`,
+      });
+      return;
+    }
+    if (explicitInputKeys.length > 0) {
+      const shownPipeline = pipeline.slice(0, 100);
+      if (!pipelineDef) {
+        json(res, 400, {
+          error: `Field "inputs" cannot be validated: pipeline "${shownPipeline}" not found`,
+        });
+        return;
+      }
+      const declared = new Set(pipelineDef.inputs ?? []);
+      const unknownKey = explicitInputKeys.find((key) => !declared.has(key));
+      if (unknownKey !== undefined) {
+        json(res, 400, {
+          error: `Input "${unknownKey.slice(0, 100)}" is not an input of "${shownPipeline}". Declared: ${[...declared].join(", ")}`,
+        });
+        return;
+      }
+    }
 
     // ── Artifact-path input resolution (spec 029 FR-003) ──────────────────────
     // When artifactPath is provided, inputs may be omitted; the artifact seeds
@@ -1955,6 +2180,7 @@ async function handleRequest(
       ...explicitInputs,
       ...artifactDerivedInputs,
       ...(models !== undefined ? { models } : {}),
+      ...(runProfile !== undefined ? { provider: runProfile.id } : {}),
     };
 
     // FR-006: when chaining from a parent artifact, write the new stage's artifact
@@ -1973,6 +2199,7 @@ async function handleRequest(
       ...(pipelineEntry !== undefined ? { pipelineSteps: pipelineEntry.loaded.def.steps } : {}),
       ...(chainArtifactDir !== undefined ? { chainArtifactDir } : {}),
       ...(typeof artifactPath === "string" ? { artifactPath } : {}),
+      ...(runProfile !== undefined ? { provider: runProfile } : {}),
     });
     json(res, 200, result);
     return;
@@ -2324,6 +2551,174 @@ async function handleRequest(
     return;
   }
 
+  // GET /api/providers — the role × profile matrix the Settings view edits (spec 039).
+  if (method === "GET" && pathname === "/api/providers") {
+    let text: string | undefined;
+    try {
+      text = readProvidersText(ctx.projectDir);
+    } catch (err) {
+      json(res, 500, {
+        error: `Cannot read ${PROVIDERS_RELATIVE_PATH}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    // A malformed file must still open the editor — refusing here would leave the
+    // only way to fix providers.yaml outside the page that exists to edit it.
+    let config: ProviderConfig = { models: [], profiles: [] };
+    let fileError: string | undefined;
+    if (text !== undefined && text !== "") {
+      try {
+        config = parseProviders(text, PROVIDERS_RELATIVE_PATH);
+      } catch (err) {
+        fileError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    const { profiles, models } = providerView(config, process.env);
+    let activeProfile: string;
+    try {
+      activeProfile = getActiveProfile(process.env, config).id;
+    } catch {
+      activeProfile = "unknown";
+    }
+    // The daemon resolves steps from its startup snapshot, so a file edited
+    // since then is on disk but not in force. Reporting the divergence lets the
+    // page say so instead of implying a saved change took effect.
+    const restartRequired =
+      ctx.providerProfiles !== undefined &&
+      JSON.stringify(ctx.providerProfiles) !== JSON.stringify(config.profiles);
+
+    json(res, 200, {
+      path: PROVIDERS_RELATIVE_PATH,
+      exists: text !== undefined,
+      hash: text === undefined ? "" : sha256(text),
+      roles: PROVIDER_ROLE_IDS,
+      activeProfile,
+      ...(config.defaultProvider !== undefined ? { defaultProvider: config.defaultProvider } : {}),
+      profiles,
+      models,
+      restartRequired,
+      ...(fileError !== undefined ? { fileError } : {}),
+    });
+    return;
+  }
+
+  // PUT /api/providers — write <projectDir>/.agent-flows/providers.yaml.
+  // The target path is assembled from ctx.projectDir and a module constant; no
+  // part of it is caller-supplied.
+  if (method === "PUT" && pathname === "/api/providers") {
+    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
+    if (!parsed.ok) {
+      json(res, 400, { error: "Malformed JSON body" });
+      return;
+    }
+    const { config, ifMatch } = parsed.value;
+    if (typeof config !== "object" || config === null || Array.isArray(config)) {
+      json(res, 400, { error: 'Field "config" must be an object' });
+      return;
+    }
+    if (typeof ifMatch !== "string") {
+      json(res, 400, { error: 'Field "ifMatch" must be a string' });
+      return;
+    }
+
+    // Serialise, then hand the result to the loader's own parser. Validation is
+    // never duplicated here: whatever the daemon would refuse to load, this
+    // route refuses to write — and it refuses before touching the filesystem.
+    let text: string;
+    try {
+      text = stringify(config);
+    } catch (err) {
+      json(res, 400, {
+        error: `Cannot serialise ${PROVIDERS_RELATIVE_PATH}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    try {
+      parseProviders(text, PROVIDERS_RELATIVE_PATH);
+    } catch (err) {
+      json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+
+    let current: string | undefined;
+    try {
+      current = readProvidersText(ctx.projectDir);
+    } catch (err) {
+      json(res, 500, {
+        error: `Cannot read ${PROVIDERS_RELATIVE_PATH}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    if ((current === undefined ? "" : sha256(current)) !== ifMatch) {
+      json(res, 409, {
+        ok: false,
+        reason: "conflict",
+        message: `${PROVIDERS_RELATIVE_PATH} changed on disk since it was loaded — write refused`,
+      });
+      return;
+    }
+
+    const filePath = providersFilePath(ctx.projectDir);
+    const containingDir = dirname(filePath);
+    mkdirSync(containingDir, { recursive: true });
+    // Containment is re-checked after symlink resolution, mirroring loadProviders:
+    // a `.agent-flows` symlinked out of the project must not become a write target.
+    let realDir: string;
+    let realProjectDir: string;
+    try {
+      realProjectDir = realpathSync(ctx.projectDir);
+      realDir = realpathSync(containingDir);
+    } catch (err) {
+      json(res, 500, {
+        error: `Cannot resolve ${PROVIDERS_RELATIVE_PATH}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    const rootWithSep = realProjectDir.endsWith(sep) ? realProjectDir : realProjectDir + sep;
+    if (!(realDir + sep).startsWith(rootWithSep)) {
+      json(res, 403, {
+        error: `${PROVIDERS_RELATIVE_PATH} resolves outside the project directory — write refused`,
+      });
+      return;
+    }
+    const targetPath = join(realDir, basename(filePath));
+    // Unlike a prompt file, providers.yaml is never followed through a symlink:
+    // the loader already rejects one that escapes the project, and a write has
+    // no reason to be more permissive than the read.
+    let mode = 0o600;
+    try {
+      const existing = lstatSync(targetPath);
+      if (existing.isSymbolicLink()) {
+        json(res, 403, {
+          error: `${PROVIDERS_RELATIVE_PATH} is a symlink — write refused`,
+        });
+        return;
+      }
+      mode = existing.mode & 0o777;
+    } catch {
+      // Absent — a new file keeps the 0o600 the temp file is created with.
+    }
+
+    const tmpPath = join(realDir, `.providers.yaml.${randomUUID()}.tmp`);
+    try {
+      writeFileSync(tmpPath, text, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      chmodSync(tmpPath, mode);
+      renameSync(tmpPath, targetPath);
+    } catch (err) {
+      rmSync(tmpPath, { force: true });
+      throw err;
+    }
+    // The daemon's registry, active profile and profile list are all startup
+    // snapshots baked into every built workflow, so a saved file is not yet in
+    // force. Refreshing only the profile list would be worse than not
+    // refreshing: a new profile would resolve while the models it names would
+    // still be missing from the registry, moving the failure from this boundary
+    // into the middle of a run.
+    json(res, 200, { ok: true, hash: sha256(text), restartRequired: true });
+    return;
+  }
+
   // GET /api/skills/:name — return the content of one skill's SKILL.md
   const skillMatch = RE_SKILL_CONTENT.exec(pathname);
   if (method === "GET" && skillMatch) {
@@ -2602,6 +2997,7 @@ if (process.argv[1] === __filename) {
       registry,
       store,
       profile,
+      providerProfiles: providers.profiles,
       cwd: projectDir,
       ...(checkCommand !== undefined ? { checkCommand } : {}),
     });
@@ -2625,6 +3021,7 @@ if (process.argv[1] === __filename) {
         registry,
         store,
         profile,
+        providerProfiles: providers.profiles,
         cwd: projectDir,
         ...(checkCommand !== undefined ? { checkCommand } : {}),
       },
@@ -2647,7 +3044,15 @@ if (process.argv[1] === __filename) {
   // FR-004: pipelinesDir is NOT passed to startServer so the HTTP layer resolves
   // the canon directory per-request.
   const listenOn = async (port: number): Promise<ServeHandle> =>
-    startServer({ port, dbPath, runService, projectDir, state });
+    startServer({
+      port,
+      dbPath,
+      runService,
+      projectDir,
+      state,
+      // The same snapshot the workflows above were built with (spec 039 review).
+      providerProfiles: providers.profiles,
+    });
 
   let handle: ServeHandle;
   try {

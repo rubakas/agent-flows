@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Copies the page assets that `tsc` never emits into dist/ (spec 038 D2, FR-001).
 //
-// tsconfig.json sets no `allowJs`, so the four hand-written browser modules and
+// tsconfig.json sets no `allowJs`, so the hand-written browser modules and
 // ui.html are invisible to the compiler. The daemon reads the page as
 // join(__dirname, "ui.html") and each module as a sibling of it, so without this
 // step every page route on a compiled build answers 503.
@@ -14,7 +14,14 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const PAGE_ASSETS = ["ui.html", "ui-route.js", "ui-graph.js", "ui-log.js", "ui-tables.js"];
+export const PAGE_ASSETS = [
+  "ui.html",
+  "ui-route.js",
+  "ui-graph.js",
+  "ui-log.js",
+  "ui-tables.js",
+  "ui-providers.js",
+];
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
