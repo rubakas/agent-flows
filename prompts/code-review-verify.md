@@ -17,6 +17,8 @@ Answer these five probes per finding. Any probe that turns on finding nothing co
 - **Callers** — does every symbol the finding leans on have a production caller? One used only by tests is not load-bearing.
 - **Scope** — you cannot run git: an added line is `introduced`, unchanged context `pre-existing`; quote the hunk header. `{{introducedCommits}}`, if non-empty, adds commit attribution; if empty, say so. Report `undetermined` ONLY if the diff omits the line.
 
+A falsifiability finding claims a test cannot fail, and its own neutering edit is what settles it: apply that edit on paper to the code under test and read the test's assertions against the result. If an assertion would then break, `DECLINED`; if it would still hold, `CONFIRMED` — a test that cannot fail is a `defect`, not a `business-decision`. The Guard probe asks whether another test covers the same behaviour and could fail; `PARTIAL` when one does. Its literal empty reply — "Every covering test can fail — no unfalsifiable coverage found." — is a completed search that found nothing and carries no finding to adjudicate.
+
 Vagueness is failure: "may be an issue" is unfalsifiable; be specific enough to be provably wrong. Rank corrections by falsifiability: a wrong line number is cosmetic beside a false sentence guarding a real finding. A `business-decision` needs a named owner and one answerable question; an `external-confirmation` a named document or party. Classify once with `kind`; `verdict: CONFIRMED` when the question is real — `kind` keeps it out of the blocking count, not the verdict.
 </context>
 
@@ -31,6 +33,9 @@ Correctness:
 
 Security:
 {{security}}
+
+Falsifiability:
+{{falsifiability}}
 </input>
 
 <output_format>

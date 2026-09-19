@@ -15,34 +15,59 @@ optionalInputs:
   - baseline
   - introducedCommits
 steps:
+  # radius and falsifiability run first and unblocked (spec 040 FR-001). The canon has no
+  # conditionals, so neither can be skipped when it finds nothing; both prompts instead
+  # return a literal "nothing found" reply that the downstream prompts read as "the search
+  # ran and was empty", never as "the search did not run" (FR-009).
+  - id: radius
+    kind: llm
+    role: worker # repo-wide search for what the diff's correctness depends on outside itself
+    permissions:
+      contents: read
+    prompt: prompts/code-review-radius.md
+  - id: falsifiability
+    kind: llm
+    role: worker # its own dimension so its contribution to finding count is measurable (D3)
+    permissions:
+      contents: read
+    prompt: prompts/code-review-falsifiability.md
+  # Forked from prompts/audit-*.md rather than shared with audit: these consume {{radius}},
+  # which audit has no step to produce, and audit reviews a plan, not a diff. audit.yaml and
+  # the three audit-*.md prompts stay byte-identical (FR-003, FR-010).
   - id: correctness
     kind: llm
     role: worker # adversarial review of one dimension; reviewer-class agents run on sonnet
     permissions:
       contents: read
-    prompt: prompts/audit-correctness.md
+    dependsOn: [radius]
+    prompt: prompts/code-review-correctness.md
   - id: security
     kind: llm
     role: worker # same reasoning as correctness — single-dimension adversarial review
     permissions:
       contents: read
-    prompt: prompts/audit-security.md
+    dependsOn: [radius]
+    prompt: prompts/code-review-security.md
   # Verification is a separate step, run by an agent other than the one that raised the
   # finding. audit asks the reviewer that wants to report a finding whether a guard already
   # closes it — self-certification, the wrong party for the question. Here the question goes
-  # to an independent agent empowered to disprove the claim against the artifact.
+  # to an independent agent empowered to disprove the claim against the artifact. Widening
+  # its dependsOn adds finding sources ahead of it without diluting its decline authority
+  # (FR-007); radius reaches it only through correctness and security.
   - id: verify
     kind: llm
     role: reasoner # per-finding judgement against the repo; the step the whole pipeline exists for
     permissions:
       contents: read
-    dependsOn: [correctness, security]
+    dependsOn: [correctness, security, falsifiability]
     prompt: prompts/code-review-verify.md
     schema: codeReviewFindings
-  # Synthesis receives {{verify}} only — never {{correctness}} or {{security}}. Withholding
-  # the raw worker findings makes overriding the verifier's verdict structurally impossible
-  # rather than merely forbidden: synthesis cannot re-judge a finding it cannot see
-  # (spec 030 FR-008).
+  # Synthesis receives {{verify}} only — never {{correctness}}, {{security}},
+  # {{falsifiability}} or {{radius}}. Withholding the raw worker findings makes overriding
+  # the verifier's verdict structurally impossible rather than merely forbidden: synthesis
+  # cannot re-judge a finding it cannot see (spec 030 FR-008, spec 040 FR-008). The graph
+  # hands a step every transitive ancestor's output, so this isolation is enforced by the
+  # prompt naming no worker placeholder — asserted as such in canon.test.ts.
   - id: synthesis
     kind: llm
     role: reasoner # reconciles verified findings into a verdict; judgment across the whole set

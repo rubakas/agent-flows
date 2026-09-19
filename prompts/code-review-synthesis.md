@@ -31,5 +31,7 @@ Then a "Dropped" section, each with the verifier's quoted evidence.
 
 Then a separate "Questions for owners" section holding every business-decision and external-confirmation entry, each as one question with a named owner, excluded from the blocking count whatever its verdict.
 
-End with a verdict line: "Change is ready to merge" if there are no blocking findings, or "Change has N blocking finding(s) — resolve before merge" if there are.
+Then a "Searched and not found" section, one line for each of the four dimensions this review covers: correctness, security, test falsifiability, and blast radius (what outside the change its correctness depends on — callers, invariants asserted elsewhere, divergent siblings, newly reachable states). Each line names the class of defect that dimension looks for and what the verified list shows for it: the findings it produced, or that it produced none. Where a dimension produced nothing, say so as a result of the search, not as silence.
+
+End with a verdict line that argues from that section. "Change is ready to merge" if there are no blocking findings, or "Change has N blocking finding(s) — resolve before merge" if there are — followed by one sentence naming the dimensions that came back clean and the ones that did not. A verdict that cannot distinguish "we looked and it is clean" from "we did not look" is not a gate, and "nothing survived verification" alone does not make that distinction.
 </output_format>

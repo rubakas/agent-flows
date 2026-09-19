@@ -7,9 +7,9 @@ import { describe, it } from "node:test";
 import { parse } from "yaml";
 import { packageRoot } from "../packageRoot.js";
 import { assembleSpec } from "./assemble.js";
-import { pipelineLevels } from "./graph.js";
+import { pipelineAncestors, pipelineLevels } from "./graph.js";
 import { loadPipeline } from "./load.js";
-import { renderPrompt } from "./render.js";
+import { extractPlaceholders, renderPrompt } from "./render.js";
 
 const repoRoot = packageRoot();
 const pipelinesYaml = join(repoRoot, "pipelines", "spec-creation.yaml");
@@ -2517,35 +2517,55 @@ describe("FR-014: ship.yaml approve step declares manualOnly: true", () => {
   });
 });
 
-// ── spec 030 — code-review.yaml structure ────────────────────────────────────
+// ── spec 030 / 040 — code-review.yaml structure ──────────────────────────────
 
-describe("code-review.yaml — structure (spec 030)", () => {
+describe("code-review.yaml — structure (spec 030, spec 040)", () => {
   const codeReviewYaml = join(repoRoot, "pipelines", "code-review.yaml");
-  const STEP_IDS = ["correctness", "security", "verify", "synthesis"] as const;
+  const STEP_IDS = [
+    "radius",
+    "falsifiability",
+    "correctness",
+    "security",
+    "verify",
+    "synthesis",
+  ] as const;
 
-  it("loads and defines exactly four steps", () => {
+  it("loads and defines exactly six steps", () => {
     const { def } = loadPipeline(codeReviewYaml);
     assert.equal(def.id, "code-review");
     assert.equal(
       def.steps.length,
-      4,
-      `code-review must define exactly 4 steps (FR-001); got ${def.steps.length.toString()}: ${def.steps
+      6,
+      `code-review must define exactly 6 steps (040 FR-001); got ${def.steps.length.toString()}: ${def.steps
         .map((s) => s.id)
         .join(", ")}`
     );
     assert.deepEqual(
       def.steps.map((s) => s.id),
       [...STEP_IDS],
-      "step ids must be correctness, security, verify, synthesis"
+      "step ids must be radius, falsifiability, correctness, security, verify, synthesis"
     );
   });
 
-  it("dependency levels are [[correctness, security], [verify], [synthesis]]", () => {
+  it("dependency levels are [[radius, falsifiability], [correctness, security], [verify], [synthesis]]", () => {
     const { def } = loadPipeline(codeReviewYaml);
     assert.deepEqual(
       pipelineLevels(def.steps),
-      [["correctness", "security"], ["verify"], ["synthesis"]],
-      "verification must be its own level between the two workers and synthesis (FR-001)"
+      [["radius", "falsifiability"], ["correctness", "security"], ["verify"], ["synthesis"]],
+      "radius feeds the two dimension reviewers, falsifiability runs beside it and reaches " +
+        "verify directly, and verification stays its own level before synthesis (040 FR-001)"
+    );
+  });
+
+  it("verify depends on correctness, security and falsifiability — not on radius directly", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    const verify = def.steps.find((s) => s.id === "verify");
+    assert.ok(verify, "verify step must exist");
+    assert.deepEqual(
+      verify.dependsOn,
+      ["correctness", "security", "falsifiability"],
+      "040 FR-007: the falsifiability dimension reaches the verifier directly, while radius " +
+        "reaches it only through correctness and security (D2)"
     );
   });
 
@@ -2594,6 +2614,149 @@ describe("code-review.yaml — structure (spec 030)", () => {
       assert.ok(prompts[id].length > 0, `prompts["${id}"] should be non-empty`);
     }
   });
+});
+
+// ── spec 040 — prompt wiring and the synthesis isolation ─────────────────────
+
+describe("code-review prompts — placeholders and wiring (spec 040)", () => {
+  const codeReviewYaml = join(repoRoot, "pipelines", "code-review.yaml");
+  const promptText = (relPath: string): string =>
+    readFileSync(join(repoRoot, ...relPath.split("/")), "utf8");
+
+  // FR-008. The graph hands a step the output of every TRANSITIVE ancestor
+  // (pipelineAncestors), so synthesis's vars map carries correctness, security,
+  // falsifiability and radius whatever its prompt says, and renderPrompt would
+  // substitute any of them on sight. Nothing structural withholds them: the
+  // isolation is exactly "the prompt names none of them", which is what this
+  // asserts. Prove it can fail by adding {{correctness}} to the prompt.
+  it("synthesis names {{verify}} and no worker step's raw output", () => {
+    const placeholders = new Set(
+      extractPlaceholders(promptText("prompts/code-review-synthesis.md"))
+    );
+    assert.ok(
+      placeholders.has("verify"),
+      "synthesis must consume {{verify}} — it is the only input it has"
+    );
+    for (const worker of ["correctness", "security", "falsifiability", "radius"]) {
+      assert.ok(
+        !placeholders.has(worker),
+        `prompts/code-review-synthesis.md names {{${worker}}}. synthesis may not see a worker's ` +
+          "raw output: it is a transitive ancestor, so the value IS in the vars map and would " +
+          "render, letting synthesis re-judge a verdict the verifier settled (030 FR-008, " +
+          "040 FR-008)."
+      );
+    }
+  });
+
+  // renderPrompt throws on a placeholder the vars map has no key for, and the
+  // vars map of an llm step is exactly inputs + models/provider + transitive
+  // ancestors (build.ts). That throw happens at run time, where it costs a run;
+  // this check moves it to load time.
+  it("every placeholder in every step's prompt is a key that step can actually see", () => {
+    const { def, prompts } = loadPipeline(codeReviewYaml);
+    const ancestors = pipelineAncestors(def.steps);
+    for (const step of def.steps) {
+      const visible = new Set([
+        ...def.inputs,
+        "models",
+        "provider",
+        ...(ancestors.get(step.id) ?? []),
+      ]);
+      for (const name of extractPlaceholders(prompts[step.id])) {
+        assert.ok(
+          visible.has(name),
+          `step "${step.id}" names {{${name}}}, which is not in its vars map ` +
+            `(${[...visible].join(", ")}). renderPrompt throws on it at run time.`
+        );
+      }
+    }
+  });
+
+  it("verify consumes the falsifiability findings", () => {
+    const placeholders = new Set(extractPlaceholders(promptText("prompts/code-review-verify.md")));
+    assert.ok(
+      placeholders.has("falsifiability"),
+      "040 FR-007: verify adjudicates falsifiability findings, so its prompt must name them — " +
+        "a step whose output no prompt reads is a model call paid for and thrown away"
+    );
+  });
+
+  for (const id of ["correctness", "security"] as const) {
+    it(`${id} consumes {{radius}} as required context`, () => {
+      const placeholders = new Set(extractPlaceholders(promptText(`prompts/code-review-${id}.md`)));
+      assert.ok(
+        placeholders.has("radius"),
+        `040 FR-003: ${id} must read the blast-radius report; without it the step reviews the ` +
+          "diff alone, which is the blindness spec 040 exists to fix"
+      );
+    });
+  }
+
+  // FR-009. The canon has no conditionals, so a step that finds nothing still
+  // runs and still produces output. These literals are the contract that says
+  // "the search ran and was empty"; a downstream prompt that no longer quotes
+  // one can no longer tell that apart from "the search did not run".
+  it("the no-op literals agree between producer and consumer", () => {
+    const RADIUS_EMPTY = "No blast radius found — nothing outside the change depends on it.";
+    const FALSIFIABILITY_EMPTY = "Every covering test can fail — no unfalsifiable coverage found.";
+
+    assert.ok(
+      promptText("prompts/code-review-radius.md").includes(RADIUS_EMPTY),
+      "code-review-radius.md must instruct the literal empty reply (FR-009)"
+    );
+    assert.ok(
+      promptText("prompts/code-review-falsifiability.md").includes(FALSIFIABILITY_EMPTY),
+      "code-review-falsifiability.md must instruct the literal empty reply (FR-009)"
+    );
+    for (const id of ["correctness", "security"] as const) {
+      assert.ok(
+        promptText(`prompts/code-review-${id}.md`).includes(RADIUS_EMPTY),
+        `code-review-${id}.md must quote the radius no-op literal verbatim, or it cannot read ` +
+          "an empty blast radius as a completed search (FR-009)"
+      );
+    }
+    assert.ok(
+      promptText("prompts/code-review-verify.md").includes(FALSIFIABILITY_EMPTY),
+      "code-review-verify.md must quote the falsifiability no-op literal verbatim (FR-009)"
+    );
+  });
+});
+
+// ── spec 040 FR-003/FR-010 — the two prompt sets stay forked ─────────────────
+//
+// `audit` is nested inside build, spec-creation, cycle and cycle-dev, so an edit
+// to a shared audit-*.md prompt changes five pipelines at once — and audit
+// reviews a plan, not a diff. `git diff --exit-code` proves the prompts are
+// untouched by ONE change; this pins the wiring, so re-merging the two sets
+// (pointing code-review back at the audit prompts, or audit at the forked ones)
+// fails here instead of silently on the next run.
+
+describe("audit and code-review reference disjoint worker prompts (spec 040 FR-003)", () => {
+  const promptOf = (pipeline: string, stepId: string): string | undefined => {
+    const raw = readFileSync(join(repoRoot, "pipelines", `${pipeline}.yaml`), "utf8");
+    const doc = parse(raw) as { steps: { id: string; prompt?: string }[] };
+    return doc.steps.find((s) => s.id === stepId)?.prompt;
+  };
+
+  for (const id of ["correctness", "security"] as const) {
+    it(`audit.${id} still reads prompts/audit-${id}.md`, () => {
+      assert.equal(
+        promptOf("audit", id),
+        `prompts/audit-${id}.md`,
+        `audit's ${id} step must keep its own prompt: audit reviews a plan, and it is nested ` +
+          "inside build, spec-creation, cycle and cycle-dev, so repointing it changes five pipelines"
+      );
+    });
+
+    it(`code-review.${id} reads the forked prompts/code-review-${id}.md`, () => {
+      assert.equal(
+        promptOf("code-review", id),
+        `prompts/code-review-${id}.md`,
+        `code-review's ${id} step must read the forked prompt: the shared audit prompt has no ` +
+          "{{radius}} and frames the input as a plan (040 FR-003)"
+      );
+    });
+  }
 });
 
 // ── spec 030 non-goal — audit and its prompts are not modified by code-review ─
