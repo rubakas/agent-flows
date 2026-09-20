@@ -80,6 +80,7 @@ describe("the page uses one visual language (spec 037 D8/FR-013)", () => {
       "cancelled",
       "awaiting_approval",
       "disk",
+      "active",
     ]) {
       assert.ok(
         UI.includes(`.badge.${variant} {`),

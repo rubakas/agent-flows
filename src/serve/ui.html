@@ -220,6 +220,39 @@
         gap: 6px;
         flex-wrap: wrap;
       }
+      /* A profile-level field in a column header: labelled, so it does not read
+         as one of the role rows (039 D2c). */
+      .cfg-sub {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 4px;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      .cfg-input.invalid {
+        border-color: var(--err);
+        outline: 1px solid var(--err);
+      }
+      /* The anchor a validation error is shown against. Out of flow, so naming
+         the cell at fault never pushes the rest of the table down (039 D3). */
+      .matrix-cell {
+        position: relative;
+      }
+      .error-box.cell-error {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 100%;
+        z-index: 5;
+        margin: 2px 0 0;
+        padding: 4px 6px;
+        font-size: 11px;
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: 0;
+        background: color-mix(in srgb, var(--err) 12%, var(--panel));
+      }
       .name-item {
         font-family: var(--mono);
         font-size: 12px;
@@ -471,6 +504,23 @@
       .badge.disk {
         background: color-mix(in srgb, var(--muted) 15%, transparent);
         color: var(--muted);
+      }
+      /* Which provider profile is in force is the status of the settings view,
+         so it gets the accent chip (039 D2b). */
+      .badge.active {
+        background: color-mix(in srgb, var(--accent) 15%, transparent);
+        color: var(--accent);
+        font-weight: 600;
+      }
+      /* A chip in a column header must not inherit the header's uppercase,
+         letter-spaced, muted treatment, or it scans as part of the name. */
+      .table th .badge {
+        text-transform: none;
+        letter-spacing: 0;
+        border: 1px solid var(--line);
+      }
+      .table th .badge.active {
+        border-color: var(--accent);
       }
       .step-output {
         font-family: var(--mono);
@@ -831,6 +881,10 @@
         <div class="section">
           <div class="section-header">
             <h2>Providers</h2>
+            <span class="muted"
+              >each row is one role — reading across shows the model that plays it under each
+              provider</span
+            >
             <span class="muted" id="providers-path">.agent-flows/providers.yaml</span>
             <button class="btn" id="btn-add-profile">Add profile</button>
             <button class="btn" id="btn-add-model">Add model</button>
@@ -839,7 +893,7 @@
             </button>
           </div>
           <div class="error-box" id="providers-error" hidden></div>
-          <p class="muted" id="providers-restart" hidden></p>
+          <div id="providers-notices"></div>
           <div class="card">
             <label class="field">
               <span>default provider</span>
@@ -953,6 +1007,7 @@
         providerColumns,
         renderProviderMatrix,
         renderProviderModels,
+        renderProviderNotices,
       } from "/ui-providers.js";
 
       // ── DOM helpers ────────────────────────────────────────────────────────
@@ -2615,6 +2670,11 @@
       let _providers = null;
       /** The edited state: matrix columns plus the project model entries. */
       let _providerForm = null;
+      /** Whether the file on disk diverges from the daemon's startup snapshot. */
+      let _providerRestartRequired = false;
+      /** Whether a PUT succeeded in THIS page session — never true on a cold load. */
+      let _providerSaved = false;
+      let _providerSavedTimer = null;
 
       /** A GET model view flattened into the shape the editable row reads. */
       function providerModelForm(m) {
@@ -2646,7 +2706,11 @@
           };
           renderProviderEditor();
           if (data.fileError) setProviderError(data.fileError);
-          setRestartNote(data.restartRequired);
+          // A save in this session makes the snapshot stale even when the GET
+          // cannot see it — the daemon only compares against profiles it read
+          // at startup.
+          _providerRestartRequired = _providerRestartRequired || Boolean(data.restartRequired);
+          renderProviderNoticesRegion();
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
@@ -2743,45 +2807,114 @@
         box.textContent = message; // .textContent — a parser message, never markup
       }
 
-      function setRestartNote(required) {
-        const note = document.getElementById("providers-restart");
-        note.hidden = !required;
-        note.textContent = required
-          ? "Saved to disk. The daemon resolves models and profiles from its startup snapshot — restart it for this to take effect."
-          : "";
+      function renderProviderNoticesRegion() {
+        document.getElementById("providers-notices").innerHTML = renderProviderNotices({
+          restartRequired: _providerRestartRequired,
+          saved: _providerSaved,
+        });
+      }
+
+      /** Confirm a save that actually happened, and take the confirmation back. */
+      function confirmProviderSave() {
+        _providerSaved = true;
+        clearTimeout(_providerSavedTimer);
+        _providerSavedTimer = setTimeout(() => {
+          _providerSaved = false;
+          renderProviderNoticesRegion();
+        }, 8000);
       }
 
       /** Clear the inline anchors so a second save does not show a stale error. */
       function clearProviderErrors() {
         setProviderError("");
-        for (const el of document.querySelectorAll("[data-profile-error], [data-model-error]")) {
+        for (const el of document.querySelectorAll(
+          "[data-profile-error], [data-model-error], [data-cell-error-profile]"
+        )) {
           el.hidden = true;
           el.textContent = "";
         }
+        for (const el of document.querySelectorAll(".cfg-input.invalid")) {
+          el.classList.remove("invalid");
+        }
+      }
+
+      /** Outline the field at fault and put the reason in its own anchor. */
+      function anchorProviderError(input, box, text) {
+        if (input) input.classList.add("invalid");
+        if (!box) return;
+        box.hidden = false;
+        box.textContent = text; // .textContent — a parser message, never markup
+      }
+
+      /** The first element whose attributes all match, without CSS escaping an id. */
+      function findByAttrs(selector, attrs) {
+        for (const el of document.querySelectorAll(selector)) {
+          if (Object.entries(attrs).every(([name, value]) => el.getAttribute(name) === value)) {
+            return el;
+          }
+        }
+        return null;
       }
 
       /**
        * Show a rejected write next to what was wrong. The daemon's 400 carries
-       * the validator's own field path, so it is anchored rather than reduced to
-       * "save failed" — the whole message stays visible above the table too.
+       * the validator's own field path, so the offending cell is outlined and the
+       * reason shown under it rather than at the top of its column — in a grid,
+       * `roles.worker` is a row position, not a column-level fact. The whole
+       * message stays visible above the table too.
        */
       function showProviderFailure(err, profileIds) {
         setProviderError(err.message);
         if (err.status !== 400) return;
         const where = parseProviderError(err.message);
         if (where.index === null) return;
-        const anchorId = where.scope === "profiles" ? `data-profile-error` : `data-model-error`;
-        const key = where.scope === "profiles" ? profileIds[where.index] : String(where.index);
-        for (const el of document.querySelectorAll(`[${anchorId}]`)) {
-          if (el.getAttribute(anchorId) !== key) continue;
-          el.hidden = false;
-          el.textContent = `${where.field}: ${where.reason}`;
+        const text = `${where.field}: ${where.reason}`;
+
+        if (where.scope !== "profiles") {
+          const key = String(where.index);
+          anchorProviderError(
+            null,
+            findByAttrs("[data-model-error]", { "data-model-error": key }),
+            text
+          );
+          return;
         }
+
+        const id = profileIds[where.index];
+        if (id === undefined) return;
+        const role = where.field.startsWith("roles.") ? where.field.slice("roles.".length) : "";
+        if (role !== "") {
+          anchorProviderError(
+            findByAttrs("[data-cell-profile]", {
+              "data-cell-profile": id,
+              "data-cell-role": role,
+            }),
+            findByAttrs("[data-cell-error-profile]", {
+              "data-cell-error-profile": id,
+              "data-cell-error-role": role,
+            }),
+            text
+          );
+          return;
+        }
+        // `fallback` and the profile id itself are column-level facts, and the
+        // header is where they are edited.
+        anchorProviderError(
+          where.field.startsWith("fallback")
+            ? findByAttrs("[data-fallback-profile]", { "data-fallback-profile": id })
+            : null,
+          findByAttrs("[data-profile-error]", { "data-profile-error": id }),
+          text
+        );
       }
 
       async function saveProviderConfig() {
         syncProviderFormFromDom();
         clearProviderErrors();
+        // An earlier confirmation must not stand while this save is in flight.
+        _providerSaved = false;
+        clearTimeout(_providerSavedTimer);
+        renderProviderNoticesRegion();
         const built = collectProviderDocument(_providerForm);
         try {
           const result = await api("PUT", "/api/providers", {
@@ -2789,10 +2922,9 @@
             ifMatch: _providers.hash,
           });
           flash("Providers saved");
-          setRestartNote(result.restartRequired);
-          const keepRestartNote = result.restartRequired;
+          _providerRestartRequired = _providerRestartRequired || Boolean(result.restartRequired);
+          confirmProviderSave();
           await loadProviderConfig();
-          setRestartNote(keepRestartNote);
         } catch (e) {
           showProviderFailure(e, built.profileIds);
         }

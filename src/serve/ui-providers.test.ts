@@ -16,6 +16,7 @@ import {
   providerColumns,
   renderProviderMatrix,
   renderProviderModels,
+  renderProviderNotices,
 } from "./ui-providers.js";
 
 /** A GET /api/providers body with one project profile shadowing a built-in. */
@@ -48,6 +49,27 @@ function sampleData() {
     models: [{ id: "opus", transport: "cli", cli: { bin: "claude" }, source: "builtin" }],
   };
 }
+
+describe("renderProviderNotices — staleness and save are two facts (D1)", () => {
+  it("never claims a save on a page that has not saved", () => {
+    const html = renderProviderNotices({ restartRequired: true, saved: false });
+    assert.ok(
+      !html.includes("Saved to disk"),
+      "a cold load of a stale file must not assert a save this session never made"
+    );
+    assert.match(html, /differs from the daemon's startup snapshot/u);
+  });
+
+  it("confirms a save that actually happened", () => {
+    const html = renderProviderNotices({ restartRequired: true, saved: true });
+    assert.ok(html.includes("Saved to disk."), "a real save must be confirmed");
+    assert.match(html, /differs from the daemon's startup snapshot/u);
+  });
+
+  it("says nothing when the file is in force and nothing was saved", () => {
+    assert.equal(renderProviderNotices({}), "");
+  });
+});
 
 describe("providerColumns — one column per id, project wins (3.5)", () => {
   it("puts project-declared profiles first and keeps the built-in it shadows", () => {
@@ -91,10 +113,38 @@ describe("renderProviderMatrix — roles are rows, profiles are columns (3.1)", 
     assert.ok(html.includes("overrides the built-in"), "the override must be visible");
   });
 
-  it("renders the fallback chain as an editable field", () => {
+  it("renders the fallback chain as an editable profile-level field, not a role row", () => {
     const html = renderProviderMatrix(providerColumns(sampleData()));
     assert.ok(html.includes('data-fallback-profile="anthropic"'));
     assert.ok(html.includes('value="openai"'), "the chain must be pre-filled");
+    const body = html.slice(html.indexOf("<tbody>"));
+    assert.ok(
+      !body.includes("data-fallback-profile"),
+      "fallback is a profile property — it must not read as a fourth role row"
+    );
+    assert.equal(
+      body.match(/<tr>/gu)?.length,
+      PROVIDER_ROLES.length,
+      "the matrix body has exactly one row per role"
+    );
+  });
+
+  it("marks the profile in force with its own chip", () => {
+    const html = renderProviderMatrix(providerColumns(sampleData()), {
+      activeProfile: "anthropic",
+    });
+    assert.ok(
+      html.includes('<span class="badge active">active</span>'),
+      "active must be a chip, not another run of header text"
+    );
+  });
+
+  it("gives every role cell its own error anchor (D3)", () => {
+    const html = renderProviderMatrix(providerColumns(sampleData()));
+    assert.ok(
+      html.includes('data-cell-error-profile="anthropic" data-cell-error-role="worker"'),
+      "a validation error must be able to anchor to the cell at fault"
+    );
   });
 
   it("escapes every interpolated value", () => {

@@ -13,6 +13,10 @@ export interface ProviderColumn {
   builtin: { roles: Record<string, string>; fallback: string[] } | null;
 }
 
+export declare function renderProviderNotices(state?: {
+  restartRequired?: boolean;
+  saved?: boolean;
+}): string;
 export declare function providerColumns(data: Record<string, unknown>): ProviderColumn[];
 export declare function renderProviderMatrix(
   columns: ProviderColumn[],

@@ -31,6 +31,33 @@ function esc(s) {
 export const PROVIDER_ROLES = ["reasoner", "worker", "scout"];
 
 /**
+ * The notices above the editor.
+ *
+ * The staleness warning and the save confirmation are two different facts and
+ * are rendered from two different inputs: `restartRequired` comes from the
+ * daemon and is true on a cold load of a file that diverges from its startup
+ * snapshot, while `saved` is true only after a PUT in this page session. Saying
+ * "Saved to disk." on a page nobody has saved asserts an action that never
+ * happened, and a line that is always present stops being read — which costs
+ * the restart warning its audience.
+ *
+ * @param {{restartRequired?: boolean, saved?: boolean}} [state]
+ * @returns {string} HTML for the notices region; empty when there is nothing to say.
+ */
+export function renderProviderNotices(state = {}) {
+  const notices = [];
+  if (state.saved) {
+    notices.push(`<p class="muted" data-provider-saved>Saved to disk.</p>`);
+  }
+  if (state.restartRequired) {
+    notices.push(
+      `<p class="muted" data-provider-restart>.agent-flows/providers.yaml differs from the daemon's startup snapshot — restart it for these values to affect runs.</p>`
+    );
+  }
+  return notices.join("");
+}
+
+/**
  * One column per profile id, project entry winning over a built-in of the same
  * id — the same find-first rule `getProfile` applies, so the table shows what
  * resolution actually does.
@@ -101,15 +128,23 @@ export function renderProviderMatrix(columns, opts = {}) {
       const note = c.overridesBuiltIn
         ? `<div class="muted">overrides the built-in "${esc(c.id)}"</div>`
         : "";
-      const active = c.id === opts.activeProfile ? `<span class="badge">active</span>` : "";
+      const active = c.id === opts.activeProfile ? `<span class="badge active">active</span>` : "";
       const remove =
         c.source === "project"
           ? `<button class="btn" data-remove-profile="${esc(c.id)}" title="Remove this project profile">×</button>`
           : "";
+      // `fallback` is a property of the profile, not a model assignment, so it
+      // sits with the other profile-level facts in the header rather than as a
+      // fourth row in a three-role table.
       return `<th data-profile-col="${esc(c.id)}">
-        <div class="cfg-head"><code>${esc(c.id)}</code><span class="badge">${esc(badge)}</span>${active}${remove}</div>
-        ${note}
-        <div class="error-box" data-profile-error="${esc(c.id)}" hidden></div>
+        <div class="matrix-cell">
+          <div class="cfg-head"><code>${esc(c.id)}</code><span class="badge">${esc(badge)}</span>${active}${remove}</div>
+          ${note}
+          <div class="cfg-sub"><span>fallback</span>
+            <input class="cfg-input" type="text" data-fallback-profile="${esc(c.id)}"
+              placeholder="none" value="${esc((c.fallback ?? []).join(", "))}" /></div>
+          <div class="error-box cell-error" data-profile-error="${esc(c.id)}" hidden></div>
+        </div>
       </th>`;
     })
     .join("");
@@ -118,29 +153,21 @@ export function renderProviderMatrix(columns, opts = {}) {
     const cells = columns
       .map(
         (c) =>
-          `<td><input class="cfg-input" type="text" list="provider-model-ids"
+          `<td class="matrix-cell"><input class="cfg-input" type="text" list="provider-model-ids"
              data-cell-profile="${esc(c.id)}" data-cell-role="${esc(role)}"
-             value="${esc(c.roles?.[role] ?? "")}" /></td>`
+             value="${esc(c.roles?.[role] ?? "")}" />
+           <div class="error-box cell-error" data-cell-error-profile="${esc(c.id)}" data-cell-error-role="${esc(role)}" hidden></div></td>`
       )
       .join("");
     return `<tr><th scope="row"><code>${esc(role)}</code></th>${cells}</tr>`;
   }).join("");
-
-  const fallbackCells = columns
-    .map(
-      (c) =>
-        `<td><input class="cfg-input" type="text" data-fallback-profile="${esc(c.id)}"
-           placeholder="none" value="${esc((c.fallback ?? []).join(", "))}" /></td>`
-    )
-    .join("");
 
   const datalist = `<datalist id="provider-model-ids">${modelIds
     .map((id) => `<option value="${esc(id)}"></option>`)
     .join("")}</datalist>`;
 
   return `${datalist}<table class="table"><thead><tr><th>role</th>${head}</tr></thead>
-    <tbody>${rows}
-    <tr><th scope="row"><code>fallback</code></th>${fallbackCells}</tr></tbody></table>`;
+    <tbody>${rows}</tbody></table>`;
 }
 
 /**
