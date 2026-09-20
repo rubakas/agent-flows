@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { loadPipeline } from "../canon/load.js";
+import { listPipelines, loadPipeline } from "../canon/load.js";
 import { packageRoot } from "../packageRoot.js";
 import { generateWorkflowScript } from "./claudeCode.js";
 import type { LoadedPipeline } from "../canon/types.js";
@@ -105,15 +105,54 @@ describe("generateWorkflowScript — structural checks", () => {
   });
 });
 
-describe("generateWorkflowScript — drift guard", () => {
-  it("generated output matches .claude/workflows/audit.js on disk", () => {
-    const generated = getGenerated();
-    const onDisk = readFileSync(join(repoRoot, ".claude", "workflows", "audit.js"), "utf8");
-    assert.equal(
-      generated,
-      onDisk,
-      "Generated script has drifted from .claude/workflows/audit.js — run pnpm bindings:claude to regenerate"
-    );
+describe("generateWorkflowScript — every bundled pipeline", () => {
+  // The committed .claude/workflows/*.js artifacts are gone: they are an export
+  // for Claude Code that nothing in the daemon reads, and only one of the five
+  // was pinned, so the rest rotted against the generator through a whole spec.
+  // What is worth guarding is the generator itself — that for every pipeline we
+  // ship it either refuses loudly or emits a script that parses. Nothing is
+  // written into the repository.
+  it("either refuses loudly or emits a syntactically valid script", () => {
+    const yamlFiles = listPipelines(join(repoRoot, "pipelines"));
+    assert.ok(yamlFiles.length >= 3, `expected the bundled pipeline set, got ${yamlFiles.length}`);
+
+    const outDir = mkdtempSync(join(tmpdir(), "agent-flows-gen-all-"));
+    try {
+      for (const yamlFile of yamlFiles) {
+        const loaded = loadPipeline(yamlFile);
+        let script: string;
+        try {
+          script = generateWorkflowScript(loaded);
+        } catch (err) {
+          // A refusal is a legitimate outcome, but only for an unsupported kind
+          // and only when it names the pipeline and says Binding A.
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.ok(
+            msg.includes(loaded.def.id) && msg.includes("Binding A"),
+            `${loaded.def.id}: refusal must name the pipeline and Binding A, got: ${msg}`
+          );
+          continue;
+        }
+
+        assert.ok(
+          !script.includes("{{"),
+          `${loaded.def.id}: leftover {{ placeholder in the generated script`
+        );
+
+        const wrapped =
+          "(async function() {\n" + script.replace(/\bexport const meta\b/, "const meta") + "\n})";
+        const tmpFile = join(outDir, `${loaded.def.id}.mjs`);
+        writeFileSync(tmpFile, wrapped);
+        try {
+          execSync(`node --check ${tmpFile}`, { stdio: "pipe" });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.fail(`${loaded.def.id}: node --check failed on generated script:\n${msg}`);
+        }
+      }
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -13,5 +13,9 @@ mastra.db*
 *-mastra.db*
 .pi/
 
+# Binding A export — regenerate on demand with `pnpm bindings:claude`; nothing in
+# the daemon reads it, and a committed copy silently rots against the generator.
+.claude/workflows/
+
 # One-time research doc — kept locally, not published (decisions distilled into docs/decisions/)
 docs/agent-flows-harness-research-and-design.md
