@@ -1,11 +1,11 @@
 # 040. Code review execution
 
-| Field        | Value                                                              |
-| ------------ | ------------------------------------------------------------------ |
-| Feature Name | Code review execution                                              |
-| Branch       | `feat/040-code-review-execution` (not yet created)                 |
-| Status       | Phase 1 approved, in progress. Phase 2 designed, **not approved**. |
-| Created      | 2026-09-20                                                         |
+| Field        | Value                                                                                                         |
+| ------------ | ------------------------------------------------------------------------------------------------------------- |
+| Feature Name | Code review execution                                                                                         |
+| Branch       | `feat/040-code-review-execution` (not yet created)                                                            |
+| Status       | Phase 1 approved, in progress — amended 2026-09-20 (first benchmark run). Phase 2 designed, **not approved**. |
+| Created      | 2026-09-20                                                                                                    |
 
 ## Context
 
@@ -144,7 +144,8 @@ schema already carries both values; no schema change.
 
 **D5 — `synthesis` must argue the merge verdict affirmatively.** It states what classes of defect were
 searched for and not found, rather than emitting "ready to merge" because nothing survived `verify`. A
-verdict that cannot distinguish "we looked and it's clean" from "we didn't look" is not a gate.
+verdict that cannot distinguish "we looked and it's clean" from "we didn't look" is not a gate. Stands
+as written; benchmark run 1 confirmed it works. Its placement was incomplete, not wrong — see D11.
 
 **D6 — Preservation: `verify` stays separate and keeps its decline authority; `synthesis` keeps
 receiving `{{verify}}` only.** `verify`'s ability to `DECLINE` with written reasons is the pipeline's
@@ -154,6 +155,30 @@ indirectly, through `correctness`/`security`, per D2), but it remains the one st
 agent than the ones raising findings, that adjudicates every claim. `synthesis`'s `dependsOn` stays
 `[verify]` and `prompts/code-review-synthesis.md` gains no new placeholder — per the render/visibleKeys
 constraint above, this is what keeps the isolation real rather than accidental.
+
+**D11 (amendment, 2026-09-20) — severity is argued at `verify`, not only at `synthesis`.** D5 aimed the
+"argue the verdict" fix one step too late. `synthesis` can only argue from the severities `verify` hands
+it, so a silent downgrade inside `verify` decides the merge verdict before `synthesis` ever sees the
+finding: in benchmark run 1 all 13 findings arrived `minor`, including a `falsifiability` finding raised
+`major` with a neutering-edit argument, and "ready to merge" followed with nothing to argue against.
+`prompts/code-review-verify.md` therefore carries the worker's proposed severity forward unless the
+verifier has a stated reason to move it, and states that reason in the finding's own words for any move,
+up or down. This is not licence to inflate — a worker's severity is a proposal, not a verdict, and
+judging it against the repository remains the verifier's job. What is forbidden is the silent downgrade.
+The `severity` enum (`blocking | major | minor`) is unchanged; FR-010 still holds. D5's requirement on
+`synthesis` stands unchanged — the argued verdict was run 1's clearest win.
+
+**D12 (amendment, 2026-09-20) — a new review dimension is checked for what it DISPLACES, not only for
+what it adds.** Benchmark run 1 lost a baseline finding — the most structural one in the set — while its
+`correctness` output grew longer, so nothing ran out of room: the dimension moved the worker's attention
+rather than crowding out its words. A dimension handed to an existing reviewer as required context
+converts that reviewer into a processor of the dimension. Two consequences, both general:
+
+- Every prompt that consumes another step's output states the order and the relationship explicitly: the
+  reviewer's own review comes first and must be complete on its own terms, and the new surface is
+  additive — it may never narrow, replace, or consume the budget for that review.
+- Every benchmark comparison reports retained baseline findings alongside added ones. A run that adds
+  four findings and loses one is not a strict improvement, and a count that only goes up hides that.
 
 **D7 — (Phase 2, deferred) Probe execution never lets a model author a shell command.** The threat model
 is that `code-review` runs on a diff the operator did not write, so a model-authored command string
@@ -191,7 +216,12 @@ usable check command is configured.** No dependency on a specific language or te
   makes reachable (D2).
 - **FR-003.** `prompts/code-review-correctness.md` and `prompts/code-review-security.md` (new, forked
   from `prompts/audit-correctness.md`/`prompts/audit-security.md`) reference `{{radius}}` and treat it
-  as required context for their own review, not as optional colour (D2). `prompts/audit-correctness.md`,
+  as required context for their own review, not as optional colour (D2). **Amended 2026-09-20 (D12):**
+  they also state the order and the relationship — the worker's own review of the change comes first and
+  must be complete on its own terms, including the structural questions a diff alone raises (is the
+  invariant this change relies on enforced anywhere else; what is absent that should be present), and
+  `{{radius}}` is additional surface layered on top of it that may not narrow, replace, or consume the
+  budget for that review. Working through every radius entry remains required. `prompts/audit-correctness.md`,
   `prompts/audit-security.md`, `pipelines/audit.yaml`, and the other two `audit-*.md` prompts stay
   byte-identical, verified with `git diff --exit-code`.
 - **FR-004.** `prompts/code-review-falsifiability.md` (new) instructs the model to check each test or
@@ -207,7 +237,10 @@ usable check command is configured.** No dependency on a specific language or te
 - **FR-007.** `verify`'s `dependsOn` becomes `[correctness, security, falsifiability]`; its schema
   (`codeReviewFindings`), its role (`reasoner`, distinct from every worker feeding it) and its decline
   authority are unchanged; `prompts/code-review-verify.md` gains `{{falsifiability}}` alongside its
-  existing placeholders (D6).
+  existing placeholders (D6). **Amended 2026-09-20 (D11):** `prompts/code-review-verify.md` additionally
+  makes `severity` an argued decision — the worker's proposed severity carries forward unless the
+  verifier states a reason to move it, and every move, up or down, carries that reason in the finding's
+  own words. No schema change: the `severity` enum is untouched (FR-010).
 - **FR-008.** `synthesis`'s `dependsOn` stays `[verify]`; `prompts/code-review-synthesis.md` gains no
   placeholder for `{{correctness}}`, `{{security}}`, `{{falsifiability}}` or `{{radius}}` — a load-time
   assertion (`extractPlaceholders` over the file) proves this, matching the mechanism spec 030 FR-008
@@ -262,6 +295,40 @@ net loss, not a win, regardless of whether the two missed defects above are caug
 whether a spec could fail without running it; the control review's own data says reasoning catches some
 but not all of its ten unfalsifiable-spec findings. The remainder stays uncaught until Phase 2 is
 approved and built.
+
+### First benchmark run (2026-09-20)
+
+Run `c209f8d2`, the six-step Phase-1 pipeline, against baseline run `d0ce9d9c`, the unmodified four-step
+pipeline. Identical brief, identical diff, identical repository — the pipeline is the only variable.
+
+| Measure                | Baseline `d0ce9d9c` | Run 1 `c209f8d2` |
+| ---------------------- | ------------------- | ---------------- |
+| Findings retained      | 4                   | 7                |
+| Of the baseline 4      | —                   | 3 kept, 1 lost   |
+| Added findings         | —                   | 4                |
+| `verify` decline rate  | 25%                 | 15%              |
+| `PARTIAL` verdicts     | 1                   | 6                |
+| Findings above `minor` | 0                   | 0                |
+
+The next run regresses against these numbers, retained findings included.
+
+**Finding 1 — the new dimension displaced an existing finding.** The baseline's most structural item —
+"no second layer enforces `paid_on implies pricing closed`", at `db/schema.rb:764` — is absent from run 1.
+Run 1's `correctness` output is longer than the baseline's (7,566 vs 5,993 characters) yet mentions
+`schema.rb`, `constraint` and `database` zero times, where the baseline mentioned all three; two of its
+six entries are explicitly radius-derived, one headed `**Location:** blast radius`. It did not run out of
+room — its attention moved. Cause: `prompts/code-review-correctness.md` called the blast-radius report
+"required context, not colour" and told the worker to "work through it entry by entry", which turned an
+independent reviewer into a radius-processor. The radius consumption itself is sound and is kept — three
+of the four added findings came from it. Fixed in the worker prompts per D12 and FR-003; recorded as a
+general rule because it applies to every future dimension, not just this one.
+
+**Finding 2 — the severity downgrade is in `verify`, not `synthesis`.** The `falsifiability` worker
+raised its finding `major` with a neutering-edit argument: a user-facing operational claim shipped in the
+diff and echoed in `config/locales/help.en.yml`, with no test that verifies it. `verify` recorded it
+`minor` with no stated reason. All 13 findings came back `minor`, so `synthesis` had no blocking finding
+to argue from and emitted "ready to merge" for the second run running. D5 aimed the fix at `synthesis`;
+the downgrade happens one step earlier. Fixed in `prompts/code-review-verify.md` per D11 and FR-007.
 
 ## Out of scope / Risks
 
