@@ -1,11 +1,11 @@
 # 040. Code review execution
 
-| Field        | Value                                                                                                         |
-| ------------ | ------------------------------------------------------------------------------------------------------------- |
-| Feature Name | Code review execution                                                                                         |
-| Branch       | `feat/040-code-review-execution` (not yet created)                                                            |
-| Status       | Phase 1 approved, in progress — amended 2026-09-20 (first benchmark run). Phase 2 designed, **not approved**. |
-| Created      | 2026-09-20                                                                                                    |
+| Field        | Value                                                                                                                                              |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Feature Name | Code review execution                                                                                                                              |
+| Branch       | `feat/040-code-review-execution` (not yet created)                                                                                                 |
+| Status       | Phase 1 approved, in progress — amended 2026-09-20 (second benchmark run; prompt prose replaced by structure). Phase 2 designed, **not approved**. |
+| Created      | 2026-09-20                                                                                                                                         |
 
 ## Context
 
@@ -62,10 +62,11 @@ Phase 2.
 - `synthesis` — `role: reasoner`, `permissions.contents: read`, `dependsOn: [verify]`, prompt
   `prompts/code-review-synthesis.md`. Receives `{{verify}}` only.
 
-`codeReviewFindings` (`src/canon/schemas.ts:26-73`) requires, per finding: `claim`, `file`, `line`,
+`codeReviewFindings` (`src/canon/schemas.ts:26-68`) requires, per finding: `claim`, `file`, `line`,
 `quote`, `verdict` (`CONFIRMED | PARTIAL | DECLINED`), `citationAccurate`, `scope`
 (`introduced | pre-existing | undetermined`), `kind` (`defect | business-decision |
-external-confirmation`), `severity` (`blocking | major | minor`), `probes`
+external-confirmation`), `severity` (`blocking | major | minor`), `severityRationale` (added
+2026-09-20 by D13/FR-016, the one exception FR-010 grants), `probes`
 (`guard, reachability, remedy, callers, scope`), `correctedWording`. `additionalProperties: false` on
 both the finding object and the wrapper.
 
@@ -174,11 +175,55 @@ what it adds.** Benchmark run 1 lost a baseline finding — the most structural 
 rather than crowding out its words. A dimension handed to an existing reviewer as required context
 converts that reviewer into a processor of the dimension. Two consequences, both general:
 
-- Every prompt that consumes another step's output states the order and the relationship explicitly: the
-  reviewer's own review comes first and must be complete on its own terms, and the new surface is
-  additive — it may never narrow, replace, or consume the budget for that review.
+- ~~Every prompt that consumes another step's output states the order and the relationship explicitly:
+  the reviewer's own review comes first and must be complete on its own terms, and the new surface is
+  additive — it may never narrow, replace, or consume the budget for that review.~~ **Tried in run 2 and
+  REVERTED — see D13 and D14.** The prose went into both worker prompts verbatim and the displaced
+  finding stayed displaced, while retention fell. The diagnosis in this decision still stands; the
+  instrument it proposed does not.
 - Every benchmark comparison reports retained baseline findings alongside added ones. A run that adds
   four findings and loses one is not a strict improvement, and a count that only goes up hides that.
+  **This is the metric that matters** — not raised-count, not decline rate. Run 2 improved both of those
+  while losing baseline findings, and reading either alone would have scored a regression as a win.
+
+**D13 (amendment, 2026-09-20) — where prose has failed twice, the instrument becomes a contract.** Run
+2 is the controlled test of D11's and D12's prompt-level fixes: same brief, same diff, same repository,
+prompts the only variable. Both fixes failed on their own targets. The durable finding, stated
+generally because it is not about these two prompts:
+
+> Prose guidance moved a quantitative behaviour — the verifier's hedging rate — but moved neither
+> structural behaviour. Asking a model to think about something is not the same instrument as requiring
+> it to emit something. Where the wanted behaviour is structural, the instrument has to be a contract:
+> a required output slot, or a field that cannot be left silent, not an instruction.
+
+Two contracts follow, and they are the whole of this amendment's new surface:
+
+- **A required output slot** for the displaced dimension. `prompts/code-review-correctness.md`'s
+  `<output_format>` carries a section headed exactly `Invariants relied on`, which the model must fill:
+  each invariant the change relies on, and the layer that enforces it — or `enforced nowhere`, which is
+  a finding, not an omission. This is the displaced baseline finding's own shape (`db/schema.rb:764`,
+  "no second layer enforces `paid_on implies pricing closed`"), turned from something the worker was
+  asked to consider into something the worker must produce. `prompts/code-review-security.md` carries
+  the same instrument in its own tracing voice, headed `Constraints relied on`, because the security
+  prompt already asks what constrains each value on the way and the section is where that answer lands.
+- **A field that cannot be left silent** for severity. `codeReviewFindings` gains
+  `severityRationale`, required, `additionalProperties: false` unchanged. D11's prose stays as the
+  field's companion — it is what tells the verifier _what to write there_ — but the enforcement is now
+  the schema, which a model cannot satisfy by omission the way it satisfied a paragraph.
+
+Cost of the exception: one more required string per finding, and `prompts/code-review-synthesis.md`
+reprints it beside every severity, so a reader sees whether a finding was argued down or merely
+recorded low.
+
+**D14 (amendment, 2026-09-20) — run 2's worker-prompt tightening is REVERTED to the run-1 wording.**
+`prompts/code-review-correctness.md` and `prompts/code-review-security.md` are restored to their state
+at `c7f6dfc`: the "This review of yours comes first…" / "These traces of yours come first…" paragraphs
+are removed and the original "required context, not colour" radius paragraphs come back. Rationale:
+retention. Run 1's wording retained 3 of the baseline's 4 findings; run 2's tightening retained about 2
+and additionally lost the TOCTOU spec finding, while adding nothing on its target. A change that makes
+the measured-worse thing worse is reverted even though its raised-count and decline-rate read better —
+those are not the bar (D12). The reverted prose is not replaced by more prose; it is replaced by the
+required slot in D13.
 
 **D7 — (Phase 2, deferred) Probe execution never lets a model author a shell command.** The threat model
 is that `code-review` runs on a diff the operator did not write, so a model-authored command string
@@ -216,12 +261,11 @@ usable check command is configured.** No dependency on a specific language or te
   makes reachable (D2).
 - **FR-003.** `prompts/code-review-correctness.md` and `prompts/code-review-security.md` (new, forked
   from `prompts/audit-correctness.md`/`prompts/audit-security.md`) reference `{{radius}}` and treat it
-  as required context for their own review, not as optional colour (D2). **Amended 2026-09-20 (D12):**
-  they also state the order and the relationship — the worker's own review of the change comes first and
-  must be complete on its own terms, including the structural questions a diff alone raises (is the
-  invariant this change relies on enforced anywhere else; what is absent that should be present), and
-  `{{radius}}` is additional surface layered on top of it that may not narrow, replace, or consume the
-  budget for that review. Working through every radius entry remains required. `prompts/audit-correctness.md`,
+  as required context for their own review, not as optional colour (D2). **Amended 2026-09-20 (D14),
+  superseding the D12 amendment:** both prompts are restored to their `c7f6dfc` wording — the
+  order-and-relationship paragraphs run 2 added are removed, because they cost retention and moved
+  nothing on their target. The structural completeness they asked for is required instead by FR-015's
+  output slot. Working through every radius entry remains required. `prompts/audit-correctness.md`,
   `prompts/audit-security.md`, `pipelines/audit.yaml`, and the other two `audit-*.md` prompts stay
   byte-identical, verified with `git diff --exit-code`.
 - **FR-004.** `prompts/code-review-falsifiability.md` (new) instructs the model to check each test or
@@ -240,7 +284,9 @@ usable check command is configured.** No dependency on a specific language or te
   existing placeholders (D6). **Amended 2026-09-20 (D11):** `prompts/code-review-verify.md` additionally
   makes `severity` an argued decision — the worker's proposed severity carries forward unless the
   verifier states a reason to move it, and every move, up or down, carries that reason in the finding's
-  own words. No schema change: the `severity` enum is untouched (FR-010).
+  own words. **Amended 2026-09-20 (D13):** that paragraph stays, but it is no longer the mechanism — it
+  is the instruction for what to write in the `severityRationale` field FR-016 makes required. The
+  `severity` enum itself is still untouched.
 - **FR-008.** `synthesis`'s `dependsOn` stays `[verify]`; `prompts/code-review-synthesis.md` gains no
   placeholder for `{{correctness}}`, `{{security}}`, `{{falsifiability}}` or `{{radius}}` — a load-time
   assertion (`extractPlaceholders` over the file) proves this, matching the mechanism spec 030 FR-008
@@ -251,9 +297,48 @@ usable check command is configured.** No dependency on a specific language or te
 correctness.md`/`code-review-security.md` treat that literal reply as "the check ran and found
   nothing," never as "the check did not run" — required because the canon has no conditionals to skip a
   downstream step on an upstream no-op.
-- **FR-010.** `pipelines/audit.yaml` and its three `audit-*.md` prompts are unmodified; `codeReviewFindings`
-  (`src/canon/schemas.ts:26-73`) is unmodified — no new field, no changed enum — for the duration of
-  Phase 1 (D1).
+- **FR-010.** `pipelines/audit.yaml` and its three `audit-*.md` prompts are unmodified. **Amended
+  2026-09-20 (D13):** `codeReviewFindings` (`src/canon/schemas.ts:26-68`) takes exactly one change for
+  the duration of Phase 1 — the addition of the required `severityRationale` string (FR-016). No other
+  field, no changed enum, `additionalProperties: false` unchanged on both the finding object and the
+  wrapper. The exception is granted because two controlled runs established that the behaviour FR-007
+  asks for cannot be obtained from the prompt: the same finding arrived `major` and left `minor` with an
+  empty explanation in both runs, including the one whose prompt forbade exactly that. A field the
+  schema requires is the only instrument left that a model cannot satisfy by omission. It is granted for
+  this field only; Phase 2's evidence-grade field (FR-013) remains deferred and unapproved, and D1's bar
+  otherwise stands.
+
+### Added 2026-09-20 (D13, D14)
+
+- **FR-015.** `prompts/code-review-correctness.md`'s `<output_format>` requires a section headed
+  exactly `Invariants relied on`, never empty, with one entry per invariant the change relies on: the
+  invariant stated so it could be false, and the enforcing layer with the line quoted — or
+  `enforced nowhere` with the searches that came back empty named. `enforced nowhere` must also be
+  raised as a finding in the list above, with its own location and severity. The enforcement the change
+  itself adds does not count as enforcement of the invariant that change relies on. The heading is
+  literal so the section's presence is checkable. `prompts/code-review-security.md` carries the same
+  instrument as `Constraints relied on`, in its tracing voice: one entry per externally-influenced value,
+  the bounding line quoted or `constrained nowhere`. Both prompts' "the review is done when" lines name
+  the section, so an unfilled slot is an incomplete review rather than a style lapse (D13).
+- **FR-016.** `codeReviewFindings` carries a required `severityRationale: string`, in `properties` and in
+  `required`, `additionalProperties: false` unchanged. `prompts/code-review-verify.md` enumerates it
+  among the per-finding fields and states its semantics: it names the severity the worker proposed and
+  what the verifier did with it — a confirmation when unchanged, and when changed in either direction the
+  reason, grounded in what was read in the repository. Naming the proposed severity is part of the
+  contract, so the entry says what was moved from as well as what it was moved to.
+  `prompts/code-review-synthesis.md` reprints it verbatim beside every retained finding's severity (D13).
+- **FR-017.** A `code-review-severity` eval makes the silent downgrade falsifiable.
+  `src/evals/fixtures/code-review-severity.ts` seeds ONE hand-written `falsifiability` finding, raised
+  `major` with a neutering-edit argument, against files that exist in this repository
+  (`src/evals/persistRun.ts`, `src/evals/persistRun.test.ts`). Because the graded event is a downgrade
+  and no live worker can be compelled to raise a given finding at a given severity, the eval runs the
+  real `verify` step alone — real prompt, real schema, real read access — over seeded worker text, via a
+  verify-only reduction of `code-review.yaml` built in `src/evals/run.ts`; `assertReadOnly` is applied to
+  the whole pipeline before the reduction. `reviewSeverity` in `src/evals/scorers.ts` FAILS a finding
+  emitted below the proposed severity whose `severityRationale` does not account for the drop, and a
+  finding the key cannot locate at all; it PASSES a severity kept, or lowered with a reason that names
+  what it moved from. The scorer is unit-tested without a model in `src/evals/scorers.test.ts`, and that
+  test is proven able to fail by neutering `severityDropAccountedFor` (D13).
 
 ## Functional Requirements — Phase 2 (DEFERRED — NOT APPROVED)
 
@@ -287,7 +372,12 @@ baseline:
 **Precision bar.** Both prior production runs together produced roughly 12 findings total with nothing
 discardable as noise. Report findings-per-run and `verify`'s decline rate before (unmodified pipeline)
 and after (this spec) each of the three ranges. Tripling the finding count with half of it junk is a
-net loss, not a win, regardless of whether the two missed defects above are caught.
+net loss, not a win, regardless of whether the two missed defects above are caught. **Amended
+2026-09-20 (D12, confirmed by run 2):** report retained baseline findings alongside both, and read that
+number first. Findings-per-run and decline rate are precision proxies that move independently of
+whether the review still finds what it used to: run 2 raised fewer findings and declined a larger share
+of them — which reads as improved precision — while retaining half as many baseline findings as run 1.
+A run is not an improvement on a metric that went the wrong way.
 
 **What this measures and what it does not.** These three benchmark runs and their diagnosis (2)
 (blast-radius), (3) (framing) and (4) (verdict argument) fixes are inside Phase 1's scope. Diagnosis (1)
@@ -330,6 +420,40 @@ diff and echoed in `config/locales/help.en.yml`, with no test that verifies it. 
 to argue from and emitted "ready to merge" for the second run running. D5 aimed the fix at `synthesis`;
 the downgrade happens one step earlier. Fixed in `prompts/code-review-verify.md` per D11 and FR-007.
 
+### Second benchmark run (2026-09-20)
+
+Run `70703f60`, the six-step pipeline with D11's and D12's prompt fixes applied (`ccbb89a`), against run
+`c209f8d2` and the same four-step baseline `d0ce9d9c`. Identical brief, identical diff, identical
+repository — the prompts are the only variable between run 1 and run 2.
+
+| Measure                     | Baseline `d0ce9d9c` | Run 1 `c209f8d2` | Run 2 `70703f60` |
+| --------------------------- | ------------------- | ---------------- | ---------------- |
+| Findings retained           | 4                   | 7                | 4                |
+| **Of the baseline 4, kept** | —                   | **3**            | **~2**           |
+| `verify` decline rate       | 25%                 | 15%              | higher           |
+| Findings above `minor`      | 0                   | 0                | 0                |
+
+**Both prompt-level fixes failed on their targets.**
+
+- **Severity (D11).** The `falsifiability` worker proposed `major` for
+  `spec/models/share_sale_spec.rb:321` in run 1 AND in run 2. `verify` wrote `minor` in both, with
+  `correctedWording` empty and no probe mentioning the decision — in run 2 despite
+  `prompts/code-review-verify.md` now carrying an explicit "severity is argued, never assigned in
+  silence" paragraph forbidding precisely that. The prose was read and not acted on.
+- **Displacement (D12).** The baseline finding "no second layer enforces `paid_on implies pricing
+closed`" (`db/schema.rb:764`) is absent from run 1 AND run 2. `correctness` mentions `schema.rb`,
+  `constraint` and `database` zero times in both, where the four-step baseline mentioned all three.
+  Run 2's "your own review comes first / the radius report is additive" paragraphs did not move it.
+- **The tightening made retention worse.** Run 2 kept about 2 of the baseline's 4 findings against run
+  1's 3, additionally losing the TOCTOU spec finding, while raising fewer findings and declining a
+  larger share. On raised-count and decline-rate alone run 2 reads as the better run; on retained
+  baseline findings — the metric that matters (D12) — it is the worse one. Reverted by D14.
+
+What the pair establishes is not about these two prompts: prose moved the one quantitative behaviour in
+the set (hedging) and neither structural one. That is the finding recorded as D13, and the instruments
+that replace the prose — FR-015's required slot, FR-016's required field, FR-017's eval — are what the
+third run measures.
+
 ## Out of scope / Risks
 
 - Phase 2 (D7-D10, FR-011-FR-014) is designed, not approved, and not implemented on this branch. Its
@@ -340,8 +464,10 @@ the downgrade happens one step earlier. Fixed in `prompts/code-review-verify.md`
   must stay byte-identical, verified with `git diff --exit-code`, matching spec 030's own out-of-scope
   guarantee.
 - No new tool grant, no Bash access, for any Phase 1 step.
-- No schema change in Phase 1; `codeReviewFindings`'s field set, enums and `additionalProperties: false`
-  are unchanged.
+- ~~No schema change in Phase 1; `codeReviewFindings`'s field set, enums and
+  `additionalProperties: false` are unchanged.~~ **Amended 2026-09-20 (D13/FR-010):** exactly one field,
+  `severityRationale`, is added, for the reason FR-010 records. Enums and `additionalProperties: false`
+  are unchanged, and no further schema change is in scope for Phase 1.
 - `radius` and `falsifiability` add two more `llm` calls per run over spec 030's four-step graph; cost
   impact is not separately budgeted here and should be read off the benchmark's own run costs.
 - The falsifiability dimension's own precision (does it add real findings or noise) is exactly what the

@@ -9,7 +9,7 @@ Verified findings:
 </context>
 
 <input>
-Each entry carries a verdict, `citationAccurate`, a quote of the cited source, a scope, a kind and corrected wording. Treat them as settled.
+Each entry carries a verdict, `citationAccurate`, a quote of the cited source, a scope, a kind, a severity with the rationale the verifier argued for it, and corrected wording. Treat them as settled.
 </input>
 
 <output_format>
@@ -22,7 +22,7 @@ Return a single prioritised list of findings:
 5. Order by falsifiability, not severity: what one grep can disprove comes first.
 6. For each retained finding, state:
    - **Title** — a short label.
-   - **Severity** — blocking, major, or minor.
+   - **Severity** — blocking, major, or minor, followed by the verifier's `severityRationale` verbatim. Never restate the severity without it: the rationale is what lets a reader see whether a finding was argued down or merely recorded low.
    - **Location** — file, line, and the verifier's quote.
    - **Scope** — introduced, pre-existing, or undetermined.
    - **Summary** — one to three sentences: the problem, the evidence, and what must change.

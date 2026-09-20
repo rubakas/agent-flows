@@ -4,7 +4,7 @@
 // Usage: tsx src/evals/run.ts <fixture-name>
 // Usage: tsx src/evals/run.ts --list   (prints available fixtures and exits)
 // Available fixtures: bug-missing-detail, feature-collision, audit-planted-defects,
-//                      code-review-citations
+//                      code-review-citations, code-review-severity
 //
 // Thresholds (exit non-zero if any falls below):
 //   citedPathsExist      = 100% — anti-hallucination: every cited path must exist
@@ -14,6 +14,8 @@
 //   conditional misrouted =    0 — no raised item may carry the adjudication it forbids
 //                                  (an item nobody raised, or raised without anything matching
 //                                   what it wants, is inconclusive and fails nothing)
+//   silent downgrades    =    0 — no finding may leave below the severity it arrived at
+//                                  without a rationale accounting for the drop
 //
 // Every step's raw output is written to a run directory outside the repo
 // (AGENT_FLOWS_EVAL_OUT, else the OS temp dir) and its path is printed first:
@@ -46,10 +48,18 @@ import {
   existingFunctionalityNamed,
   plantedGapsFound,
   reviewConditional,
+  reviewSeverity,
   reviewVerdicts,
 } from "./scorers.js";
 import { stepOutputText } from "./stepOutput.js";
-import type { ClaimedFindings, ConditionalItem, KeyedItem, VerdictExpectation } from "./scorers.js";
+import type {
+  ClaimedFindings,
+  ConditionalItem,
+  KeyedItem,
+  SeverityExpectation,
+  VerdictExpectation,
+} from "./scorers.js";
+import type { LoadedPipeline, StepDef } from "../canon/types.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -85,15 +95,78 @@ interface CodeReviewFixture {
   expectedPaths: string[];
 }
 
-type AnyFixture = EvalFixture | AuditFixture | CodeReviewFixture;
+/**
+ * A fixture that seeds the worker side by hand and runs `verify` alone.
+ *
+ * The graded event is a DOWNGRADE, which needs a known starting severity, and no
+ * live worker can be compelled to raise a given finding at a given severity. The
+ * upstream steps are therefore replaced by fixed text and only the step under
+ * test runs — see the header of fixtures/code-review-severity.ts.
+ */
+interface CodeReviewSeverityFixture {
+  /** Diff passed as `plan` input to the verify step. */
+  diff: string;
+  /** What existed before the change; passed as the `baseline` input. */
+  baseline: string;
+  /** Hand-written text seeded in place of the correctness/security/falsifiability steps. */
+  workerOutputs: { correctness: string; security: string; falsifiability: string };
+  /** Severity outcomes the verifier must reach, one per seeded finding. */
+  expectations: SeverityExpectation[];
+  /** Every path listed here must exist in the repo (anti-rot assertion). */
+  expectedPaths: string[];
+}
+
+type AnyFixture = EvalFixture | AuditFixture | CodeReviewFixture | CodeReviewSeverityFixture;
+
+/** Checked first: a severity fixture also carries a diff AND expectations. */
+function isSeverityFixture(f: AnyFixture): f is CodeReviewSeverityFixture {
+  return "workerOutputs" in f;
+}
 
 /** Checked before isAuditFixture: a code-review fixture also carries a diff. */
 function isCodeReviewFixture(f: AnyFixture): f is CodeReviewFixture {
-  return "expectations" in f && Array.isArray((f as CodeReviewFixture).expectations);
+  return (
+    !isSeverityFixture(f) &&
+    "expectations" in f &&
+    Array.isArray((f as CodeReviewFixture).expectations)
+  );
 }
 
 function isAuditFixture(f: AnyFixture): f is AuditFixture {
-  return !isCodeReviewFixture(f) && "diff" in f && typeof (f as AuditFixture).diff === "string";
+  return (
+    !isSeverityFixture(f) &&
+    !isCodeReviewFixture(f) &&
+    "diff" in f &&
+    typeof (f as AuditFixture).diff === "string"
+  );
+}
+
+/**
+ * The same pipeline reduced to its `verify` step, with the worker outputs the
+ * step consumes promoted to pipeline inputs.
+ *
+ * The real step, the real prompt and the real schema — only the producers of its
+ * upstream text change. `dependsOn` is dropped because the steps it names are no
+ * longer in the graph, and the three names move into `inputs` so that
+ * `visibleKeys` (built from `def.inputs` plus the step's ancestors) still carries
+ * every placeholder the prompt resolves; an unmapped placeholder is a hard throw,
+ * so a mismatch here fails loudly rather than rendering a blank.
+ */
+function verifyOnlyPipeline(full: LoadedPipeline): LoadedPipeline {
+  const verify = full.def.steps.find((s) => s.id === "verify");
+  if (!verify) {
+    throw new Error(`pipeline "${full.def.id}" has no verify step to run in isolation`);
+  }
+  const { dependsOn: _dropped, ...standalone } = verify;
+  return {
+    def: {
+      ...full.def,
+      id: `${full.def.id}-verify-only`,
+      inputs: [...full.def.inputs, "correctness", "security", "falsifiability"],
+      steps: [standalone as StepDef],
+    },
+    prompts: { verify: full.prompts.verify },
+  };
 }
 
 // ── Thresholds ────────────────────────────────────────────────────────────────
@@ -128,6 +201,7 @@ const KNOWN_FIXTURES = [
   "feature-collision",
   "audit-planted-defects",
   "code-review-citations",
+  "code-review-severity",
 ] as const;
 
 if (process.argv.includes("--list")) {
@@ -188,15 +262,20 @@ for (const p of fixture.expectedPaths) {
 
 // ── Load pipeline ─────────────────────────────────────────────────────────────
 
-const pipelineFile = isCodeReviewFixture(fixture)
-  ? "code-review.yaml"
-  : isAuditFixture(fixture)
-    ? "audit.yaml"
-    : "investigate.yaml";
-const loaded = loadPipeline(join(pipelinesDir, pipelineFile));
+const pipelineFile =
+  isCodeReviewFixture(fixture) || isSeverityFixture(fixture)
+    ? "code-review.yaml"
+    : isAuditFixture(fixture)
+      ? "audit.yaml"
+      : "investigate.yaml";
+const loadedFull = loadPipeline(join(pipelinesDir, pipelineFile));
 
 // Safety guard: refuse pipelines with any writing or shell-exec steps (including loop bodies).
-assertReadOnly(loaded);
+// Applied to the whole pipeline, before any trimming: a step removed from the graph must not be
+// a step the guard never saw.
+assertReadOnly(loadedFull);
+
+const loaded = isSeverityFixture(fixture) ? verifyOnlyPipeline(loadedFull) : loadedFull;
 
 const llmStepCount = loaded.def.steps.filter((s) => s.kind === "llm").length;
 console.log(
@@ -215,7 +294,11 @@ const mastraWf = mastra.getWorkflow(loaded.def.id);
 
 const run = await mastraWf.createRun();
 
-if (isCodeReviewFixture(fixture)) {
+if (isSeverityFixture(fixture)) {
+  console.log(
+    `\nDiff: ${fixture.diff.length.toString()} chars, ${fixture.expectations.length.toString()} seeded finding(s), worker output supplied by the fixture — only verify runs`
+  );
+} else if (isCodeReviewFixture(fixture)) {
   console.log(
     `\nDiff: ${fixture.diff.length.toString()} chars, ${fixture.expectations.length.toString()} expected verdict(s), ${fixture.conditional.length.toString()} conditional item(s)`
   );
@@ -228,11 +311,18 @@ if (isCodeReviewFixture(fixture)) {
 }
 console.log("\nRunning…\n");
 
-const runInput = isCodeReviewFixture(fixture)
-  ? { plan: fixture.diff, baseline: fixture.baseline, introducedCommits: "" }
-  : isAuditFixture(fixture)
-    ? { plan: fixture.diff }
-    : { request: fixture.seedPrompt };
+const runInput = isSeverityFixture(fixture)
+  ? {
+      plan: fixture.diff,
+      baseline: fixture.baseline,
+      introducedCommits: "",
+      ...fixture.workerOutputs,
+    }
+  : isCodeReviewFixture(fixture)
+    ? { plan: fixture.diff, baseline: fixture.baseline, introducedCommits: "" }
+    : isAuditFixture(fixture)
+      ? { plan: fixture.diff }
+      : { request: fixture.seedPrompt };
 
 // ── Persist the raw run ───────────────────────────────────────────────────────
 // Every step's output is written verbatim, before scoring, so the artifact that
@@ -298,7 +388,7 @@ let fullOutput: string;
 // dropped", and those call for opposite fixes.
 let preSynthesisOutput = "";
 
-if (isCodeReviewFixture(fixture)) {
+if (isCodeReviewFixture(fixture) || isSeverityFixture(fixture)) {
   // The per-finding verdicts live in the verify step's output; synthesis sees
   // only what verify passed on, so scoring it would score the wrong artifact.
   // verify is schema-gated, so its context entry is the parsed object, not a
@@ -348,7 +438,70 @@ console.log(`${bar}\n`);
 let failed: boolean;
 let summary: Record<string, unknown>;
 
-if (isCodeReviewFixture(fixture)) {
+if (isSeverityFixture(fixture)) {
+  // The only graded event is the SILENT DOWNGRADE. A verifier that keeps the
+  // worker's severity passes; one that lowers it and says why passes too, because
+  // weighing a proposal against the repository is the step's job. A finding the
+  // key cannot locate is counted apart and fails as well: verify's contract is
+  // that no finding vanishes, and scoring a vanished finding as "nothing was
+  // downgraded" would reward the worse failure.
+  const severityResult = reviewSeverity(fullOutput, fixture.expectations);
+  const silentVerdict = severityResult.silent.length === 0 ? "PASS" : "FAIL";
+  const missingVerdict = severityResult.missing.length === 0 ? "PASS" : "FAIL";
+
+  console.log("SCORES");
+  console.log(
+    `  silent downgrades     ${severityResult.silent.length.toString().padStart(4)}` +
+      `  [=0]     ${silentVerdict}`
+  );
+  console.log(
+    `  findings missing      ${severityResult.missing.length.toString().padStart(4)}` +
+      `  [=0]     ${missingVerdict}`
+  );
+
+  console.log(`\nSEVERITY KEPT (${severityResult.kept.length.toString()})`);
+  if (severityResult.kept.length === 0) {
+    console.log("  (none)");
+  } else {
+    for (const k of severityResult.kept) console.log(`  + ${k}`);
+  }
+
+  console.log(
+    `\nSEVERITY LOWERED WITH A STATED REASON (${severityResult.reasoned.length.toString()})`
+  );
+  if (severityResult.reasoned.length === 0) {
+    console.log("  (none)");
+  } else {
+    for (const r of severityResult.reasoned)
+      console.log(`  + ${r.phrase} — now ${r.emitted}: ${r.rationale}`);
+  }
+
+  console.log(`\nSILENT DOWNGRADES (${severityResult.silent.length.toString()}) [=0]`);
+  if (severityResult.silent.length === 0) {
+    console.log("  (none)");
+  } else {
+    for (const d of severityResult.silent)
+      console.log(
+        `  ! ${d.phrase} — ${d.proposed} → ${d.emitted}, severityRationale: ${d.rationale === "" ? "(empty)" : d.rationale}`
+      );
+  }
+
+  console.log(`\nFINDINGS MISSING (${severityResult.missing.length.toString()}) [=0]`);
+  if (severityResult.missing.length === 0) {
+    console.log("  (none)");
+  } else {
+    for (const m of severityResult.missing) console.log(`  - (missing) ${m}`);
+  }
+
+  summary = {
+    fixture: fixtureName,
+    provider: providerId,
+    elapsedMs,
+    severity: severityResult,
+  };
+
+  failed = severityResult.silent.length > 0 || severityResult.missing.length > 0;
+} else if (isCodeReviewFixture(fixture)) {
   // One finding answers one key. Expectations claim first, conditionals second,
   // each in fixture order: a finding both could match belongs to the key that is
   // required, not to the one that is merely graded if raised.

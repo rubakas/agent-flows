@@ -35,6 +35,7 @@ export const CODE_REVIEW_FINDING = {
     scope: { type: "string", enum: ["introduced", "pre-existing", "undetermined"] },
     kind: { type: "string", enum: ["defect", "business-decision", "external-confirmation"] },
     severity: { type: "string", enum: ["blocking", "major", "minor"] },
+    severityRationale: { type: "string" },
     probes: {
       type: "object",
       properties: {
@@ -59,6 +60,7 @@ export const CODE_REVIEW_FINDING = {
     "scope",
     "kind",
     "severity",
+    "severityRationale",
     "probes",
     "correctedWording",
   ],

@@ -6,6 +6,7 @@ import { packageRoot } from "../packageRoot.js";
 import auditPlantedDefects from "./fixtures/audit-planted-defects.js";
 import bugMissingDetail from "./fixtures/bug-missing-detail.js";
 import codeReviewCitations from "./fixtures/code-review-citations.js";
+import codeReviewSeverity from "./fixtures/code-review-severity.js";
 import featureCollision from "./fixtures/feature-collision.js";
 import { assertReadOnly } from "./safetyGuard.js";
 import {
@@ -14,10 +15,17 @@ import {
   existingFunctionalityNamed,
   plantedGapsFound,
   reviewConditional,
+  reviewSeverity,
   reviewVerdicts,
 } from "./scorers.js";
 import { stepOutputText } from "./stepOutput.js";
-import type { ClaimedFindings, ConditionalItem, KeyedItem, VerdictExpectation } from "./scorers.js";
+import type {
+  ClaimedFindings,
+  ConditionalItem,
+  KeyedItem,
+  SeverityExpectation,
+  VerdictExpectation,
+} from "./scorers.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
 // Spec 038 FR-004: the package root is found by walking up to package.json.
@@ -578,6 +586,7 @@ function finding(over: Record<string, unknown>): Record<string, unknown> {
     scope: "introduced",
     kind: "defect",
     severity: "minor",
+    severityRationale: "",
     probes: { guard: "", reachability: "", remedy: "", callers: "", scope: "" },
     correctedWording: "",
     ...over,
@@ -1904,6 +1913,186 @@ describe("code-review-citations fixture: expectation identifiers are present in 
   });
 
   for (const p of codeReviewCitations.expectedPaths) {
+    it(`answer-key path exists: ${p}`, () => {
+      assert.ok(
+        existsSync(join(REPO_ROOT, p)),
+        `answer-key path does not exist: ${p} — update the fixture`
+      );
+    });
+  }
+});
+
+// ── reviewSeverity ────────────────────────────────────────────────────────────
+
+/**
+ * The fixture's own answer key, pulled by phrase fragment, so these tests grade
+ * the same expectation a live run of `code-review-severity` grades. Reordering or
+ * rewording the fixture cannot silently detach them from it.
+ */
+function severityExpectationFor(fragment: string): SeverityExpectation {
+  const found = codeReviewSeverity.expectations.find((e) => e.phrase.includes(fragment));
+  assert.ok(found, `no fixture expectation whose phrase contains "${fragment}"`);
+  return found;
+}
+
+/** A verify-shaped finding matching the fixture's key, with severity to taste. */
+function severityFinding(severity: string, severityRationale: string): string {
+  return jsonOutput([
+    finding({
+      claim:
+        "The truncation test builds its expected value from MAX_PERSISTED_CHARS, so a wrong ceiling cannot make it fail",
+      file: "src/evals/persistRun.test.ts",
+      line: 66,
+      quote: "assert.equal(written.length, MAX_PERSISTED_CHARS);",
+      severity,
+      severityRationale,
+    }),
+  ]);
+}
+
+describe("reviewSeverity", () => {
+  const expectation = severityExpectationFor("MAX_PERSISTED_CHARS");
+
+  it("fails a major finding emitted minor with an empty severityRationale", () => {
+    const r = reviewSeverity(severityFinding("minor", ""), [expectation]);
+
+    assert.equal(r.silent.length, 1, "an unaccounted drop is the failure this eval exists for");
+    assert.equal(r.silent[0].proposed, "major");
+    assert.equal(r.silent[0].emitted, "minor");
+    assert.deepEqual(r.kept, []);
+    assert.deepEqual(r.reasoned, []);
+    assert.deepEqual(r.missing, []);
+  });
+
+  it("passes a downgrade whose rationale names what it moved from and why", () => {
+    const r = reviewSeverity(
+      severityFinding(
+        "minor",
+        "The worker proposed major. src/evals/run.ts is the only production caller of persistRun " +
+          "and every eval run writes its own timestamped directory, so a wrong ceiling costs one " +
+          "run's record rather than corrupting stored state — minor."
+      ),
+      [expectation]
+    );
+
+    assert.equal(r.reasoned.length, 1, "arguing a severity down is the verifier's job");
+    assert.equal(r.reasoned[0].emitted, "minor");
+    assert.deepEqual(r.silent, []);
+  });
+
+  it("fails a rationale that restates the label instead of giving a reason", () => {
+    const r = reviewSeverity(severityFinding("minor", "Downgraded to minor."), [expectation]);
+
+    assert.equal(r.silent.length, 1, "a label is not an argument, however it is phrased");
+    assert.equal(r.silent[0].rationale, "Downgraded to minor.");
+  });
+
+  it("fails a long rationale that never names the severity it moved from", () => {
+    const r = reviewSeverity(
+      severityFinding(
+        "minor",
+        "This was weighed carefully against the repository and the surrounding code was read " +
+          "in full before the severity recorded here was settled on."
+      ),
+      [expectation]
+    );
+
+    assert.equal(
+      r.silent.length,
+      1,
+      "a generic sentence of any length leaves the move itself unstated"
+    );
+  });
+
+  it("passes a finding whose proposed severity is kept, whatever the rationale says", () => {
+    const r = reviewSeverity(severityFinding("major", "Stands as proposed."), [expectation]);
+
+    assert.deepEqual(r.kept, [expectation.phrase]);
+    assert.deepEqual(r.silent, []);
+  });
+
+  it("counts a severity that is kept ABOVE the proposal as kept, not as a move to explain", () => {
+    const r = reviewSeverity(severityFinding("blocking", ""), [expectation]);
+
+    assert.deepEqual(r.kept, [expectation.phrase]);
+    assert.deepEqual(r.silent, []);
+  });
+
+  it("treats an absent severity as a drop, not as a finding that kept its own", () => {
+    const withoutSeverity = jsonOutput([
+      {
+        claim: "The truncation test cannot fail on a wrong MAX_PERSISTED_CHARS",
+        file: "src/evals/persistRun.test.ts",
+        verdict: "CONFIRMED",
+        kind: "defect",
+      },
+    ]);
+    const r = reviewSeverity(withoutSeverity, [expectation]);
+
+    assert.equal(r.silent.length, 1);
+    assert.equal(r.silent[0].emitted, "NONE");
+  });
+
+  it("reports a finding the verifier dropped entirely as missing, never as a pass", () => {
+    const elsewhere = jsonOutput([
+      finding({ claim: "an unrelated finding about the .md/.json split", severity: "minor" }),
+    ]);
+    const r = reviewSeverity(elsewhere, [expectation]);
+
+    assert.deepEqual(r.missing, [expectation.phrase]);
+    assert.deepEqual(r.kept, []);
+    assert.deepEqual(r.silent, []);
+  });
+
+  it("honours a shared claim set, so one finding cannot answer two keys", () => {
+    const claimed: ClaimedFindings = new Set();
+    const output = severityFinding("minor", "");
+
+    const first = reviewSeverity(output, [expectation], claimed);
+    const second = reviewSeverity(output, [expectation], claimed);
+
+    assert.equal(first.silent.length, 1);
+    assert.deepEqual(second.missing, [expectation.phrase], "the finding was already claimed");
+  });
+});
+
+// ── code-review-severity fixture: anti-rot guard ──────────────────────────────
+
+describe("code-review-severity fixture", () => {
+  it("seeds exactly one finding, raised above the floor so a drop is possible", () => {
+    assert.equal(
+      codeReviewSeverity.expectations.length,
+      1,
+      "the fixture grades one downgrade; a second finding would make a failure ambiguous"
+    );
+    assert.notEqual(
+      codeReviewSeverity.expectations[0].proposedSeverity,
+      "minor",
+      "a finding proposed at the floor cannot be downgraded, so it could never fail this eval"
+    );
+  });
+
+  it("states the proposed severity in the seeded worker text, not only in the answer key", () => {
+    const proposed = codeReviewSeverity.expectations[0].proposedSeverity;
+    assert.match(
+      codeReviewSeverity.workerOutputs.falsifiability,
+      new RegExp(`\\b${proposed}\\b`, "i"),
+      "the verifier reads the worker text, not the answer key: a severity only the key knows " +
+        "is one the verifier was never handed"
+    );
+  });
+
+  it("keys the answer on the claim, so a silent downgrade cannot read as never raised", () => {
+    for (const kw of codeReviewSeverity.expectations[0].keywords) {
+      assert.ok(
+        codeReviewSeverity.diff.toLowerCase().includes(kw.toLowerCase()) ||
+          codeReviewSeverity.workerOutputs.falsifiability.toLowerCase().includes(kw.toLowerCase()),
+        `keyword "${kw}" appears in neither the diff nor the seeded finding — it cannot match`
+      );
+    }
+  });
+
+  for (const p of codeReviewSeverity.expectedPaths) {
     it(`answer-key path exists: ${p}`, () => {
       assert.ok(
         existsSync(join(REPO_ROOT, p)),

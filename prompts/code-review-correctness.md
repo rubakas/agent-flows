@@ -9,9 +9,7 @@ You have read access to the repository. Ground every finding in what you actuall
 
 Read what the code does and compare it against what its names, its callers and its surrounding contract promise. The gap between the two is where defects live. Give particular attention to the order in which alternatives are tried — which source wins when several supply a value, and whether that precedence is the one the caller would expect; to defaults and fallbacks that quietly substitute a value; to conditions that are inverted or negated; and to boundaries where a count, an index or an empty case changes behaviour.
 
-This review of yours comes first, and it has to be complete on its own terms before any other source of surface is brought into it. Completeness includes the structural questions a diff raises by itself: when the change relies on an invariant holding, ask where that invariant is enforced — a database constraint, a validation, a second layer behind the one you are reading — and report it when the answer is nowhere. What is absent is as much a defect as what is written: the case no branch handles, the state nothing prevents, the guarantee every layer assumes some other layer makes.
-
-The blast-radius report below is additional surface, layered on top of the review you have just finished — never a substitute for it, never a narrowing of it, and never a claim on the attention the change itself is owed. With your own review complete, work through it entry by entry: for every caller, asserted invariant, divergent sibling and newly reachable state it names, decide whether the change breaks it, and say which. Those entries are the defects this review would otherwise miss entirely, because they live in files the diff does not contain. The report states facts, not verdicts — the judgement is yours. If it reads exactly "No blast radius found — nothing outside the change depends on it.", that search ran and came back empty; treat the change as self-contained and review it on its own terms. It never means the search was skipped.
+The blast-radius report below is required context, not colour. Work through it entry by entry: for every caller, asserted invariant, divergent sibling and newly reachable state it names, decide whether the change breaks it, and say which. Those entries are the defects this review would otherwise miss entirely, because they live in files the diff does not contain. The report states facts, not verdicts — the judgement is yours. If it reads exactly "No blast radius found — nothing outside the change depends on it.", that search ran and came back empty; treat the change as self-contained and review it on its own terms. It never means the search was skipped.
 
 The brief you were given frames the change a certain way — which paths it touches, which concern it belongs to. Restate that framing in one sentence, then deliberately review one thing it excludes and report what you find there. A defect outside the operator's frame is still a defect; scope is the verifier's call, not yours, so report it and let it be scoped.
 
@@ -38,7 +36,15 @@ Return a list of correctness findings. For each finding:
 
 Include only real defects: logic errors, missing cases, type mismatches, broken invariants, changes that contradict existing code, and comments or documentation the change makes false. Do not include stylistic preferences or speculative improvements.
 
+Then a section headed exactly `Invariants relied on`. It is required and it is never empty: a change that depends on nothing holding is one you have not yet read closely enough. List every invariant the change relies on — a value's range, an ordering that must already have happened, a state that must already be true, a uniqueness, a nullability, a pairing between two columns or two fields. For each, one entry:
+
+- **Invariant** — what must be true, stated so it could be false.
+- **Enforced at** — the layer that holds it and the line you read there: a database constraint, a model validation, a type, a guard in a caller, a check earlier in the same function. Cite the file and quote it.
+- **Or `enforced nowhere`** — when you searched every layer you can reach and no line holds it. Name the searches that came back empty.
+
+`enforced nowhere` is a finding, not an omission: raise it in the list above too, with its own location and severity. The layer the change itself adds does not count as enforcement of the invariant that change relies on — an assumption checked only where it is consumed is unenforced everywhere else.
+
 Then a line naming the framing you were given and the one thing outside it you reviewed.
 
-The review is done when every hunk of the change has been checked against the relevant code and every blast-radius entry has been answered.
+The review is done when every hunk of the change has been checked against the relevant code, every blast-radius entry has been answered, and every invariant in `Invariants relied on` carries either a quoted enforcing line or `enforced nowhere`.
 </output_format>

@@ -308,6 +308,14 @@ export interface ParsedFinding {
   verdict: string;
   kind?: string;
   blocking: boolean;
+  /** Lowercased `severity`, absent when the finding carries none. */
+  severity?: string;
+  /**
+   * The finding's `severityRationale`, verbatim. Absent on the prose path: prose
+   * has no fields, so a rationale cannot be told apart from the rest of the
+   * block, and reviewSeverity treats that as unaccounted rather than guessing.
+   */
+  severityRationale?: string;
 }
 
 /**
@@ -410,6 +418,8 @@ function parseJsonFindings(output: string): ParsedFinding[] | undefined {
       verdict,
       kind: typeof f.kind === "string" ? f.kind : undefined,
       blocking: verdict !== "DECLINED" && f.kind === "defect" && f.severity === "blocking",
+      severity: typeof f.severity === "string" ? f.severity.toLowerCase() : undefined,
+      severityRationale: typeof f.severityRationale === "string" ? f.severityRationale : undefined,
     };
   });
 }
@@ -464,11 +474,13 @@ function parseProseFindings(output: string): ParsedFinding[] {
         : /\bdefect\b/.test(lower)
           ? "defect"
           : undefined;
+    const severity = /\b(blocking|major|minor)\b/.exec(lower)?.[1];
     return {
       haystack: lower,
       verdict,
       kind,
       blocking: verdict !== "DECLINED" && kind === "defect" && /\bblocking\b/.test(lower),
+      severity,
     };
   });
 }
@@ -666,4 +678,118 @@ export function reviewConditional(
   }
 
   return { routed, misrouted, inconclusive, notRaised };
+}
+
+// ── reviewSeverity ────────────────────────────────────────────────────────────
+
+/** Severity a finding may carry, weakest last (spec 040 FR-015). */
+export type FindingSeverity = "blocking" | "major" | "minor";
+
+const SEVERITY_RANK: Record<string, number> = { blocking: 3, major: 2, minor: 1 };
+
+/**
+ * Shortest rationale that can carry a reason rather than a label.
+ *
+ * "Downgraded to minor" is 21 characters and states nothing; a reason grounded in
+ * something read in the repository names the code it read. The floor is coarse on
+ * purpose — it exists so that a bare restatement cannot satisfy the field, not to
+ * grade prose — and it is paired with the proposed-severity check below, which a
+ * generic sentence of any length still fails.
+ */
+const SEVERITY_RATIONALE_MIN_CHARS = 40;
+
+/**
+ * One expected severity outcome in a severity fixture answer key.
+ *
+ * `proposedSeverity` is what the SEEDED worker output raised, not what the
+ * verifier emitted. The fixture writes the worker's side by hand precisely so
+ * this number is known rather than inferred.
+ */
+export interface SeverityExpectation extends KeyedItem {
+  /** The severity the seeded worker output proposed for this finding. */
+  proposedSeverity: FindingSeverity;
+}
+
+export interface SeverityCheckResult {
+  /** Emitted at or above the proposed severity: nothing to account for. */
+  kept: string[];
+  /** Emitted below the proposed severity, with a rationale that accounts for the drop. */
+  reasoned: { phrase: string; emitted: string; rationale: string }[];
+  /** Emitted below the proposed severity with no accounting rationale — the failure. */
+  silent: { phrase: string; proposed: string; emitted: string; rationale: string }[];
+  /** Phrases no emitted finding matched: the verifier dropped the finding entirely. */
+  missing: string[];
+}
+
+/**
+ * Whether `severityRationale` accounts for a downgrade.
+ *
+ * Two independent conditions, because either alone is trivially satisfiable. It
+ * must name the severity it moved FROM — the verify prompt requires that
+ * explicitly, so an entry that omits it is not a rationale that was written and
+ * missed, it is one that was never written — and it must carry more than the two
+ * labels, which is what the length floor is for.
+ *
+ * Deliberately not a judgement of whether the reason is GOOD: no offline scorer
+ * can make that call, and pretending to would make the gate unfalsifiable in the
+ * other direction.
+ */
+export function severityDropAccountedFor(rationale: string | undefined, proposed: string): boolean {
+  const text = (rationale ?? "").trim();
+  if (text.length < SEVERITY_RATIONALE_MIN_CHARS) return false;
+  return text.toLowerCase().includes(proposed.toLowerCase());
+}
+
+/**
+ * Score a verifier's severity discipline against a known answer key.
+ *
+ * Pure and offline: no model call, no file read. The graded event is the SILENT
+ * DOWNGRADE — a finding that arrives `major` and leaves `minor` with nothing
+ * accounting for the drop. Keeping the severity passes; lowering it with a stated
+ * reason passes, because a verifier weighing a worker's proposal against the
+ * repository is doing its job. Only the unaccounted drop fails.
+ *
+ * A finding the answer key cannot locate at all is `missing`, not a pass: the
+ * verify contract is that no finding vanishes, and an eval that scored a vanished
+ * finding as "nothing was downgraded" would reward the worse failure.
+ */
+export function reviewSeverity(
+  output: string,
+  expectations: SeverityExpectation[],
+  claimed?: ClaimedFindings
+): SeverityCheckResult {
+  const findings = parseJsonFindings(output) ?? parseProseFindings(output);
+
+  const kept: string[] = [];
+  const reasoned: { phrase: string; emitted: string; rationale: string }[] = [];
+  const silent: { phrase: string; proposed: string; emitted: string; rationale: string }[] = [];
+  const missing: string[] = [];
+
+  for (const exp of expectations) {
+    const hit = matchAll(findings, exp.keywords, claimed)[0];
+    if (!hit) {
+      missing.push(exp.phrase);
+      continue;
+    }
+    const emitted = hit.severity ?? "";
+    const rationale = hit.severityRationale ?? "";
+    // An unparseable or absent severity ranks 0, so it reads as a drop from any
+    // proposal: a finding that lost its severity is not one that kept it.
+    if ((SEVERITY_RANK[emitted] ?? 0) >= SEVERITY_RANK[exp.proposedSeverity]) {
+      kept.push(exp.phrase);
+      continue;
+    }
+    if (severityDropAccountedFor(rationale, exp.proposedSeverity)) {
+      reasoned.push({ phrase: exp.phrase, emitted: emitted === "" ? "NONE" : emitted, rationale });
+      continue;
+    }
+    silent.push({
+      phrase: exp.phrase,
+      proposed: exp.proposedSeverity,
+      emitted: emitted === "" ? "NONE" : emitted,
+      rationale,
+    });
+  }
+
+  return { kept, reasoned, silent, missing };
 }

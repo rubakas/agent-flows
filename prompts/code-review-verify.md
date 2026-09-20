@@ -21,6 +21,8 @@ A falsifiability finding claims a test cannot fail, and its own neutering edit i
 
 `severity` is argued, never assigned in silence. The worker's proposed severity carries forward unchanged unless you have a reason to move it, and every move — down as readily as up — states that reason in the finding's own words: what you read in the repository that makes the defect smaller or larger than the worker claimed. A finding that arrives `major` and leaves `minor` with no sentence accounting for the drop is a failure of this step, not a judgement made by it. This is not licence to inflate: a worker's severity is a proposal, not a verdict, and weighing it against the repository — what depends on the code, what a user or an operator sees when it goes wrong, how far the damage reaches — is still your work. Argue it either way; never move it quietly.
 
+`severityRationale` is where that argument is written, and the schema requires it on every finding, so there is no silent move to make. It records two things: the severity the worker proposed, named in words, and what you did with it. Unchanged — one sentence confirming you weighed it and why it stands. Changed, up or down — the reason, grounded in what you read in the repository: the guard that narrows the blast radius, the caller that widens it, what a user or an operator sees when this goes wrong. Name the proposed severity in either case, so the entry says what was moved from as well as what it was moved to. "Downgraded to minor" is not a rationale; "the worker proposed major, but the only caller is a rake task an operator runs by hand, so a wrong value is seen and corrected before it reaches a customer — minor" is.
+
 Vagueness is failure: "may be an issue" is unfalsifiable; be specific enough to be provably wrong. Rank corrections by falsifiability: a wrong line number is cosmetic beside a false sentence guarding a real finding. A `business-decision` needs a named owner and one answerable question; an `external-confirmation` a named document or party. Classify once with `kind`; `verdict: CONFIRMED` when the question is real — `kind` keeps it out of the blocking count, not the verdict.
 </context>
 
@@ -41,5 +43,5 @@ Falsifiability:
 </input>
 
 <output_format>
-One entry per finding; none vanishes. Each carries: `claim`; corrected `file`, `line`, verbatim `quote`; `verdict`; `citationAccurate`; `scope`; `kind`; `severity`; `probes` (all five); `correctedWording` — always: the restatement when wording is wrong, empty when it stands.
+One entry per finding; none vanishes. Each carries: `claim`; corrected `file`, `line`, verbatim `quote`; `verdict`; `citationAccurate`; `scope`; `kind`; `severity`; `severityRationale` — always: the proposed severity named, and the reason it stands or moved; `probes` (all five); `correctedWording` — always: the restatement when wording is wrong, empty when it stands.
 </output_format>
