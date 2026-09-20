@@ -14,6 +14,7 @@ import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
 import { emitStepEvent } from "../../canon/stepLogEvents.js";
 import { TransportFailureError } from "../../canon/stepRuntime.js";
+import { validateCanonOutput } from "../../canon/validateOutput.js";
 import { recordStep } from "../../runtime/stepIntrospection.js";
 import { appendStepLog, writeStepOutput } from "../../runtime/stepLog.js";
 import type { PortabilityOptions } from "../../canon/portability.js";
@@ -194,21 +195,31 @@ function ctxVars(ctxData: Ctx): Record<string, string> {
 }
 
 // Try to parse a schema-gated step output; returns ok/error so callers can retry.
+// `retryNote` is what the one retry tells the model; `error` is what a failed step
+// reports. A schema violation names the field and the constraint in both.
 function tryParseSchemaOutput(
   raw: string,
   schemaKey: string
-): { ok: true; value: unknown } | { ok: false; error: string } {
+): { ok: true; value: unknown } | { ok: false; error: string; retryNote: string } {
   const stripped = stripFences(raw);
   let parsed: unknown;
   try {
     parsed = JSON.parse(stripped) as unknown;
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    const error = err instanceof Error ? err.message : String(err);
+    return { ok: false, error, retryNote: `Your previous output was not valid JSON (${error}).` };
   }
   if (typeof parsed !== "object" || parsed === null || !(schemaKey in parsed)) {
+    const error = `output missing required key "${schemaKey}". Got: ${stripped.slice(0, 200)}`;
+    return { ok: false, error, retryNote: `Your previous output was not valid JSON (${error}).` };
+  }
+  const violations = validateCanonOutput(schemaKey, parsed);
+  if (violations !== undefined) {
     return {
       ok: false,
-      error: `output missing required key "${schemaKey}". Got: ${stripped.slice(0, 200)}`,
+      error: `output does not match schema "${schemaKey}": ${violations}. Got: ${stripped.slice(0, 200)}`,
+      retryNote:
+        `Your previous output did not match the required JSON Schema` + ` (${violations}).`,
     };
   }
   return { ok: true, value: parsed };
@@ -627,9 +638,7 @@ export function buildLlmStep(
           const r1 = tryParseSchemaOutput(raw, step.schema);
           if (!r1.ok) {
             // One retry with explicit error feedback.
-            const retryPrompt =
-              `${prompt}\n\nYour previous output was not valid JSON (${r1.error}).` +
-              ` Return ONLY the JSON object.`;
+            const retryPrompt = `${prompt}\n\n${r1.retryNote} Return ONLY the JSON object.`;
             let retryRaw: string;
             try {
               retryRaw = await runner(entry, retryPrompt, runnerDeps);

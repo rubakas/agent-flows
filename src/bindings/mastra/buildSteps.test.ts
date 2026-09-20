@@ -1738,3 +1738,80 @@ describe("buildLlmStep — provider failover", () => {
     }
   });
 });
+
+// ─── Declared schema is enforced, not just pasted into the prompt ─────────────
+
+describe("buildLlmStep — schema-gated output is validated against the canon schema", () => {
+  const VALID_WEAKNESS = `{"weaknesses":[{"text":"Ambiguous","severity":"medium","blocking":false}]}`;
+  // Parses, carries the required top-level key, and violates the FINDING enum.
+  const BAD_SEVERITY = `{"weaknesses":[{"text":"Ambiguous","severity":"moderate","blocking":false}]}`;
+
+  const step: StepDef = {
+    id: "critic",
+    kind: "llm",
+    prompt: "prompts/critic.md",
+    schema: "weaknesses",
+  };
+
+  function runStep(runner: typeof runLlmStep): Promise<Record<string, unknown>> {
+    const llmStep = buildLlmStep(
+      step,
+      { critic: "critic prompt" },
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+      undefined
+    );
+    return (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
+  }
+
+  it("retries once with a prompt naming the field and the constraint", async () => {
+    const prompts: string[] = [];
+    let call = 0;
+    const runner: typeof runLlmStep = async (_entry, prompt) => {
+      prompts.push(prompt);
+      call += 1;
+      return call === 1 ? BAD_SEVERITY : VALID_WEAKNESS;
+    };
+
+    const out = await runStep(runner);
+
+    assert.equal(prompts.length, 2, "one retry, no more");
+    const retryPrompt = prompts[1] ?? "";
+    assert.match(retryPrompt, /weaknesses\.0\.severity/);
+    assert.match(retryPrompt, /must be one of low, medium, high, critical/);
+    assert.match(retryPrompt, /"moderate"/);
+    assert.deepEqual(out.critic, JSON.parse(VALID_WEAKNESS));
+  });
+
+  it("fails the step when the retry violates the schema too", async () => {
+    let call = 0;
+    const runner: typeof runLlmStep = async () => {
+      call += 1;
+      return BAD_SEVERITY;
+    };
+
+    let thrown: Error | undefined;
+    try {
+      await runStep(runner);
+    } catch (err) {
+      thrown = err instanceof Error ? err : new Error(String(err));
+    }
+
+    assert.equal(call, 2, "exactly one retry before failing");
+    assert.ok(thrown !== undefined, "a twice-invalid output must fail the step");
+    assert.match(thrown.message, /Step "critic": output does not match schema "weaknesses"/);
+    assert.match(thrown.message, /must be one of low, medium, high, critical/);
+  });
+
+  it("accepts a schema-valid output without retrying", async () => {
+    let call = 0;
+    const runner: typeof runLlmStep = async () => {
+      call += 1;
+      return VALID_WEAKNESS;
+    };
+
+    const out = await runStep(runner);
+
+    assert.equal(call, 1, "a valid output must not be retried");
+    assert.deepEqual(out.critic, JSON.parse(VALID_WEAKNESS));
+  });
+});
