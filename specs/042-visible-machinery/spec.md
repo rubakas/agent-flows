@@ -130,6 +130,25 @@ alive — exiting under a gate would strand an approval nobody can give. Only `l
 persisted as `running` by a process killed mid-step stays `running` on disk forever, and counting
 those would pin every future daemon for that project open on the strength of an old crash.
 
+**D12 — One page reads every project, by forwarding rather than by reworking the server.** (Added
+2026-09-22 on the owner's ask: "мені не дуже подобається що я маю перемикатись між портами".) A
+daemon binds one project at startup and no route takes a project from the request, so seeing two
+projects meant opening two ports. Spec 039 fixes that properly — one daemon, a `project` parameter on
+every route — and is a rework of ~40 routes. This is the cheap 90%: a request to
+`/api/projects/:projectKey/api/...` is forwarded by the daemon whose page is open to that project's
+own daemon, and the page prefixes every call with the project the operator picked.
+
+The target port is never taken from the request — it is read from that project's `daemon.json` and
+verified by the same probe D3 already requires, so this cannot be aimed at an arbitrary host or port.
+A nested proxy path is refused, or two daemons could bounce a request between them. The response is
+piped, not buffered, because the run view reads progress over SSE and a buffered forward would hang
+the very view this exists to show. `GET /api/daemons` is the one call that is never forwarded: it is
+machine-wide already, and its `self` flag is computed by whichever daemon answers, so forwarding it
+would put "serving this page" on the wrong row.
+
+**This is a stepping stone, not a substitute.** When spec 039 lands, the proxy route is deleted; the
+page's picker and its one API seam are what survive.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via
@@ -172,6 +191,11 @@ those would pin every future daemon for that project open on the strength of an 
   `running` or `awaiting_approval`. A daemon without that marker never exits on this path however
   long it is quiet. The span is overridable by `AGENT_FLOWS_IDLE_MS` — a test seam, not a documented
   knob, because the exit path ends the process and can only be observed from outside.
+- **FR-009.** `GET|POST|PUT|DELETE /api/projects/:projectKey/api/...` forwards to the port recorded
+  for `:projectKey`, streaming the response, and refuses with 502 naming the project when that key is
+  unknown or its daemon is not answering. A nested `/api/projects/` path is not forwarded at all. The
+  page carries the selected project in `?project=`, prefixes every API call with it, and leaves
+  `GET /api/daemons` unprefixed.
 
 ## Verification
 

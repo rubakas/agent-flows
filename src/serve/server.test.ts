@@ -550,20 +550,25 @@ describe("POST /api/runs — non-blocking start + SSE step events", () => {
   });
 
   // A run's inputs carry the change under review, which is the one body on this
-  // daemon that is legitimately large: a 35-file pull request diff is ~77 KB, and
-  // the 64 KB default refused it at the boundary before the reviewer ever ran.
-  it("POST /api/runs accepts a body past the 64 KB default, and still refuses a huge one", async () => {
-    const past64k = await mutate(srv.port, "POST", "/api/runs", {
+  // daemon that is legitimately large: a 35-file pull request diff is ~77 KB and
+  // a ~100k-line one is ~4.5 MB, while the 64 KB default refused both at the
+  // boundary before the reviewer ever ran.
+  it("POST /api/runs accepts a diff-sized body, and still refuses an absurd one", async () => {
+    const bigDiff = await mutate(srv.port, "POST", "/api/runs", {
       pipeline: "no-such-pipeline",
-      inputs: { plan: "d".repeat(200_000) },
+      inputs: { plan: "d".repeat(6 * 1024 * 1024) },
     });
-    assert.notEqual(past64k.status, 413, "a 200 KB diff must reach the handler, not the size guard");
+    assert.notEqual(
+      bigDiff.status,
+      413,
+      "a 6 MB diff — larger than a 100k-line change — must reach the handler"
+    );
 
-    const huge = await mutate(srv.port, "POST", "/api/runs", {
+    const absurd = await mutate(srv.port, "POST", "/api/runs", {
       pipeline: "no-such-pipeline",
-      inputs: { plan: "d".repeat(2 * 1024 * 1024) },
+      inputs: { plan: "d".repeat(80 * 1024 * 1024) },
     });
-    assert.equal(huge.status, 413, "the limit is raised, not removed");
+    assert.equal(absurd.status, 413, "the cap is raised, not removed");
   });
 
   it("POST /api/runs with a non-string provider → 400", async () => {

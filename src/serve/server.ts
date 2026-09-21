@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import {
   createServer as nodeCreateServer,
+  request as httpRequest,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
@@ -90,6 +91,7 @@ import {
 import { readHidden, setHidden } from "../runtime/visibility.js";
 import { resolveArtifactInputs } from "./artifactInputs.js";
 import { listDaemons, stateDirForKey } from "./daemons.js";
+import { resolveProxyTarget, splitProxyPath } from "./proxy.js";
 import {
   countInFlight,
   DEFAULT_IDLE_MS,
@@ -182,11 +184,18 @@ const BODY_LIMIT_IMPORT = 4 * 1024 * 1024; // 4 MB — /api/import carries a YAM
 // 1 MiB — /api/drafts/:id/preview carries one YAML body plus every edited
 // prompt text in a single payload, which overruns the 64 KB default (FR-004).
 const BODY_LIMIT_PREVIEW = 1024 * 1024;
-// 1 MiB — a run's `inputs` carry the change under review. A 35-file pull request
-// diff is ~77 KB on its own, so the 64 KB default refused every medium review at
-// the boundary; trimming the diff instead would hide the very files a reviewer
-// is meant to read (the falsifiability step reviews the tests).
-const BODY_LIMIT_RUN = 1024 * 1024;
+// 64 MiB — a run's `inputs` carry the change under review, which is the one body
+// on this daemon that is legitimately large. A 35-file pull request diff is
+// ~77 KB; the owner routinely reviews changes an order of magnitude past that,
+// and a ~100k-line diff is around 4.5 MB. Trimming the diff to fit is not the
+// answer: it would hide the very files a reviewer is meant to read, and the
+// falsifiability step exists to review the tests.
+//
+// This is deliberately far above any real diff rather than snug against one.
+// The cap is here so a runaway client gets a clear 413 instead of an OOM, not to
+// express an opinion about how large a change may be. The real ceiling is the
+// model's context window, which this number cannot raise.
+const BODY_LIMIT_RUN = 64 * 1024 * 1024;
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
 
@@ -747,6 +756,58 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
   });
 }
 
+/**
+ * Pipe one request to another local daemon and its answer back (spec 042 D12).
+ *
+ * Piped rather than buffered: the run view reads progress over SSE, which never
+ * ends, so anything that waits for a complete body would hang the view it exists
+ * to show. The target is always 127.0.0.1 on a port read from a verified daemon
+ * record — the caller resolves that before calling this.
+ */
+async function forwardToDaemon(
+  req: IncomingMessage,
+  res: ServerResponse,
+  port: number,
+  path: string
+): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const upstream = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path,
+        method: req.method ?? "GET",
+        // The target applies the same Host and content-type guards we just
+        // passed, so it is handed a Host it will accept for its own port.
+        headers: {
+          host: `127.0.0.1:${port}`,
+          ...(req.headers["content-type"] !== undefined
+            ? { "content-type": req.headers["content-type"] }
+            : {}),
+          ...(req.headers.accept !== undefined ? { accept: req.headers.accept } : {}),
+        },
+      },
+      (upRes) => {
+        res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+        upRes.pipe(res);
+        upRes.on("end", () => resolve());
+        upRes.on("error", () => {
+          res.end();
+          resolve();
+        });
+      }
+    );
+    upstream.on("error", (err: Error) => {
+      if (!res.headersSent) json(res, 502, { error: `daemon on port ${port}: ${err.message}` });
+      else res.end();
+      resolve();
+    });
+    // A client that navigates away mid-stream must not leave the upstream open.
+    res.on("close", () => upstream.destroy());
+    req.pipe(upstream);
+  });
+}
+
 // ── Port resolution and listen failures (spec 033 D4/FR-011/FR-012) ───────────
 
 /** Printed when the requested port is not a usable TCP port number (FR-011). */
@@ -1137,6 +1198,26 @@ async function handleRequest(
       self: { pid: process.pid, projectDir: ctx.projectDir },
     });
     json(res, 200, { daemons });
+    return;
+  }
+
+  // /api/projects/:projectKey/api/... — read another project through this daemon
+  // (spec 042 D12). The page stays on one origin and one port; the daemon whose
+  // page is open forwards to the project the operator picked. The target port is
+  // read from that project's own verified daemon record, never from the request,
+  // so this cannot be aimed anywhere else. The response is piped rather than
+  // buffered, because the run view's progress arrives as SSE.
+  const proxySplit = splitProxyPath(pathname);
+  if (proxySplit !== undefined) {
+    const daemons = await listDaemons(stateRootOf(ctx.state), {
+      self: { pid: process.pid, projectDir: ctx.projectDir },
+    });
+    const target = resolveProxyTarget(proxySplit.projectKey, daemons);
+    if (typeof target === "string") {
+      json(res, 502, { error: target });
+      return;
+    }
+    await forwardToDaemon(req, res, target.port, proxySplit.rest + url.search);
     return;
   }
 

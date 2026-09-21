@@ -356,6 +356,22 @@
       .table tr.awaiting td:first-child {
         border-left: 3px solid var(--warn);
       }
+      /* 042 D12: the project selector reads as part of the masthead, not as a
+         form control competing with the product name. */
+      #project-picker {
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        color: var(--ink-2);
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 2px 6px;
+        margin-left: 12px;
+      }
+      #project-picker:hover {
+        color: var(--ink);
+        border-color: var(--accent);
+      }
       .pipeline-id {
         font-family: var(--mono);
       }
@@ -775,6 +791,9 @@
   <body>
     <header>
       <h1>agent-flows</h1>
+      <!-- 042 D12: which project the views below are reading. Its own daemon
+           answers directly; any other is read through this one. -->
+      <select id="project-picker" title="Project these views read"></select>
       <span class="spacer"></span>
       <nav class="tabs">
         <a class="tab" id="tab-runs" href="#/runs">Runs</a>
@@ -1027,14 +1046,70 @@
         el._t = setTimeout(() => el.classList.remove("show"), 3000);
       }
 
-      async function api(method, path, body) {
+      // 042 D12: the project every view below reads. Empty means this daemon's
+      // own project, which it answers directly; any other key is prefixed so the
+      // daemon serving this page forwards to that project's daemon. Kept in the
+      // URL rather than only in memory so a reload, a copied link and a restored
+      // tab all land on the same project.
+      let projectKey = new URLSearchParams(location.search).get("project") || "";
+
+      function apiPath(path) {
+        return projectKey === "" ? path : `/api/projects/${encodeURIComponent(projectKey)}${path}`;
+      }
+
+      async function request(url, method, body) {
         const opts = { method, headers: { "content-type": "application/json" } };
         if (body !== undefined) opts.body = JSON.stringify(body);
-        const res = await fetch(path, opts);
+        const res = await fetch(url, opts);
         const json = await res.json().catch(() => ({}));
         if (!res.ok)
           throw Object.assign(new Error(json.error || "Request failed"), { status: res.status });
         return json;
+      }
+
+      /** Reads the selected project, through this daemon when it is not ours. */
+      const api = (method, path, body) => request(apiPath(path), method, body);
+
+      /** Reads this daemon itself, whichever project the views are showing. */
+      const apiLocal = (method, path, body) => request(path, method, body);
+
+      // 042 D12: fill the picker from the live daemons. A project with no live
+      // daemon is not offered — there would be nothing to answer for it — and
+      // changing the selection reloads, so no view can keep a row from the
+      // project you just left.
+      async function fillProjectPicker() {
+        const sel = document.getElementById("project-picker");
+        if (!sel) return;
+        let daemons = [];
+        try {
+          daemons = (await apiLocal("GET", "/api/daemons")).daemons || [];
+        } catch {
+          return;
+        }
+        const live = daemons.filter((d) => d.live);
+        // One project and it is ours: a picker with a single option is furniture.
+        if (live.length < 2) {
+          sel.hidden = true;
+          return;
+        }
+        sel.hidden = false;
+        sel.innerHTML = live
+          .map((d) => {
+            const key = d.self ? "" : d.projectKey;
+            const name = String(d.projectDir || "")
+              .split("/")
+              .pop();
+            return `<option value="${escH(key)}"${key === projectKey ? " selected" : ""}>${escH(
+              name
+            )}${d.self ? "" : ` · ${d.port}`}</option>`;
+          })
+          .join("");
+        sel.onchange = () => {
+          const url = new URL(location.href);
+          if (sel.value === "") url.searchParams.delete("project");
+          else url.searchParams.set("project", sel.value);
+          location.href = url.toString();
+        };
       }
 
       // ── Dialogs (037 D3/D4) ────────────────────────────────────────────────
@@ -1690,7 +1765,10 @@
 
       async function loadDaemons() {
         try {
-          const data = await api("GET", "/api/daemons");
+          // Never proxied: this list is machine-wide, and its "serving this page"
+          // flag is computed by whichever daemon answers — forwarding it would
+          // put that badge on the wrong row.
+          const data = await apiLocal("GET", "/api/daemons");
           _daemons = data.daemons || [];
           renderDaemons();
         } catch (e) {
@@ -1974,7 +2052,7 @@
           return;
         }
 
-        const es = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
+        const es = new EventSource(apiPath(`/api/runs/${encodeURIComponent(runId)}/events`));
         activeRunEs = es;
         window.__afDebug.sseOpens += 1;
         window.__afDebug.openStreams = window.__afDebug.sseOpens - window.__afDebug.sseCloses;
@@ -2051,7 +2129,7 @@
       async function backfillRunLog(runId) {
         let text = "";
         try {
-          const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/log`);
+          const res = await fetch(apiPath(`/api/runs/${encodeURIComponent(runId)}/log`));
           if (res.ok) text = await res.text();
         } catch {
           // The activity list is an addition to the view, not the view itself.
@@ -3078,6 +3156,7 @@
       // ── Boot ───────────────────────────────────────────────────────────────
 
       (async () => {
+        void fillProjectPicker();
         route();
       })();
     </script>
