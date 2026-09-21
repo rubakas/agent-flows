@@ -5,7 +5,7 @@ import { GraphError, pipelineAncestors, pipelineLevels } from "./graph.js";
 import { expandNested } from "./nest.js";
 import { extractPlaceholders } from "./render.js";
 import { canonSchemas } from "./schemas.js";
-import type { LoadedPipeline, PipelineDef, Role } from "./types.js";
+import type { LoadedPipeline, PipelineDef, Role, StepDef } from "./types.js";
 
 const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
 
@@ -76,6 +76,282 @@ export interface LoadDeps {
    * form one — is reported instead of exhausting the call stack.
    */
   loadStack?: readonly string[];
+}
+
+/**
+ * Validates a step of any kind other than `llm`: the fields that are llm-only
+ * are refused here, then the per-kind required fields are checked.
+ */
+function validateNonLlmStep(step: StepDef): void {
+  const raw = step as unknown as Record<string, unknown>;
+  for (const field of NON_LLM_FORBIDDEN) {
+    if (raw[field] !== undefined) {
+      throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
+    }
+  }
+  // maxBudgetUsd is llm-only; reject on all other step kinds
+  if (raw.maxBudgetUsd !== undefined) {
+    throw new Error(`Step "${step.id}": maxBudgetUsd is only allowed on llm steps`);
+  }
+  // failover is llm-only: no other step kind is dispatched to a provider.
+  if (raw.failover !== undefined) {
+    throw new Error(`Step "${step.id}": failover is only allowed on llm steps`);
+  }
+  // env is only valid on check steps; reject it on all other non-llm kinds.
+  if (step.kind !== "check") {
+    for (const field of NON_CHECK_FORBIDDEN) {
+      if (raw[field] !== undefined) {
+        throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
+      }
+    }
+  }
+  if (step.role !== undefined) {
+    throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
+  }
+  // manualOnly is only valid on gate steps (FR-013).
+  if (step.kind !== "gate" && raw.manualOnly !== undefined) {
+    throw new Error(`Step "${step.id}": manualOnly is only allowed on gate steps`);
+  }
+
+  if (step.kind === "pipeline") {
+    if (!step.pipeline) {
+      throw new Error(`Step "${step.id}": pipeline step requires pipeline`);
+    }
+    return;
+  }
+
+  if (step.kind === "loop") {
+    if (!step.pipeline) {
+      throw new Error(`Step "${step.id}": loop step requires pipeline`);
+    }
+    if (!step.maxIterations || !Number.isInteger(step.maxIterations) || step.maxIterations <= 0) {
+      throw new Error(
+        `Step "${step.id}": loop step requires maxIterations to be a positive integer`
+      );
+    }
+    if (!step.until) {
+      throw new Error(`Step "${step.id}": loop step requires until`);
+    }
+    return;
+  }
+
+  if (step.kind === "check") {
+    if (!step.command) {
+      throw new Error(`Step "${step.id}": check step requires command`);
+    }
+    // FR-004: {{checkCommand}} is the only supported placeholder in a command.
+    // Any other {{...}} would reach /bin/sh literally; reject it loudly so the
+    // author discovers the mistake at load time rather than at runtime.
+    for (const ph of extractPlaceholders(step.command)) {
+      if (ph !== "checkCommand") {
+        throw new Error(
+          `Step "${step.id}": command contains unknown placeholder "{{${ph}}}" — only {{checkCommand}} is supported`
+        );
+      }
+    }
+    // Validate the optional required flag: a terminal check that fails the run.
+    const requiredField = raw.required;
+    if (requiredField !== undefined && typeof requiredField !== "boolean") {
+      throw new Error(
+        `Step "${step.id}": required must be a boolean; got ${JSON.stringify(requiredField)}`
+      );
+    }
+    // Validate the optional env allowlist field.
+    const envField = raw.env;
+    if (envField !== undefined) {
+      if (!Array.isArray(envField) || (envField as unknown[]).length === 0) {
+        throw new Error(
+          `Step "${step.id}": env must be a non-empty array of environment variable name strings`
+        );
+      }
+      for (const entry of envField as unknown[]) {
+        if (
+          typeof entry !== "string" ||
+          entry.trim() === "" ||
+          !/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry)
+        ) {
+          throw new Error(
+            `Step "${step.id}": env entries must be valid environment variable names ` +
+              `(letters, digits, underscore; must start with a letter or underscore); ` +
+              `got: ${JSON.stringify(entry)}`
+          );
+        }
+      }
+    }
+    return;
+  }
+
+  if (step.kind === "export-spec") {
+    if (!step.path) {
+      throw new Error(`Step "${step.id}": export-spec step requires path`);
+    }
+    return;
+  }
+
+  if (step.kind === "gate") {
+    const manualOnlyField = raw.manualOnly;
+    if (manualOnlyField !== undefined && typeof manualOnlyField !== "boolean") {
+      throw new Error(
+        `Step "${step.id}": manualOnly must be a boolean; got ${JSON.stringify(manualOnlyField)}`
+      );
+    }
+    return;
+  }
+
+  // assemble-spec / persist-ticket: validated above; skip llm checks.
+  return;
+}
+
+/**
+ * Validates an `llm` step and returns the contents of its prompt file, which is
+ * read here because the containment check and the read must see the same path.
+ */
+function validateLlmStep(
+  step: StepDef,
+  ctx: { repoRoot: string; rootWithSep: string; readFile: (p: string) => string }
+): string {
+  const { repoRoot, rootWithSep, readFile } = ctx;
+  const raw = step as unknown as Record<string, unknown>;
+  // manualOnly is only valid on gate steps (FR-013).
+  if (raw.manualOnly !== undefined) {
+    throw new Error(`Step "${step.id}": manualOnly is only allowed on gate steps`);
+  }
+  // env is only valid on check steps; reject it on llm steps too.
+  for (const field of NON_CHECK_FORBIDDEN) {
+    if (raw[field] !== undefined) {
+      throw new Error(`Step "${step.id}": llm step cannot set ${field}`);
+    }
+  }
+
+  // Validate timeoutMs if present (same reasoning as defaultTimeoutMs above)
+  const timeoutField = raw.timeoutMs;
+  if (timeoutField !== undefined) {
+    assertPositiveTimeout(`Step "${step.id}"`, "timeoutMs", timeoutField);
+  }
+
+  // Validate the optional failover flag: false pins the step to one provider.
+  const failoverField = raw.failover;
+  if (failoverField !== undefined && typeof failoverField !== "boolean") {
+    throw new Error(
+      `Step "${step.id}": failover must be a boolean; got ${JSON.stringify(failoverField)}`
+    );
+  }
+
+  const budgetField = raw.maxBudgetUsd;
+  if (budgetField !== undefined) {
+    if (typeof budgetField !== "number" || budgetField <= 0) {
+      throw new Error(
+        `Step "${step.id}": maxBudgetUsd must be a positive number; got ${JSON.stringify(budgetField)}`
+      );
+    }
+  }
+
+  if (!step.role && !step.model) {
+    throw new Error(`Step "${step.id}": llm step requires role or model`);
+  }
+  if (step.role && step.model) {
+    throw new Error(`Step "${step.id}": step cannot set both role and model`);
+  }
+  if (step.role && !VALID_ROLES.includes(step.role)) {
+    throw new Error(`Step "${step.id}": unknown role "${step.role}"`);
+  }
+  if (!step.prompt) {
+    throw new Error(`Step "${step.id}": llm step requires prompt`);
+  }
+  const resolvedPromptPath = resolve(repoRoot, step.prompt);
+  if (!resolvedPromptPath.startsWith(rootWithSep)) {
+    throw new PromptPathError(
+      `Step "${step.id}": prompt path "${step.prompt}" escapes the pipeline root`
+    );
+  }
+  try {
+    const realPromptPath = realpathSync(resolvedPromptPath);
+    if (!realPromptPath.startsWith(rootWithSep)) {
+      throw new PromptPathError(
+        `Step "${step.id}": prompt path "${step.prompt}" resolves outside the pipeline root via symlink`
+      );
+    }
+  } catch (err) {
+    if (err instanceof PromptPathError) throw err;
+    // ENOENT or other fs error: file does not exist, let readFile handle below
+  }
+  try {
+    return readFile(resolvedPromptPath);
+  } catch {
+    throw new Error(`Step "${step.id}": prompt file "${step.prompt}" not found`);
+  }
+}
+
+/** Validates the fields whose rules do not depend on the step kind. */
+function validateStepCommon(step: StepDef): void {
+  if (step.schema !== undefined && !(step.schema in canonSchemas)) {
+    throw new Error(`Step "${step.id}": unknown schema "${String(step.schema)}"`);
+  }
+
+  if (step.role !== undefined && step.kind !== "llm") {
+    throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
+  }
+
+  if (step.permissions !== undefined) {
+    const perms = step.permissions as unknown as Record<string, unknown>;
+    // D5/FR-009: `allow` is not an unknown scope — it is a removed one, and the
+    // operator needs the removal named rather than a generic "unknown scope".
+    if (perms.allow !== undefined) {
+      throw new Error("permissions.allow was removed (spec 031); deny is narrowing-only");
+    }
+    const unknownScopes = Object.keys(perms).filter((k) => k !== "contents" && k !== "deny");
+    if (unknownScopes.length > 0) {
+      throw new Error(
+        `Step "${step.id}": permissions contains unknown scope(s) "${unknownScopes.join('", "')}" — ` +
+          `only "contents" is supported`
+      );
+    }
+    const contentsValue = perms.contents;
+    if (
+      contentsValue !== undefined &&
+      contentsValue !== "read" &&
+      contentsValue !== "write" &&
+      contentsValue !== "none"
+    ) {
+      const safeValue =
+        typeof contentsValue === "string" ? contentsValue : JSON.stringify(contentsValue);
+      throw new Error(
+        `Step "${step.id}": permissions.contents "${safeValue}" is invalid — ` +
+          `must be "read", "write", or "none"`
+      );
+    }
+
+    // deny is only meaningful when contents is declared — a deny list that is
+    // not applied is a silent no-op, so we reject this.
+    const denyValue = perms.deny;
+    if (denyValue !== undefined) {
+      if (contentsValue === undefined) {
+        throw new Error(
+          `Step "${step.id}": permissions.deny requires permissions.contents to be set — ` +
+            `a deny list that is not applied is a silent no-op`
+        );
+      }
+      if (!Array.isArray(denyValue) || (denyValue as unknown[]).length === 0) {
+        throw new Error(`Step "${step.id}": permissions.deny must be a non-empty array of strings`);
+      }
+      for (const entry of denyValue as unknown[]) {
+        if (typeof entry !== "string" || entry.trim() === "") {
+          throw new Error(`Step "${step.id}": permissions.deny entries must be non-blank strings`);
+        }
+      }
+    }
+  }
+
+  if (step.skills !== undefined) {
+    if (step.skills.length === 0) {
+      throw new Error(`Step "${step.id}": skills must not be empty`);
+    }
+    for (const skill of step.skills) {
+      if (typeof skill !== "string" || skill.trim() === "") {
+        throw new Error(`Step "${step.id}": skills entries must be non-blank strings`);
+      }
+    }
+  }
 }
 
 export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline {
@@ -162,274 +438,15 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
       step.kind === "persist-ticket" ||
       step.kind === "export-spec"
     ) {
-      for (const field of NON_LLM_FORBIDDEN) {
-        if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
-          throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
-        }
-      }
-      // maxBudgetUsd is llm-only; reject on all other step kinds
-      if ((step as unknown as Record<string, unknown>).maxBudgetUsd !== undefined) {
-        throw new Error(`Step "${step.id}": maxBudgetUsd is only allowed on llm steps`);
-      }
-      // failover is llm-only: no other step kind is dispatched to a provider.
-      if ((step as unknown as Record<string, unknown>).failover !== undefined) {
-        throw new Error(`Step "${step.id}": failover is only allowed on llm steps`);
-      }
-      // env is only valid on check steps; reject it on all other non-llm kinds.
-      if (step.kind !== "check") {
-        for (const field of NON_CHECK_FORBIDDEN) {
-          if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
-            throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
-          }
-        }
-      }
-      if (step.role !== undefined) {
-        throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
-      }
-      // manualOnly is only valid on gate steps (FR-013).
-      if (
-        step.kind !== "gate" &&
-        (step as unknown as Record<string, unknown>).manualOnly !== undefined
-      ) {
-        throw new Error(`Step "${step.id}": manualOnly is only allowed on gate steps`);
-      }
-
-      if (step.kind === "pipeline") {
-        if (!step.pipeline) {
-          throw new Error(`Step "${step.id}": pipeline step requires pipeline`);
-        }
-        continue;
-      }
-
-      if (step.kind === "loop") {
-        if (!step.pipeline) {
-          throw new Error(`Step "${step.id}": loop step requires pipeline`);
-        }
-        if (
-          !step.maxIterations ||
-          !Number.isInteger(step.maxIterations) ||
-          step.maxIterations <= 0
-        ) {
-          throw new Error(
-            `Step "${step.id}": loop step requires maxIterations to be a positive integer`
-          );
-        }
-        if (!step.until) {
-          throw new Error(`Step "${step.id}": loop step requires until`);
-        }
-        continue;
-      }
-
-      if (step.kind === "check") {
-        if (!step.command) {
-          throw new Error(`Step "${step.id}": check step requires command`);
-        }
-        // FR-004: {{checkCommand}} is the only supported placeholder in a command.
-        // Any other {{...}} would reach /bin/sh literally; reject it loudly so the
-        // author discovers the mistake at load time rather than at runtime.
-        for (const ph of extractPlaceholders(step.command)) {
-          if (ph !== "checkCommand") {
-            throw new Error(
-              `Step "${step.id}": command contains unknown placeholder "{{${ph}}}" — only {{checkCommand}} is supported`
-            );
-          }
-        }
-        // Validate the optional required flag: a terminal check that fails the run.
-        const requiredField = (step as unknown as Record<string, unknown>).required;
-        if (requiredField !== undefined && typeof requiredField !== "boolean") {
-          throw new Error(
-            `Step "${step.id}": required must be a boolean; got ${JSON.stringify(requiredField)}`
-          );
-        }
-        // Validate the optional env allowlist field.
-        const envField = (step as unknown as Record<string, unknown>).env;
-        if (envField !== undefined) {
-          if (!Array.isArray(envField) || (envField as unknown[]).length === 0) {
-            throw new Error(
-              `Step "${step.id}": env must be a non-empty array of environment variable name strings`
-            );
-          }
-          for (const entry of envField as unknown[]) {
-            if (
-              typeof entry !== "string" ||
-              entry.trim() === "" ||
-              !/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry)
-            ) {
-              throw new Error(
-                `Step "${step.id}": env entries must be valid environment variable names ` +
-                  `(letters, digits, underscore; must start with a letter or underscore); ` +
-                  `got: ${JSON.stringify(entry)}`
-              );
-            }
-          }
-        }
-        continue;
-      }
-
-      if (step.kind === "export-spec") {
-        if (!step.path) {
-          throw new Error(`Step "${step.id}": export-spec step requires path`);
-        }
-        continue;
-      }
-
-      if (step.kind === "gate") {
-        const manualOnlyField = (step as unknown as Record<string, unknown>).manualOnly;
-        if (manualOnlyField !== undefined && typeof manualOnlyField !== "boolean") {
-          throw new Error(
-            `Step "${step.id}": manualOnly must be a boolean; got ${JSON.stringify(manualOnlyField)}`
-          );
-        }
-        continue;
-      }
-
-      // assemble-spec / persist-ticket: validated above; skip llm checks.
+      validateNonLlmStep(step);
       continue;
     }
 
     if (step.kind === "llm") {
-      // manualOnly is only valid on gate steps (FR-013).
-      if ((step as unknown as Record<string, unknown>).manualOnly !== undefined) {
-        throw new Error(`Step "${step.id}": manualOnly is only allowed on gate steps`);
-      }
-      // env is only valid on check steps; reject it on llm steps too.
-      for (const field of NON_CHECK_FORBIDDEN) {
-        if ((step as unknown as Record<string, unknown>)[field] !== undefined) {
-          throw new Error(`Step "${step.id}": llm step cannot set ${field}`);
-        }
-      }
-
-      // Validate timeoutMs if present (same reasoning as defaultTimeoutMs above)
-      const timeoutField = (step as unknown as Record<string, unknown>).timeoutMs;
-      if (timeoutField !== undefined) {
-        assertPositiveTimeout(`Step "${step.id}"`, "timeoutMs", timeoutField);
-      }
-
-      // Validate the optional failover flag: false pins the step to one provider.
-      const failoverField = (step as unknown as Record<string, unknown>).failover;
-      if (failoverField !== undefined && typeof failoverField !== "boolean") {
-        throw new Error(
-          `Step "${step.id}": failover must be a boolean; got ${JSON.stringify(failoverField)}`
-        );
-      }
-
-      const budgetField = (step as unknown as Record<string, unknown>).maxBudgetUsd;
-      if (budgetField !== undefined) {
-        if (typeof budgetField !== "number" || budgetField <= 0) {
-          throw new Error(
-            `Step "${step.id}": maxBudgetUsd must be a positive number; got ${JSON.stringify(budgetField)}`
-          );
-        }
-      }
-
-      if (!step.role && !step.model) {
-        throw new Error(`Step "${step.id}": llm step requires role or model`);
-      }
-      if (step.role && step.model) {
-        throw new Error(`Step "${step.id}": step cannot set both role and model`);
-      }
-      if (step.role && !VALID_ROLES.includes(step.role)) {
-        throw new Error(`Step "${step.id}": unknown role "${step.role}"`);
-      }
-      if (!step.prompt) {
-        throw new Error(`Step "${step.id}": llm step requires prompt`);
-      }
-      const resolvedPromptPath = resolve(repoRoot, step.prompt);
-      if (!resolvedPromptPath.startsWith(rootWithSep)) {
-        throw new PromptPathError(
-          `Step "${step.id}": prompt path "${step.prompt}" escapes the pipeline root`
-        );
-      }
-      try {
-        const realPromptPath = realpathSync(resolvedPromptPath);
-        if (!realPromptPath.startsWith(rootWithSep)) {
-          throw new PromptPathError(
-            `Step "${step.id}": prompt path "${step.prompt}" resolves outside the pipeline root via symlink`
-          );
-        }
-      } catch (err) {
-        if (err instanceof PromptPathError) throw err;
-        // ENOENT or other fs error: file does not exist, let readFile handle below
-      }
-      try {
-        prompts[step.id] = readFile(resolvedPromptPath);
-      } catch {
-        throw new Error(`Step "${step.id}": prompt file "${step.prompt}" not found`);
-      }
+      prompts[step.id] = validateLlmStep(step, { repoRoot, rootWithSep, readFile });
     }
 
-    if (step.schema !== undefined && !(step.schema in canonSchemas)) {
-      throw new Error(`Step "${step.id}": unknown schema "${String(step.schema)}"`);
-    }
-
-    if (step.role !== undefined && step.kind !== "llm") {
-      throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
-    }
-
-    if (step.permissions !== undefined) {
-      const perms = step.permissions as unknown as Record<string, unknown>;
-      // D5/FR-009: `allow` is not an unknown scope — it is a removed one, and the
-      // operator needs the removal named rather than a generic "unknown scope".
-      if (perms.allow !== undefined) {
-        throw new Error("permissions.allow was removed (spec 031); deny is narrowing-only");
-      }
-      const unknownScopes = Object.keys(perms).filter((k) => k !== "contents" && k !== "deny");
-      if (unknownScopes.length > 0) {
-        throw new Error(
-          `Step "${step.id}": permissions contains unknown scope(s) "${unknownScopes.join('", "')}" — ` +
-            `only "contents" is supported`
-        );
-      }
-      const contentsValue = perms.contents;
-      if (
-        contentsValue !== undefined &&
-        contentsValue !== "read" &&
-        contentsValue !== "write" &&
-        contentsValue !== "none"
-      ) {
-        const safeValue =
-          typeof contentsValue === "string" ? contentsValue : JSON.stringify(contentsValue);
-        throw new Error(
-          `Step "${step.id}": permissions.contents "${safeValue}" is invalid — ` +
-            `must be "read", "write", or "none"`
-        );
-      }
-
-      // deny is only meaningful when contents is declared — a deny list that is
-      // not applied is a silent no-op, so we reject this.
-      const denyValue = perms.deny;
-      if (denyValue !== undefined) {
-        if (contentsValue === undefined) {
-          throw new Error(
-            `Step "${step.id}": permissions.deny requires permissions.contents to be set — ` +
-              `a deny list that is not applied is a silent no-op`
-          );
-        }
-        if (!Array.isArray(denyValue) || (denyValue as unknown[]).length === 0) {
-          throw new Error(
-            `Step "${step.id}": permissions.deny must be a non-empty array of strings`
-          );
-        }
-        for (const entry of denyValue as unknown[]) {
-          if (typeof entry !== "string" || entry.trim() === "") {
-            throw new Error(
-              `Step "${step.id}": permissions.deny entries must be non-blank strings`
-            );
-          }
-        }
-      }
-    }
-
-    if (step.skills !== undefined) {
-      if (step.skills.length === 0) {
-        throw new Error(`Step "${step.id}": skills must not be empty`);
-      }
-      for (const skill of step.skills) {
-        if (typeof skill !== "string" || skill.trim() === "") {
-          throw new Error(`Step "${step.id}": skills entries must be non-blank strings`);
-        }
-      }
-    }
+    validateStepCommon(step);
   }
 
   // Resolve and expand nested pipelines. Without an injected resolver the child
