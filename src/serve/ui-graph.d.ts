@@ -15,10 +15,13 @@ export declare const COL_GAP: number;
 export declare const ROW_GAP: number;
 
 /** The right-angle path one edge takes between two boxes (spec 042 D16). */
+/** Where an edge attaches to a box, spread down its side (spec 042 D16). */
+export declare function attachY(boxY: number, i: number, n: number): number;
+
 export declare function edgePath(
-  from: { x: number; y: number },
-  to: { x: number; y: number },
-  lane?: number,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  turnX: number,
   laneY?: number
 ): string;
 

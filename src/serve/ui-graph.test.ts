@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { pipelineLevels, pipelineToGraph } from "../canon/graph.js";
-import { BOX_W, COL_GAP, edgePath, renderLevelsSvg } from "./ui-graph.js";
+import { attachY, BOX_H, BOX_W, COL_GAP, edgePath, renderLevelsSvg } from "./ui-graph.js";
 
 const STEPS = [
   { id: "intake", kind: "llm", role: "scout" },
@@ -91,25 +91,48 @@ describe("renderLevelsSvg — nodes and edges (FR-007)", () => {
     }
   });
 
-  it("routes a same-row edge as one horizontal segment", () => {
-    assert.equal(edgePath({ x: 12, y: 12 }, { x: 220, y: 12 }), "M172 34 H220");
+  it("routes a same-height edge as one horizontal segment", () => {
+    assert.equal(edgePath({ x: 172, y: 34 }, { x: 220, y: 34 }, 196), "M172 34 H220");
   });
 
-  it("turns inside the gutter before the target for a next-column edge", () => {
-    const d = edgePath({ x: 12, y: 12 }, { x: 220, y: 72 });
-    const turn = Number(/H(-?[\d.]+) V/u.exec(d)?.[1]);
-    assert.ok(turn > 220 - COL_GAP && turn < 220, `the turn must sit in the gutter: ${d}`);
+  it("turns at the gutter the caller picked for a next-column edge", () => {
+    assert.equal(edgePath({ x: 172, y: 34 }, { x: 220, y: 94 }, 196), "M172 34 H196 V94 H220");
   });
 
   it("drops a longer span into the lane below, never across the column it skips", () => {
-    const d = edgePath({ x: 12, y: 72 }, { x: 428, y: 12 }, 0, 160);
+    const d = edgePath({ x: 172, y: 94 }, { x: 428, y: 34 }, 404, 160);
     assert.ok(d.includes("V160"), `a two-column edge must use the lane: ${d}`);
   });
 
-  it("gives edges arriving at one box their own lane", () => {
-    const a = edgePath({ x: 12, y: 12 }, { x: 220, y: 72 }, 0);
-    const b = edgePath({ x: 12, y: 12 }, { x: 220, y: 72 }, 1);
-    assert.notEqual(a, b, "two edges sharing a turn point read as one thick line");
+  // Three edges arriving at `verify` all met it at the box's middle, so their
+  // three arrowheads stacked into what looked like one and no line could be
+  // traced to its target. Each side of a box now spreads its edges out.
+  it("spreads the edges on one side of a box to their own heights", () => {
+    assert.equal(attachY(12, 0, 1), 34, "a lone edge still meets the middle");
+    const three = [attachY(12, 0, 3), attachY(12, 1, 3), attachY(12, 2, 3)];
+    assert.equal(new Set(three).size, 3, `three edges need three heights: ${three.join()}`);
+    assert.ok(
+      three.every((y) => y > 12 && y < 12 + BOX_H),
+      `every attachment must stay on the box's side: ${three.join()}`
+    );
+  });
+
+  it("no two edges arriving at one box share an endpoint", () => {
+    const svg = render(STEPS);
+    const ends = [...svg.matchAll(/<path class="edge" d="[^"]*?H(-?[\d.]+)"/gu)].map((m) => m[0]);
+    const endPoints = [...svg.matchAll(/<path class="edge" d="([^"]+)"/gu)].map((m) => {
+      const d = m[1];
+      const lastH = [...d.matchAll(/H(-?[\d.]+)/gu)].at(-1)?.[1];
+      const lastV = [...d.matchAll(/V(-?[\d.]+)/gu)].at(-1)?.[1];
+      const startY = /M-?[\d.]+ (-?[\d.]+)/u.exec(d)?.[1];
+      return `${lastH},${lastV ?? startY}`;
+    });
+    assert.equal(ends.length, endPoints.length);
+    assert.equal(
+      new Set(endPoints).size,
+      endPoints.length,
+      `stacked arrowheads read as one: ${endPoints.join(" | ")}`
+    );
   });
 
   it("every edge ends in an arrowhead, so direction needs no tracing", () => {

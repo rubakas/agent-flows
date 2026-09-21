@@ -43,11 +43,29 @@ const ARROW_DEFS =
 const LANE = 5;
 
 /**
+ * Where an edge attaches to a box, spread down its side.
+ *
+ * Every edge used to meet its box at the vertical middle, so the three edges
+ * arriving at `verify` landed on one point and their three arrowheads stacked
+ * into what looked like one — you could not tell which line went where, which
+ * is the complaint this answers. With `n` edges on a side, the `i`th sits at its
+ * own height, and each arrowhead is its own.
+ *
+ * @param {number} boxY Top of the box.
+ * @param {number} i Index of this edge among those on that side.
+ * @param {number} n How many edges share that side.
+ * @returns {number}
+ */
+export function attachY(boxY, i, n) {
+  return boxY + (BOX_H * (i + 1)) / (n + 1);
+}
+
+/**
  * The path one edge takes, as right angles rather than a diagonal.
  *
- * A straight line between two boxes on different rows crosses the column gap at
- * an angle, and over a two-column span it crosses whatever box sits between —
- * which is how the diagram came to read as a spray of crossing lines.
+ * A straight line between two boxes crossed the column gap at an angle, and over
+ * a two-column span it crossed whatever box sat between — which is how the
+ * diagram came to read as a spray of crossing lines.
  *
  * Two routes, because one is not enough. An edge to the NEXT column turns once
  * in the gutter before its target, which is always empty. An edge spanning more
@@ -55,29 +73,20 @@ const LANE = 5;
  * lane at box height is occupied by the columns it skips. It drops into a lane
  * BELOW the diagram, runs across there, and climbs into its target's gutter.
  *
- * @param {{ x: number, y: number }} from Top-left of the source box.
- * @param {{ x: number, y: number }} to Top-left of the target box.
- * @param {number} lane Index among the edges arriving at this target.
+ * @param {{ x: number, y: number }} start Where it leaves the source box.
+ * @param {{ x: number, y: number }} end Where it meets the target box.
+ * @param {number} turnX X of the vertical run, in the gutter before the target.
  * @param {number} [laneY] Y of the free lane below the boxes, for long spans.
  * @returns {string} An SVG path `d`.
  */
-export function edgePath(from, to, lane = 0, laneY) {
-  const sx = from.x + BOX_W;
-  const sy = from.y + BOX_H / 2;
-  const ex = to.x;
-  const ey = to.y + BOX_H / 2;
-  const fan = (lane - 0.5) * LANE;
-  const turn = ex - COL_GAP / 2 + fan;
-
-  if (sy === ey) return `M${sx} ${sy} H${ex}`;
-
-  // One column apart: the gutter before the target is the only gap needed.
-  const spansOneColumn = ex - sx <= COL_GAP + 1;
-  if (spansOneColumn || laneY === undefined) return `M${sx} ${sy} H${turn} V${ey} H${ex}`;
-
-  // Further: out into our own gutter, down under everything, across, and up.
-  const out = sx + COL_GAP / 2 + fan;
-  return `M${sx} ${sy} H${out} V${laneY} H${turn} V${ey} H${ex}`;
+export function edgePath(start, end, turnX, laneY) {
+  if (start.y === end.y) return `M${start.x} ${start.y} H${end.x}`;
+  const spansOneColumn = end.x - start.x <= COL_GAP + 1;
+  if (spansOneColumn || laneY === undefined) {
+    return `M${start.x} ${start.y} H${turnX} V${end.y} H${end.x}`;
+  }
+  const out = start.x + COL_GAP / 2;
+  return `M${start.x} ${start.y} H${out} V${laneY} H${turnX} V${end.y} H${end.x}`;
 }
 
 /** Steps reachable by following dependsOn edges forward from the roots. */
@@ -158,6 +167,7 @@ export function renderLevelsSvg(levels, graph, opts) {
     const to = pos.get(e.to);
     return from !== undefined && to !== undefined && to.x - (from.x + BOX_W) > COL_GAP + 1;
   }).length;
+
   const laneY = longEdges > 0 ? boxesBottom + LANE * 2 : undefined;
   const height = (laneY === undefined ? boxesBottom : laneY + longEdges * LANE) + MARGIN;
 
@@ -167,16 +177,30 @@ export function renderLevelsSvg(levels, graph, opts) {
   let body = "";
 
   // Edges first so a box always paints over the line that ends under it.
-  // Several edges arriving at one box would otherwise share a vertical segment
-  // and read as a single thick line, so each gets its own lane in the gutter.
-  const laneByTarget = new Map();
-  for (const e of edges) {
+  // Count first: an edge's attachment height depends on how many others share
+  // that side of the box, which is not known until every edge has been seen.
+  const drawable = edges.filter((e) => pos.has(e.from) && pos.has(e.to));
+  const outOf = new Map();
+  const intoOf = new Map();
+  for (const e of drawable) {
+    outOf.set(e.from, (outOf.get(e.from) ?? 0) + 1);
+    intoOf.set(e.to, (intoOf.get(e.to) ?? 0) + 1);
+  }
+  const outSeen = new Map();
+  const inSeen = new Map();
+  for (const e of drawable) {
     const from = pos.get(e.from);
     const to = pos.get(e.to);
-    if (!from || !to) continue;
-    const lane = laneByTarget.get(e.to) ?? 0;
-    laneByTarget.set(e.to, lane + 1);
-    body += `<path class="edge" d="${edgePath(from, to, lane, laneY)}" marker-end="url(#af-arrow)" />`;
+    const oi = outSeen.get(e.from) ?? 0;
+    const ii = inSeen.get(e.to) ?? 0;
+    outSeen.set(e.from, oi + 1);
+    inSeen.set(e.to, ii + 1);
+    const start = { x: from.x + BOX_W, y: attachY(from.y, oi, outOf.get(e.from)) };
+    const end = { x: to.x, y: attachY(to.y, ii, intoOf.get(e.to)) };
+    // Fan the turn apart too, so two edges into neighbouring heights do not run
+    // their verticals along the same line.
+    const turnX = to.x - COL_GAP / 2 + (ii - (intoOf.get(e.to) - 1) / 2) * LANE;
+    body += `<path class="edge" d="${edgePath(start, end, turnX, laneY)}" marker-end="url(#af-arrow)" />`;
   }
 
   for (const id of allIds) {
