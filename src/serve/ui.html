@@ -773,7 +773,6 @@
       <nav class="tabs">
         <a class="tab" id="tab-runs" href="#/runs">Runs</a>
         <a class="tab" id="tab-workflows" href="#/workflows">Workflows</a>
-        <a class="tab" id="tab-templates" href="#/templates">Templates</a>
         <a class="tab" id="tab-settings" href="#/settings">Settings</a>
       </nav>
     </header>
@@ -819,7 +818,6 @@
             <span class="actions" style="margin-left: auto">
               <button class="btn" id="btn-new-workflow">New workflow</button>
               <button class="btn" id="btn-show-hidden">Show hidden</button>
-              <a class="btn" id="btn-from-template" href="#/templates">From template…</a>
             </span>
           </div>
           <div id="workflows-table-wrap">Loading…</div>
@@ -840,33 +838,6 @@
           <a class="btn" href="#/workflows">← Workflows</a>
         </div>
         <div id="workflow-edit-body"></div>
-      </section>
-
-      <!-- Templates view (037 D4) = the catalogue we ship plus saved bundles -->
-      <section class="view" id="view-templates" hidden>
-        <div class="section">
-          <div class="section-header">
-            <h2>Bundled</h2>
-            <span class="muted">the workflows we ship — preview and export</span>
-          </div>
-          <div id="bundled-table-wrap">Loading…</div>
-        </div>
-
-        <div class="section">
-          <div class="section-header">
-            <h2>Yours</h2>
-            <span class="muted">~/.agent-flows/templates/</span>
-          </div>
-          <div id="template-table-wrap">Loading…</div>
-        </div>
-      </section>
-
-      <!-- Template preview (037 D4) -->
-      <section class="view" id="view-template" hidden>
-        <div class="section-header">
-          <a class="btn" href="#/templates">← Templates</a>
-        </div>
-        <div id="template-view-body"></div>
       </section>
 
       <!-- Settings view (D6) -->
@@ -991,7 +962,6 @@
         fmtTime,
         runRow,
         statusClass,
-        templateRow,
         workflowRow,
       } from "/ui-tables.js";
       import {
@@ -1326,103 +1296,12 @@
         }
       };
 
-      // ── Templates view (037 D4, 038 D16 — import and export only) ─────────
-
-      async function loadTemplates() {
-        loadBundledCatalogue();
-        loadSavedTemplates();
-      }
-
-      async function loadBundledCatalogue() {
-        const wrap = document.getElementById("bundled-table-wrap");
-        try {
-          const data = await api("GET", "/api/pipelines?source=bundled");
-          const rows = data.pipelines || [];
-          if (!rows.length) {
-            wrap.innerHTML = `<p class="empty">No bundled workflows found.</p>`;
-            return;
-          }
-          wrap.innerHTML = `<table class="table"><thead><tr>
-            <th>ID</th><th>Description</th><th>Steps</th><th>Inputs</th><th>Actions</th>
-          </tr></thead><tbody>${rows
-            .map((r) => templateRow({ ...r, section: "bundled" }))
-            .join("")}</tbody></table>`;
-          for (const btn of wrap.querySelectorAll("[data-preview-bundled]")) {
-            btn.onclick = () => {
-              location.hash = hashFor("template", btn.dataset.previewBundled);
-            };
-          }
-          for (const btn of wrap.querySelectorAll("[data-export-bundled]")) {
-            btn.onclick = () => exportWorkflow(btn.dataset.exportBundled);
-          }
-        } catch (e) {
-          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
-        }
-      }
+      // ── Workflow view (037 D5) ─────────────────────────────────────────────
 
       /** Download one workflow's bundle — the other half of import/export (D16). */
       function exportWorkflow(id) {
         window.location.href = `/api/export/${encodeURIComponent(id)}`;
       }
-
-      async function loadSavedTemplates() {
-        const wrap = document.getElementById("template-table-wrap");
-        try {
-          const data = await api("GET", "/api/templates");
-          const templates = data.templates || [];
-          if (!templates.length) {
-            wrap.innerHTML = `<p class="empty">No templates saved yet.</p>`;
-            return;
-          }
-          wrap.innerHTML = `<table class="table"><thead><tr>
-            <th>Template</th><th>Source workflow</th><th>Exported</th><th>Actions</th>
-          </tr></thead><tbody>${templates
-            .map((t) => templateRow({ ...t, section: "yours" }))
-            .join("")}</tbody></table>`;
-          for (const btn of wrap.querySelectorAll("[data-preview-tmpl]")) {
-            btn.onclick = () => {
-              location.hash = hashFor("template", btn.dataset.previewTmpl);
-            };
-          }
-          for (const btn of wrap.querySelectorAll("[data-import-tmpl]")) {
-            btn.onclick = () => importSavedTemplate(btn.dataset.importTmpl);
-          }
-          for (const btn of wrap.querySelectorAll("[data-del-tmpl]")) {
-            btn.onclick = async () => {
-              const id = btn.dataset.delTmpl;
-              if (!confirm(`Delete template "${id}"?`)) return;
-              try {
-                await api("DELETE", `/api/templates/${encodeURIComponent(id)}`, {});
-                flash(`Deleted template "${id}"`);
-                loadSavedTemplates();
-              } catch (e) {
-                flash(e.message, true);
-              }
-            };
-          }
-        } catch (e) {
-          wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
-        }
-      }
-
-      async function importSavedTemplate(id) {
-        try {
-          const r = await api("POST", `/api/templates/${encodeURIComponent(id)}/install`, {});
-          if (r.skipped && r.skipped.length > 0 && r.written.length === 0) {
-            if (!confirm(`"${id}" is already in this repository. Overwrite its files?`)) return;
-            const forced = await api("POST", `/api/templates/${encodeURIComponent(id)}/install`, {
-              overwrite: true,
-            });
-            flash(`Imported: ${forced.written.join(", ")}`);
-            return;
-          }
-          flash(`Imported: ${r.written.join(", ") || "(already up to date)"}`);
-        } catch (e) {
-          flash(e.message, true);
-        }
-      }
-
-      // ── Workflow view (037 D5) ─────────────────────────────────────────────
 
       /** The step table of the read-only workflow view. Every cell is escaped. */
       function stepTableHtml(def) {
@@ -1468,7 +1347,7 @@
         return html;
       }
 
-      /** The read-only body shared by the workflow view and the template preview. */
+      /** The read-only body of the workflow view. */
       function workflowBodyHtml(d) {
         return `<div class="workflow-split">
           <div class="workflow-pane-diagram">
@@ -1500,7 +1379,6 @@
               <button class="btn" data-wf-run>Run…</button>
               <button class="btn" data-wf-edit>Edit</button>
               <button class="btn" data-wf-export>Export</button>
-              <button class="btn" data-wf-template>Save as template</button>
               ${writable ? `<button class="btn danger" data-wf-delete>Delete</button>` : ""}
             </span>
           </div>${workflowBodyHtml(d)}`;
@@ -1508,7 +1386,6 @@
           body.querySelector("[data-wf-run]").onclick = () => openRunDialog(id);
           body.querySelector("[data-wf-export]").onclick = () => exportWorkflow(id);
           body.querySelector("[data-wf-edit]").onclick = () => editWorkflow(id);
-          body.querySelector("[data-wf-template]").onclick = () => saveAsTemplate(id);
           const delBtn = body.querySelector("[data-wf-delete]");
           if (delBtn)
             delBtn.onclick = () =>
@@ -1517,31 +1394,6 @@
               });
         } catch (e) {
           body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
-        }
-      }
-
-      async function saveAsTemplate(id) {
-        const templateId = prompt("Save as template — template id:", id);
-        if (templateId === null) return;
-        try {
-          const r = await api("POST", `/api/pipelines/${encodeURIComponent(id)}/template`, {
-            templateId,
-          });
-          flash(`Saved template "${r.templateId}"`);
-        } catch (e) {
-          if (e.status === 409 && confirm(`Template "${templateId}" exists. Overwrite?`)) {
-            try {
-              const r = await api("POST", `/api/pipelines/${encodeURIComponent(id)}/template`, {
-                templateId,
-                overwrite: true,
-              });
-              flash(`Saved template "${r.templateId}"`);
-            } catch (err) {
-              flash(err.message, true);
-            }
-            return;
-          }
-          flash(e.message, true);
         }
       }
 
@@ -1772,85 +1624,6 @@
         const next = parseHash(location.hash);
         if (next.view === "workflow-edit" && next.id === _editor.id) return true;
         return confirm("This workflow has unsaved changes. Leave the editor?");
-      }
-
-      // ── Template preview (037 D4) ──────────────────────────────────────────
-
-      /**
-       * One hash serves both sections, so the saved bundle is tried first and a
-       * 404 means the id names a workflow from the shipped catalogue instead.
-       */
-      async function openTemplateView(id) {
-        const body = document.getElementById("template-view-body");
-        body.innerHTML = "Loading…";
-        try {
-          let bundle = null;
-          try {
-            bundle = await api("GET", `/api/templates/${encodeURIComponent(id)}`);
-          } catch (e) {
-            if (e.status !== 404) throw e;
-          }
-          if (bundle) {
-            body.innerHTML = savedTemplateHtml(bundle);
-            body.querySelector("[data-tmpl-import]").onclick = () => importSavedTemplate(id);
-            return;
-          }
-          const d = await api("GET", `/api/pipelines/${encodeURIComponent(id)}?source=bundled`);
-          body.innerHTML = `<div class="workflow-head">
-            <h2>${escH(d.def.id)}</h2>
-            <span class="pipeline-desc">${escH(d.def.description || "")}</span>
-            <span class="muted mono">bundled</span>
-            <span class="actions" style="margin-left:auto">
-              <button class="btn" data-tmpl-export>Export</button>
-            </span>
-          </div>${workflowBodyHtml(d)}`;
-          body.querySelector("[data-tmpl-export]").onclick = () => exportWorkflow(id);
-        } catch (e) {
-          body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
-        }
-      }
-
-      /**
-       * A saved bundle is previewed from its manifest: every check command it
-       * would bring in and every file it carries that is not a pipeline, so
-       * Import is never a blind trust decision (037 D4).
-       */
-      function savedTemplateHtml(t) {
-        const files = t.files || [];
-        const extras = files.filter((f) => !f.startsWith("pipelines/"));
-        const checks = t.checks || [];
-        return `<div class="workflow-head">
-            <h2>${escH(t.templateId)}</h2>
-            <span class="pipeline-desc">from ${escH(t.sourcePipeline)}, exported ${escH(
-              t.exportedAt
-            )}</span>
-            <span class="muted mono">template</span>
-            <span class="actions" style="margin-left:auto">
-              <button class="btn" data-tmpl-import>Import</button>
-            </span>
-          </div>
-          <div class="section">
-            <div class="section-header"><h2>Check commands</h2></div>
-            ${
-              checks.length
-                ? `<table class="table"><thead><tr><th>Workflow</th><th>Step</th><th>Command</th></tr></thead><tbody>${checks
-                    .map(
-                      (c) =>
-                        `<tr><td class="pipeline-id">${escH(c.pipeline)}</td>
-                         <td class="pipeline-id">${escH(c.stepId)}</td>
-                         <td><pre class="code-block">${escH(c.command)}</pre></td></tr>`
-                    )
-                    .join("")}</tbody></table>`
-                : `<p class="empty">This bundle runs no check commands.</p>`
-            }
-          </div>
-          <div class="section">
-            <div class="section-header"><h2>Files</h2></div>
-            <p class="empty">
-              ${escH(String(files.length))} files, ${escH(String(extras.length))} of them not a workflow definition.
-            </p>
-            <div>${files.map((f) => `<span class="name-item">${escH(f)}</span>`).join("")}</div>
-          </div>`;
       }
 
       // ── Run observability ──────────────────────────────────────────────────
@@ -3041,17 +2814,8 @@
 
       // ── Router (spec 034 D1/D7) ────────────────────────────────────────────
 
-      const VIEW_IDS = [
-        "runs",
-        "run",
-        "workflows",
-        "workflow",
-        "workflow-edit",
-        "templates",
-        "template",
-        "settings",
-      ];
-      const TAB_IDS = ["runs", "workflows", "templates", "settings"];
+      const VIEW_IDS = ["runs", "run", "workflows", "workflow", "workflow-edit", "settings"];
+      const TAB_IDS = ["runs", "workflows", "settings"];
 
       /**
        * At this width the Runs view keeps the table and the selected run's
@@ -3097,7 +2861,6 @@
           run: "runs",
           workflow: "workflows",
           "workflow-edit": "workflows",
-          template: "templates",
         };
         const activeTab = TAB_OF[view] ?? view;
         for (const id of TAB_IDS) {
@@ -3126,10 +2889,6 @@
           // Re-entering the same editor (the leave guard puts the hash back)
           // must not throw the buffer away and reload it from disk.
           if (!_editor || _editor.id !== id) openWorkflowEditor(id);
-        } else if (view === "templates") {
-          loadTemplates();
-        } else if (view === "template") {
-          openTemplateView(id);
         } else if (view === "settings") {
           loadEnvironment();
           loadProviderConfig();

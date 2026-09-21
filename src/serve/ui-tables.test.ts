@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { runRow, templateRow, workflowRow } from "./ui-tables.js";
+import { runRow, workflowRow } from "./ui-tables.js";
 
 const HOSTILE = '<img src=x onerror=alert(1)>"';
 
@@ -77,55 +77,6 @@ describe("workflowRow — actions follow the row's own layer (038 D14/D15)", () 
     });
     assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
     assert.ok(html.includes("&lt;img src=x onerror=alert(1)&gt;&quot;"));
-  });
-});
-
-describe("templateRow — bundled and saved sections (FR-008)", () => {
-  it("a bundled template offers Preview and Export, never Install (038 D16)", () => {
-    const html = templateRow({ section: "bundled", id: "cycle", description: "d", steps: 3 });
-    assert.ok(html.includes(">Preview<"));
-    assert.ok(html.includes('data-export-bundled="cycle"'));
-    assert.ok(!html.includes(">Install<"), "install is gone; Templates is import/export only");
-    assert.ok(!html.includes(">Delete<"), "the shipped catalogue cannot be deleted from the page");
-  });
-
-  it("a saved template shows exportedAt and offers Preview, Import and Delete", () => {
-    const html = templateRow({
-      section: "yours",
-      templateId: "mine",
-      sourcePipeline: "cycle",
-      exportedAt: "2026-09-14T10:00:00.000Z",
-    });
-    assert.ok(html.includes("2026-09-14T10:00:00.000Z"), "exportedAt is shown");
-    for (const label of ["Preview", "Import", "Delete"]) {
-      assert.ok(html.includes(`>${label}<`), `a saved template must offer ${label}`);
-    }
-  });
-
-  it("escapes description and inputs on a bundled row", () => {
-    const html = templateRow({
-      section: "bundled",
-      id: HOSTILE,
-      description: HOSTILE,
-      inputs: [HOSTILE],
-      steps: 2,
-    });
-    assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
-  });
-
-  it("escapes templateId, sourcePipeline and exportedAt on a saved row", () => {
-    const html = templateRow({
-      section: "yours",
-      templateId: HOSTILE,
-      sourcePipeline: HOSTILE,
-      exportedAt: HOSTILE,
-    });
-    assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
-    assert.equal(
-      html.split("&lt;img src=x onerror=alert(1)&gt;&quot;").length - 1,
-      7,
-      "templateId in the row hook, its cell and three button attributes, plus sourcePipeline and exportedAt"
-    );
   });
 });
 

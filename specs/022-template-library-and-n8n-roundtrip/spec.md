@@ -7,6 +7,14 @@
 | Status       | Draft                                    |
 | Created      | 2026-09-07                               |
 
+> **Amendment (2026-09-21) — the template store has no reader.** FR-001's global template store at
+> `AGENT_FLOWS_TEMPLATES_DIR` (`~/.agent-flows/templates/`) still holds whatever bundles were saved
+> into it, but by owner decision the entire Templates surface — the page views, `/api/templates*` and
+> `POST /api/pipelines/:id/template` — was deleted and the daemon no longer reads
+> `AGENT_FLOWS_TEMPLATES_DIR`. See the amendment at the head of
+> [`specs/039-one-page-many-projects/spec.md`](../039-one-page-many-projects/spec.md). (The n8n half
+> of this spec was already retired by ADR-0017.)
+
 ## Context
 
 The division of surfaces is settled and is a requirement of this spec, not a question it re-opens: **the agent-flows web UI is a project inventory and library manager** — it answers, fast, what is in this project directory, which workflows are here, and whether any need adding; from it the operator can view a workflow, delete it, and create one from shipped or saved templates. **n8n is the authoring surface**: a brand-new workflow is created in n8n, and editing an existing one happens in n8n via a redirect button in our UI. The bridge back is that a workflow authored in n8n can be saved into agent-flows as a template in a **global** (not project-scoped) directory, for later insertion into any project.

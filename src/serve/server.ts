@@ -15,7 +15,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  type Stats,
   writeFileSync,
 } from "node:fs";
 import {
@@ -32,7 +31,6 @@ import { parse, stringify } from "yaml";
 import { createDynamicMastra } from "../bindings/mastra/dynamicMastra.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../bundle/bundle.js";
-import { assertSafePath } from "../bundle/paths.js";
 import { hashContent, saveDraft } from "../canon/canonWriter.js";
 import {
   getDraft,
@@ -104,7 +102,6 @@ import {
   safePath,
 } from "./route-helpers.js";
 import { CONTENT_CAP, handleContentRoutes } from "./routes/content.js";
-import { handleTemplateRoutes } from "./routes/templates.js";
 import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
 import type { Role } from "../canon/types.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
@@ -133,7 +130,6 @@ const RE_PIPELINE_DETAIL = /^\/api\/pipelines\/([^/]+)$/u;
 const RE_PIPELINE_DRAFTS = /^\/api\/pipelines\/([^/]+)\/drafts$/u;
 const RE_PIPELINE_FORK = /^\/api\/pipelines\/([^/]+)\/fork$/u;
 const RE_PIPELINE_VISIBILITY = /^\/api\/pipelines\/([^/]+)\/visibility$/u;
-const RE_PIPELINE_TEMPLATE = /^\/api\/pipelines\/([^/]+)\/template$/u;
 const RE_PIPELINE_PROMPTS = /^\/api\/pipelines\/([^/]+)\/prompts$/u;
 const RE_PIPELINE_PROMPT = /^\/api\/pipelines\/([^/]+)\/prompts\/([^/]+)$/u;
 const RE_DRAFT_BY_ID = /^\/api\/drafts\/(\d+)$/u;
@@ -286,8 +282,8 @@ function mergedPipelineRows(catalog: MergedCatalog, hidden: ReadonlySet<string>)
 /**
  * List every loadable pipeline in `pipelinesDir` as a catalogue row.
  *
- * `steps` and `inputs` come from the loaded definition so the Workflows and
- * Templates tables can be rendered from one request (spec 037 D3/D4).
+ * `steps` and `inputs` come from the loaded definition so the Workflows table
+ * can be rendered from one request (spec 037 D3).
  */
 function listPipelineRows(pipelinesDir: string, root: string): PipelineRow[] {
   let files: string[];
@@ -471,11 +467,6 @@ export interface ServeOptions {
   /** Root directory containing skills/ and agents/ subdirs. Defaults to AGENT_FLOWS_SKILLS_DIR or ~/.claude. */
   skillsBase?: string;
   /**
-   * Directory for the global template store. Defaults to `~/.agent-flows/templates/`.
-   * Each template is one `<templateId>.yaml` bundle file (FR-001).
-   */
-  templatesBase?: string;
-  /**
    * The provider profiles the running workflows were BUILT with — the daemon's
    * startup `providers.yaml` snapshot, the same array handed to BuildDeps.
    *
@@ -515,8 +506,6 @@ interface HandlerCtx {
   dbPath: string;
   bundledPipelinesDir: string;
   skillsBase: string;
-  /** Global template store directory (FR-001). */
-  templatesBase: string;
   /** Package version reported by `GET /api/daemon` (spec 038 FR-011). */
   version: string;
   /** ISO timestamp fixed when this daemon began listening (spec 038 FR-011). */
@@ -596,11 +585,6 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
   const skillsBase =
     opts.skillsBase ?? process.env.AGENT_FLOWS_SKILLS_DIR ?? join(homedir(), ".claude");
 
-  const templatesBase =
-    opts.templatesBase ??
-    process.env.AGENT_FLOWS_TEMPLATES_DIR ??
-    join(homedir(), ".agent-flows", "templates");
-
   // boundPort is updated once the OS assigns a port (important when port: 0).
   let boundPort = opts.port ?? DEFAULT_PORT;
 
@@ -645,7 +629,6 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
       dbPath,
       bundledPipelinesDir,
       skillsBase,
-      templatesBase,
       version,
       startedAt,
       ...(opts.providerProfiles !== undefined ? { providerProfiles: opts.providerProfiles } : {}),
@@ -1087,7 +1070,7 @@ async function handleRequest(
       return;
     }
     if (source === "bundled") {
-      // The Templates view: the package's own catalogue, never the merge.
+      // The package's own catalogue, never the merge.
       json(res, 200, {
         pipelines: listPipelineRows(ctx.bundledPipelinesDir, dirname(ctx.bundledPipelinesDir)),
       });
@@ -1190,76 +1173,6 @@ async function handleRequest(
     });
     writeFileSync(destPath, skeleton, "utf8");
     json(res, 201, { id, path: relative(root, destPath) });
-    return;
-  }
-
-  // POST /api/pipelines/:id/template — save a project workflow as a template
-  // bundle in the global templates dir (spec 037 D5/FR-003). Registered before
-  // the pipeline-detail route so a future looser detail pattern cannot swallow
-  // the /template suffix.
-  const saveTemplateMatch = RE_PIPELINE_TEMPLATE.exec(pathname);
-  if (method === "POST" && saveTemplateMatch) {
-    const id = decodeURIComponent(saveTemplateMatch[1]);
-    if (!requireSafeId(id, "Pipeline", res)) return;
-    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
-    if (parsed === undefined) return;
-    const { templateId, overwrite } = parsed;
-    if (templateId !== undefined && typeof templateId !== "string") {
-      json(res, 400, { error: 'Field "templateId" must be a string when provided' });
-      return;
-    }
-    // The template defaults to the pipeline's own id and is re-checked either
-    // way — a default is not a reason to skip validation (S5).
-    const tId = typeof templateId === "string" && templateId !== "" ? templateId : id;
-    if (!requireSafeId(tId, "Template", res)) return;
-    try {
-      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
-    } catch {
-      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
-      return;
-    }
-    const entry = findPipelineById(ctx.pipelinesDir, id);
-    if (!entry) {
-      json(res, 404, { error: `Pipeline "${id}" not found` });
-      return;
-    }
-    const destPath = join(ctx.templatesBase, `${tId}.yaml`);
-    // lstat, not stat: a symlink planted at the destination (dangling or not)
-    // would redirect the write outside the templates directory, and a dangling
-    // one is invisible to existsSync.
-    let destStat: Stats | undefined;
-    try {
-      destStat = lstatSync(destPath);
-    } catch {
-      destStat = undefined;
-    }
-    if (destStat?.isSymbolicLink()) {
-      json(res, 403, { error: `Template "${tId}" path is a symbolic link — refusing to write` });
-      return;
-    }
-    if (destStat && overwrite !== true) {
-      json(res, 409, { error: `Template "${tId}" already exists` });
-      return;
-    }
-    try {
-      const bundle = exportBundle(id, ctx.pipelinesDir);
-      mkdirSync(ctx.templatesBase, { recursive: true });
-      // "wx" unless overwriting: the exclusive open closes the window between
-      // the lstat above and the write, so nothing can be planted in between.
-      writeFileSync(destPath, stringifyBundle(bundle), {
-        encoding: "utf8",
-        mode: 0o600,
-        flag: overwrite === true ? "w" : "wx",
-      });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-        json(res, 409, { error: `Template "${tId}" already exists` });
-        return;
-      }
-      json(res, 422, { error: safePath((err as Error).message, root) });
-      return;
-    }
-    json(res, 201, { templateId: tId, path: destPath });
     return;
   }
 
@@ -1401,8 +1314,8 @@ async function handleRequest(
   const pipelineDetailMatch = RE_PIPELINE_DETAIL.exec(pathname);
   if (method === "GET" && pipelineDetailMatch) {
     const id = decodeURIComponent(pipelineDetailMatch[1]);
-    // Same exact-literal enum as the listing route: the template preview reads
-    // a bundled definition the project has not installed (spec 037 D4).
+    // Same exact-literal enum as the listing route: reads a bundled definition
+    // rather than the merged view (spec 037 D4).
     const source = url.searchParams.get("source");
     if (source !== null && source !== "bundled") {
       json(res, 400, { error: "invalid source" });
@@ -1997,7 +1910,7 @@ async function handleRequest(
   if (method === "GET" && manifestMatch) {
     const id = decodeURIComponent(manifestMatch[1]);
     // Validate the id before joining it into a path — a crafted id must not escape runs/.
-    // Follows the same isSafeId pattern used for DELETE /api/pipelines/:id and template routes.
+    // Follows the same isSafeId pattern used for DELETE /api/pipelines/:id.
     if (!requireSafeId(id, "Run", res)) return;
     const runDir = join(ctx.state.runsDir, id);
     if (!existsSync(join(runDir, "manifest.json"))) {
@@ -2389,10 +2302,6 @@ async function handleRequest(
     }
     return;
   }
-
-  // ── Template routes (FR-002) ───────────────────────────────────────────────
-
-  if (await handleTemplateRoutes(req, res, ctx, method, pathname)) return;
 
   json(res, 404, { error: `Not found: ${method} ${pathname}` });
 }

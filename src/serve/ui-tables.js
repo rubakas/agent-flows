@@ -116,52 +116,6 @@ export function workflowRow(wf) {
 }
 
 /**
- * One row of a Templates section (spec 037 D4, spec 038 D16). The two sections carry
- * different data: a bundled row is a pipeline we ship, a "yours" row is a saved
- * bundle in ~/.agent-flows/templates.
- *
- * @param {{ section: string, id?: string, description?: string, steps?: number,
- *   inputs?: string[], templateId?: string, sourcePipeline?: string,
- *   exportedAt?: string }} t
- * @returns {string}
- */
-export function templateRow(t) {
-  if (t?.section === "yours") {
-    const tid = String(t.templateId ?? "");
-    const actions = [
-      btn("Preview", "data-preview-tmpl", tid),
-      btn("Import", "data-import-tmpl", tid),
-      btn("Delete", "data-del-tmpl", tid, "danger"),
-    ].join("");
-    return (
-      `<tr data-tmpl-row="${esc(tid)}">` +
-      `<td class="pipeline-id">${esc(tid)}</td>` +
-      `<td class="pipeline-id">${esc(t.sourcePipeline ?? "")}</td>` +
-      `<td class="pipeline-desc">${esc(t.exportedAt ?? "")}</td>` +
-      `<td class="actions">${actions}</td>` +
-      `</tr>`
-    );
-  }
-  const id = String(t?.id ?? "");
-  const inputs = Array.isArray(t?.inputs) ? t.inputs.join(", ") : "";
-  // Import and export only (spec 038 D16): there is no install, and every
-  // bundled workflow is already present in every project through the layers.
-  const actions = [
-    btn("Preview", "data-preview-bundled", id),
-    btn("Export", "data-export-bundled", id),
-  ].join("");
-  return (
-    `<tr data-bundled-row="${esc(id)}">` +
-    `<td class="pipeline-id">${esc(id)}</td>` +
-    `<td class="pipeline-desc">${esc(t?.description ?? "")}</td>` +
-    `<td>${esc(t?.steps ?? "")}</td>` +
-    `<td class="pipeline-id">${esc(inputs)}</td>` +
-    `<td class="actions">${actions}</td>` +
-    `</tr>`
-  );
-}
-
-/**
  * One row of the Runs table (spec 034 FR-002/FR-011), moved here unchanged.
  *
  * A run restored from its artifact is a record, not a live process — the `disk`

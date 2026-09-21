@@ -7,6 +7,22 @@
 | Status       | Draft — ship order reversed after review (see "Ship order: reversed after review") |
 | Created      | 2026-09-17                                                                         |
 
+> **Amendment (2026-09-21) — Templates deleted, not merged.** By owner decision the whole Templates
+> surface was removed ahead of the rest of this spec: the `#/templates` and `#/templates/<id>`
+> routes, the `#view-templates`/`#view-template` containers, the `templates` tab and
+> `btn-from-template` link, `templateRow` in `ui-tables.js`, `POST /api/pipelines/:id/template`
+> (save-as-template) and the whole `/api/templates*` route group, together with the `templatesBase`
+> plumbing (`ServeOptions`, `HandlerCtx`, `AGENT_FLOWS_TEMPLATES_DIR` resolution). Nothing under
+> `~/.agent-flows/templates/` was touched — the bundles are still on disk.
+>
+> This satisfies **D1/FR-001** but **contradicts FR-002**, which planned an `Import…` dialog built on
+> the "unchanged" `GET /api/templates`, `GET /api/templates/:id`, `POST /api/templates/:id/install`
+> and `DELETE /api/templates/:id`. Those four routes no longer exist, so the saved bundles in
+> `~/.agent-flows/templates/` currently have no reader. FR-002 must either be dropped or re-specified
+> to restore the routes it depends on; `git show 355e2c9:src/serve/routes/templates.ts` is the
+> deleted implementation. `?source=bundled` on `GET /api/pipelines` and `GET /api/pipelines/:id`
+> survives but now has no caller.
+
 ## Context
 
 Owner ask, verbatim (2026-09-17): "also I still dont understand why we have 2 pages: workflows and

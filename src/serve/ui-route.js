@@ -9,28 +9,19 @@
 export const DEFAULT_VIEW = "runs";
 
 /**
- * Every view the page can show. "run", "workflow", "workflow-edit" and
- * "template" are detail views, reached only through a route carrying an id.
+ * Every view the page can show. "run", "workflow" and "workflow-edit" are
+ * detail views, reached only through a route carrying an id.
  */
-export const VIEWS = [
-  "runs",
-  "run",
-  "workflows",
-  "workflow",
-  "workflow-edit",
-  "templates",
-  "template",
-  "settings",
-];
+export const VIEWS = ["runs", "run", "workflows", "workflow", "workflow-edit", "settings"];
 
 /**
  * Map a location hash onto a view.
  *
- * Returns `{ view }` for the four tab routes, `{ view: "run", runId }` for
- * `#/runs/<id>`, and `{ view, id }` for the workflow, workflow-edit and
- * template detail routes. Anything unrecognised — empty, "#", a stale link, a
- * route from a future version — falls back to the default view rather than
- * rendering a blank page.
+ * Returns `{ view }` for the three tab routes, `{ view: "run", runId }` for
+ * `#/runs/<id>`, and `{ view, id }` for the workflow and workflow-edit detail
+ * routes. Anything unrecognised — empty, "#", a stale link, a route from a
+ * future version — falls back to the default view rather than rendering a
+ * blank page.
  *
  * @param {string} hash Raw `location.hash`, with or without the leading "#".
  * @returns {{ view: string, runId?: string, id?: string }}
@@ -68,14 +59,9 @@ export function parseHash(hash) {
     return { view: rest.length === 2 ? "workflow-edit" : "workflow", id };
   }
 
-  if (head === "templates" && rest.length === 1 && rest[0] !== "") {
-    const id = decode(rest[0]);
-    return id === null ? { view: "templates" } : { view: "template", id };
-  }
-
   // A tab route with anything trailing is not one of the valid routes;
   // "#/settings/extra" is a stale or hand-edited link, not the settings view.
-  if (rest.length === 0 && (head === "workflows" || head === "templates" || head === "settings")) {
+  if (rest.length === 0 && (head === "workflows" || head === "settings")) {
     return { view: head };
   }
   return { view: DEFAULT_VIEW };
@@ -103,9 +89,6 @@ export function hashFor(view, id) {
   }
   if (view === "workflow-edit") {
     return id === undefined ? "#/workflows" : `#/workflows/${encodeURIComponent(id)}/edit`;
-  }
-  if (view === "template") {
-    return id === undefined ? "#/templates" : `#/templates/${encodeURIComponent(id)}`;
   }
   return `#/${view}`;
 }

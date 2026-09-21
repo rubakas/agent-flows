@@ -9,7 +9,18 @@ import { DEFAULT_VIEW, hashFor, parseHash, pollersFor, VIEWS } from "./ui-route.
 
 describe("parseHash — route table (FR-001)", () => {
   it("falls back to the runs view for no hash, a bare '#', and unknown routes", () => {
-    for (const hash of ["", "#", "#/", "#/nope", "#/runs-old", "#/settings/extra/deep", "/"]) {
+    for (const hash of [
+      "",
+      "#",
+      "#/",
+      "#/nope",
+      "#/runs-old",
+      "#/settings/extra/deep",
+      "/",
+      // The Templates surface was removed; its links are now stale routes.
+      "#/templates",
+      "#/templates/cycle",
+    ]) {
       assert.equal(
         parseHash(hash).view,
         "runs",
@@ -22,7 +33,6 @@ describe("parseHash — route table (FR-001)", () => {
   it("maps each tab route to its view", () => {
     assert.deepEqual(parseHash("#/runs"), { view: "runs" });
     assert.deepEqual(parseHash("#/workflows"), { view: "workflows" });
-    assert.deepEqual(parseHash("#/templates"), { view: "templates" });
     assert.deepEqual(parseHash("#/settings"), { view: "settings" });
   });
 
@@ -53,8 +63,7 @@ describe("parseHash — route table (FR-001)", () => {
     assert.equal(parseHash(hashFor("run", "abc def")).runId, "abc def");
     assert.equal(hashFor("workflow", "a b"), "#/workflows/a%20b");
     assert.equal(hashFor("workflow-edit", "a b"), "#/workflows/a%20b/edit");
-    assert.equal(hashFor("template", "a b"), "#/templates/a%20b");
-    for (const view of ["workflow", "workflow-edit", "template"]) {
+    for (const view of ["workflow", "workflow-edit"]) {
       const round = parseHash(hashFor(view, "a b"));
       assert.equal(round.view, view, `hashFor(${view}) must parse back to ${view}`);
       assert.equal(round.id, "a b");
@@ -63,7 +72,7 @@ describe("parseHash — route table (FR-001)", () => {
 });
 
 describe("parseHash — catalogue detail routes (spec 037 D2/FR-006)", () => {
-  it("maps the workflow, editor and template routes to their views", () => {
+  it("maps the workflow and editor routes to their views", () => {
     assert.deepEqual(parseHash("#/workflows/investigate"), {
       view: "workflow",
       id: "investigate",
@@ -72,7 +81,6 @@ describe("parseHash — catalogue detail routes (spec 037 D2/FR-006)", () => {
       view: "workflow-edit",
       id: "investigate",
     });
-    assert.deepEqual(parseHash("#/templates/cycle"), { view: "template", id: "cycle" });
   });
 
   it("only 'edit' is a valid third segment; anything else falls back to runs", () => {
@@ -81,13 +89,8 @@ describe("parseHash — catalogue detail routes (spec 037 D2/FR-006)", () => {
     }
   });
 
-  it("a template route with a trailing segment falls back to runs", () => {
-    assert.equal(parseHash("#/templates/cycle/extra").view, "runs");
-  });
-
   it("a malformed escape in a detail id falls back to that route's list", () => {
     assert.deepEqual(parseHash("#/workflows/%E0%A4%A"), { view: "workflows" });
-    assert.deepEqual(parseHash("#/templates/%E0%A4%A"), { view: "templates" });
   });
 
   it("VIEWS names every view parseHash can return", () => {
@@ -97,8 +100,6 @@ describe("parseHash — catalogue detail routes (spec 037 D2/FR-006)", () => {
       "#/workflows",
       "#/workflows/x",
       "#/workflows/x/edit",
-      "#/templates",
-      "#/templates/x",
       "#/settings",
     ]) {
       assert.ok(
@@ -115,7 +116,7 @@ describe("pollersFor — the runs poller is view-gated (spec 037 D9/FR-010)", ()
   });
 
   it("leaves every other view idle, including the run details", () => {
-    for (const view of ["run", "workflows", "templates", "settings", "nope"]) {
+    for (const view of ["run", "workflows", "settings", "nope"]) {
       assert.deepEqual(pollersFor(view), [], `view ${view} must poll nothing`);
     }
   });

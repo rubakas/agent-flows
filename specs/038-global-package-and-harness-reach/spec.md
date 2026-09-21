@@ -7,6 +7,11 @@
 | Status       | Implemented — Ships 1–5 landed; V3 (packaging proof) and V4 (harness reach proof) both owner-verified by hand and recorded below; the developer page's visual pass is still outstanding |
 | Created      | 2026-09-16                                                                                                                                                                              |
 
+> **Amendment (2026-09-21) — D16 superseded.** **D16** ("Templates becomes import/export only") no
+> longer describes the page: the Templates surface was deleted outright by owner decision. See the
+> amendment at the head of [`specs/039-one-page-many-projects/spec.md`](../039-one-page-many-projects/spec.md).
+> `AGENT_FLOWS_TEMPLATES_DIR` (named under D14) is no longer read by the daemon.
+
 ## Context
 
 Owner ask, verbatim (2026-09-16): "we need to complete the install/uninstall process ... we need to

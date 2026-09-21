@@ -7,6 +7,14 @@
 | Status       | Implemented — 2026-09-15 (owner visual pass pending) |
 | Created      | 2026-09-14                                           |
 
+> **Amendment (2026-09-21) — D4 and FR-003 removed.** The Templates view (**D4**), its preview route
+> and the save-as-template route (**FR-003**, `POST /api/pipelines/:id/template`) were deleted by
+> owner decision; see the amendment at the head of
+> [`specs/039-one-page-many-projects/spec.md`](../039-one-page-many-projects/spec.md) for the full
+> list and its consequences. **FR-008**'s `templateRow` and the `templates`/`template` routes named in
+> **D2** are gone with it; `workflowRow` and `runRow` are unchanged. The rest of this spec is a
+> historical record of what shipped on 2026-09-15 and is not rewritten here.
+
 ## Problem
 
 The owner (2026-09-14): "I still see the n8n in the tool; Templates should be the page with our
