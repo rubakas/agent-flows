@@ -380,6 +380,12 @@
         color: var(--accent);
         text-decoration: underline;
       }
+      /* 042 D14: the subject leads the page the way a title does. */
+      #run-detail-subject {
+        font-size: 13px;
+        color: var(--ink-2);
+        margin: 2px 0 4px;
+      }
       /* 042 D18: a run reads as three answers to three questions — what came
          out, what happened, what was asked. Each gets one heading in the same
          idiom, so none of them has to be inferred from position. */
@@ -406,13 +412,12 @@
       #run-result {
         margin-bottom: 16px;
       }
-      #run-result .result-body {
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        padding: 10px 12px;
+      /* No frame of its own: renderOutput already returns a bordered code-block,
+         and wrapping it drew the same box twice. The only thing worth overriding
+         is the height — a report needs more room than a step's output does. */
+      #run-result .code-block {
         max-height: 55vh;
-        overflow: auto;
-        background: var(--sunk);
+        margin-top: 0;
       }
       .pipeline-desc {
         color: var(--ink-2);
@@ -2629,7 +2634,11 @@
         </h2>
         <div id="run-detail-id">Run <code>${escH(runId)}</code> ${copyButton(runId)}${
           inv && inv.startedAt ? ` · started ${escH(fmtTime(inv.startedAt))}` : ""
-        }</div>`;
+        }</div>${
+          // 042 D14: what this run is about. The list says it; losing it on the
+          // way in made every code-review page look like every other one.
+          snapshot.subject ? `<div id="run-detail-subject">${escH(snapshot.subject)}</div>` : ""
+        }`;
 
         // 042 D17/D18: the answer first, above how the run was asked for. The
         // invocation is 475px of the inputs you already know you sent; reading

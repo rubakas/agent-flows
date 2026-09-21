@@ -215,6 +215,12 @@ export interface GetResult {
   /** All gate decisions recorded so far (FR-008). Empty until a gate is decided. */
   gateDecisions: GateDecision[];
   result?: unknown;
+  /**
+   * One line naming what this run was started against (spec 042 D14), derived
+   * from its inputs — the same line the runs list shows, so a run opened from
+   * that list does not lose the only label that told it apart.
+   */
+  subject?: string;
   /** Present only when status is "awaiting_approval" — the pending gate's human-readable prompt. */
   gateMessage?: string;
   /** Present only when status is "awaiting_approval" — the spec the human is being asked to approve. */
@@ -716,6 +722,7 @@ export class RunService {
       steps: this.mergedSteps(record),
       gateDecisions: record.gateDecisions,
       result: record.result,
+      ...withSubject(record.invocation),
       ...(record.error !== undefined ? { error: record.error } : {}),
       ...(record.cancelled !== undefined ? { cancelled: record.cancelled } : {}),
       ...(record.judgeError !== undefined ? { judgeError: record.judgeError } : {}),
@@ -744,7 +751,10 @@ export class RunService {
     // The artifact is a serialised GetResult plus provenance, so it already has
     // the shape callers expect; the cast documents that it is not re-validated
     // field by field, and status/steps/gateDecisions were normalised on read.
-    return persisted as unknown as GetResult;
+    // `subject` is derived rather than read, because artifacts written before it
+    // existed carry none and a restored run should not be the nameless one.
+    const out = persisted as unknown as GetResult;
+    return { ...out, ...withSubject(out.invocation) };
   }
 
   /**
