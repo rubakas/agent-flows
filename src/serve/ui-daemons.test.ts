@@ -66,6 +66,18 @@ describe("daemonRow — only a verified record gets a Stop (spec 042 D3, V1)", (
     assert.ok(other.includes(">running<"), `another live daemon still reads as running: ${other}`);
   });
 
+  it("links another project's port to its own page, and links no other port", () => {
+    const other = daemonRow(entry(), {});
+    assert.ok(
+      other.includes('<a href="http://localhost:7411/"'),
+      `the only way to see that daemon's runs is its own page: ${other}`
+    );
+    const self = daemonRow(entry({ self: true }), {});
+    assert.ok(!self.includes("<a href"), `this page's own port links back here: ${self}`);
+    const stale = daemonRow(entry({ live: false }), {});
+    assert.ok(!stale.includes("<a href"), `a port nothing answered on is not a link: ${stale}`);
+  });
+
   it("a row whose stop is in flight shows stopping…, not a second button", () => {
     const html = daemonRow(entry(), { busy: "-Users-en3e-code-agent-flows" });
     assert.ok(html.includes("stopping…"));

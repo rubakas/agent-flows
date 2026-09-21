@@ -129,6 +129,9 @@ as a risk (see Risks), not closed by this spec.
   showing project directory (basename plus full path), pid, port, uptime since `startedAt`, and a
   Stop action; a stale record (`live: false`) is shown distinctly (e.g. "not responding") with no
   Stop action wired to it, since D3 forbids signalling an unverified pid (D1, D2, D3, D5).
+  A live daemon that is not the one serving the page carries its port as a link to its own page,
+  which is the only place that daemon's runs can be read; the serving daemon's own port is not a
+  link, because it leads back here, and a stale port is not a link, because nothing answers it.
 - **FR-003.** A new `POST /api/daemons/:projectKey/stop` route (or equivalent scoped by the
   project's state-dir key) calls `stopProjectDaemon` (`stop.ts:71-153`) for exactly that project's
   state directory and returns its `StopReport` (`stop.ts:41-49`) verbatim; the page shows a confirm

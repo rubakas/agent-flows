@@ -88,6 +88,15 @@ export function daemonRow(d, opts) {
           d?.pid ?? ""
         )}" data-stop-project="${esc(projectName(d?.projectDir))}">Stop</button>`;
 
+  // Seeing what another project's daemon is doing means opening its own page,
+  // so its port is the link. This page's port would only reload this page, and
+  // a port nothing answered on is a link to a connection error (FR-002).
+  const port = Number(d?.port);
+  const portCell =
+    live && d?.self !== true && Number.isInteger(port)
+      ? `<a href="http://localhost:${port}/" target="_blank" rel="noreferrer">${port}</a>`
+      : esc(d?.port ?? "");
+
   return (
     `<tr data-daemon-row="${esc(key)}">` +
     `<td>${status}</td>` +
@@ -95,7 +104,7 @@ export function daemonRow(d, opts) {
       projectName(d?.projectDir)
     )}</td>` +
     `<td class="num">${esc(d?.pid ?? "")}</td>` +
-    `<td class="num">${esc(d?.port ?? "")}</td>` +
+    `<td class="num">${portCell}</td>` +
     `<td class="num muted">${live ? esc(fmtUptime(d?.startedAt, opts?.now)) : "—"}</td>` +
     `<td class="actions">${action}${
       opts?.result ? `<span class="muted">${esc(opts.result)}</span>` : ""
