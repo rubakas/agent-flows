@@ -152,352 +152,389 @@ export function reachResult(reach: HarnessReach): CheckResult {
   };
 }
 
-export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
+// 1. Node ≥ 22 (required)
+function checkNode(probes: DoctorProbes): CheckResult[] {
   const results: CheckResult[] = [];
-
-  // 1. Node ≥ 22 (required)
-  {
-    const raw = probes.nodeVersion().replace(/^v/, "");
-    const major = parseInt(raw.split(".")[0], 10);
-    if (major >= 22) {
-      results.push({ name: "Node.js ≥ 22", status: "ok", detail: `v${raw}` });
-    } else {
-      results.push({
-        name: "Node.js ≥ 22",
-        status: "fail",
-        detail: `v${raw} (need ≥ 22)`,
-        hint: "nvm install 22 && nvm use  (reads .nvmrc)",
-      });
-    }
+  const raw = probes.nodeVersion().replace(/^v/, "");
+  const major = parseInt(raw.split(".")[0], 10);
+  if (major >= 22) {
+    results.push({ name: "Node.js ≥ 22", status: "ok", detail: `v${raw}` });
+  } else {
+    results.push({
+      name: "Node.js ≥ 22",
+      status: "fail",
+      detail: `v${raw} (need ≥ 22)`,
+      hint: "nvm install 22 && nvm use  (reads .nvmrc)",
+    });
   }
+  return results;
+}
 
-  // 2. pnpm on PATH (required)
-  {
-    const p = probes.which("pnpm");
-    if (p) {
-      results.push({ name: "pnpm", status: "ok", detail: p });
-    } else {
-      results.push({
-        name: "pnpm",
-        status: "fail",
-        detail: "not found on PATH",
-        hint: "corepack enable pnpm",
-      });
-    }
+// 2. pnpm on PATH (required)
+function checkPnpm(probes: DoctorProbes): CheckResult[] {
+  const results: CheckResult[] = [];
+  const p = probes.which("pnpm");
+  if (p) {
+    results.push({ name: "pnpm", status: "ok", detail: p });
+  } else {
+    results.push({
+      name: "pnpm",
+      status: "fail",
+      detail: "not found on PATH",
+      hint: "corepack enable pnpm",
+    });
   }
+  return results;
+}
 
-  // 3. better-sqlite3 native ABI (required)
-  {
-    if (probes.requireNative()) {
-      results.push({ name: "better-sqlite3 (native ABI)", status: "ok", detail: "loads ok" });
-    } else {
-      // Reinstall, never rebuild: a globally installed package has no build
-      // step the user can re-run, and `pnpm rebuild` in some unrelated checkout
-      // would not touch the copy the harnesses actually spawn (D11).
-      results.push({
-        name: "better-sqlite3 (native ABI)",
-        status: "fail",
-        detail: `ERR_DLOPEN_FAILED — NODE_MODULE_VERSION mismatch: this module was built for another Node than the running v${probes.nodeVersion().replace(/^v/, "")}`,
-        hint: "reinstall the package under this Node (npm i -g @rubakas/agent-flows); do not try to rebuild it",
-      });
-    }
+// 3. better-sqlite3 native ABI (required)
+function checkNativeAbi(probes: DoctorProbes): CheckResult[] {
+  const results: CheckResult[] = [];
+  if (probes.requireNative()) {
+    results.push({ name: "better-sqlite3 (native ABI)", status: "ok", detail: "loads ok" });
+  } else {
+    // Reinstall, never rebuild: a globally installed package has no build
+    // step the user can re-run, and `pnpm rebuild` in some unrelated checkout
+    // would not touch the copy the harnesses actually spawn (D11).
+    results.push({
+      name: "better-sqlite3 (native ABI)",
+      status: "fail",
+      detail: `ERR_DLOPEN_FAILED — NODE_MODULE_VERSION mismatch: this module was built for another Node than the running v${probes.nodeVersion().replace(/^v/, "")}`,
+      hint: "reinstall the package under this Node (npm i -g @rubakas/agent-flows); do not try to rebuild it",
+    });
   }
+  return results;
+}
 
-  // 3b. Harness reach: is the MCP server registered where each harness looks (FR-032)?
+// 3b. Harness reach: is the MCP server registered where each harness looks (FR-032)?
+function checkHarnessReach(probes: DoctorProbes): CheckResult[] {
+  const results: CheckResult[] = [];
   for (const reach of probes.harnessReach()) {
     results.push(reachResult(reach));
   }
+  return results;
+}
 
-  // 3c. This project's daemon (FR-032)
-  {
-    const daemon = await probes.projectDaemon();
-    const status: CheckStatus =
-      daemon.state === "listening" || daemon.state === "not-running" ? "ok" : "warn";
+// 3c. This project's daemon (FR-032)
+async function checkProjectDaemon(probes: DoctorProbes): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const daemon = await probes.projectDaemon();
+  const status: CheckStatus =
+    daemon.state === "listening" || daemon.state === "not-running" ? "ok" : "warn";
+  results.push({
+    name: "This project's daemon",
+    status,
+    detail: daemon.detail,
+    hint:
+      daemon.state === "stale-record" || daemon.state === "mismatch"
+        ? "agent-flows stop  (then let the next tool call start a fresh daemon)"
+        : undefined,
+  });
+  return results;
+}
+
+// 4. Active provider + profile role transport prerequisites (required)
+async function checkActiveProvider(probes: DoctorProbes): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  try {
+    const profile = getActiveProfile(probes.env, probes.providers);
+    const registry = defaultRegistry(probes.env, probes.providers.models);
+
+    const roles = (["reasoner", "worker", "scout"] as const).map((role) => ({
+      role,
+      modelId: profile.roles[role],
+      entry: registry.resolve(profile.roles[role]),
+    }));
+
+    const roleStr = roles.map(({ role, modelId }) => `${role}=${modelId}`).join(", ");
     results.push({
-      name: "This project's daemon",
-      status,
-      detail: daemon.detail,
-      hint:
-        daemon.state === "stale-record" || daemon.state === "mismatch"
-          ? "agent-flows stop  (then let the next tool call start a fresh daemon)"
-          : undefined,
+      name: "Active provider",
+      status: "ok",
+      detail: `${profile.id} (${roleStr})`,
     });
-  }
 
-  // 4. Active provider + profile role transport prerequisites (required)
-  {
-    try {
-      const profile = getActiveProfile(probes.env, probes.providers);
-      const registry = defaultRegistry(probes.env, probes.providers.models);
+    // Check each unique transport required by this profile
+    const checkedTransports = new Set<string>();
+    for (const { entry } of roles) {
+      if (entry.transport === "cli") {
+        const bin = entry.cli!.bin;
+        const key = `cli:${bin}`;
+        if (checkedTransports.has(key)) continue;
+        checkedTransports.add(key);
 
-      const roles = (["reasoner", "worker", "scout"] as const).map((role) => ({
-        role,
-        modelId: profile.roles[role],
-        entry: registry.resolve(profile.roles[role]),
-      }));
-
-      const roleStr = roles.map(({ role, modelId }) => `${role}=${modelId}`).join(", ");
-      results.push({
-        name: "Active provider",
-        status: "ok",
-        detail: `${profile.id} (${roleStr})`,
-      });
-
-      // Check each unique transport required by this profile
-      const checkedTransports = new Set<string>();
-      for (const { entry } of roles) {
-        if (entry.transport === "cli") {
-          const bin = entry.cli!.bin;
-          const key = `cli:${bin}`;
-          if (checkedTransports.has(key)) continue;
-          checkedTransports.add(key);
-
-          const found = probes.which(bin);
-          if (found) {
-            results.push({
-              name: `${profile.id}: ${bin} CLI transport`,
-              status: "ok",
-              detail: found,
-            });
-          } else {
-            results.push({
-              name: `${profile.id}: ${bin} CLI transport`,
-              status: "fail",
-              detail: `${bin} not found on PATH`,
-              hint:
-                bin === "claude"
-                  ? "Install from https://docs.claude.com/en/docs/claude-code"
-                  : "npm i -g @openai/codex && codex login",
-            });
-          }
-        } else if (entry.transport === "api") {
-          const baseUrl = new URL(entry.api!.endpoint).origin;
-          const key = `api:${baseUrl}`;
-          if (checkedTransports.has(key)) continue;
-          checkedTransports.add(key);
-
-          const ok = await probes.reachable(baseUrl);
-          if (ok) {
-            results.push({
-              name: `${profile.id}: api transport`,
-              status: "ok",
-              detail: `${baseUrl} reachable`,
-            });
-          } else {
-            results.push({
-              name: `${profile.id}: api transport`,
-              status: "fail",
-              detail: `${baseUrl} unreachable`,
-              hint: "Start the API service (e.g. ollama serve)",
-            });
-          }
-        }
-      }
-    } catch (err) {
-      results.push({
-        name: "Active provider",
-        status: "fail",
-        detail: String(err instanceof Error ? err.message : err),
-      });
-    }
-  }
-
-  // 5. claude CLI on PATH + logged in (required — Binding A)
-  {
-    const allClaudePaths = probes.whichAll("claude");
-    const claudeBin = allClaudePaths[0];
-    if (!claudeBin) {
-      results.push({
-        name: "claude CLI",
-        status: "fail",
-        detail: "not found on PATH",
-        hint: "Install from https://docs.claude.com/en/docs/claude-code",
-      });
-    } else {
-      // Fetch CLI version (first line of --version output)
-      const versionResult = await probes.exec("claude", ["--version"]);
-      const versionLine = versionResult.stdout.split("\n")[0].trim();
-
-      // Detect shadowed installs — multiple distinct real paths in PATH order
-      if (allClaudePaths.length > 1) {
-        const realPaths = allClaudePaths.map((p) => {
-          try {
-            return realpathSync(p);
-          } catch {
-            return p;
-          }
-        });
-        const distinctRealPaths = [...new Set(realPaths)];
-        if (distinctRealPaths.length > 1) {
+        const found = probes.which(bin);
+        if (found) {
           results.push({
-            name: "claude CLI shadowed",
-            status: "warn",
-            detail: allClaudePaths.join(", "),
-            hint: "remove stale installs (e.g. `npm -g uninstall @anthropic-ai/claude-code` under old Node versions); the FIRST one in PATH is what will run",
+            name: `${profile.id}: ${bin} CLI transport`,
+            status: "ok",
+            detail: found,
+          });
+        } else {
+          results.push({
+            name: `${profile.id}: ${bin} CLI transport`,
+            status: "fail",
+            detail: `${bin} not found on PATH`,
+            hint:
+              bin === "claude"
+                ? "Install from https://docs.claude.com/en/docs/claude-code"
+                : "npm i -g @openai/codex && codex login",
+          });
+        }
+      } else if (entry.transport === "api") {
+        const baseUrl = new URL(entry.api!.endpoint).origin;
+        const key = `api:${baseUrl}`;
+        if (checkedTransports.has(key)) continue;
+        checkedTransports.add(key);
+
+        const ok = await probes.reachable(baseUrl);
+        if (ok) {
+          results.push({
+            name: `${profile.id}: api transport`,
+            status: "ok",
+            detail: `${baseUrl} reachable`,
+          });
+        } else {
+          results.push({
+            name: `${profile.id}: api transport`,
+            status: "fail",
+            detail: `${baseUrl} unreachable`,
+            hint: "Start the API service (e.g. ollama serve)",
           });
         }
       }
+    }
+  } catch (err) {
+    results.push({
+      name: "Active provider",
+      status: "fail",
+      detail: String(err instanceof Error ? err.message : err),
+    });
+  }
+  return results;
+}
 
-      // Auth check on the first-in-PATH binary
-      const authResult = await probes.exec("claude", ["auth", "status", "--json"]);
-      let loggedIn = false;
-      if (authResult.code === 0) {
+// 5. claude CLI on PATH + logged in (required — Binding A)
+async function checkClaudeCli(probes: DoctorProbes): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const allClaudePaths = probes.whichAll("claude");
+  const claudeBin = allClaudePaths[0];
+  if (!claudeBin) {
+    results.push({
+      name: "claude CLI",
+      status: "fail",
+      detail: "not found on PATH",
+      hint: "Install from https://docs.claude.com/en/docs/claude-code",
+    });
+  } else {
+    // Fetch CLI version (first line of --version output)
+    const versionResult = await probes.exec("claude", ["--version"]);
+    const versionLine = versionResult.stdout.split("\n")[0].trim();
+
+    // Detect shadowed installs — multiple distinct real paths in PATH order
+    if (allClaudePaths.length > 1) {
+      const realPaths = allClaudePaths.map((p) => {
         try {
-          const raw: unknown = JSON.parse(authResult.stdout);
-          if (typeof raw === "object" && raw !== null && "loggedIn" in raw) {
-            loggedIn = (raw as { loggedIn?: unknown }).loggedIn === true;
-          }
+          return realpathSync(p);
         } catch {
-          // unparseable output — treat as not logged in
+          return p;
         }
-      }
-      const versionSuffix = versionLine ? ` (${versionLine})` : "";
-      if (loggedIn) {
-        results.push({ name: "claude CLI", status: "ok", detail: `${claudeBin}${versionSuffix}` });
-      } else {
+      });
+      const distinctRealPaths = [...new Set(realPaths)];
+      if (distinctRealPaths.length > 1) {
         results.push({
-          name: "claude CLI",
-          status: "fail",
-          detail: `found at ${claudeBin}${versionSuffix} but not logged in`,
-          hint: "claude auth login",
+          name: "claude CLI shadowed",
+          status: "warn",
+          detail: allClaudePaths.join(", "),
+          hint: "remove stale installs (e.g. `npm -g uninstall @anthropic-ai/claude-code` under old Node versions); the FIRST one in PATH is what will run",
         });
       }
     }
-  }
 
-  // 6. codex CLI + codex doctor (optional → warn — Binding B visibility)
-  {
-    const codexBin = probes.which("codex");
-    if (!codexBin) {
+    // Auth check on the first-in-PATH binary
+    const authResult = await probes.exec("claude", ["auth", "status", "--json"]);
+    let loggedIn = false;
+    if (authResult.code === 0) {
+      try {
+        const raw: unknown = JSON.parse(authResult.stdout);
+        if (typeof raw === "object" && raw !== null && "loggedIn" in raw) {
+          loggedIn = (raw as { loggedIn?: unknown }).loggedIn === true;
+        }
+      } catch {
+        // unparseable output — treat as not logged in
+      }
+    }
+    const versionSuffix = versionLine ? ` (${versionLine})` : "";
+    if (loggedIn) {
+      results.push({ name: "claude CLI", status: "ok", detail: `${claudeBin}${versionSuffix}` });
+    } else {
+      results.push({
+        name: "claude CLI",
+        status: "fail",
+        detail: `found at ${claudeBin}${versionSuffix} but not logged in`,
+        hint: "claude auth login",
+      });
+    }
+  }
+  return results;
+}
+
+// 6. codex CLI + codex doctor (optional → warn — Binding B visibility)
+async function checkCodexCli(probes: DoctorProbes): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const codexBin = probes.which("codex");
+  if (!codexBin) {
+    results.push({
+      name: "codex CLI",
+      status: "warn",
+      detail: "not found on PATH",
+      hint: "npm i -g @openai/codex && codex login",
+    });
+  } else {
+    const doctorResult = await probes.exec("codex", ["doctor"]);
+    if (doctorResult.code === 0) {
+      results.push({ name: "codex CLI", status: "ok", detail: codexBin });
+    } else {
       results.push({
         name: "codex CLI",
         status: "warn",
-        detail: "not found on PATH",
+        detail: `codex doctor exited ${doctorResult.code}`,
         hint: "npm i -g @openai/codex && codex login",
       });
-    } else {
-      const doctorResult = await probes.exec("codex", ["doctor"]);
-      if (doctorResult.code === 0) {
-        results.push({ name: "codex CLI", status: "ok", detail: codexBin });
-      } else {
-        results.push({
-          name: "codex CLI",
-          status: "warn",
-          detail: `codex doctor exited ${doctorResult.code}`,
-          hint: "npm i -g @openai/codex && codex login",
-        });
-      }
     }
   }
+  return results;
+}
 
-  // 7. Ollama reachable + model qwen2.5:1.5b present (optional → warn)
-  {
-    const ollamaBase = probes.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
-    const modelName = "qwen2.5:1.5b";
-    try {
-      const tags = (await probes.fetchJson(`${ollamaBase}/api/tags`)) as {
-        models?: { name: string }[];
-      };
-      results.push({ name: "Ollama", status: "ok", detail: `reachable at ${ollamaBase}` });
-      const hasModel = tags.models?.some((m) => m.name === modelName) ?? false;
-      if (hasModel) {
-        results.push({ name: `Ollama model ${modelName}`, status: "ok", detail: "present" });
-      } else {
-        results.push({
-          name: `Ollama model ${modelName}`,
-          status: "warn",
-          detail: "not found",
-          hint: `ollama pull ${modelName}`,
-        });
-      }
-    } catch {
-      results.push({
-        name: "Ollama",
-        status: "warn",
-        detail: `unreachable at ${ollamaBase}`,
-        hint: "brew install ollama && brew services start ollama",
-      });
+// 7. Ollama reachable + model qwen2.5:1.5b present (optional → warn)
+async function checkOllama(probes: DoctorProbes): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const ollamaBase = probes.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+  const modelName = "qwen2.5:1.5b";
+  try {
+    const tags = (await probes.fetchJson(`${ollamaBase}/api/tags`)) as {
+      models?: { name: string }[];
+    };
+    results.push({ name: "Ollama", status: "ok", detail: `reachable at ${ollamaBase}` });
+    const hasModel = tags.models?.some((m) => m.name === modelName) ?? false;
+    if (hasModel) {
+      results.push({ name: `Ollama model ${modelName}`, status: "ok", detail: "present" });
+    } else {
       results.push({
         name: `Ollama model ${modelName}`,
         status: "warn",
-        detail: "cannot check (Ollama unreachable)",
+        detail: "not found",
         hint: `ollama pull ${modelName}`,
       });
     }
+  } catch {
+    results.push({
+      name: "Ollama",
+      status: "warn",
+      detail: `unreachable at ${ollamaBase}`,
+      hint: "brew install ollama && brew services start ollama",
+    });
+    results.push({
+      name: `Ollama model ${modelName}`,
+      status: "warn",
+      detail: "cannot check (Ollama unreachable)",
+      hint: `ollama pull ${modelName}`,
+    });
   }
+  return results;
+}
 
-  // 8. LiteLLM reachable (optional → warn)
-  {
-    const litellmBase = probes.env.LITELLM_BASE_URL ?? "http://localhost:4000";
-    try {
-      await probes.fetchJson(`${litellmBase}/health/liveliness`);
-      results.push({ name: "LiteLLM", status: "ok", detail: `reachable at ${litellmBase}` });
-    } catch {
+// 8. LiteLLM reachable (optional → warn)
+async function checkLiteLLM(probes: DoctorProbes): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const litellmBase = probes.env.LITELLM_BASE_URL ?? "http://localhost:4000";
+  try {
+    await probes.fetchJson(`${litellmBase}/health/liveliness`);
+    results.push({ name: "LiteLLM", status: "ok", detail: `reachable at ${litellmBase}` });
+  } catch {
+    results.push({
+      name: "LiteLLM",
+      status: "warn",
+      detail: `unreachable at ${litellmBase}`,
+      hint: "docker compose up -d litellm",
+    });
+  }
+  return results;
+}
+
+// 9. Canon: all pipelines load without error (required)
+function checkCanon(probes: DoctorProbes): CheckResult[] {
+  const results: CheckResult[] = [];
+  const canon = probes.loadCanon();
+  if (canon.failed.length === 0 && canon.loaded.length > 0) {
+    results.push({
+      name: "Canon (pipelines)",
+      status: "ok",
+      detail: `${canon.loaded.length} pipeline(s) loaded: ${canon.loaded.join(", ")}`,
+    });
+  } else if (canon.failed.length === 0 && canon.loaded.length === 0) {
+    results.push({
+      name: "Canon (pipelines)",
+      status: "warn",
+      detail: "no pipeline files found in pipelines/",
+      hint: "add at least one .yaml file to pipelines/",
+    });
+  } else {
+    for (const { file, error } of canon.failed) {
       results.push({
-        name: "LiteLLM",
-        status: "warn",
-        detail: `unreachable at ${litellmBase}`,
-        hint: "docker compose up -d litellm",
+        name: "Canon (pipelines)",
+        status: "fail",
+        detail: `${file}: ${error}`,
       });
     }
-  }
-
-  // 9. Canon: all pipelines load without error (required)
-  {
-    const canon = probes.loadCanon();
-    if (canon.failed.length === 0 && canon.loaded.length > 0) {
+    if (canon.loaded.length > 0) {
       results.push({
         name: "Canon (pipelines)",
         status: "ok",
         detail: `${canon.loaded.length} pipeline(s) loaded: ${canon.loaded.join(", ")}`,
       });
-    } else if (canon.failed.length === 0 && canon.loaded.length === 0) {
-      results.push({
-        name: "Canon (pipelines)",
-        status: "warn",
-        detail: "no pipeline files found in pipelines/",
-        hint: "add at least one .yaml file to pipelines/",
-      });
-    } else {
-      for (const { file, error } of canon.failed) {
-        results.push({
-          name: "Canon (pipelines)",
-          status: "fail",
-          detail: `${file}: ${error}`,
-        });
-      }
-      if (canon.loaded.length > 0) {
-        results.push({
-          name: "Canon (pipelines)",
-          status: "ok",
-          detail: `${canon.loaded.length} pipeline(s) loaded: ${canon.loaded.join(", ")}`,
-        });
-      }
     }
   }
-
-  // 11. Layer-0: OPENAI_API_KEY / ANTHROPIC_API_KEY must NOT be in env (required)
-  {
-    const leaked = (["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] as const).filter(
-      (k) => k in probes.env && Boolean(probes.env[k])
-    );
-    if (leaked.length === 0) {
-      results.push({
-        name: "Layer-0 key isolation",
-        status: "ok",
-        detail: "no provider keys in env",
-      });
-    } else {
-      results.push({
-        name: "Layer-0 key isolation",
-        status: "fail",
-        detail: `${leaked.join(", ")} found in env — keys belong in LiteLLM only`,
-        hint: `unset ${leaked.join(" ")}`,
-      });
-    }
-  }
-
   return results;
+}
+
+// 11. Layer-0: OPENAI_API_KEY / ANTHROPIC_API_KEY must NOT be in env (required)
+function checkKeyIsolation(probes: DoctorProbes): CheckResult[] {
+  const results: CheckResult[] = [];
+  const leaked = (["OPENAI_API_KEY", "ANTHROPIC_API_KEY"] as const).filter(
+    (k) => k in probes.env && Boolean(probes.env[k])
+  );
+  if (leaked.length === 0) {
+    results.push({
+      name: "Layer-0 key isolation",
+      status: "ok",
+      detail: "no provider keys in env",
+    });
+  } else {
+    results.push({
+      name: "Layer-0 key isolation",
+      status: "fail",
+      detail: `${leaked.join(", ")} found in env — keys belong in LiteLLM only`,
+      hint: `unset ${leaked.join(" ")}`,
+    });
+  }
+  return results;
+}
+
+export async function runDoctor(probes: DoctorProbes): Promise<CheckResult[]> {
+  return [
+    ...checkNode(probes),
+    ...checkPnpm(probes),
+    ...checkNativeAbi(probes),
+    ...checkHarnessReach(probes),
+    ...(await checkProjectDaemon(probes)),
+    ...(await checkActiveProvider(probes)),
+    ...(await checkClaudeCli(probes)),
+    ...(await checkCodexCli(probes)),
+    ...(await checkOllama(probes)),
+    ...(await checkLiteLLM(probes)),
+    ...checkCanon(probes),
+    ...checkKeyIsolation(probes),
+  ];
 }
 
 export function defaultProbes(): DoctorProbes {
