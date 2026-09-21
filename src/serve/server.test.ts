@@ -5847,4 +5847,59 @@ describe("live daemon — port selection and record lifecycle (FR-011/FR-012/FR-
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  // Spec 042 D11. The exit path ends the process, so the only honest test of the
+  // WIRING — as opposed to the policy, which `idleShutdown.test.ts` covers — is
+  // to spawn a real daemon and watch it go.
+  it("an auto-started daemon stops itself once idle, and a human's daemon does not", async () => {
+    const tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-idle-")));
+    const project = join(tmpDir, "project");
+    mkdirSync(project);
+    const env = {
+      AGENT_FLOWS_HOME: join(tmpDir, "home"),
+      AGENT_FLOWS_PROJECT_DIR: project,
+      AGENT_FLOWS_IDLE_MS: "400",
+    };
+    const stateDir = resolveProjectState(project, env).dir;
+
+    const reaped = spawnDaemon({ ...env, AGENT_FLOWS_AUTOSTART: "1" });
+    reaped.stdout?.resume();
+    reaped.stderr?.resume();
+    try {
+      await waitForRecord(stateDir);
+      const code = await new Promise<number | null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), 20_000);
+        reaped.on("exit", (c) => {
+          clearTimeout(timer);
+          resolve(c);
+        });
+      });
+      assert.equal(code, 0, "an idle auto-started daemon must stop on its own");
+      assert.equal(
+        readDaemonRecord(stateDir),
+        undefined,
+        "and must drop the record, or the panel shows a daemon that is gone"
+      );
+    } finally {
+      if (reaped.exitCode === null && reaped.signalCode === null) reaped.kill("SIGKILL");
+    }
+
+    // Same span, same quiet, no autostart marker: this one must still be there.
+    const kept = spawnDaemon(env);
+    kept.stdout?.resume();
+    kept.stderr?.resume();
+    try {
+      const record = await waitForRecord(stateDir);
+      await new Promise<void>((r) => setTimeout(r, 2_000));
+      assert.equal(
+        kept.exitCode,
+        null,
+        "a daemon a human started must survive any amount of quiet"
+      );
+      assert.deepEqual(readDaemonRecord(stateDir)?.pid, record.pid);
+    } finally {
+      kept.kill("SIGKILL");
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

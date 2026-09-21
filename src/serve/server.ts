@@ -90,6 +90,13 @@ import {
 import { readHidden, setHidden } from "../runtime/visibility.js";
 import { resolveArtifactInputs } from "./artifactInputs.js";
 import { listDaemons, stateDirForKey } from "./daemons.js";
+import {
+  countInFlight,
+  DEFAULT_IDLE_MS,
+  idleCheckIntervalMs,
+  IDLE_MS_ENV,
+  shouldExitWhenIdle,
+} from "./idleShutdown.js";
 
 import {
   BODY_LIMIT_DEFAULT,
@@ -482,6 +489,15 @@ export interface ServeOptions {
    * instead of at the boundary.
    */
   providerProfiles?: ProviderProfile[];
+  /**
+   * Whether this daemon was spawned by the MCP process rather than by a human
+   * (spec 042 D11). Defaults to the `AGENT_FLOWS_AUTOSTART` marker the spawner
+   * sets. Only an auto-started daemon reaps itself when idle; injected here so
+   * the policy is reachable in a test without touching the real environment.
+   */
+  autostarted?: boolean;
+  /** Idle span before an auto-started daemon stops. Defaults to 15 minutes. */
+  idleMs?: number;
 }
 
 export interface ServeHandle {
@@ -603,7 +619,13 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
   // transition, not one per request. null means no line has been emitted yet.
   let lastLayerLine: string | null = null;
 
+  // Spec 042 D11: the clock an auto-started daemon's idle exit is measured from.
+  // Seeded at construction so a daemon that is spawned and never dialled still
+  // ages out, rather than waiting for a first request that never comes.
+  let lastRequestAt = Date.now();
+
   const server = nodeCreateServer((req, res) => {
+    lastRequestAt = Date.now();
     // FR-004: resolve the workflow layers per-request so that a workflow added
     // while the daemon is running is reflected on the very next request, with no
     // restart required. When an explicit pipelinesDir was passed (test/legacy
@@ -670,10 +692,38 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
       server.on("error", (err: Error) => {
         console.error(`agent-flows serve: server error: ${err.message}`);
       });
+      // Spec 042 D11: only a daemon the MCP process spawned reaps itself.
+      const idleMs = opts.idleMs ?? envIdleMs() ?? DEFAULT_IDLE_MS;
+      const idleTimer =
+        (opts.autostarted ?? process.env[AUTOSTART_ENV] === "1")
+          ? setInterval(() => {
+              if (
+                !shouldExitWhenIdle({
+                  autostarted: true,
+                  msSinceLastRequest: Date.now() - lastRequestAt,
+                  // No run service means this daemon cannot be carrying a run.
+                  inFlight: runService === null ? 0 : countInFlight(runService.list()),
+                  idleMs,
+                })
+              ) {
+                return;
+              }
+              console.log(
+                `agent-flows serve: stopping — auto-started, idle and carrying no runs (port ${boundPort})`
+              );
+              removeDaemonRecordIfOwned(state.dir, process.pid);
+              server.closeAllConnections();
+              server.close(() => process.exit(0));
+            }, idleCheckIntervalMs(idleMs))
+          : undefined;
+      // Never hold the process open on the timer's account: it exists to end the
+      // process, so it must not be the reason the process is still there.
+      idleTimer?.unref();
       resolve({
         port: info.port,
         close: () =>
           new Promise<void>((r, e) => {
+            if (idleTimer !== undefined) clearInterval(idleTimer);
             // Graceful exit drops the record — but only if it is still ours, so
             // a daemon that was replaced while shutting down never deletes the
             // live one's record (FR-011).
@@ -721,6 +771,14 @@ export const DEFAULT_PORT = 7411;
  * port, so it can never collide with one a human launched there.
  */
 export const AUTOSTART_ENV = "AGENT_FLOWS_AUTOSTART";
+
+/** The idle-span override, when it names a positive number of milliseconds. */
+function envIdleMs(): number | undefined {
+  const raw = process.env[IDLE_MS_ENV];
+  if (raw === undefined) return undefined;
+  const ms = Number(raw);
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
 
 /** The resolved listen port plus whether the operator asked for that exact port. */
 export interface PortChoice {

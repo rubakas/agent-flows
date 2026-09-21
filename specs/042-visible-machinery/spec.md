@@ -117,6 +117,19 @@ under D2) has no such gap: the serving daemon stays up and reports the new state
 machine can already call the daemon's HTTP API, including this spec's new stop route. Recorded here
 as a risk (see Risks), not closed by this spec.
 
+**D11 — An auto-started daemon reaps itself when idle; a human's daemon never does.** (Added
+2026-09-22, after measuring it.) The MCP process spawns a daemon detached and unreferenced
+(`daemonResolver.ts:117-121`) so a run survives the chat that started it — correct, and the reason
+nothing stops it afterwards: the chat exits, its ephemeral port is never dialled again, and the
+process runs until reboot. Measured end to end: a workflow started over MCP in a project with no
+daemon left one answering on port 60478 with its run long finished and no client attached. The
+daemons panel makes that visible; this closes the other half. Only a daemon carrying the
+`AGENT_FLOWS_AUTOSTART` marker is a candidate, because a daemon started by hand has an owner who
+expects it on the conventional port. A run that is executing **or suspended at a gate** keeps it
+alive — exiting under a gate would strand an approval nobody can give. Only `live` runs count: a run
+persisted as `running` by a process killed mid-step stays `running` on disk forever, and counting
+those would pin every future daemon for that project open on the strength of an old crash.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via
@@ -154,6 +167,11 @@ as a risk (see Risks), not closed by this spec.
 - **FR-007.** `ui-daemons.js` (new) is added to `STATIC_MODULES` (`server.ts:161-167`) and to
   `scripts/copy-dist-assets.mjs`, matching the existing pattern of every other `ui-*.js` helper
   module.
+- **FR-008.** A daemon started with `AGENT_FLOWS_AUTOSTART=1` exits 0 and removes its own
+  `daemon.json` after 15 minutes during which it served no HTTP request and carried no `live` run in
+  `running` or `awaiting_approval`. A daemon without that marker never exits on this path however
+  long it is quiet. The span is overridable by `AGENT_FLOWS_IDLE_MS` — a test seam, not a documented
+  knob, because the exit path ends the process and can only be observed from outside.
 
 ## Verification
 
