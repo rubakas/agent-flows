@@ -2,6 +2,17 @@
 
 Status: Accepted — 2026-09-21
 
+> **Amendment (2026-09-21):** By owner directive, **no workflow may push anything or create a pull
+> request — all work happens locally.** `pipelines/ship.yaml`'s `pr` step (`gh pr create --fill`,
+> with its `env: [GH_TOKEN]` declaration) is removed, and `ship`'s description becomes "Gate and
+> commit locally after human approval". The reason is trust, not capability: the tool is not yet
+> trusted for unattended operation, and a pull request is the first irreversible, publicly visible
+> side effect a mis-stepped run can produce. A local commit can be amended or reset by the owner; a
+> PR cannot be unpublished. No stage touches the remote at all until that trust is established —
+> publishing a commit is the operator's own `git push`, outside any pipeline. The `ship` row in D1
+> and the PR bullet in Consequences are amended below; the `ship` description quoted in Context is
+> the pre-amendment one, left as the snapshot that motivated this ADR.
+
 ## Context
 
 The owner's goal is to automate software development from an initial prompt through to a PR, while
@@ -52,20 +63,20 @@ Five concrete problems follow from this drift:
 and REFUSES a named class of side effect. The refusal is the load-bearing column — it is what makes
 "run any part independently" safe to promise:
 
-| Stage           | Input                        | Output                                    | Refuses                                                                           |
-| --------------- | ---------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------- |
-| `investigate`   | `request`                    | `findings`                                | Writes nothing; `permissions.contents: read` on every step                        |
-| `spec-creation` | `request`, `findings?`       | approved, hardened spec (`artifact.spec`) | Writes no repo files; gated by a human `approve` step before persisting           |
-| `develop`       | `plan`                       | code + tests written to the repo          | Runs no tests, no review, no git commands                                         |
-| `build-round`   | (implicit, from `build`)     | one test-and-fix iteration                | Only loop iteration; never decides convergence itself (`build` does)              |
-| `build`         | `plan`                       | a tree that passes `{{checkCommand}}`     | Never touches git history or the remote — no commit, no branch, no PR             |
-| `audit`         | `plan`                       | a verdict + findings on the PLAN          | Read-only (`permissions.contents: read`); changes no code                         |
-| `code-review`   | `plan` (a diff), `baseline?` | verified findings on the DIFF             | Read-only; no shell access on any step (findings come from text search)           |
-| `correct-plan`  | `plan`, `findings`           | a revised, complete plan                  | Writes no repo files; output is plan text, not code                               |
-| `test`          | (none)                       | pass/fail + evidence                      | Runs `{{checkCommand}}` only; no repair, no review                                |
-| `ship`          | `plan`                       | a commit + an open pull request           | The only stage that touches git history or the remote; gated by a human `approve` |
-| `cycle`         | `request`                    | investigate → plan → build → ship         | Nothing beyond what its stages already refuse                                     |
-| `cycle-dev`     | `request`                    | investigate → plan → build (stops)        | Never commits, never opens a PR — the one difference from `cycle`                 |
+| Stage           | Input                        | Output                                    | Refuses                                                                                                                                        |
+| --------------- | ---------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `investigate`   | `request`                    | `findings`                                | Writes nothing; `permissions.contents: read` on every step                                                                                     |
+| `spec-creation` | `request`, `findings?`       | approved, hardened spec (`artifact.spec`) | Writes no repo files; gated by a human `approve` step before persisting                                                                        |
+| `develop`       | `plan`                       | code + tests written to the repo          | Runs no tests, no review, no git commands                                                                                                      |
+| `build-round`   | (implicit, from `build`)     | one test-and-fix iteration                | Only loop iteration; never decides convergence itself (`build` does)                                                                           |
+| `build`         | `plan`                       | a tree that passes `{{checkCommand}}`     | Never touches git history or the remote — no commit, no branch, no PR                                                                          |
+| `audit`         | `plan`                       | a verdict + findings on the PLAN          | Read-only (`permissions.contents: read`); changes no code                                                                                      |
+| `code-review`   | `plan` (a diff), `baseline?` | verified findings on the DIFF             | Read-only; no shell access on any step (findings come from text search)                                                                        |
+| `correct-plan`  | `plan`, `findings`           | a revised, complete plan                  | Writes no repo files; output is plan text, not code                                                                                            |
+| `test`          | (none)                       | pass/fail + evidence                      | Runs `{{checkCommand}}` only; no repair, no review                                                                                             |
+| `ship`          | `plan`                       | a local commit                            | Never touches the remote — no push, no PR; the only stage that touches git history at all, and gated by a human `approve` (amended 2026-09-21) |
+| `cycle`         | `request`                    | investigate → plan → build → ship         | Nothing beyond what its stages already refuse                                                                                                  |
+| `cycle-dev`     | `request`                    | investigate → plan → build (stops)        | Never commits, never opens a PR — the one difference from `cycle`                                                                              |
 
 This table is descriptive of the pipelines as they exist today (`pipelines/*.yaml`); it does not
 introduce new stages.
@@ -137,8 +148,9 @@ resolution.
   added to a plan-reviewing prompt without corrupting `audit`'s callers (`build`, `spec-creation`,
   `cycle`, `cycle-dev`).
 - `ship` still produces a fixed commit message (`git add -u && git commit -m "feat: apply approved
-plan"`, `pipelines/ship.yaml:21`) and a PR whose title/body `gh pr create --fill` derives from that
-  message — this is a known, separately-tracked gap, not fixed here. The fixed string exists for a
+plan"`, `pipelines/ship.yaml`) — this is a known, separately-tracked gap, not fixed here. (Amended
+  2026-09-21: the PR whose title/body `gh pr create --fill` derived from that message no longer
+  exists; the fixed-message gap is now about the commit alone.) The fixed string exists for a
   sound reason recorded in the same file: check commands are not placeholder-rendered, and
   interpolating model output into a shell string is command injection. The eventual fix is a step
   that writes a real commit message to a run-scoped file and a check that commits with
