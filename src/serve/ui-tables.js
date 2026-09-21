@@ -67,6 +67,32 @@ const SYNTHETIC_STEP_ID = /^__merge_level_\d+$/u;
  * @param {string[]} declaredStepIds
  * @returns {{ stepId: string, current: boolean, n: number | null, m: number } | null}
  */
+/**
+ * The step whose output IS the run's answer (spec 042 D17).
+ *
+ * The sink: the one step nothing else depends on. For `code-review` that is
+ * `synthesis`, whose output is the report — which used to be reachable only by
+ * scrolling past five steps and opening the last one's disclosure, as if it
+ * were no more the point than the prompts above it.
+ *
+ * Returns null when the graph has no single sink, which is a pipeline whose
+ * "the answer" is genuinely ambiguous; the caller then shows nothing rather
+ * than picking one arbitrarily.
+ *
+ * @param {{ id?: string, dependsOn?: string[] }[]} declaredSteps
+ * @returns {string | null}
+ */
+export function terminalStepId(declaredSteps) {
+  const steps = (Array.isArray(declaredSteps) ? declaredSteps : []).filter(
+    (s) => typeof s?.id === "string" && !SYNTHETIC_STEP_ID.test(s.id)
+  );
+  if (steps.length === 0) return null;
+  const dependedOn = new Set();
+  for (const s of steps) for (const d of s.dependsOn ?? []) dependedOn.add(d);
+  const sinks = steps.map((s) => s.id).filter((id) => !dependedOn.has(id));
+  return sinks.length === 1 ? sinks[0] : null;
+}
+
 export function runProgress(steps, declaredStepIds) {
   const declared = Array.isArray(declaredStepIds) ? declaredStepIds : [];
   const own = Object.entries(steps ?? {}).filter(([id]) => !SYNTHETIC_STEP_ID.test(id));

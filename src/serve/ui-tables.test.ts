@@ -8,9 +8,54 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { emptyRunsMessage, progressCell, runProgress, runRow, workflowRow } from "./ui-tables.js";
+import {
+  emptyRunsMessage,
+  progressCell,
+  runProgress,
+  runRow,
+  terminalStepId,
+  workflowRow,
+} from "./ui-tables.js";
 
 const HOSTILE = '<img src=x onerror=alert(1)>"';
+
+describe("terminalStepId — the step whose output is the run's answer (042 D17)", () => {
+  it("picks the one step nothing depends on", () => {
+    assert.equal(
+      terminalStepId([
+        { id: "radius" },
+        { id: "correctness", dependsOn: ["radius"] },
+        { id: "verify", dependsOn: ["correctness"] },
+        { id: "synthesis", dependsOn: ["verify"] },
+      ]),
+      "synthesis"
+    );
+  });
+
+  it("refuses to guess when a pipeline has two sinks", () => {
+    assert.equal(
+      terminalStepId([{ id: "a" }, { id: "b", dependsOn: ["a"] }, { id: "c", dependsOn: ["a"] }]),
+      null,
+      "two possible answers means the run has no single one to show"
+    );
+  });
+
+  it("ignores Mastra's synthetic merge steps", () => {
+    assert.equal(
+      terminalStepId([
+        { id: "a" },
+        { id: "__merge_level_0", dependsOn: ["a"] },
+        { id: "b", dependsOn: ["a"] },
+      ]),
+      "b"
+    );
+  });
+
+  it("has no answer for an empty pipeline", () => {
+    assert.equal(terminalStepId([]), null);
+    assert.equal(terminalStepId(undefined), null);
+  });
+});
 
 describe("workflowRow — actions follow the row's own layer (038 D14/D15)", () => {
   it("a repository row offers Run…, Edit and Delete", () => {

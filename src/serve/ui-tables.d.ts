@@ -48,6 +48,11 @@ export interface RunProgress {
 }
 
 export declare function workflowRow(wf: WorkflowRowData): string;
+/** The step whose output is the run's answer — the graph's single sink (042 D17). */
+export declare function terminalStepId(
+  declaredSteps: { id?: string; dependsOn?: string[] }[]
+): string | null;
+
 export declare function runProgress(
   steps: Record<string, RunStepStateData> | undefined,
   declaredStepIds: string[]

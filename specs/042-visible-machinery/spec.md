@@ -186,6 +186,21 @@ vertical segment. The test now decomposes every path and checks EVERY segment ag
 is the property that was meant all along. Generalise: a geometric guarantee needs a geometric test, not
 a test of the one segment the author happened to think about.
 
+**D17 — A settled run leads with its answer.** (Owner, 2026-09-22: "чи маю я бачити в завершених
+воркфлоу результат ревью і репорт?") The report was reachable but buried: five steps down, inside the
+last one's collapsed `Output` disclosure, typographically indistinguishable from the 15–41k-character
+prompts above it. The run view had no notion of "this run's result" at all — it was a flat list of
+steps whose answer happened to be the last.
+
+The answer is the **sink**: the one declared step nothing else depends on. A pipeline with two sinks
+has no unambiguous answer, so the block stays hidden rather than picking one. Fetched in full, not
+excerpted, because a report cut at the excerpt length is not a report.
+
+**Race worth recording:** the first attempt filled the block once after the initial render, and the
+SSE `snapshot` event re-rendered the body milliseconds later and wiped it — so it silently never
+appeared. The fill now belongs to the render itself, is cached per run so repeated snapshots cost no
+fetch, and re-looks-up its element after the await instead of holding it across one.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via
