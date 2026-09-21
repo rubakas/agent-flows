@@ -132,7 +132,10 @@ migrate codex` to **copy them into your OpenClaw workspace**" (P15, emphasis min
 
 #### And a fourth concept: workflows — the largest overlap of all
 
-Hermes ships a work-orchestration layer that overlaps `af` directly. **The comparison is Kanban, not
+Both candidates ship work-orchestration layers that overlap `af` directly, and they overlap it in
+_different places_: Hermes on the durable runtime, OpenClaw on the definition language.
+
+**Hermes.** The comparison is Kanban, not
 `delegate_task`** — Hermes says so itself. `delegate_task` is fork/join RPC, and its own table (P47,
 "Kanban vs. `delegate_task`") rules it out on the two properties `af` exists for: resumability
 "**None — failed = failed**" vs "Block → unblock → re-run; crash → reclaim"; human in the loop
@@ -199,10 +202,56 @@ against columns nothing writes for routing (P47). **If a v2 ships a workflow-tem
 overlap moves from partial to near-total** — the declared-graph distinction above is the whole of
 what currently separates the two.
 
-**Net for `af`:** partially redundant, not redundant. Hermes owns the runtime substrate; `af` owns the
-definition language and the per-step guarantees. No per-run cost or token accounting tied to a Kanban
-run appears anywhere in the docs — `hermes insights` exists ("Show token/cost/activity analytics",
-P50) but is never connected to `task_runs`: **UNVERIFIED**.
+**Net for `af` vs Hermes:** partially redundant, not redundant. Hermes owns the runtime substrate;
+`af` owns the definition language and the per-step guarantees. No per-run cost or token accounting
+tied to a Kanban run appears anywhere in the docs — `hermes insights` exists ("Show token/cost/activity
+analytics", P50) but is never connected to `task_runs`: **UNVERIFIED**.
+
+**OpenClaw has three multi-step primitives, not one, and none is the default.** This is the closer
+overlap of the two, and it lands on the axis Hermes misses:
+
+- **Lobster** (P51) — "**Typed workflow runtime for OpenClaw with resumable approval gates**", an
+  **optional** plugin (`openclaw plugins install @openclaw/lobster`, then `tools.alsoAllow`). It runs
+  `.lobster` YAML/JSON **workflow files** with `name`, `args`, `steps`, `env`, `condition` and
+  `approval` — steps carry an `id`, a `run:`/`command:` shell or `pipeline:` stage, `stdin:
+$step.stdout` / `$step.json` / `$step.json.<field>` references to prior steps, `when:`/`condition:`
+  gating, and per-step `retry`, `timeout_ms`, `on_error: continue|skip_rest` and `for_each` (P52).
+  Its self-description is almost `af`'s: "a small, constrained DSL rather than a general scripting
+  language: approve/resume is a durable, built-in primitive; **pipelines are data (easy to log, diff,
+  replay, review)**" (P51). **This is a declared, forkable, versionable workflow file — the thing
+  Hermes does not have.** Paired with the optional `llm-task` tool it also gets a schema-validated
+  model step: "a single JSON-only LLM call … optionally validated against a JSON Schema", with
+  `defaultProvider` / `defaultModel` / `allowModelOverride` / `allowedCompletionModels` (P53).
+  **The limit:** steps are an ordered list joined by a single `stdin`, plus `env`/`condition`
+  references. There is no `depends_on`, no `needs`, and no parallel or fan-out/join keyword anywhere
+  in the tool docs or the upstream repo — `for_each` iterates items inside one step, and its retry
+  "restarts at the first item" (P51, P52). It is a **pipe, not a DAG**.
+- **Workboard** (P54) — a bundled-but-disabled plugin (`openclaw plugins enable workboard`) that is
+  Hermes Kanban's shape almost feature for feature: cards with statuses
+  `triage|backlog|todo|scheduled|ready|running|review|blocked|done`, and `workboard_link` — "Link a
+  parent to a child card. **Children stay `todo` until every parent reaches `done`**, then dispatch
+  promotion moves them to `ready`" — plus `workboard_decompose`, per-card skills, retry budget,
+  runtime limit, claims/heartbeat/release, proof and artifacts, and parent results in a child's
+  context. Templates exist but "prefill title, notes, labels, and priority" for one card — not a graph.
+- **Task Flow** (P55) — "the orchestration layer above background tasks… a durable record of
+  multi-step work with its own status, JSON state, revision counter, and linked task records", in the
+  `flow_runs` table of `~/.openclaw/state/openclaw.sqlite`, with optimistic concurrency on `revision`.
+  Its own table routes "Multi-step pipeline driven by plugin code" here — a managed flow is advanced
+  by **a TypeScript controller you write**, and "Durability covers records, not a JavaScript call
+  stack or automatic scheduling."
+
+OpenClaw's subagent primitive is `sessions_spawn` + `sessions_yield` + `subagents` (P56), with
+per-child `model` and `thinking` overrides, `context: fork|isolated`, optional managed worktree, and a
+default spawn depth limit of 5 — a per-child model override Hermes's `delegate_task` explicitly lacks.
+
+**Net for `af` vs OpenClaw:** Lobster overlaps `af`'s definition language directly and is the single
+closest thing to `af` in either candidate — but it is a linear pipe with no DAG, no per-step
+permissions model, and it arrives as an optional plugin on top of the whole Gateway. Workboard
+re-implements Hermes Kanban. Task Flow is a durable record you drive from code you write. Nothing in
+OpenClaw expresses ADR-0019's "Refuses" column either. **UNVERIFIED:** whether a plain (non-Task-Flow)
+Lobster run survives a reboot — resume state is "small JSON files under the Lobster state directory
+(`~/.lobster/state`)" and the docs say only that flow state persists in SQLite while "Lobster's
+approval checkpoint is separate and must also remain available for resume" (P51).
 
 **Can either be used as a thin trigger-and-notify layer?** Yes — and this is the honest part. Both
 ship a no-model scheduled payload:
@@ -606,6 +655,27 @@ Primary — OpenClaw (all paths relative to `github.com/openclaw/openclaw`, bran
   `docs/gateway/cli-backends.md`, `docs/concepts/multi-agent.md`)
 - P45 `docs/gateway/config-tools/built-in-tools.md` — `tools.exec`, web search/fetch; no HTTP-request
   tool
+- P51 `docs/tools/lobster.md` — "Typed workflow runtime for OpenClaw with resumable approval gates",
+  "## Why" (the constrained-DSL paragraph), "## Enable" (optional plugin install + `tools.alsoAllow`),
+  "## Workflow files (.lobster)", "### Injected environment variables", "## Tool parameters",
+  "### Managed Task Flow mode", "## Output envelope", "## Approvals" (`~/.lobster/state`), "## Safety"
+- P52 `https://github.com/openclaw/lobster` `README.md` — workflow file examples (`run:`, `pipeline:`,
+  `stdin:`, `when:`, `approval:`, `retry`, `timeout_ms`, `on_error`, `for_each`, approval identity
+  constraints), "## Commands" (`exec`, `where`, `pick`, `head`, `map`, `json`, `table`, `approve`),
+  `LOBSTER_MAX_OUTPUT_BYTES`, `ctx.requestInput`. No parallel/`depends_on`/`needs` keyword present
+- P53 `docs/tools/llm-task.md` — "a single JSON-only LLM call … optionally validated against a JSON
+  Schema"; `llm.allowModelOverride`, `allowedCompletionModels`, `config.defaultProvider`,
+  `defaultModel`, `defaultAuthProfileId`, `maxTokens`, `timeoutMs`
+- P54 `docs/plugins/workboard.md` and `docs/cli/workboard.md` — card statuses, "## Agent tools" table
+  (`workboard_link`, `workboard_decompose`, `workboard_create`, `workboard_read`,
+  `workboard_complete`/`_block`, `workboard_dispatch`), templates (`bugfix`, `docs`, `release`,
+  `pr_review`, `plugin`), `openclaw plugins enable workboard`
+- P55 `docs/automation/taskflow.md` — "## When to use Task Flow" table, "### Managed mode",
+  "### Mirrored mode", "## Flow statuses", "## Durable state and revision tracking" (`flow_runs` in
+  `~/.openclaw/state/openclaw.sqlite`), "## Cancel behavior"
+- P56 `docs/concepts/session-tool.md` — "## Available tools" table (`sessions_spawn`, `sessions_yield`,
+  `subagents`), "## Spawning sub-agents" (`runtime: "subagent"|"acp"`, per-child `model`/`thinking`,
+  `context: "fork"|"isolated"`, `visible`, `maxSpawnDepth` default 5)
 - P46 `docs/automation/cron-jobs/webhooks.md`, `docs/cli/webhooks.md` — inbound Gateway HTTP hooks
 
 Primary — Hermes Agent (all paths relative to `github.com/NousResearch/hermes-agent`, branch `main`,
