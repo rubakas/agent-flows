@@ -103,7 +103,8 @@ import {
   RequestTooLargeError,
   safePath,
 } from "./route-helpers.js";
-import { CONTENT_CAP, handleNamedContent } from "./routes/content.js";
+import { CONTENT_CAP } from "./routes/content.js";
+import { handleSkillRoutes } from "./routes/skills.js";
 import { handleTemplateRoutes } from "./routes/templates.js";
 import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
 import type { Role } from "../canon/types.js";
@@ -166,8 +167,6 @@ const STATIC_MODULES: ReadonlyMap<string, string> = new Map([
   ["/ui-providers.js", "ui-providers.js"],
 ]);
 
-const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
-const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
 const RE_EXPORT = /^\/api\/export\/([^/]+)$/u;
 
 // Body size limits for readBody(). BODY_LIMIT_DEFAULT now lives in
@@ -2328,19 +2327,7 @@ async function handleRequest(
     return;
   }
 
-  // GET /api/skills/:name — return the content of one skill's SKILL.md
-  const skillMatch = RE_SKILL_CONTENT.exec(pathname);
-  if (method === "GET" && skillMatch) {
-    handleNamedContent(res, ctx.skillsBase, "skill", decodeURIComponent(skillMatch[1]));
-    return;
-  }
-
-  // GET /api/agents/:name — return the content of one agent's .md file
-  const agentMatch = RE_AGENT_CONTENT.exec(pathname);
-  if (method === "GET" && agentMatch) {
-    handleNamedContent(res, ctx.skillsBase, "agent", decodeURIComponent(agentMatch[1]));
-    return;
-  }
+  if (handleSkillRoutes(req, res, ctx, method, pathname)) return;
 
   // GET /api/export/:id — export a pipeline and its full closure as a YAML bundle
   const exportMatch = RE_EXPORT.exec(pathname);
