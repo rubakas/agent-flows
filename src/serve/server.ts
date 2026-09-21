@@ -1173,6 +1173,30 @@ function resolveTemplateFile(
   return templatePath;
 }
 
+// ── Run lookup ───────────────────────────────────────────────────────────────
+
+/** The pinned 404 body for a run id with no record behind it. */
+function runNotFound(res: ServerResponse, id: string): void {
+  json(res, 404, { error: `Run "${id}" not found` });
+}
+
+/**
+ * Looks up a run snapshot for a route that has already narrowed its
+ * RunService. Writes the 404 body and returns undefined for an unknown id.
+ */
+function requireRun(
+  runService: RunService,
+  res: ServerResponse,
+  id: string
+): ReturnType<RunService["get"]> {
+  const snapshot = runService.get(id);
+  if (!snapshot) {
+    runNotFound(res, id);
+    return undefined;
+  }
+  return snapshot;
+}
+
 // ── Request handler ────────────────────────────────────────────────────────────
 
 async function handleRequest(
@@ -2227,11 +2251,8 @@ async function handleRequest(
     const { runService } = ctx;
     if (!requireRunService(runService, res)) return;
     const id = decodeURIComponent(sseMatch[1]);
-    const snapshot = runService.get(id);
-    if (!snapshot) {
-      json(res, 404, { error: `Run "${id}" not found` });
-      return;
-    }
+    const snapshot = requireRun(runService, res, id);
+    if (!snapshot) return;
 
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -2299,10 +2320,7 @@ async function handleRequest(
       json(res, 400, { error: "invalid after" });
       return;
     }
-    if (!runService.get(id)) {
-      json(res, 404, { error: `Run "${id}" not found` });
-      return;
-    }
+    if (!requireRun(runService, res, id)) return;
     // A run recorded before this spec has no events file: an empty body, not a 404.
     const location = runService.logLocation(id);
     const after = Number(afterRaw ?? 0);
@@ -2313,7 +2331,7 @@ async function handleRequest(
       file = location === undefined ? undefined : runLogFile(location.dir, location.pipelineId);
     } catch (err) {
       if (!(err instanceof RangeError)) throw err;
-      json(res, 404, { error: `Run "${id}" not found` });
+      runNotFound(res, id);
       return;
     }
     res.writeHead(200, {
@@ -2337,10 +2355,7 @@ async function handleRequest(
       json(res, 400, { error: `Step id "${stepId}" is invalid` });
       return;
     }
-    if (!runService.get(id)) {
-      json(res, 404, { error: `Run "${id}" not found` });
-      return;
-    }
+    if (!requireRun(runService, res, id)) return;
     const location = runService.logLocation(id);
     let output: unknown;
     try {
@@ -2350,7 +2365,7 @@ async function handleRequest(
           : readStepOutput(stepOutputFile(location.dir, location.pipelineId, stepId));
     } catch (err) {
       if (!(err instanceof RangeError)) throw err;
-      json(res, 404, { error: `Run "${id}" not found` });
+      runNotFound(res, id);
       return;
     }
     if (output === undefined) {
@@ -2374,7 +2389,7 @@ async function handleRequest(
     if (!requireSafeId(id, "Run", res)) return;
     const runDir = join(ctx.state.runsDir, id);
     if (!existsSync(join(runDir, "manifest.json"))) {
-      json(res, 404, { error: `Run "${id}" not found` });
+      runNotFound(res, id);
       return;
     }
     let manifest: unknown;
@@ -2397,11 +2412,8 @@ async function handleRequest(
     const { runService } = ctx;
     if (!requireRunService(runService, res)) return;
     const id = decodeURIComponent(runGetMatch[1]);
-    const state = runService.get(id);
-    if (!state) {
-      json(res, 404, { error: `Run "${id}" not found` });
-      return;
-    }
+    const state = requireRun(runService, res, id);
+    if (!state) return;
     json(res, 200, state);
     return;
   }
@@ -2444,7 +2456,7 @@ async function handleRequest(
     const reasonStr = typeof reason === "string" ? reason : undefined;
     const result = await runService.cancel(id, reasonStr);
     if (result === undefined) {
-      json(res, 404, { error: `Run "${id}" not found` });
+      runNotFound(res, id);
       return;
     }
     if (!result.ok) {
