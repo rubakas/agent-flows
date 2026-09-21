@@ -147,7 +147,7 @@ const approveTool = createTool({
 const getRunTool = createTool({
   id: "get_run",
   description:
-    "Get the current status and result of a pipeline run. This is the progress companion to start_run: poll it while a run is in flight and its `steps` array carries each step's status and output excerpt as they arrive. Includes how it was invoked (pipeline, inputs, models, gate mode) and per-step progress (id, status, startedAt, finishedAt, output excerpt, error, resolved model for llm steps, command for check steps). Rendered prompts are not returned — read them from the run page or artifact. When the run is suspended at an approval gate, also returns the gate message and spec so the caller can review them before approving. When the run was cancelled, returns when it was cancelled and why.",
+    "Get the current status and result of a pipeline run. This is the progress companion to start_run: poll it while a run is in flight and its `steps` array carries each step's status and output excerpt as they arrive. Show the `progress` string verbatim — it is the one-line 'pipeline · step (N of M) · elapsed' summary of all of this, and the thing to put in front of the user. Includes how it was invoked (pipeline, inputs, models, gate mode) and per-step progress (id, status, startedAt, finishedAt, output excerpt, error, resolved model for llm steps, command for check steps). Rendered prompts are not returned — read them from the run page or artifact. When the run is suspended at an approval gate, also returns the gate message and spec so the caller can review them before approving. When the run was cancelled, returns when it was cancelled and why.",
   inputSchema: z.object({
     runId: z.string().describe("Run ID returned by run_pipeline"),
   }),

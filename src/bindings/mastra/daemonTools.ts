@@ -84,7 +84,7 @@ interface DaemonStepState {
   command?: string;
 }
 
-interface DaemonRunState {
+export interface DaemonRunState {
   runId: string;
   pipelineId: string;
   status: string;
@@ -92,9 +92,82 @@ interface DaemonRunState {
   gateMessage?: string;
   spec?: unknown;
   artifactPath?: string;
-  invocation?: unknown;
+  invocation?: { startedAt?: string; [key: string]: unknown };
   steps?: Record<string, DaemonStepState>;
   cancelled?: { at: string; reason?: string };
+}
+
+/**
+ * Mastra's own synthetic bookkeeping for parallel merge branches. No pipeline
+ * author declares one, so an operator would not recognise the id and it must
+ * never be shown as the current step or counted in "N of M".
+ */
+const SYNTHETIC_STEP_ID = /^__merge_level_\d+$/u;
+
+/** Elapsed time as one glanceable token: "42s", "3m12s", "1h04m". */
+function compactElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1_000));
+  const h = Math.floor(seconds / 3_600);
+  const m = Math.floor((seconds % 3_600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h${String(m).padStart(2, "0")}m`;
+  if (m > 0) return `${m}m${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+/** Milliseconds for an ISO timestamp, or undefined when absent or unparseable. */
+function isoMs(iso: string | undefined): number | undefined {
+  if (iso === undefined) return undefined;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/**
+ * One glanceable line describing where a run is, for a chat client that cannot
+ * show the `steps` array: `code-review · verify (4 of 6) · 3m12s` while it
+ * advances, `code-review · succeeded · 6 steps · 4m01s` once it has stopped.
+ *
+ * Pure over the daemon's run state so it can be tested without a daemon; `now`
+ * is a parameter for the same reason.
+ *
+ * A run at a gate is rendered in the stopped form: it is not advancing, so a
+ * growing elapsed time and a "current step" would both be lies. There is no
+ * cost segment because `GET /api/runs/:id` reports no per-run cost — `costUsd`
+ * lives only on usage events in the run's events log, and aggregating it is not
+ * this function's job.
+ */
+export function formatRunProgress(state: DaemonRunState, now: number = Date.now()): string {
+  const steps = Object.entries(state.steps ?? {}).filter(([id]) => !SYNTHETIC_STEP_ID.test(id));
+  const stopped = TERMINAL_RUN_STATUSES.has(state.status);
+
+  const startMs =
+    isoMs(state.invocation?.startedAt) ??
+    steps.map(([, st]) => isoMs(st.startedAt)).find((ms) => ms !== undefined);
+  const finishedMs = steps
+    .map(([, st]) => isoMs(st.finishedAt))
+    .filter((ms): ms is number => ms !== undefined);
+  const endMs = stopped && finishedMs.length > 0 ? Math.max(...finishedMs) : now;
+  const elapsed = compactElapsed(startMs === undefined ? 0 : endMs - startMs);
+
+  if (stopped) {
+    const count = `${steps.length} step${steps.length === 1 ? "" : "s"}`;
+    return [state.pipelineId, state.status, count, elapsed].join(" · ");
+  }
+
+  // The running step, or — between steps, or while a synthetic merge is in
+  // flight — the last one to finish, so the line never goes blank mid-run.
+  let currentIndex = steps.findIndex(([, st]) => st.status === "running");
+  if (currentIndex === -1) {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      if (steps[i][1].finishedAt !== undefined) {
+        currentIndex = i;
+        break;
+      }
+    }
+  }
+  if (currentIndex === -1) return [state.pipelineId, "starting", elapsed].join(" · ");
+  const position = `${steps[currentIndex][0]} (${currentIndex + 1} of ${steps.length})`;
+  return [state.pipelineId, position, elapsed].join(" · ");
 }
 
 /**
@@ -248,6 +321,7 @@ export async function getRunState(runId: string): Promise<Record<string, unknown
     spec: got.spec,
     ...(got.invocation !== undefined ? { invocation: got.invocation } : {}),
     steps: toStepViews(got.steps),
+    progress: formatRunProgress(got),
     ...(got.cancelled !== undefined ? { cancelled: got.cancelled } : {}),
   };
 }

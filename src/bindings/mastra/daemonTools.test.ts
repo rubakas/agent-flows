@@ -14,11 +14,13 @@ import { clearDaemonBaseCache } from "./daemonResolver.js";
 import {
   TERMINAL_RUN_STATUSES,
   cancelRun,
+  formatRunProgress,
   getRunState,
   pollRunUntilTerminal,
   runPipeline,
   startRun,
 } from "./daemonTools.js";
+import type { DaemonRunState } from "./daemonTools.js";
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
@@ -130,10 +132,16 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
 
     const out = (await getRunState("run-3")) as {
       status: string;
+      progress: string;
       steps: Record<string, unknown>[];
       cancelled?: { at: string; reason?: string };
     };
     assert.equal(out.status, "cancelled");
+    assert.equal(
+      out.progress,
+      "develop · cancelled · 2 steps · 5s",
+      "get_run must carry the one-line progress summary beside the steps array"
+    );
     assert.deepEqual(out.cancelled, { at: "2026-09-13T10:00:05.000Z", reason: "stopped" });
     assert.deepEqual(out.steps, [
       {
@@ -393,5 +401,121 @@ describe("run_pipeline — still blocks until the run is terminal", () => {
     const out = (await runPipeline({ pipeline: "develop" })) as { error: string };
     assert.match(out.error, /HTTP 500/);
     assert.equal(gets, 0, "a run that never started has nothing to poll");
+  });
+});
+
+// ── The one-line progress summary get_run hands a chat client ────────────────
+
+describe("formatRunProgress — the glanceable line", () => {
+  /** 2026-09-21T10:00:00Z, so every case below reads as a literal offset from it. */
+  const T0 = Date.parse("2026-09-21T10:00:00.000Z");
+  const at = (offsetMs: number): string => new Date(T0 + offsetMs).toISOString();
+
+  const midRun: DaemonRunState = {
+    runId: "r1",
+    pipelineId: "code-review",
+    status: "running",
+    invocation: { startedAt: at(0) },
+    steps: {
+      scope: { status: "succeeded", startedAt: at(0), finishedAt: at(30_000) },
+      read: { status: "succeeded", startedAt: at(30_000), finishedAt: at(70_000) },
+      judge: { status: "succeeded", startedAt: at(70_000), finishedAt: at(120_000) },
+      verify: { status: "running", startedAt: at(120_000) },
+      report: { status: "pending" },
+      finish: { status: "pending" },
+    },
+  };
+
+  it("names the running step and its position, and counts elapsed to now", () => {
+    assert.equal(formatRunProgress(midRun, T0 + 192_000), "code-review · verify (4 of 6) · 3m12s");
+  });
+
+  it("excludes synthetic __merge_level_* entries from the position and the count", () => {
+    const withMerges: DaemonRunState = {
+      ...midRun,
+      steps: {
+        scope: { status: "succeeded", startedAt: at(0), finishedAt: at(30_000) },
+        __merge_level_1: { status: "succeeded", startedAt: at(30_000), finishedAt: at(30_001) },
+        read: { status: "succeeded", startedAt: at(30_000), finishedAt: at(70_000) },
+        judge: { status: "succeeded", startedAt: at(70_000), finishedAt: at(120_000) },
+        __merge_level_4: { status: "succeeded", startedAt: at(120_000), finishedAt: at(120_001) },
+        verify: { status: "running", startedAt: at(120_000) },
+        report: { status: "pending" },
+        finish: { status: "pending" },
+      },
+    };
+    assert.equal(
+      formatRunProgress(withMerges, T0 + 192_000),
+      "code-review · verify (4 of 6) · 3m12s",
+      "the two synthetic ids must change neither N nor M"
+    );
+  });
+
+  it("falls back to the last finished step while a run is between steps", () => {
+    const between: DaemonRunState = {
+      ...midRun,
+      steps: {
+        scope: { status: "succeeded", startedAt: at(0), finishedAt: at(30_000) },
+        read: { status: "succeeded", startedAt: at(30_000), finishedAt: at(70_000) },
+        judge: { status: "pending" },
+      },
+    };
+    assert.equal(formatRunProgress(between, T0 + 71_000), "code-review · read (2 of 3) · 1m11s");
+  });
+
+  it("states the outcome and the step count once the run has stopped", () => {
+    const done: DaemonRunState = {
+      runId: "r1",
+      pipelineId: "code-review",
+      status: "succeeded",
+      invocation: { startedAt: at(0) },
+      steps: {
+        scope: { status: "succeeded", startedAt: at(0), finishedAt: at(30_000) },
+        read: { status: "succeeded", startedAt: at(30_000), finishedAt: at(70_000) },
+        judge: { status: "succeeded", startedAt: at(70_000), finishedAt: at(120_000) },
+        verify: { status: "succeeded", startedAt: at(120_000), finishedAt: at(180_000) },
+        report: { status: "succeeded", startedAt: at(180_000), finishedAt: at(220_000) },
+        finish: { status: "succeeded", startedAt: at(220_000), finishedAt: at(241_000) },
+      },
+    };
+    assert.equal(
+      formatRunProgress(done, T0 + 9_999_999),
+      "code-review · succeeded · 6 steps · 4m01s",
+      "a stopped run's elapsed time freezes at its last finishedAt, not at now"
+    );
+  });
+
+  it("says '1 step' for a single-step run", () => {
+    const solo: DaemonRunState = {
+      runId: "r2",
+      pipelineId: "investigate",
+      status: "succeeded",
+      invocation: { startedAt: at(0) },
+      steps: { look: { status: "succeeded", startedAt: at(0), finishedAt: at(8_000) } },
+    };
+    assert.equal(formatRunProgress(solo, T0 + 60_000), "investigate · succeeded · 1 step · 8s");
+  });
+
+  it("renders no cost segment, because the run state carries no cost", () => {
+    for (const line of [
+      formatRunProgress(midRun, T0 + 192_000),
+      formatRunProgress({ ...midRun, status: "failed" }, T0 + 192_000),
+    ]) {
+      assert.ok(!line.includes("$"), `no cost is available, so none may be shown: ${line}`);
+    }
+  });
+
+  it("uses the hour form past an hour and says 'starting' before any step reports", () => {
+    assert.equal(
+      formatRunProgress(midRun, T0 + 3_840_000),
+      "code-review · verify (4 of 6) · 1h04m"
+    );
+    assert.equal(
+      formatRunProgress(
+        { runId: "r3", pipelineId: "ship", status: "running", invocation: { startedAt: at(0) } },
+        T0 + 5_000
+      ),
+      "ship · starting · 5s"
+    );
   });
 });
