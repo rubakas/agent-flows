@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { runRow, workflowRow } from "./ui-tables.js";
+import { progressCell, runProgress, runRow, workflowRow } from "./ui-tables.js";
 
 const HOSTILE = '<img src=x onerror=alert(1)>"';
 
@@ -118,6 +118,118 @@ describe("runRow — unchanged behaviour, including the disk badge", () => {
 
   it("escapes the run id, pipeline id and status", () => {
     const html = runRow({ runId: HOSTILE, pipelineId: HOSTILE, status: HOSTILE });
+    assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
+  });
+});
+
+describe("runProgress — where a run has got to (spec 042 D7, V3)", () => {
+  const DECLARED = ["survey", "plan", "build", "verify"];
+
+  it("names the running step and its position among the declared steps", () => {
+    const progress = runProgress(
+      {
+        survey: {
+          status: "succeeded",
+          startedAt: "2026-09-21T10:00:00.000Z",
+          finishedAt: "2026-09-21T10:01:00.000Z",
+        },
+        plan: { status: "running", startedAt: "2026-09-21T10:01:00.000Z" },
+      },
+      DECLARED
+    );
+    assert.deepEqual(progress, { stepId: "plan", current: true, n: 2, m: 4 });
+  });
+
+  it("never names a __merge_level_* step as the current step (V3)", () => {
+    const progress = runProgress(
+      {
+        survey: {
+          status: "succeeded",
+          startedAt: "2026-09-21T10:00:00.000Z",
+          finishedAt: "2026-09-21T10:01:00.000Z",
+        },
+        __merge_level_1: { status: "running", startedAt: "2026-09-21T10:01:00.000Z" },
+      },
+      DECLARED
+    );
+    assert.ok(progress, "a run with one finished step has progress to report");
+    assert.equal(
+      progress.stepId,
+      "survey",
+      "a synthetic merge step is Mastra bookkeeping — showing it tells the operator nothing"
+    );
+    assert.equal(progress.current, false, "nothing the author declared is running right now");
+  });
+
+  it("never counts a __merge_level_* step toward M (V3)", () => {
+    const progress = runProgress(
+      {
+        survey: {
+          status: "succeeded",
+          startedAt: "2026-09-21T10:00:00.000Z",
+          finishedAt: "2026-09-21T10:01:00.000Z",
+        },
+        __merge_level_1: {
+          status: "succeeded",
+          startedAt: "2026-09-21T10:01:00.000Z",
+          finishedAt: "2026-09-21T10:01:01.000Z",
+        },
+        plan: { status: "running", startedAt: "2026-09-21T10:01:01.000Z" },
+      },
+      DECLARED
+    );
+    assert.ok(progress);
+    assert.equal(progress.m, 4, "M is the pipeline's own declared step count");
+    assert.equal(progress.n, 2, "N is the declared position of plan, unshifted by the merge step");
+    assert.ok(
+      !JSON.stringify(progress).includes("__merge_level"),
+      `no synthetic id may reach the row: ${JSON.stringify(progress)}`
+    );
+  });
+
+  it("falls back to the last step to finish when none is running", () => {
+    const progress = runProgress(
+      {
+        survey: {
+          status: "succeeded",
+          startedAt: "2026-09-21T10:00:00.000Z",
+          finishedAt: "2026-09-21T10:01:00.000Z",
+        },
+        plan: {
+          status: "succeeded",
+          startedAt: "2026-09-21T10:01:00.000Z",
+          finishedAt: "2026-09-21T10:02:00.000Z",
+        },
+      },
+      DECLARED
+    );
+    assert.ok(progress);
+    assert.equal(progress.stepId, "plan");
+    assert.equal(progress.current, false);
+  });
+
+  it("keeps the step id but drops the position when the pipeline no longer declares it", () => {
+    const progress = runProgress({ gone: { status: "running" } }, DECLARED);
+    assert.deepEqual(progress, { stepId: "gone", current: true, n: null, m: 4 });
+    assert.equal(progressCell(progress), '<span class="step-id">gone</span>');
+  });
+
+  it("is null before any step has fired", () => {
+    assert.equal(runProgress({}, DECLARED), null);
+    assert.equal(runProgress({ __merge_level_1: { status: "running" } }, DECLARED), null);
+  });
+
+  it("renders into the run row and escapes the step id", () => {
+    const html = runRow(
+      {
+        runId: "r1",
+        pipelineId: "investigate",
+        status: "running",
+        createdAt: "2026-09-21T10:00:00.000Z",
+      },
+      { progress: { stepId: HOSTILE, current: true, n: 2, m: 4 } }
+    );
+    assert.ok(html.includes("2 of 4"), `the row must carry the position: ${html}`);
     assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
   });
 });

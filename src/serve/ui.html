@@ -58,6 +58,14 @@
       .muted {
         color: var(--muted);
       }
+      /* Utility: a value that has to line up with the value above it — pid, port,
+         duration, uptime, "4 of 8" (042 D5). Tabular figures are a functional
+         choice: a column of durations that does not align cannot be scanned.
+         Labels never get this. */
+      .num {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+      }
       /* Top bar (037 D8): name, project, state dir, tabs right-aligned. */
       header {
         display: flex;
@@ -389,6 +397,22 @@
       }
       .step-id {
         font-family: var(--mono);
+      }
+      /* The runs list's inline progress cell (042 FR-005): step id then position. */
+      .run-step .num {
+        color: var(--muted);
+        margin-left: 6px;
+      }
+      /* The page has lost the daemon it was reading from — the one state a stale
+         page must not hide, since reading a dead daemon's last render is exactly
+         the incident this view exists to prevent (042 D9/FR-004). */
+      .disconnected-box {
+        background: color-mix(in srgb, var(--warn) 10%, transparent);
+        color: var(--warn);
+        border: 1px solid var(--warn);
+        border-radius: var(--radius);
+        padding: 8px 12px;
+        margin-bottom: 10px;
       }
       .step-model {
         font-family: var(--mono);
@@ -779,24 +803,41 @@
 
     <main>
       <div id="flash-area"></div>
+      <!-- 042 D9/FR-004: the page cannot watch its own daemon die, so the one
+           honest thing it can report is that it has lost contact. -->
+      <div class="disconnected-box" id="disconnected-banner" hidden></div>
 
-      <!-- Runs view (D2) -->
+      <!-- Runs view (D2). Live state first (042 D1): the daemons running on this
+           machine, then the runs in flight, then the history behind them. -->
       <section class="view" id="view-runs" hidden>
-        <div class="section-header">
-          <h2>Runs</h2>
-          <div class="chips" id="runs-filter">
-            <button class="btn chip" data-runs-filter="active">Active</button>
-            <button class="btn chip" data-runs-filter="finished">Finished</button>
-            <button class="btn chip" data-runs-filter="all">All</button>
+        <!-- Daemons (042 D1/D2/FR-002). Every project on this machine, not just
+             this one: two daemons once ran for two days unnoticed. Refreshed by
+             the runs poller, so there is no second Refresh button here. -->
+        <div class="section">
+          <div class="section-header">
+            <h2>Daemons</h2>
+            <span class="muted" id="daemons-note"></span>
           </div>
-          <button class="btn" id="btn-refresh-runs" style="margin-left: auto">Refresh</button>
+          <div id="daemons-table-wrap">Loading…</div>
         </div>
-        <div id="runs-split">
-          <div id="runs-pane-list">
-            <div id="runs-table-wrap">Loading…</div>
+
+        <div class="section">
+          <div class="section-header">
+            <h2>Runs</h2>
+            <div class="chips" id="runs-filter">
+              <button class="btn chip" data-runs-filter="active">In flight</button>
+              <button class="btn chip" data-runs-filter="finished">Finished</button>
+              <button class="btn chip" data-runs-filter="all">All</button>
+            </div>
+            <button class="btn" id="btn-refresh-runs" style="margin-left: auto">Refresh</button>
           </div>
-          <div id="runs-pane-detail" hidden>
-            <div id="runs-pane-detail-body"></div>
+          <div id="runs-split">
+            <div id="runs-pane-list">
+              <div id="runs-table-wrap">Loading…</div>
+            </div>
+            <div id="runs-pane-detail" hidden>
+              <div id="runs-pane-detail-body"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -960,10 +1001,12 @@
         ACTIVE_STATUSES,
         fmtElapsed,
         fmtTime,
+        runProgress,
         runRow,
         statusClass,
         workflowRow,
       } from "/ui-tables.js";
+      import { daemonsTable, stopConfirmText, stopResultLine } from "/ui-daemons.js";
       import {
         mergeLogEvents,
         renderDecisions,
@@ -1626,6 +1669,93 @@
         return confirm("This workflow has unsaved changes. Leave the editor?");
       }
 
+      // ── Daemons panel (042 D1/D2/D4/D8) ────────────────────────────────────
+
+      /** The last verified list from GET /api/daemons, so a re-render costs nothing. */
+      let _daemons = [];
+
+      /** The project key whose stop is in flight; that row shows "stopping…". */
+      let _stoppingKey = null;
+
+      /** The outcome line of the last stop issued on this page, per project key. */
+      const _stopResults = {};
+
+      /**
+       * The banner for the one thing the page cannot observe: the death of the
+       * daemon serving it (D9/FR-004). Polling stops with it — a page that keeps
+       * asking a dead daemon is the stale-page failure all over again.
+       */
+      function showDisconnected(message) {
+        const el = document.getElementById("disconnected-banner");
+        el.textContent = message;
+        el.hidden = false;
+        stopRunsPoller();
+      }
+
+      function renderDaemons() {
+        const wrap = document.getElementById("daemons-table-wrap");
+        const stale = _daemons.filter((d) => !d.live).length;
+        document.getElementById("daemons-note").textContent =
+          stale === 0
+            ? ""
+            : `${stale} stale record${stale === 1 ? "" : "s"} — a daemon that exited without cleaning up.`;
+        wrap.innerHTML = daemonsTable(_daemons, { busy: _stoppingKey, results: _stopResults });
+        wireDaemonsTable(wrap);
+      }
+
+      async function loadDaemons() {
+        try {
+          const data = await api("GET", "/api/daemons");
+          _daemons = data.daemons || [];
+          renderDaemons();
+        } catch (e) {
+          document.getElementById("daemons-table-wrap").innerHTML =
+            `<div class="error-box">${escH(e.message)}</div>`;
+        }
+      }
+
+      /**
+       * Wire the Stop buttons (D4/D8). Only live rows carry one — a stale record
+       * names a pid the operating system may have given to someone else, so the
+       * markup offers nothing to click on it in the first place.
+       */
+      function wireDaemonsTable(wrap) {
+        wrap.querySelectorAll("[data-stop-daemon]").forEach((btn) => {
+          btn.onclick = async () => {
+            const key = btn.dataset.stopDaemon;
+            // D8: no undo, so the confirm names the project and the pid.
+            if (!confirm(stopConfirmText(btn.dataset.stopProject, btn.dataset.stopPid))) return;
+            const entry = _daemons.find((d) => d.projectKey === key);
+            _stoppingKey = key;
+            delete _stopResults[key];
+            renderDaemons();
+            try {
+              const report = await api("POST", `/api/daemons/${encodeURIComponent(key)}/stop`);
+              _stopResults[key] = stopResultLine(report);
+            } catch (e) {
+              // D9/FR-004: stopping the daemon that serves this page means the
+              // answer never arrives. The page reports what it observed — a lost
+              // connection — never a "stopped" it has no daemon left to confirm.
+              if (entry?.self) {
+                _stopResults[key] = stopResultLine({ disconnected: true });
+                showDisconnected(_stopResults[key]);
+              } else {
+                _stopResults[key] = stopResultLine({
+                  outcome: "unresolved",
+                  reason: e.message,
+                });
+              }
+            } finally {
+              _stoppingKey = null;
+            }
+            // D8: the outcome is shown and nothing is retried. Re-reading the
+            // list is what proves the process is gone, not the report.
+            if (document.getElementById("disconnected-banner").hidden) await loadDaemons();
+            else renderDaemons();
+          };
+        });
+      }
+
       // ── Run observability ──────────────────────────────────────────────────
 
       /** Active SSE connection for the currently-watched run, if any. */
@@ -1637,11 +1767,68 @@
       /** The run whose details are on screen, so a re-rendered table can mark it. */
       let _selectedRunId = null;
 
+      /**
+       * What an empty runs list says (042 FR-006). Each one names the next move,
+       * because "no runs" with nowhere to go is the state this page shipped with.
+       */
+      const EMPTY_RUNS = {
+        active: 'Nothing is running. Start a run from <a href="#/workflows">Workflows</a>.',
+        finished: 'No run has finished yet. Start one from <a href="#/workflows">Workflows</a>.',
+        all: 'No runs on record. Start one from <a href="#/workflows">Workflows</a>.',
+      };
+
+      /**
+       * Declared step ids per workflow, so the "N of M" denominator costs one
+       * request per workflow instead of one per poll. M is the count of steps
+       * the author wrote (042 D7) — it must not grow as the run advances.
+       */
+      const _declaredSteps = {};
+
+      async function declaredStepsFor(pipelineId) {
+        if (_declaredSteps[pipelineId] === undefined) {
+          try {
+            const data = await api("GET", `/api/pipelines/${encodeURIComponent(pipelineId)}`);
+            _declaredSteps[pipelineId] = (data.def?.steps || []).map((s) => s.id);
+          } catch {
+            // A run of a workflow that has since been deleted still shows its
+            // step id; only the position is unknowable.
+            _declaredSteps[pipelineId] = [];
+          }
+        }
+        return _declaredSteps[pipelineId];
+      }
+
+      /**
+       * Where each in-flight run has got to (042 D6/FR-005).
+       *
+       * One `GET /api/runs/:id` per in-flight run — the same snapshot the run
+       * view already reads, not a new endpoint — and nothing at all for settled
+       * runs, which are not moving.
+       */
+      async function loadRunProgress(runs) {
+        const inFlight = runs.filter((r) => ACTIVE_STATUSES.has(r.status) && r.source !== "disk");
+        const byRunId = {};
+        await Promise.all(
+          inFlight.map(async (r) => {
+            try {
+              const snapshot = await api("GET", `/api/runs/${encodeURIComponent(r.runId)}`);
+              const declared = await declaredStepsFor(snapshot.pipelineId || r.pipelineId);
+              byRunId[r.runId] = runProgress(snapshot.steps, declared);
+            } catch {
+              // A run that settled between the list and the snapshot is simply
+              // no longer in flight; the row renders without a position.
+            }
+          })
+        );
+        return byRunId;
+      }
+
       async function loadRuns() {
         const wrap = document.getElementById("runs-table-wrap");
         try {
           const data = await api("GET", "/api/runs");
-          renderRuns(data.runs || [], wrap);
+          const runs = data.runs || [];
+          renderRuns(runs, wrap, await loadRunProgress(runs));
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }
@@ -1651,7 +1838,7 @@
        * Render the runs table from an already-fetched list. The chips filter this
        * list client-side (FR-002) — switching chips costs no request.
        */
-      function renderRuns(runs, wrap) {
+      function renderRuns(runs, wrap, progress) {
         for (const chip of document.querySelectorAll("[data-runs-filter]")) {
           chip.classList.toggle("active", chip.dataset.runsFilter === _runsFilter);
         }
@@ -1674,16 +1861,20 @@
         html += `<p class="muted" style="margin-bottom:6px">${escH(String(activeCount))} active, ${escH(String(runs.length))} total</p>`;
 
         if (!shown.length) {
-          wrap.innerHTML = `${html}<p class="empty">No ${escH(_runsFilter)} runs.</p>`;
+          // FR-006: an empty list is an invitation to act, not a mood.
+          wrap.innerHTML = `${html}<p class="empty">${EMPTY_RUNS[_runsFilter]}</p>`;
           wireRunsTable(wrap);
           return;
         }
 
         html += `<table class="table"><thead><tr>
-          <th>Status</th><th>Workflow</th><th>Started</th><th>Duration</th><th>Actions</th>
+          <th>Status</th><th>Workflow</th><th>Step</th><th>Started</th><th>Duration</th><th>Actions</th>
         </tr></thead><tbody>`;
         for (const r of shown) {
-          html += runRow(r, { selected: r.runId === _selectedRunId });
+          html += runRow(r, {
+            selected: r.runId === _selectedRunId,
+            progress: progress?.[r.runId] ?? null,
+          });
         }
         html += "</tbody></table>";
         wrap.innerHTML = html;
@@ -1721,10 +1912,15 @@
       function startRunsPoller() {
         if (_runsPoller !== null) return;
         _runsPoller = setInterval(() => {
-          // Poll only while the runs list is on screen: a hidden tab, another
-          // view, or a live SSE stream all make the request pure waste.
-          if (document.hidden || activeRunEs !== null) return;
+          // Poll only while the landing view is on screen: a hidden tab or
+          // another view makes the request pure waste.
+          if (document.hidden) return;
           if (document.getElementById("view-runs").hidden) return;
+          // 042: a daemon that crashed since the last read must show as stale on
+          // the next one, so liveness is re-probed every poll, never cached.
+          loadDaemons();
+          // The runs list is driven by the open stream while one is open.
+          if (activeRunEs !== null) return;
           loadRuns();
         }, 4000);
       }
@@ -1745,6 +1941,7 @@
         }
         if (!pollersFor(parseHash(location.hash).view).includes("runs")) return;
         startRunsPoller();
+        loadDaemons();
         if (activeRunEs === null) loadRuns();
       });
 
@@ -2874,12 +3071,17 @@
 
         if (view === "runs") {
           _selectedRunId = null;
+          // 042 D1: live state first — the daemons, then the runs.
+          loadDaemons();
           loadRuns();
         } else if (view === "run") {
           _selectedRunId = runId;
           // The table is part of this screen when split, so it is loaded too —
           // and it is what shows the selection.
-          if (splitRun) loadRuns();
+          if (splitRun) {
+            loadDaemons();
+            loadRuns();
+          }
           openRunView(runId);
         } else if (view === "workflows") {
           loadWorkflows();

@@ -26,6 +26,75 @@ function esc(s) {
 /** Statuses counted as active by the Active chip and the runs poller. */
 export const ACTIVE_STATUSES = new Set(["running", "started", "awaiting_approval"]);
 
+/**
+ * Mastra's own synthetic bookkeeping for parallel merge branches (spec 042 D7).
+ * No pipeline author declares one, so an operator shown `__merge_level_1` as the
+ * current step learns nothing and mistrusts the number next to it.
+ */
+const SYNTHETIC_STEP_ID = /^__merge_level_\d+$/u;
+
+/**
+ * Where a run has got to, for the runs list (spec 042 D6/D7, FR-005).
+ *
+ * `steps` is `GetResult.steps` — the run's own per-step states, keyed by id —
+ * and `declaredStepIds` is the pipeline's declared step list, which is what N
+ * and M are counted against: M is how many steps the author wrote, not how many
+ * have happened, so the denominator does not grow as the run advances.
+ *
+ * The current step is the one that is running. Between steps — and while a
+ * synthetic merge is in flight — it is the last step to leave "running", marked
+ * `current: false` so the caller can label it rather than imply work is
+ * happening there now. Returns null when nothing has started yet.
+ *
+ * @param {Record<string, { status?: string, startedAt?: string, finishedAt?: string }>} steps
+ * @param {string[]} declaredStepIds
+ * @returns {{ stepId: string, current: boolean, n: number | null, m: number } | null}
+ */
+export function runProgress(steps, declaredStepIds) {
+  const declared = Array.isArray(declaredStepIds) ? declaredStepIds : [];
+  const own = Object.entries(steps ?? {}).filter(([id]) => !SYNTHETIC_STEP_ID.test(id));
+  if (own.length === 0) return null;
+
+  const latest = (candidates, key) =>
+    candidates
+      .filter(([, st]) => typeof st?.[key] === "string")
+      .sort(([, a], [, b]) => Date.parse(a[key]) - Date.parse(b[key]))
+      .pop();
+
+  const running = own.filter(([, st]) => st?.status === "running" || st?.status === "started");
+  const picked = running.length > 0 ? (latest(running, "startedAt") ?? running[0]) : null;
+  const chosen = picked ?? latest(own, "finishedAt") ?? null;
+  if (chosen === null) return null;
+
+  const stepId = chosen[0];
+  const index = declared.indexOf(stepId);
+  return {
+    stepId,
+    current: picked !== null,
+    n: index === -1 ? null : index + 1,
+    m: declared.length,
+  };
+}
+
+/**
+ * `runProgress` as the one line the runs table shows: `verify 4 of 8`, or
+ * `verify (last) 4 of 8` between steps. A step the pipeline no longer declares —
+ * an old run of a since-edited workflow — keeps its id and drops the position
+ * rather than inventing one.
+ *
+ * @param {{ stepId: string, current: boolean, n: number | null, m: number } | null} progress
+ * @returns {string}
+ */
+export function progressCell(progress) {
+  if (progress === null || progress === undefined) return "";
+  const label = progress.current ? esc(progress.stepId) : `${esc(progress.stepId)} (last)`;
+  const position =
+    progress.n === null || progress.m === 0
+      ? ""
+      : ` <span class="num">${esc(progress.n)} of ${esc(progress.m)}</span>`;
+  return `<span class="step-id">${label}</span>${position}`;
+}
+
 /** Format a UTC ISO string as a short local time string. */
 export function fmtTime(iso) {
   try {
@@ -122,9 +191,14 @@ export function workflowRow(wf) {
  * badge says so in the row, so the missing Cancel button later is not a
  * surprise.
  *
+ * While the run is advancing the row also carries where it has got to — the
+ * current step and its position in the pipeline (spec 042 FR-005) — so the
+ * common question "what is it doing right now" is answered from the list,
+ * without opening the run.
+ *
  * @param {{ runId: string, pipelineId?: string, status?: string, createdAt?: string,
  *   settledAt?: string, source?: string }} r
- * @param {{ selected?: boolean }} [opts]
+ * @param {{ selected?: boolean, progress?: object | null }} [opts]
  * @returns {string}
  */
 export function runRow(r, opts) {
@@ -152,8 +226,9 @@ export function runRow(r, opts) {
     `<tr data-run-row="${esc(r?.runId ?? "")}"${rowClasses ? ` class="${rowClasses}"` : ""}>` +
     `<td><span class="badge ${esc(sc)}">${esc(r?.status ?? "")}</span>${diskMark}</td>` +
     `<td class="pipeline-id">${esc(r?.pipelineId ?? "")}</td>` +
+    `<td class="run-step">${progressCell(opts?.progress ?? null)}</td>` +
     `<td class="muted">${esc(fmtTime(r?.createdAt))}</td>` +
-    `<td class="muted">${elapsed}</td>` +
+    `<td class="muted num">${elapsed}</td>` +
     `<td class="actions">${btn("Details", "data-run-details", String(r?.runId ?? ""))}</td>` +
     `</tr>`
   );

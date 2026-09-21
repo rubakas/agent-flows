@@ -28,5 +28,31 @@ export declare const ACTIVE_STATUSES: Set<string>;
 export declare function fmtTime(iso: string | undefined): string;
 export declare function statusClass(status: string | undefined): string;
 export declare function fmtElapsed(startIso?: string, endIso?: string): string;
+/** One step's state as `GetResult.steps` records it (spec 042 FR-005). */
+export interface RunStepStateData {
+  status?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+/** Where a run has got to, against the pipeline's declared step list (spec 042 D7). */
+export interface RunProgress {
+  stepId: string;
+  /** False when the step named is the last to have finished, not one now running. */
+  current: boolean;
+  /** 1-based position among the declared steps, or null when the id is not declared. */
+  n: number | null;
+  /** How many steps the pipeline declares. */
+  m: number;
+}
+
 export declare function workflowRow(wf: WorkflowRowData): string;
-export declare function runRow(r: RunRowData, opts?: { selected?: boolean }): string;
+export declare function runProgress(
+  steps: Record<string, RunStepStateData> | undefined,
+  declaredStepIds: string[]
+): RunProgress | null;
+export declare function progressCell(progress: RunProgress | null | undefined): string;
+export declare function runRow(
+  r: RunRowData,
+  opts?: { selected?: boolean; progress?: RunProgress | null }
+): string;

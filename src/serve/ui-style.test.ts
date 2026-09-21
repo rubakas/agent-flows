@@ -23,6 +23,7 @@ const MARKUP = {
   "ui.html": UI,
   "ui-tables.js": readFileSync(join(HERE, "ui-tables.js"), "utf8"),
   "ui-log.js": readFileSync(join(HERE, "ui-log.js"), "utf8"),
+  "ui-daemons.js": readFileSync(join(HERE, "ui-daemons.js"), "utf8"),
 };
 
 /** The body of a `{ … }` block that starts at the given opening line. */
