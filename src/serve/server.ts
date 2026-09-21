@@ -1133,6 +1133,46 @@ async function refuseBundled(
   return true;
 }
 
+// ── Template file resolution ─────────────────────────────────────────────────
+
+/**
+ * Validates a template id and maps it to its file under ctx.templatesBase.
+ * Writes the 400 response and returns undefined when the id is unsafe or
+ * would escape the templates directory. Does not check existence.
+ */
+function resolveTemplatePath(
+  ctx: HandlerCtx,
+  tId: string,
+  res: ServerResponse
+): string | undefined {
+  if (!requireSafeId(tId, "Template", res)) return undefined;
+  try {
+    assertSafePath(ctx.templatesBase, `${tId}.yaml`);
+  } catch {
+    json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
+    return undefined;
+  }
+  return join(ctx.templatesBase, `${tId}.yaml`);
+}
+
+/**
+ * resolveTemplatePath plus the existence check, for routes that read the
+ * template file straight away. Writes 400 or 404 and returns undefined.
+ */
+function resolveTemplateFile(
+  ctx: HandlerCtx,
+  tId: string,
+  res: ServerResponse
+): string | undefined {
+  const templatePath = resolveTemplatePath(ctx, tId, res);
+  if (templatePath === undefined) return undefined;
+  if (!existsSync(templatePath)) {
+    json(res, 404, { error: `Template "${tId}" not found` });
+    return undefined;
+  }
+  return templatePath;
+}
+
 // ── Request handler ────────────────────────────────────────────────────────────
 
 async function handleRequest(
@@ -2779,18 +2819,8 @@ async function handleRequest(
   const templateDetailMatch = RE_TEMPLATE_DETAIL.exec(pathname);
   if (method === "GET" && templateDetailMatch) {
     const tId = decodeURIComponent(templateDetailMatch[1]);
-    if (!requireSafeId(tId, "Template", res)) return;
-    try {
-      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
-    } catch {
-      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
-      return;
-    }
-    const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
-    if (!existsSync(templatePath)) {
-      json(res, 404, { error: `Template "${tId}" not found` });
-      return;
-    }
+    const templatePath = resolveTemplateFile(ctx, tId, res);
+    if (templatePath === undefined) return;
     try {
       const bundle = parseBundle(readFileSync(templatePath, "utf8"));
       json(res, 200, {
@@ -2809,15 +2839,9 @@ async function handleRequest(
   // DELETE /api/templates/:id
   if (method === "DELETE" && templateDetailMatch) {
     const tId = decodeURIComponent(templateDetailMatch[1]);
-    if (!requireSafeId(tId, "Template", res)) return;
-    try {
-      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
-    } catch {
-      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
-      return;
-    }
+    const templatePath = resolveTemplatePath(ctx, tId, res);
+    if (templatePath === undefined) return;
     await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
-    const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
     if (!existsSync(templatePath)) {
       json(res, 404, { error: `Template "${tId}" not found` });
       return;
@@ -2831,18 +2855,8 @@ async function handleRequest(
   const templateInstallMatch = RE_TEMPLATE_INSTALL.exec(pathname);
   if (method === "POST" && templateInstallMatch) {
     const tId = decodeURIComponent(templateInstallMatch[1]);
-    if (!requireSafeId(tId, "Template", res)) return;
-    try {
-      assertSafePath(ctx.templatesBase, `${tId}.yaml`);
-    } catch {
-      json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
-      return;
-    }
-    const templatePath = join(ctx.templatesBase, `${tId}.yaml`);
-    if (!existsSync(templatePath)) {
-      json(res, 404, { error: `Template "${tId}" not found` });
-      return;
-    }
+    const templatePath = resolveTemplateFile(ctx, tId, res);
+    if (templatePath === undefined) return;
     // Deliberately lenient: an unparseable body falls back to overwrite:false
     // rather than 400 — this route only ever reads one optional boolean field,
     // so readJsonBody's stricter "malformed body" rejection is not used here.
