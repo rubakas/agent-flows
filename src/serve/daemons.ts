@@ -124,3 +124,15 @@ export async function listDaemons(
   const entries = await Promise.all(dirs.map((dir) => classify(dir, probe, deps.self)));
   return entries.filter((e): e is DaemonListEntry => e !== undefined);
 }
+
+/**
+ * The state directory a project key names, or undefined when no such project
+ * exists under `stateHome` (FR-003).
+ *
+ * The key is matched against the directory names the enumeration already found;
+ * it is never joined onto a path. A request carrying "../.." therefore resolves
+ * to nothing rather than to a directory outside the state root.
+ */
+export function stateDirForKey(stateHome: string, key: string): string | undefined {
+  return listProjectStateDirs({ AGENT_FLOWS_HOME: stateHome }).find((dir) => basename(dir) === key);
+}

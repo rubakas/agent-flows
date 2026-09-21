@@ -25,7 +25,12 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { request as httpRequest, type IncomingMessage, type RequestOptions } from "node:http";
+import {
+  createServer as createHttpServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type RequestOptions,
+} from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -56,8 +61,10 @@ import {
   type ServeHandle,
   CONTENT_CAP,
 } from "./server.js";
+import { stopProjectDaemon } from "./stop.js";
 import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
 import type { TicketStore } from "../module/seams.js";
+import type { AddressInfo } from "node:net";
 
 const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
 
@@ -5622,6 +5629,114 @@ describe("GET /api/daemons — every daemon on the machine (spec 042 FR-001)", (
     assert.ok(ghost, "a stale record is reported, never omitted");
     assert.equal(ghost.live, false);
     assert.equal(ghost.self, false);
+  });
+});
+
+describe("POST /api/daemons/:projectKey/stop — the page's Stop (spec 042 FR-003)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let stateHome: string;
+
+  /** A project under this test's state home, with a daemon.json naming `port`. */
+  function recordGhost(name: string, port: number, pid: number): string {
+    const projectDir = join(tmpDir, name);
+    mkdirSync(projectDir, { recursive: true });
+    const ghost = resolveProjectState(projectDir, { AGENT_FLOWS_HOME: stateHome });
+    mkdirSync(ghost.dir, { recursive: true });
+    writeFileSync(
+      join(ghost.dir, "daemon.json"),
+      JSON.stringify({
+        projectDir,
+        version: "0.1.0",
+        pid,
+        startedAt: "2026-09-21T10:00:00.000Z",
+        port,
+      })
+    );
+    return ghost.key;
+  }
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-daemon-stop-")));
+    stateHome = join(tmpDir, "state-home");
+    srv = await startServer({
+      state: makeState(REAL_REPO_ROOT, tmpDir),
+      port: 0,
+      dbPath: ":memory:",
+      projectDir: REAL_REPO_ROOT,
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns the same StopReport stopProjectDaemon returns for that state dir (V2)", async () => {
+    // Port 1 is not bound, so the record is stale and pid 999999 must NOT be
+    // signalled — a SIGTERM to a pid that does not exist throws ESRCH, and this
+    // route would answer 500 instead of the refusal report.
+    const key = recordGhost("stale-ghost", 1, 999999);
+    const stateDir = join(stateHome, "projects", key);
+
+    const res = await mutate(srv.port, "POST", `/api/daemons/${encodeURIComponent(key)}/stop`, {});
+    assert.equal(res.status, 200, `expected the refusal report, got ${res.status}`);
+    const viaRoute = await res.json();
+    const viaCall = await stopProjectDaemon(stateDir);
+    assert.deepEqual(
+      viaRoute,
+      viaCall,
+      "the route must drive stop.ts, not a second kill path of its own"
+    );
+    assert.equal((viaRoute as { outcome: string }).outcome, "no-daemon");
+  });
+
+  it("refuses a record whose port is held by another pid, and signals nothing", async () => {
+    const holder = createHttpServer((_req, hres) => {
+      hres.writeHead(200, { "Content-Type": "application/json" });
+      hres.end(
+        JSON.stringify({
+          projectDir: join(tmpDir, "impostor"),
+          version: "0.1.0",
+          pid: 123456,
+          startedAt: "2026-09-21T10:00:00.000Z",
+        })
+      );
+    });
+    const port = await new Promise<number>((resolve) => {
+      holder.listen(0, "127.0.0.1", () => resolve((holder.address() as AddressInfo).port));
+    });
+
+    try {
+      const key = recordGhost("impostor", port, 999999);
+      const res = await mutate(
+        srv.port,
+        "POST",
+        `/api/daemons/${encodeURIComponent(key)}/stop`,
+        {}
+      );
+      assert.equal(res.status, 200);
+      const report = (await res.json()) as { outcome: string; reason: string };
+      assert.equal(report.outcome, "unresolved");
+      assert.match(report.reason, /held by pid 123456, not the recorded pid 999999/u);
+      assert.match(report.reason, /nothing was signalled/u);
+    } finally {
+      holder.closeAllConnections();
+      await new Promise<void>((resolve) => holder.close(() => resolve()));
+    }
+  });
+
+  it("404s an unknown project key and never joins it onto a path", async () => {
+    for (const key of ["no-such-project", "..", "../.."]) {
+      const res = await mutate(
+        srv.port,
+        "POST",
+        `/api/daemons/${encodeURIComponent(key)}/stop`,
+        {}
+      );
+      assert.equal(res.status, 404, `key ${key} must resolve to no project`);
+    }
   });
 });
 

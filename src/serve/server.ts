@@ -89,7 +89,7 @@ import {
 } from "../runtime/stepLog.js";
 import { readHidden, setHidden } from "../runtime/visibility.js";
 import { resolveArtifactInputs } from "./artifactInputs.js";
-import { listDaemons } from "./daemons.js";
+import { listDaemons, stateDirForKey } from "./daemons.js";
 
 import {
   BODY_LIMIT_DEFAULT,
@@ -103,6 +103,7 @@ import {
   safePath,
 } from "./route-helpers.js";
 import { CONTENT_CAP, handleContentRoutes } from "./routes/content.js";
+import { stopProjectDaemon } from "./stop.js";
 import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
 import type { Role } from "../canon/types.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
@@ -162,6 +163,8 @@ const STATIC_MODULES: ReadonlyMap<string, string> = new Map([
   ["/ui-tables.js", "ui-tables.js"],
   ["/ui-providers.js", "ui-providers.js"],
 ]);
+
+const RE_DAEMON_STOP = /^\/api\/daemons\/([^/]+)\/stop$/u;
 
 const RE_EXPORT = /^\/api\/export\/([^/]+)$/u;
 
@@ -1070,6 +1073,25 @@ async function handleRequest(
       self: { pid: process.pid, projectDir: ctx.projectDir },
     });
     json(res, 200, { daemons });
+    return;
+  }
+
+  // POST /api/daemons/:projectKey/stop — the page's Stop button (spec 042 FR-003,
+  // D4, D8). No new kill mechanism: this delegates to `stopProjectDaemon`, which
+  // re-runs the identity handshake before it signals anything, so a record that
+  // went stale between the page's last read and this click is refused here too.
+  // The StopReport is returned verbatim; the page renders its outcome and never
+  // retries on its own.
+  const daemonStopMatch = RE_DAEMON_STOP.exec(pathname);
+  if (method === "POST" && daemonStopMatch) {
+    const key = decodeURIComponent(daemonStopMatch[1]);
+    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+    const stateDir = stateDirForKey(stateRootOf(ctx.state), key);
+    if (stateDir === undefined) {
+      json(res, 404, { error: `No project state directory named "${key}"` });
+      return;
+    }
+    json(res, 200, await stopProjectDaemon(stateDir));
     return;
   }
 
