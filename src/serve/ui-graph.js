@@ -33,6 +33,53 @@ export const COL_GAP = 48;
 export const ROW_GAP = 16;
 const MARGIN = 12;
 
+/** The arrowhead every edge ends in, so direction is readable without tracing. */
+const ARROW_DEFS =
+  '<defs><marker id="af-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" ' +
+  'markerHeight="6" orient="auto-start-reverse">' +
+  '<path class="edge-head" d="M0 1 L7 4 L0 7 z" /></marker></defs>';
+
+/** How far apart two edges sharing a gutter or a lane run from each other. */
+const LANE = 5;
+
+/**
+ * The path one edge takes, as right angles rather than a diagonal.
+ *
+ * A straight line between two boxes on different rows crosses the column gap at
+ * an angle, and over a two-column span it crosses whatever box sits between —
+ * which is how the diagram came to read as a spray of crossing lines.
+ *
+ * Two routes, because one is not enough. An edge to the NEXT column turns once
+ * in the gutter before its target, which is always empty. An edge spanning more
+ * than one column cannot be routed between the boxes at all: every horizontal
+ * lane at box height is occupied by the columns it skips. It drops into a lane
+ * BELOW the diagram, runs across there, and climbs into its target's gutter.
+ *
+ * @param {{ x: number, y: number }} from Top-left of the source box.
+ * @param {{ x: number, y: number }} to Top-left of the target box.
+ * @param {number} lane Index among the edges arriving at this target.
+ * @param {number} [laneY] Y of the free lane below the boxes, for long spans.
+ * @returns {string} An SVG path `d`.
+ */
+export function edgePath(from, to, lane = 0, laneY) {
+  const sx = from.x + BOX_W;
+  const sy = from.y + BOX_H / 2;
+  const ex = to.x;
+  const ey = to.y + BOX_H / 2;
+  const fan = (lane - 0.5) * LANE;
+  const turn = ex - COL_GAP / 2 + fan;
+
+  if (sy === ey) return `M${sx} ${sy} H${ex}`;
+
+  // One column apart: the gutter before the target is the only gap needed.
+  const spansOneColumn = ex - sx <= COL_GAP + 1;
+  if (spansOneColumn || laneY === undefined) return `M${sx} ${sy} H${turn} V${ey} H${ex}`;
+
+  // Further: out into our own gutter, down under everything, across, and up.
+  const out = sx + COL_GAP / 2 + fan;
+  return `M${sx} ${sy} H${out} V${laneY} H${turn} V${ey} H${ex}`;
+}
+
 /** Steps reachable by following dependsOn edges forward from the roots. */
 function reachableIds(ids, edges) {
   const hasIncoming = new Set();
@@ -102,7 +149,17 @@ export function renderLevelsSvg(levels, graph, opts) {
 
   const rows = cols.reduce((max, level) => Math.max(max, level.length), 0);
   const width = cols.length * (BOX_W + COL_GAP) + 2 * MARGIN;
-  const height = Math.max(1, rows) * (BOX_H + ROW_GAP) + 2 * MARGIN;
+  const boxesBottom = MARGIN + Math.max(1, rows) * (BOX_H + ROW_GAP) - ROW_GAP;
+
+  // An edge spanning more than one column has to pass under the boxes; the lane
+  // it uses only exists if the picture is tall enough to hold it.
+  const longEdges = edges.filter((e) => {
+    const from = pos.get(e.from);
+    const to = pos.get(e.to);
+    return from !== undefined && to !== undefined && to.x - (from.x + BOX_W) > COL_GAP + 1;
+  }).length;
+  const laneY = longEdges > 0 ? boxesBottom + LANE * 2 : undefined;
+  const height = (laneY === undefined ? boxesBottom : laneY + longEdges * LANE) + MARGIN;
 
   const allIds = cols.flat();
   const reachable = reachableIds(allIds, edges);
@@ -110,13 +167,16 @@ export function renderLevelsSvg(levels, graph, opts) {
   let body = "";
 
   // Edges first so a box always paints over the line that ends under it.
+  // Several edges arriving at one box would otherwise share a vertical segment
+  // and read as a single thick line, so each gets its own lane in the gutter.
+  const laneByTarget = new Map();
   for (const e of edges) {
     const from = pos.get(e.from);
     const to = pos.get(e.to);
     if (!from || !to) continue;
-    body +=
-      `<line class="edge" x1="${from.x + BOX_W}" y1="${from.y + BOX_H / 2}" ` +
-      `x2="${to.x}" y2="${to.y + BOX_H / 2}" />`;
+    const lane = laneByTarget.get(e.to) ?? 0;
+    laneByTarget.set(e.to, lane + 1);
+    body += `<path class="edge" d="${edgePath(from, to, lane, laneY)}" marker-end="url(#af-arrow)" />`;
   }
 
   for (const id of allIds) {
@@ -144,6 +204,8 @@ export function renderLevelsSvg(levels, graph, opts) {
 
   return (
     `<svg class="levels" width="${width}" height="${height}" ` +
-    `viewBox="0 0 ${width} ${height}" role="img" aria-label="pipeline diagram">${body}</svg>`
+    `viewBox="0 0 ${width} ${height}" role="img" aria-label="pipeline diagram">` +
+    ARROW_DEFS +
+    `${body}</svg>`
   );
 }

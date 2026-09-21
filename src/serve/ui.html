@@ -688,9 +688,17 @@
         font-size: 10px;
         fill: var(--muted);
       }
+      /* Edges carry the structure, so they read a step above the box borders —
+         and a path, unlike a line, fills unless told not to. */
       .levels .edge {
-        stroke: var(--line);
+        fill: none;
+        stroke: var(--muted);
         stroke-width: 1;
+        stroke-linejoin: round;
+      }
+      .levels .edge-head {
+        fill: var(--muted);
+        stroke: none;
       }
       /* Dialogs (037 D3/D4): a bordered panel, no decorative chrome. */
       dialog {

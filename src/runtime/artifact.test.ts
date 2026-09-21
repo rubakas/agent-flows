@@ -1165,6 +1165,9 @@ describe("listPersistedRuns / readPersistedRun — runs survive the daemon", () 
         status: "succeeded",
         createdAt: "2026-09-13T10:00:00.000Z",
         settledAt: "2026-09-13T10:06:12.000Z",
+        // Derived from the artifact's own invocation (042 D14), so a restored
+        // run names what it was started against just as a live one does.
+        subject: "ship it",
         source: "disk",
       });
 

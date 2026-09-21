@@ -171,6 +171,21 @@ view; the separate `View` button beside it is removed, having said the same thin
 duplication the owner named when he called the interface "дубльований". An anchor rather than a click
 handler, so it answers the keyboard and middle-click like every other link.
 
+**D16 — Diagram edges are routed, not drawn straight.** (Owner, 2026-09-22: "лініі які зєднують блоки
+погані".) A straight line between two boxes crossed the column gap at an angle, and over a two-column
+span it crossed whatever box sat between — the diagram read as a spray. Edges now leave horizontally,
+turn at right angles and arrive horizontally, with an arrowhead so direction needs no tracing. Two
+routes: to the next column, one turn in the gutter before the target, which is always empty; further
+than that, down into a lane BELOW the boxes, across, and up — because every horizontal lane at box
+height belongs to the columns being skipped. Edges arriving at one box are fanned apart so they do not
+read as a single thick line.
+
+**The first fix was wrong in a way the first test could not see.** It routed right angles but still ran
+a long edge horizontally at box height, straight through the box it skipped; the test checked only the
+vertical segment. The test now decomposes every path and checks EVERY segment against EVERY box, which
+is the property that was meant all along. Generalise: a geometric guarantee needs a geometric test, not
+a test of the one segment the author happened to think about.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via

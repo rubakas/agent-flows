@@ -14,6 +14,13 @@ export declare const BOX_H: number;
 export declare const COL_GAP: number;
 export declare const ROW_GAP: number;
 
+/** The right-angle path one edge takes between two boxes (spec 042 D16). */
+export declare function edgePath(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  lane?: number
+): string;
+
 export declare function renderLevelsSvg(
   levels: readonly (readonly string[])[],
   graph: { nodes?: { id: string }[]; edges?: { from: string; to: string }[] } | null | undefined,

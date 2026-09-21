@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { pipelineLevels, pipelineToGraph } from "../canon/graph.js";
-import { BOX_W, COL_GAP, renderLevelsSvg } from "./ui-graph.js";
+import { BOX_W, COL_GAP, edgePath, renderLevelsSvg } from "./ui-graph.js";
 
 const STEPS = [
   { id: "intake", kind: "llm", role: "scout" },
@@ -25,13 +25,97 @@ function render(steps: typeof STEPS): string {
 const count = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
 
 describe("renderLevelsSvg — nodes and edges (FR-007)", () => {
-  it("renders one box per step and one line per dependsOn edge", () => {
+  it("renders one box per step and one edge per dependsOn entry", () => {
     const svg = render(STEPS);
     assert.equal(count(svg, "<rect"), STEPS.length, "one rect per step");
-    assert.equal(count(svg, "<line"), 3, "one line per dependsOn entry");
+    assert.equal(count(svg, '<path class="edge"'), 3, "one edge per dependsOn entry");
+    assert.equal(count(svg, "<line"), 0, "edges are routed paths, not diagonals");
     for (const s of STEPS) {
       assert.ok(svg.includes(`data-step="${s.id}"`), `step ${s.id} must carry a data-step hook`);
     }
+  });
+
+  // The diagram once drew every edge as a straight line between box edges, so a
+  // cross-row edge crossed the column gap at an angle and a two-column one
+  // crossed whatever box sat between. The first fix routed right angles but
+  // still ran a long edge horizontally at box height, straight through the box
+  // it skipped — checking only the vertical segment had missed it. This checks
+  // EVERY segment against EVERY box, which is the property that actually
+  // matters.
+  function segmentsOf(d: string): { x1: number; y1: number; x2: number; y2: number }[] {
+    const out: { x1: number; y1: number; x2: number; y2: number }[] = [];
+    let x = 0;
+    let y = 0;
+    for (const m of d.matchAll(/([MHV])(-?[\d.]+)(?: (-?[\d.]+))?/gu)) {
+      const [, cmd, a, b] = m;
+      const px = x;
+      const py = y;
+      if (cmd === "M") {
+        x = Number(a);
+        y = Number(b);
+        continue;
+      }
+      if (cmd === "H") x = Number(a);
+      else y = Number(a);
+      out.push({ x1: px, y1: py, x2: x, y2: y });
+    }
+    return out;
+  }
+
+  function crossesBox(
+    seg: { x1: number; y1: number; x2: number; y2: number },
+    box: { x: number; y: number; w: number; h: number }
+  ): boolean {
+    const [lo, hi] = [Math.min(seg.x1, seg.x2), Math.max(seg.x1, seg.x2)];
+    const [top, bot] = [Math.min(seg.y1, seg.y2), Math.max(seg.y1, seg.y2)];
+    // Touching an edge is how an arrow arrives; overlapping the interior is the bug.
+    return hi > box.x && lo < box.x + box.w && bot > box.y && top < box.y + box.h;
+  }
+
+  it("no edge segment ever passes through a box", () => {
+    const svg = render(STEPS);
+    const boxes = [
+      ...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"/gu),
+    ].map((m) => ({ x: +m[1], y: +m[2], w: +m[3], h: +m[4] }));
+    const paths = [...svg.matchAll(/<path class="edge" d="([^"]+)"/gu)].map((m) => m[1]);
+    assert.ok(boxes.length > 0 && paths.length > 0, "the fixture must produce boxes and edges");
+    for (const d of paths) {
+      for (const seg of segmentsOf(d)) {
+        for (const box of boxes) {
+          assert.ok(
+            !crossesBox(seg, box),
+            `segment ${JSON.stringify(seg)} of "${d}" runs through box ${JSON.stringify(box)}`
+          );
+        }
+      }
+    }
+  });
+
+  it("routes a same-row edge as one horizontal segment", () => {
+    assert.equal(edgePath({ x: 12, y: 12 }, { x: 220, y: 12 }), "M172 34 H220");
+  });
+
+  it("turns inside the gutter before the target for a next-column edge", () => {
+    const d = edgePath({ x: 12, y: 12 }, { x: 220, y: 72 });
+    const turn = Number(/H(-?[\d.]+) V/u.exec(d)?.[1]);
+    assert.ok(turn > 220 - COL_GAP && turn < 220, `the turn must sit in the gutter: ${d}`);
+  });
+
+  it("drops a longer span into the lane below, never across the column it skips", () => {
+    const d = edgePath({ x: 12, y: 72 }, { x: 428, y: 12 }, 0, 160);
+    assert.ok(d.includes("V160"), `a two-column edge must use the lane: ${d}`);
+  });
+
+  it("gives edges arriving at one box their own lane", () => {
+    const a = edgePath({ x: 12, y: 12 }, { x: 220, y: 72 }, 0);
+    const b = edgePath({ x: 12, y: 12 }, { x: 220, y: 72 }, 1);
+    assert.notEqual(a, b, "two edges sharing a turn point read as one thick line");
+  });
+
+  it("every edge ends in an arrowhead, so direction needs no tracing", () => {
+    const svg = render(STEPS);
+    assert.equal(count(svg, 'marker-end="url(#af-arrow)"'), 3);
+    assert.ok(svg.includes('<marker id="af-arrow"'), "the marker must be defined once");
   });
 
   it("puts each level in its own column, left to right", () => {
