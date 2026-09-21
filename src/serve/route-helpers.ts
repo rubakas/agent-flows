@@ -6,6 +6,10 @@
 import type { RunService } from "../runtime/runService.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+// Body size limit for readBody() shared by every mutating route except
+// /api/import, whose larger YAML-bundle limit stays with that route.
+export const BODY_LIMIT_DEFAULT = 65_536; // 64 KB — all mutating routes except /api/import
+
 // Safe pipeline/template/run id: lowercase alphanumeric and hyphens, must start with a letter or digit.
 // Prohibits dot, slash, backslash, space — blocks all path-traversal attempts.
 const RE_SAFE_ID = /^[a-z0-9][a-z0-9-]*$/u;

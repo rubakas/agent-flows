@@ -24,20 +24,14 @@ import {
   type ServerResponse,
 } from "node:http";
 import { homedir } from "node:os";
-import { basename, dirname, join, normalize, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parse, stringify } from "yaml";
 
 import { createDynamicMastra } from "../bindings/mastra/dynamicMastra.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
-import {
-  exportBundle,
-  importBundle,
-  parseBundle,
-  stringifyBundle,
-  type WorkflowBundle,
-} from "../bundle/bundle.js";
+import { exportBundle, importBundle, parseBundle, stringifyBundle } from "../bundle/bundle.js";
 import { assertSafePath } from "../bundle/paths.js";
 import { hashContent, saveDraft } from "../canon/canonWriter.js";
 import {
@@ -99,11 +93,10 @@ import { readHidden, setHidden } from "../runtime/visibility.js";
 import { resolveArtifactInputs } from "./artifactInputs.js";
 
 import {
+  BODY_LIMIT_DEFAULT,
   isSafeId,
   json,
-  parseJsonBody,
   readAndDiscardBody,
-  readBody,
   requireJsonBody,
   requireRunService,
   requireSafeId,
@@ -111,6 +104,7 @@ import {
   safePath,
 } from "./route-helpers.js";
 import { CONTENT_CAP, handleNamedContent } from "./routes/content.js";
+import { handleTemplateRoutes } from "./routes/templates.js";
 import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
 import type { Role } from "../canon/types.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
@@ -175,11 +169,9 @@ const STATIC_MODULES: ReadonlyMap<string, string> = new Map([
 const RE_SKILL_CONTENT = /^\/api\/skills\/([^/]+)$/u;
 const RE_AGENT_CONTENT = /^\/api\/agents\/([^/]+)$/u;
 const RE_EXPORT = /^\/api\/export\/([^/]+)$/u;
-const RE_TEMPLATE_DETAIL = /^\/api\/templates\/([^/]+)$/u;
-const RE_TEMPLATE_INSTALL = /^\/api\/templates\/([^/]+)\/install$/u;
 
-// Body size limits for readBody().
-const BODY_LIMIT_DEFAULT = 65_536; // 64 KB — all mutating routes except /api/import
+// Body size limits for readBody(). BODY_LIMIT_DEFAULT now lives in
+// route-helpers.ts so the extracted route modules can share it.
 const BODY_LIMIT_IMPORT = 4 * 1024 * 1024; // 4 MB — /api/import carries a YAML bundle
 // 1 MiB — /api/drafts/:id/preview carries one YAML body plus every edited
 // prompt text in a single payload, which overruns the 64 KB default (FR-004).
@@ -240,43 +232,6 @@ function findPipelineById(pipelinesDir: string, id: string): PipelineEntry | und
     }
   }
   return undefined;
-}
-
-/**
- * The literal command of every `check` step a bundle would install (spec 037
- * D4). The template preview shows these before Install, so accepting a bundle
- * from elsewhere is never a blind trust decision.
- *
- * Best-effort by design: a pipeline entry that does not parse contributes no
- * commands rather than failing the preview — `importBundle` is the check that
- * refuses it at write time.
- */
-function bundleCheckCommands(
-  bundle: WorkflowBundle
-): { pipeline: string; stepId: string; command: string }[] {
-  const checks: { pipeline: string; stepId: string; command: string }[] = [];
-  for (const file of bundle.files) {
-    // Normalised before the prefix test: "prompts/../pipelines/x.yaml" installs as
-    // a pipeline, so a preview reading the raw path would hide its check commands.
-    if (!normalize(file.path).startsWith("pipelines/")) continue;
-    let raw: unknown;
-    try {
-      raw = parse(file.content);
-    } catch {
-      continue;
-    }
-    const doc = raw as { id?: unknown; steps?: unknown };
-    if (!Array.isArray(doc?.steps)) continue;
-    for (const step of doc.steps as { id?: unknown; kind?: unknown; command?: unknown }[]) {
-      if (step?.kind !== "check" || typeof step.command !== "string") continue;
-      checks.push({
-        pipeline: typeof doc.id === "string" ? doc.id : file.path,
-        stepId: typeof step.id === "string" ? step.id : "",
-        command: step.command,
-      });
-    }
-  }
-  return checks;
 }
 
 /**
@@ -1002,46 +957,6 @@ async function refuseBundled(
   await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
   json(res, 403, { error: message });
   return true;
-}
-
-// ── Template file resolution ─────────────────────────────────────────────────
-
-/**
- * Validates a template id and maps it to its file under ctx.templatesBase.
- * Writes the 400 response and returns undefined when the id is unsafe or
- * would escape the templates directory. Does not check existence.
- */
-function resolveTemplatePath(
-  ctx: HandlerCtx,
-  tId: string,
-  res: ServerResponse
-): string | undefined {
-  if (!requireSafeId(tId, "Template", res)) return undefined;
-  try {
-    assertSafePath(ctx.templatesBase, `${tId}.yaml`);
-  } catch {
-    json(res, 400, { error: `Template id "${tId}" would escape the templates directory` });
-    return undefined;
-  }
-  return join(ctx.templatesBase, `${tId}.yaml`);
-}
-
-/**
- * resolveTemplatePath plus the existence check, for routes that read the
- * template file straight away. Writes 400 or 404 and returns undefined.
- */
-function resolveTemplateFile(
-  ctx: HandlerCtx,
-  tId: string,
-  res: ServerResponse
-): string | undefined {
-  const templatePath = resolveTemplatePath(ctx, tId, res);
-  if (templatePath === undefined) return undefined;
-  if (!existsSync(templatePath)) {
-    json(res, 404, { error: `Template "${tId}" not found` });
-    return undefined;
-  }
-  return templatePath;
 }
 
 // ── Run lookup ───────────────────────────────────────────────────────────────
@@ -2491,88 +2406,7 @@ async function handleRequest(
 
   // ── Template routes (FR-002) ───────────────────────────────────────────────
 
-  // GET /api/templates — list all templates in the global store
-  if (method === "GET" && pathname === "/api/templates") {
-    const templates: { templateId: string; sourcePipeline: string; exportedAt: string }[] = [];
-    const errors: string[] = [];
-    if (existsSync(ctx.templatesBase)) {
-      for (const f of readdirSync(ctx.templatesBase).sort()) {
-        if (!f.endsWith(".yaml") && !f.endsWith(".yml")) continue;
-        const templateId = f.replace(/\.ya?ml$/u, "");
-        const filePath = join(ctx.templatesBase, f);
-        try {
-          const bundle = parseBundle(readFileSync(filePath, "utf8"));
-          templates.push({
-            templateId,
-            sourcePipeline: bundle.sourcePipeline,
-            exportedAt: bundle.exportedAt,
-          });
-        } catch (err) {
-          errors.push(`${f}: ${(err as Error).message}`);
-        }
-      }
-    }
-    json(res, 200, { templates, ...(errors.length > 0 ? { errors } : {}) });
-    return;
-  }
-
-  // GET /api/templates/:id — get template details
-  const templateDetailMatch = RE_TEMPLATE_DETAIL.exec(pathname);
-  if (method === "GET" && templateDetailMatch) {
-    const tId = decodeURIComponent(templateDetailMatch[1]);
-    const templatePath = resolveTemplateFile(ctx, tId, res);
-    if (templatePath === undefined) return;
-    try {
-      const bundle = parseBundle(readFileSync(templatePath, "utf8"));
-      json(res, 200, {
-        templateId: tId,
-        sourcePipeline: bundle.sourcePipeline,
-        exportedAt: bundle.exportedAt,
-        files: bundle.files.map((f) => f.path),
-        checks: bundleCheckCommands(bundle),
-      });
-    } catch (err) {
-      json(res, 422, { error: `Template "${tId}" is invalid: ${(err as Error).message}` });
-    }
-    return;
-  }
-
-  // DELETE /api/templates/:id
-  if (method === "DELETE" && templateDetailMatch) {
-    const tId = decodeURIComponent(templateDetailMatch[1]);
-    const templatePath = resolveTemplatePath(ctx, tId, res);
-    if (templatePath === undefined) return;
-    await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
-    if (!existsSync(templatePath)) {
-      json(res, 404, { error: `Template "${tId}" not found` });
-      return;
-    }
-    rmSync(templatePath);
-    json(res, 200, { ok: true, id: tId });
-    return;
-  }
-
-  // POST /api/templates/:id/install — install a template into the project (FR-002)
-  const templateInstallMatch = RE_TEMPLATE_INSTALL.exec(pathname);
-  if (method === "POST" && templateInstallMatch) {
-    const tId = decodeURIComponent(templateInstallMatch[1]);
-    const templatePath = resolveTemplateFile(ctx, tId, res);
-    if (templatePath === undefined) return;
-    // Deliberately lenient: an unparseable body falls back to overwrite:false
-    // rather than 400 — this route only ever reads one optional boolean field,
-    // so readJsonBody's stricter "malformed body" rejection is not used here.
-    const bodyRaw = await readBody(req, BODY_LIMIT_DEFAULT);
-    const bodyParsed = parseJsonBody(bodyRaw);
-    const doOverwrite = bodyParsed.ok && bodyParsed.value.overwrite === true;
-    try {
-      const bundle = parseBundle(readFileSync(templatePath, "utf8"));
-      const report = importBundle(bundle, repoCanonRoot(ctx.projectDir), doOverwrite);
-      json(res, 200, report);
-    } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, root) });
-    }
-    return;
-  }
+  if (await handleTemplateRoutes(req, res, ctx, method, pathname)) return;
 
   json(res, 404, { error: `Not found: ${method} ${pathname}` });
 }
