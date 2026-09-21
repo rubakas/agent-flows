@@ -1811,6 +1811,11 @@ describe("runLlmStep — per-step deny patterns", () => {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
+      // An empty env keeps operatorDenyRules() out of the capture. Without it the
+      // machine's own ~/.claude/settings.json contributes entries, and an operator
+      // who denies `Read(**/*.pem)` makes the narrowing-only assertions below pass
+      // no matter what the flag builder does.
+      env: {},
       ...extraDeps,
     });
     return disallowed;

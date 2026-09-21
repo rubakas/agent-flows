@@ -10,20 +10,31 @@
 // inside the fake runner, letting CANNED_RESPONSES key by step id cleanly.
 
 import assert from "node:assert/strict";
-import { existsSync, unlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
+import { CREDENTIAL_DENY_PATTERNS } from "../../canon/denyPatterns.js";
 import { loadPipeline } from "../../canon/load.js";
 import { ModelRegistry } from "../../canon/registry.js";
+import { makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
 import { makeInMemoryDb } from "../../db/index.js";
 import { bundledPipelinesDir } from "../../packageRoot.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
 import { mastraDbPath } from "./paths.js";
+import type { SpawnFn } from "../../canon/runClaudeCli.js";
 import type { StepRunnerDeps, runLlmStep } from "../../canon/runStep.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 
@@ -615,6 +626,125 @@ describe("buildLlmStep — forwards denyPatterns to runner deps", () => {
       );
     } finally {
       cleanup();
+    }
+  });
+});
+
+// ── deny, end to end: YAML on disk → spawned claude argv ──────────────────────
+//
+// The links are each pinned elsewhere — the loader parses `deny` (canon.test.ts),
+// the binding forwards it (above), the flag builder emits it (runStep.test.ts) —
+// but nothing crossed all three in one artifact, so the seams were unguarded. The
+// `hasContentsAccess` gate in buildSteps.ts is one such seam: a step's declared
+// deny evaporates there with every individual test still green. This test runs the
+// real runLlmStep against a fake spawn and reads the argv the CLI would receive.
+
+describe("permissions.deny end to end — a glob declared in YAML reaches --disallowedTools", () => {
+  /** Writes a one-step pipeline plus its prompt in the layout loadPipeline expects. */
+  function writePipelineFixture(deny: string[]): { yamlPath: string; root: string } {
+    // realpath: macOS tmpdir is a symlink, and loadPipeline rejects a prompt path
+    // that resolves outside the pipeline root through one.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-deny-e2e-")));
+    mkdirSync(join(root, "pipelines"), { recursive: true });
+    mkdirSync(join(root, "prompts"), { recursive: true });
+    writeFileSync(join(root, "prompts", "survey.md"), "Analyze: {{request}}\n");
+    writeFileSync(
+      join(root, "pipelines", "deny-e2e.yaml"),
+      [
+        "id: deny-e2e",
+        "version: 1",
+        "description: deny end-to-end fixture",
+        "inputs:",
+        "  - request",
+        "steps:",
+        "  - id: survey",
+        "    kind: llm",
+        "    model: survey",
+        "    permissions:",
+        "      contents: read",
+        "      deny:",
+        // Quoted: a bare glob starting with `*` parses as a YAML alias.
+        ...deny.map((glob) => `        - ${JSON.stringify(glob)}`),
+        "    prompt: prompts/survey.md",
+        "",
+      ].join("\n")
+    );
+    return { yamlPath: join(root, "pipelines", "deny-e2e.yaml"), root };
+  }
+
+  /** Runs the fixture through the real runLlmStep and returns the captured argv. */
+  async function captureArgv(deny: string[], suffix: string): Promise<string[]> {
+    const { yamlPath, root } = writePipelineFixture(deny);
+    const pipeline = loadPipeline(yamlPath);
+    assert.deepEqual(
+      pipeline.def.steps[0]?.permissions?.deny,
+      deny,
+      "the loader must carry permissions.deny off the YAML"
+    );
+
+    let argv: string[] = [];
+    const spawn = ((_cmd: string, args: string[]) => {
+      argv = args;
+      return makeStreamJsonChild("ok").child;
+    }) as unknown as SpawnFn;
+
+    const { storage, store, cleanup } = makeTestFixture(suffix);
+    try {
+      const wf = buildPipelineWorkflow(pipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        cwd: root,
+        // An empty env keeps the machine's own ~/.claude/settings.json deny rules
+        // out of the capture.
+        runnerDeps: { spawn, env: {} },
+      });
+      const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+      const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+      await run.start({ inputData: { request: "test" } });
+    } finally {
+      cleanup();
+      rmSync(root, { recursive: true, force: true });
+    }
+
+    assert.ok(argv.length > 0, "the claude CLI was never spawned");
+    return argv;
+  }
+
+  /** The value of --disallowedTools in a captured argv. */
+  function disallowedOf(argv: string[]): string {
+    const idx = argv.indexOf("--disallowedTools");
+    assert.notEqual(idx, -1, "the step must emit --disallowedTools");
+    return argv[idx + 1] ?? "";
+  }
+
+  it("emits the declared glob as Read, Grep and Edit denials alongside the project floor", async () => {
+    const glob = "ops/runbooks/**";
+    const argv = await captureArgv([glob], "deny-e2e");
+    const disallowed = disallowedOf(argv);
+
+    for (const tool of ["Read", "Grep", "Edit"]) {
+      assert.ok(
+        disallowed.includes(`${tool}(${glob})`),
+        `the YAML-declared glob must reach the argv as ${tool}(${glob}); got: ${disallowed.slice(0, 300)}`
+      );
+    }
+    for (const pattern of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        disallowed.includes(`Read(${pattern})`),
+        `the project floor must survive a step deny: Read(${pattern}) is missing`
+      );
+    }
+  });
+
+  // D5/FR-009: deny narrows only. A step naming a floor pattern must not be able to
+  // turn that pattern into a grant.
+  it("a declared glob that names a floor pattern cannot remove it", async () => {
+    const disallowed = disallowedOf(await captureArgv(["**/*.pem"], "deny-e2e-floor"));
+    for (const pattern of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        disallowed.includes(`Read(${pattern})`),
+        `Read(${pattern}) must remain regardless of what the step declares`
+      );
     }
   });
 });

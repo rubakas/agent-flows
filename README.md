@@ -80,6 +80,30 @@ agent-flows fork cycle-dev --to repo
 
 `fork` copies exactly that workflow's own YAML and prompt files — not the other workflows it mounts, since those keep resolving across layers — into the target layer, and refuses to overwrite an existing copy unless you pass `--overwrite`. The installed package itself is never a write target.
 
+Forking is also how you deny a step paths the shipped credential floor does not know about. The floor (`.env*`, key material, `.ssh/**`, cloud credential directories — see `src/canon/denyPatterns.ts`) is applied to every step whatever the pipeline says. A project's own sensitive paths are not in it, so you name them on the step:
+
+```sh
+agent-flows fork code-review --to repo
+```
+
+```yaml
+# .agent-flows/pipelines/code-review.yaml
+- id: security
+  kind: llm
+  role: worker
+  permissions:
+    contents: read
+    deny:
+      - "ops/runbooks/**" # on-call runbooks quote live hostnames and rotation steps
+      - "db/seeds/production_sample.sql" # a real customer row set, copied for local debugging
+  dependsOn: [radius]
+  prompt: prompts/code-review-security.md
+```
+
+`deny` takes plain path globs, never vendor rule strings like `Read(...)`, and it requires `contents` — a deny list on a step with no file access is a silent no-op and is rejected at load time. It only ever narrows: a glob here cannot re-open anything the project floor denies. Enforcement, not advice — under the claude CLI the globs are emitted as `Read`/`Grep`/`Edit` denials, under codex the matching files are left out of the sanitized copy the step runs against, and a step declaring `deny` on a transport that can enforce neither is refused before it is dispatched rather than run with a warning.
+
+One caveat worth knowing before you add a glob: a denied `Grep`/`Glob` returns "no matches" rather than "denied", so a step cannot tell a hidden file from an absent one. Deny paths the step has no business reading, not paths it needs to reason about.
+
 To declutter the chat listing without deleting or disabling anything:
 
 ```sh
