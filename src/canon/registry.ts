@@ -174,6 +174,22 @@ export function getActiveProfile(
 }
 
 /**
+ * The active profile's id, or "unknown" when no profile can be resolved.
+ * Callers that only record provenance must not fail because the provider
+ * configuration is unreadable.
+ */
+export function activeProfileIdOrUnknown(
+  env: NodeJS.ProcessEnv = process.env,
+  config?: ProviderConfig
+): string {
+  try {
+    return getActiveProfile(env, config).id;
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
  * Resolves a step to its ModelEntry via role indirection or explicit model id.
  * - step.model present → registry passthrough (explicit override wins).
  * - step.role present → profile.roles[role] → registry lookup.

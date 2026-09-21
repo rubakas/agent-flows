@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
-import { getActiveProfile, resolveStepModel } from "../canon/registry.js";
+import { activeProfileIdOrUnknown, getActiveProfile, resolveStepModel } from "../canon/registry.js";
 import { runLlmStep } from "../canon/runStep.js";
 import {
   writeRunArtifact,
@@ -1417,11 +1417,7 @@ export class RunService {
   private getProfileId(record?: RunRecord): string {
     const profile = record?.profile ?? this.judgeDeps?.profile ?? this.standaloneProfile;
     if (profile) return profile.id;
-    try {
-      return getActiveProfile().id;
-    } catch {
-      return "unknown";
-    }
+    return activeProfileIdOrUnknown();
   }
 
   /**

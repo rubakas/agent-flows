@@ -73,7 +73,7 @@ import {
 import {
   builtInProfileIds,
   defaultRegistry,
-  getActiveProfile,
+  activeProfileIdOrUnknown,
   getProfile,
 } from "../canon/registry.js";
 import { makeDb, type DbInstance } from "../db/index.js";
@@ -2085,12 +2085,7 @@ async function handleRequest(
         typeof artifactProvenance?.profileId === "string"
           ? artifactProvenance.profileId
           : undefined;
-      let currentProfileId: string;
-      try {
-        currentProfileId = getActiveProfile().id;
-      } catch {
-        currentProfileId = "unknown";
-      }
+      const currentProfileId = activeProfileIdOrUnknown();
       if (artifactProfileId !== undefined && artifactProfileId !== currentProfileId) {
         console.log(
           `[agent-flows] stage handoff: artifact produced by profile "${artifactProfileId}", ` +
@@ -2533,12 +2528,7 @@ async function handleRequest(
     // spec 034 D6: the Settings view reports which provider profile is in force.
     // A profile that cannot be resolved is reported as "unknown" rather than
     // failing the whole environment response.
-    let profile: string;
-    try {
-      profile = getActiveProfile().id;
-    } catch {
-      profile = "unknown";
-    }
+    const profile = activeProfileIdOrUnknown();
 
     json(res, 200, {
       projectDir: ctx.projectDir,
@@ -2579,12 +2569,7 @@ async function handleRequest(
     }
 
     const { profiles, models } = providerView(config, process.env);
-    let activeProfile: string;
-    try {
-      activeProfile = getActiveProfile(process.env, config).id;
-    } catch {
-      activeProfile = "unknown";
-    }
+    const activeProfile = activeProfileIdOrUnknown(process.env, config);
     // The daemon resolves steps from its startup snapshot, so a file edited
     // since then is on disk but not in force. Reporting the divergence lets the
     // page say so instead of implying a saved change took effect.
