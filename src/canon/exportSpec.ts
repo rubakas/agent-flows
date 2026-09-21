@@ -167,7 +167,10 @@ export function renderSpecKitSpec(spec: HardenedSpec, meta: SpecMeta = {}): stri
     : `**Feature Branch**: ${NC("feature branch not specified")}`;
   const created = meta.created ?? new Date().toISOString().slice(0, 10);
   const status = meta.status ?? "Draft";
-  const input = meta.input ?? NC("original input not recorded");
+  // meta.input is the original request text and wins when the caller has it. When it does
+  // not — every caller that renders a bare HardenedSpec — the spec's own description is the
+  // next best record of what was asked for; only a spec with neither gets the placeholder.
+  const input = meta.input ?? (spec.description || NC("original input not recorded"));
 
   const header = [
     `# Feature Specification: ${spec.title}`,

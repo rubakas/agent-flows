@@ -312,6 +312,46 @@ describe("renderSpecKitSpec — SC ids and NEEDS CLARIFICATION", () => {
   });
 });
 
+// The Input line is the only slot in the rendered spec that can carry the spec's own
+// prose. `meta.input` is the original request text and wins when present; when it is
+// absent the spec's `description` — a required field of HardenedSpec — is the next best
+// record of what was asked for. It was silently dropped before 2026-09-21: every caller
+// that renders a HardenedSpec without meta (src/serve/artifactInputs.ts) produced a
+// NEEDS CLARIFICATION where the description should have been.
+describe("renderSpecKitSpec — Input falls back to the spec description", () => {
+  it("renders spec.description as the Input when meta.input is absent", () => {
+    const md = renderSpecKitSpec(baseSpec, {});
+    assert.ok(
+      md.includes('**Input**: User description: "An auth service feature."'),
+      "the spec's own description must be rendered as the Input"
+    );
+    assert.ok(
+      !md.includes("[NEEDS CLARIFICATION: original input not recorded]"),
+      "NEEDS CLARIFICATION must not appear when the spec carries a description"
+    );
+  });
+
+  it("meta.input still wins over spec.description when both are present", () => {
+    const md = renderSpecKitSpec(baseSpec, { input: "Build auth" });
+    assert.ok(
+      md.includes('**Input**: User description: "Build auth"'),
+      "meta.input must take precedence over the spec description"
+    );
+    assert.ok(
+      !md.includes("An auth service feature."),
+      "the description must not also appear when meta.input is given"
+    );
+  });
+
+  it("emits NEEDS CLARIFICATION when neither meta.input nor a description is present", () => {
+    const md = renderSpecKitSpec({ ...baseSpec, description: "" }, {});
+    assert.ok(
+      md.includes("[NEEDS CLARIFICATION: original input not recorded]"),
+      "the placeholder path must survive for a spec that genuinely records no input"
+    );
+  });
+});
+
 describe("writeSpecKitSpec", () => {
   it("creates the directory and writes spec.md, returning the absolute path", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
