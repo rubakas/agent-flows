@@ -3,7 +3,7 @@
 // DNS-rebinding and simple-form CSRF mitigations. Zero new runtime
 // dependencies — node:http only.
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -39,7 +39,7 @@ import {
   type WorkflowBundle,
 } from "../bundle/bundle.js";
 import { assertSafePath, isContained } from "../bundle/paths.js";
-import { saveDraft } from "../canon/canonWriter.js";
+import { hashContent, saveDraft } from "../canon/canonWriter.js";
 import {
   getDraft,
   getSource,
@@ -1010,10 +1010,6 @@ function readProvidersText(projectDir: string): string | undefined {
   }
 }
 
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
 /**
  * An endpoint stripped of any userinfo component before it leaves the daemon.
  *
@@ -1514,7 +1510,7 @@ async function handleRequest(
       prompts[stepId] = {
         path: relative(ctx.root, target.abs),
         text,
-        hash: createHash("sha256").update(text).digest("hex"),
+        hash: hashContent(text),
       };
     }
     json(res, 200, prompts);
@@ -1569,7 +1565,7 @@ async function handleRequest(
       return;
     }
     const current = readFileSync(target.abs, "utf8");
-    if (createHash("sha256").update(current).digest("hex") !== ifMatch) {
+    if (hashContent(current) !== ifMatch) {
       json(res, 409, {
         ok: false,
         reason: "conflict",
@@ -1604,7 +1600,7 @@ async function handleRequest(
       rmSync(tmpPath, { force: true });
       throw err;
     }
-    json(res, 200, { ok: true, hash: createHash("sha256").update(text).digest("hex") });
+    json(res, 200, { ok: true, hash: hashContent(text) });
     return;
   }
 
@@ -1691,7 +1687,7 @@ async function handleRequest(
     // Consume the (empty) body to satisfy HTTP spec — no useful payload expected.
     await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
     const body = readFileSync(entry.filePath, "utf8");
-    const baseHash = createHash("sha256").update(body).digest("hex");
+    const baseHash = hashContent(body);
     const relPath = relative(root, entry.filePath);
     const sourceId = indexSource(ctx.db, root, relPath, "pipeline", baseHash);
     const draftId = openDraft(ctx.db, sourceId, body, baseHash);
@@ -2599,7 +2595,7 @@ async function handleRequest(
     json(res, 200, {
       path: PROVIDERS_RELATIVE_PATH,
       exists: text !== undefined,
-      hash: text === undefined ? "" : sha256(text),
+      hash: text === undefined ? "" : hashContent(text),
       roles: PROVIDER_ROLE_IDS,
       activeProfile,
       ...(config.defaultProvider !== undefined ? { defaultProvider: config.defaultProvider } : {}),
@@ -2655,7 +2651,7 @@ async function handleRequest(
       });
       return;
     }
-    if ((current === undefined ? "" : sha256(current)) !== ifMatch) {
+    if ((current === undefined ? "" : hashContent(current)) !== ifMatch) {
       json(res, 409, {
         ok: false,
         reason: "conflict",
@@ -2720,7 +2716,7 @@ async function handleRequest(
     // refreshing: a new profile would resolve while the models it names would
     // still be missing from the registry, moving the failure from this boundary
     // into the middle of a run.
-    json(res, 200, { ok: true, hash: sha256(text), restartRequired: true });
+    json(res, 200, { ok: true, hash: hashContent(text), restartRequired: true });
     return;
   }
 
