@@ -18,7 +18,8 @@ export declare const ROW_GAP: number;
 export declare function edgePath(
   from: { x: number; y: number },
   to: { x: number; y: number },
-  lane?: number
+  lane?: number,
+  laneY?: number
 ): string;
 
 export declare function renderLevelsSvg(

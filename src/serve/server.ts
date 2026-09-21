@@ -91,7 +91,6 @@ import {
 import { readHidden, setHidden } from "../runtime/visibility.js";
 import { resolveArtifactInputs } from "./artifactInputs.js";
 import { listDaemons, stateDirForKey } from "./daemons.js";
-import { resolveProxyTarget, splitProxyPath } from "./proxy.js";
 import {
   countInFlight,
   DEFAULT_IDLE_MS,
@@ -99,6 +98,7 @@ import {
   IDLE_MS_ENV,
   shouldExitWhenIdle,
 } from "./idleShutdown.js";
+import { resolveProxyTarget, splitProxyPath } from "./proxy.js";
 
 import {
   BODY_LIMIT_DEFAULT,
