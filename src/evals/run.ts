@@ -35,6 +35,7 @@ import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
 import { buildPipelineWorkflow } from "../bindings/mastra/build.js";
 import { mastraDbPath } from "../bindings/mastra/paths.js";
+import { extractRunError } from "../bindings/mastra/runError.js";
 import { loadPipeline } from "../canon/load.js";
 import { loadProviders } from "../canon/loadProviders.js";
 import { defaultRegistry, getProfile } from "../canon/registry.js";
@@ -214,25 +215,6 @@ if (!fixtureName || !(KNOWN_FIXTURES as readonly string[]).includes(fixtureName)
   console.error(`Usage: tsx src/evals/run.ts <fixture>`);
   console.error(`Available fixtures: ${KNOWN_FIXTURES.join(", ")}`);
   process.exit(1);
-}
-
-// ── Error extraction (mirrors smoke.ts) ──────────────────────────────────────
-
-function extractRunError(runResult: unknown): string {
-  const r = runResult as Record<string, unknown> | undefined;
-  if (!r) return "unknown error";
-  const steps = r.steps as Record<string, Record<string, unknown>> | undefined;
-  if (steps) {
-    for (const [stepId, step] of Object.entries(steps)) {
-      if (step.status === "failed") {
-        const err = step.error as { message?: string } | undefined;
-        return `Step "${stepId}" failed: ${err?.message ?? "unknown error"}`;
-      }
-    }
-  }
-  const errField = r.error as { message?: string } | undefined;
-  if (errField?.message) return errField.message;
-  return "run did not succeed";
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
