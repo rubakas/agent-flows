@@ -104,7 +104,7 @@ import {
   parseJsonBody,
   readAndDiscardBody,
   readBody,
-  readJsonBody,
+  requireJsonBody,
   requireRunService,
   RequestTooLargeError,
   safePath,
@@ -1240,16 +1240,13 @@ async function handleRequest(
   const forkMatch = RE_PIPELINE_FORK.exec(pathname);
   if (method === "POST" && forkMatch) {
     const id = decodeURIComponent(forkMatch[1]);
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
     if (!isSafeId(id)) {
       json(res, 400, { error: `Pipeline id "${id}" is invalid` });
       return;
     }
-    const { to, overwrite } = parsed.value;
+    const { to, overwrite } = parsed;
     if (to !== undefined && to !== "user" && to !== "repo") {
       json(res, 400, { error: 'Field "to" must be "user" or "repo"' });
       return;
@@ -1274,16 +1271,13 @@ async function handleRequest(
   const visibilityMatch = RE_PIPELINE_VISIBILITY.exec(pathname);
   if (method === "POST" && visibilityMatch) {
     const id = decodeURIComponent(visibilityMatch[1]);
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
     if (!isSafeId(id)) {
       json(res, 400, { error: `Pipeline id "${id}" is invalid` });
       return;
     }
-    const { hidden } = parsed.value;
+    const { hidden } = parsed;
     if (typeof hidden !== "boolean") {
       json(res, 400, { error: 'Field "hidden" must be a boolean' });
       return;
@@ -1294,12 +1288,9 @@ async function handleRequest(
 
   // POST /api/pipelines — create a new pipeline in the project canon directory
   if (method === "POST" && pathname === "/api/pipelines") {
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { id, description } = parsed.value;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { id, description } = parsed;
     if (typeof id !== "string" || !isSafeId(id)) {
       json(res, 400, {
         error:
@@ -1346,12 +1337,9 @@ async function handleRequest(
       json(res, 400, { error: `Pipeline id "${id}" is invalid` });
       return;
     }
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { templateId, overwrite } = parsed.value;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { templateId, overwrite } = parsed;
     if (templateId !== undefined && typeof templateId !== "string") {
       json(res, 400, { error: 'Field "templateId" must be a string when provided' });
       return;
@@ -1486,12 +1474,9 @@ async function handleRequest(
       json(res, 404, { error: `Pipeline "${id}" not found` });
       return;
     }
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { text, ifMatch } = parsed.value;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { text, ifMatch } = parsed;
     if (typeof text !== "string") {
       json(res, 400, { error: 'Field "text" must be a string' });
       return;
@@ -1673,12 +1658,9 @@ async function handleRequest(
       json(res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
-    const parsed = await readJsonBody(req, BODY_LIMIT_PREVIEW);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const promptsField = parsed.value.prompts;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_PREVIEW);
+    if (parsed === undefined) return;
+    const promptsField = parsed.prompts;
     if (
       promptsField !== undefined &&
       (typeof promptsField !== "object" || promptsField === null || Array.isArray(promptsField))
@@ -1747,12 +1729,9 @@ async function handleRequest(
       json(res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { body: newBody } = parsed.value;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { body: newBody } = parsed;
     if (typeof newBody !== "string") {
       json(res, 400, { error: 'Field "body" must be a string' });
       return;
@@ -1804,12 +1783,9 @@ async function handleRequest(
   // Must be checked BEFORE the bare POST /api/runs handler (which matches only the
   // exact path "/api/runs", but a future edit might accidentally collide).
   if (method === "POST" && pathname === "/api/runs/decide") {
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { input, kind } = parsed.value as { input?: unknown; kind?: unknown };
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { input, kind } = parsed as { input?: unknown; kind?: unknown };
     if (typeof input !== "string" || input.trim() === "") {
       json(res, 400, { error: 'Field "input" must be a non-empty string' });
       return;
@@ -1831,12 +1807,9 @@ async function handleRequest(
   if (method === "POST" && pathname === "/api/runs") {
     const { runService } = ctx;
     if (!requireRunService(runService, res)) return;
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { pipeline, inputs, models, provider, gateMode, artifactPath } = parsed.value as {
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { pipeline, inputs, models, provider, gateMode, artifactPath } = parsed as {
       pipeline?: unknown;
       inputs?: unknown;
       models?: unknown;
@@ -2407,12 +2380,9 @@ async function handleRequest(
     const { runService } = ctx;
     if (!requireRunService(runService, res)) return;
     const id = decodeURIComponent(approveMatch[1]);
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { approved, reason } = parsed.value;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { approved, reason } = parsed;
     if (typeof approved !== "boolean") {
       json(res, 400, { error: 'Field "approved" must be a boolean' });
       return;
@@ -2436,12 +2406,9 @@ async function handleRequest(
     if (!requireRunService(runService, res)) return;
     const id = decodeURIComponent(cancelMatch[1]);
     // The body is optional — an empty request is a cancel with no reason.
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { reason } = parsed.value;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { reason } = parsed;
     const reasonStr = typeof reason === "string" ? reason : undefined;
     const result = await runService.cancel(id, reasonStr);
     if (result === undefined) {
@@ -2463,12 +2430,9 @@ async function handleRequest(
   if (method === "POST" && pathname === "/api/gate-judge") {
     const { runService } = ctx;
     if (!requireRunService(runService, res)) return;
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { gateMessage, spec, pipelineId } = parsed.value as {
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { gateMessage, spec, pipelineId } = parsed as {
       gateMessage?: unknown;
       spec?: unknown;
       pipelineId?: unknown;
@@ -2607,12 +2571,9 @@ async function handleRequest(
   // The target path is assembled from ctx.projectDir and a module constant; no
   // part of it is caller-supplied.
   if (method === "PUT" && pathname === "/api/providers") {
-    const parsed = await readJsonBody(req, BODY_LIMIT_DEFAULT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { config, ifMatch } = parsed.value;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    if (parsed === undefined) return;
+    const { config, ifMatch } = parsed;
     if (typeof config !== "object" || config === null || Array.isArray(config)) {
       json(res, 400, { error: 'Field "config" must be an object' });
       return;
@@ -2771,12 +2732,9 @@ async function handleRequest(
 
   // POST /api/import — import a workflow bundle into .agent-flows/
   if (method === "POST" && pathname === "/api/import") {
-    const parsed = await readJsonBody(req, BODY_LIMIT_IMPORT);
-    if (!parsed.ok) {
-      json(res, 400, { error: "Malformed JSON body" });
-      return;
-    }
-    const { bundle: bundleText, overwrite, target } = parsed.value;
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_IMPORT);
+    if (parsed === undefined) return;
+    const { bundle: bundleText, overwrite, target } = parsed;
     if (typeof bundleText !== "string") {
       json(res, 400, { error: 'Field "bundle" must be a string' });
       return;

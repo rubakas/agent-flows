@@ -124,3 +124,23 @@ export function requireRunService(
   }
   return true;
 }
+
+const MALFORMED_JSON_BODY = { error: "Malformed JSON body" };
+
+/**
+ * Guard for routes that require a JSON object body. Writes the pinned 400
+ * body and returns undefined when the payload is absent or not a JSON
+ * object; otherwise returns the parsed object.
+ */
+export async function requireJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  maxBytes: number
+): Promise<Record<string, unknown> | undefined> {
+  const parsed = await readJsonBody(req, maxBytes);
+  if (!parsed.ok) {
+    json(res, 400, MALFORMED_JSON_BODY);
+    return undefined;
+  }
+  return parsed.value;
+}
