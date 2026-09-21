@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { progressCell, runProgress, runRow, workflowRow } from "./ui-tables.js";
+import { emptyRunsMessage, progressCell, runProgress, runRow, workflowRow } from "./ui-tables.js";
 
 const HOSTILE = '<img src=x onerror=alert(1)>"';
 
@@ -231,5 +231,25 @@ describe("runProgress — where a run has got to (spec 042 D7, V3)", () => {
     );
     assert.ok(html.includes("2 of 4"), `the row must carry the position: ${html}`);
     assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
+  });
+});
+
+describe("emptyRunsMessage — an empty list invites an action (spec 042 FR-006, V5)", () => {
+  it("every chip's empty state names the next move", () => {
+    for (const filter of ["active", "finished", "all"]) {
+      const msg = emptyRunsMessage(filter);
+      assert.match(
+        msg,
+        /href="#\/workflows"/u,
+        `the ${filter} empty state must point somewhere: ${msg}`
+      );
+      assert.ok(msg.length > 20, `a bare "nothing here" is the state FR-006 forbids: ${msg}`);
+    }
+  });
+
+  it("says which list is empty, not just that something is", () => {
+    assert.match(emptyRunsMessage("active"), /Nothing is running/u);
+    assert.match(emptyRunsMessage("finished"), /No run has finished/u);
+    assert.match(emptyRunsMessage("all"), /No runs on record/u);
   });
 });

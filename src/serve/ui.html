@@ -999,6 +999,7 @@
       import { renderLevelsSvg } from "/ui-graph.js";
       import {
         ACTIVE_STATUSES,
+        emptyRunsMessage,
         fmtElapsed,
         fmtTime,
         runProgress,
@@ -1092,7 +1093,9 @@
             : "Show hidden";
 
           if (!rows.length) {
-            wrap.innerHTML = `<p class="empty">No workflows found.</p>`;
+            wrap.innerHTML =
+              `<p class="empty">No workflows yet. ` +
+              `Write one with New workflow, or fork a bundled one.</p>`;
             return;
           }
           wrap.innerHTML = `<table class="table"><thead><tr>
@@ -1768,16 +1771,6 @@
       let _selectedRunId = null;
 
       /**
-       * What an empty runs list says (042 FR-006). Each one names the next move,
-       * because "no runs" with nowhere to go is the state this page shipped with.
-       */
-      const EMPTY_RUNS = {
-        active: 'Nothing is running. Start a run from <a href="#/workflows">Workflows</a>.',
-        finished: 'No run has finished yet. Start one from <a href="#/workflows">Workflows</a>.',
-        all: 'No runs on record. Start one from <a href="#/workflows">Workflows</a>.',
-      };
-
-      /**
        * Declared step ids per workflow, so the "N of M" denominator costs one
        * request per workflow instead of one per poll. M is the count of steps
        * the author wrote (042 D7) — it must not grow as the run advances.
@@ -1858,11 +1851,11 @@
           </div>`;
         }
         const activeCount = runs.filter((r) => ACTIVE_STATUSES.has(r.status)).length;
-        html += `<p class="muted" style="margin-bottom:6px">${escH(String(activeCount))} active, ${escH(String(runs.length))} total</p>`;
+        html += `<p class="muted" style="margin-bottom:6px">${escH(String(activeCount))} in flight, ${escH(String(runs.length))} total</p>`;
 
         if (!shown.length) {
           // FR-006: an empty list is an invitation to act, not a mood.
-          wrap.innerHTML = `${html}<p class="empty">${EMPTY_RUNS[_runsFilter]}</p>`;
+          wrap.innerHTML = `${html}<p class="empty">${emptyRunsMessage(_runsFilter)}</p>`;
           wireRunsTable(wrap);
           return;
         }

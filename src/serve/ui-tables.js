@@ -23,8 +23,25 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
-/** Statuses counted as active by the Active chip and the runs poller. */
+/** Statuses counted as active by the In flight chip and the runs poller. */
 export const ACTIVE_STATUSES = new Set(["running", "started", "awaiting_approval"]);
+
+/**
+ * What an empty runs list says (spec 042 FR-006).
+ *
+ * Every branch names the next move. An empty state is an invitation to act, not
+ * a mood: "No runs." leaves an operator who has just arrived with nowhere to go,
+ * which on a page whose whole job is making machinery visible is a dead end.
+ *
+ * @param {string} filter One of the runs chips: "active", "finished", "all".
+ * @returns {string} HTML — the link is the only markup in it.
+ */
+export function emptyRunsMessage(filter) {
+  const start = 'Start one from <a href="#/workflows">Workflows</a>.';
+  if (filter === "finished") return `No run has finished yet. ${start}`;
+  if (filter === "all") return `No runs on record. ${start}`;
+  return `Nothing is running. ${start}`;
+}
 
 /**
  * Mastra's own synthetic bookkeeping for parallel merge branches (spec 042 D7).
