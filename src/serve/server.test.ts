@@ -5563,6 +5563,68 @@ describe("GET /api/daemon — identity, health and version in one route (FR-011)
   });
 });
 
+describe("GET /api/daemons — every daemon on the machine (spec 042 FR-001)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let state: ProjectState;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-daemons-")));
+    state = makeState(REAL_REPO_ROOT, tmpDir);
+    srv = await startServer({
+      state,
+      port: 0,
+      dbPath: ":memory:",
+      projectDir: REAL_REPO_ROOT,
+      pipelinesDir: REAL_PIPELINES_DIR,
+    });
+  });
+
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("reports the serving daemon as live and marked self", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/daemons`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { daemons: Record<string, unknown>[] };
+    const mine = body.daemons.find((d) => d.pid === process.pid);
+    assert.ok(mine, `the serving daemon must list itself: ${JSON.stringify(body.daemons)}`);
+    assert.equal(mine.live, true);
+    assert.equal(mine.self, true);
+    assert.equal(mine.port, srv.port);
+    assert.equal(mine.projectDir, REAL_REPO_ROOT);
+  });
+
+  it("reports a neighbouring project's stale record as not live (D3)", async () => {
+    // A crashed daemon's leftovers: a record on a port nothing is listening on.
+    const ghostProject = join(tmpDir, "ghost-project");
+    mkdirSync(ghostProject, { recursive: true });
+    const ghostState = resolveProjectState(ghostProject, {
+      AGENT_FLOWS_HOME: join(tmpDir, "state-home"),
+    }).dir;
+    mkdirSync(ghostState, { recursive: true });
+    writeFileSync(
+      join(ghostState, "daemon.json"),
+      JSON.stringify({
+        projectDir: ghostProject,
+        version: "0.1.0",
+        pid: 999999,
+        startedAt: "2026-09-21T10:00:00.000Z",
+        port: 1,
+      })
+    );
+
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/daemons`);
+    const body = (await res.json()) as { daemons: Record<string, unknown>[] };
+    const ghost = body.daemons.find((d) => d.projectDir === ghostProject);
+    assert.ok(ghost, "a stale record is reported, never omitted");
+    assert.equal(ghost.live, false);
+    assert.equal(ghost.self, false);
+  });
+});
+
 describe("daemon.json is removed on a graceful close (FR-011)", () => {
   it("close() drops the record it wrote", async () => {
     const tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-daemon-close-")));

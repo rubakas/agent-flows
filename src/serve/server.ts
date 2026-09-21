@@ -89,6 +89,7 @@ import {
 } from "../runtime/stepLog.js";
 import { readHidden, setHidden } from "../runtime/visibility.js";
 import { resolveArtifactInputs } from "./artifactInputs.js";
+import { listDaemons } from "./daemons.js";
 
 import {
   BODY_LIMIT_DEFAULT,
@@ -1057,6 +1058,18 @@ async function handleRequest(
       startedAt: ctx.startedAt,
     };
     json(res, 200, identity);
+    return;
+  }
+
+  // GET /api/daemons — every recorded daemon on this machine, verified (spec 042
+  // FR-001, D2, D3). Cross-project and READ-ONLY: it reads other projects'
+  // daemon.json and probes their ports, and no route here dispatches a run or
+  // writes into a state directory that is not this daemon's own.
+  if (method === "GET" && pathname === "/api/daemons") {
+    const daemons = await listDaemons(stateRootOf(ctx.state), {
+      self: { pid: process.pid, projectDir: ctx.projectDir },
+    });
+    json(res, 200, { daemons });
     return;
   }
 
