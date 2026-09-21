@@ -215,6 +215,11 @@ step count — two rows reading only "succeeded · Activity · Output" are bookk
 wrote. And a step's inline excerpt is capped to a few lines: six of them at full height made the page
 mostly a second, worse copy of the outputs collapsed beneath them. Measured: 3038px → 1805px.
 
+**Amended the same day, on the owner's next look: "а як розгорнути?"** The clamp shipped with no way
+out — clipped text nobody can read is worse than long text. The excerpt opens in place on click, says
+so in its tooltip, and the handler is delegated from the panel rather than bound per row, because the
+stream replaces step rows as they advance and a row-bound handler dies with its row.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via

@@ -588,7 +588,8 @@
         border-color: var(--accent);
       }
       /* 042 D18: an excerpt is a glance. Six of these at full height made the
-         page mostly a second, worse copy of the outputs below them. */
+         page mostly a second, worse copy of the outputs below them — but a clamp
+         with no way out is just text you cannot read, so it opens on click. */
       .step-output {
         font-family: var(--mono);
         font-size: 11px;
@@ -598,8 +599,17 @@
         word-break: break-all;
         max-height: 4.5em;
         overflow: hidden;
+        cursor: pointer;
         -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
         mask-image: linear-gradient(to bottom, #000 60%, transparent);
+      }
+      .step-output:hover {
+        color: var(--ink-2);
+      }
+      .step-output.expanded {
+        max-height: none;
+        -webkit-mask-image: none;
+        mask-image: none;
       }
       .gate-box {
         background: color-mix(in srgb, var(--warn) 8%, transparent);
@@ -2411,6 +2421,21 @@
        * Fetch a step's persisted output the first time its Output block is opened
        * (spec 036 D6/D10). It is never part of the snapshot or the SSE stream.
        */
+      /**
+       * Let a clamped excerpt open in place (042 D18).
+       *
+       * Delegated from the panel rather than bound per row: the stream replaces
+       * step rows as they advance, and a handler bound to a row dies with it.
+       */
+      function wireExcerptToggles(scope) {
+        scope.onclick = (ev) => {
+          const el = ev.target.closest?.(".step-output");
+          if (el === null || el === undefined || !scope.contains(el)) return;
+          el.classList.toggle("expanded");
+          el.title = el.classList.contains("expanded") ? "Click to collapse" : "Click to expand";
+        };
+      }
+
       function wireStepOutputs(scope, runId) {
         for (const details of scope.querySelectorAll(".step-output-full")) {
           const row = details.closest(".step-row");
@@ -2559,7 +2584,9 @@
         if (st.model) html += `<span class="step-model">${escH(st.model)}</span>`;
         if (st.outputExcerpt) {
           // step output is untrusted model-produced text — use escH
-          html += `<div class="step-output">${escH(st.outputExcerpt)}</div>`;
+          html += `<div class="step-output" title="Click to expand">${escH(
+            st.outputExcerpt
+          )}</div>`;
         }
         const detail =
           st.prompt !== undefined ? "Prompt" : st.command !== undefined ? "Command" : null;
@@ -2665,6 +2692,7 @@
         body.innerHTML = html;
         wireCopyButtons(body);
         wireStepOutputs(body, runId);
+        wireExcerptToggles(body);
         // The step rows are new DOM, so their activity lists are repainted from
         // the merge state rather than refetched (spec 036 D4).
         repaintLogs(body);
@@ -2760,6 +2788,7 @@
           if (!outEl) {
             outEl = document.createElement("div");
             outEl.className = "step-output";
+            outEl.title = "Click to expand";
             row.appendChild(outEl);
           }
           outEl.textContent = outputExcerpt; // .textContent — safe, untrusted model output
