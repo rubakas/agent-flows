@@ -39,7 +39,7 @@ type StepResultStatus = "succeeded" | "failed" | "cancelled";
  * but failing format:check — the old default declared that run converged.
  */
 export const DEFAULT_CHECK_COMMAND =
-  "pnpm lint && pnpm typecheck && pnpm format:check && pnpm test";
+  "pnpm lint && pnpm typecheck && pnpm build && pnpm format:check && pnpm test";
 
 /**
  * How many trailing output lines a failing `required` check quotes in the error it
