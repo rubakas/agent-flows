@@ -2049,7 +2049,14 @@ describe("readAgentFlowsConfig (FR-003)", () => {
           const msg = err instanceof Error ? err.message : String(err);
           assert.ok(msg.includes("config.json"), `error must name the config file; got: ${msg}`);
           assert.ok(msg.includes("checkCommand"), `error must name the offending key; got: ${msg}`);
-          assert.ok(!msg.includes("42"), `error must not include the value; got: ${msg}`);
+          // The message legitimately embeds the config path, and mkdtemp's random
+          // suffix can itself contain "42" — mask the known dir so the value check
+          // tests the message, not the luck of the draw.
+          const withoutDir = msg.replaceAll(projectDir, "<projectDir>");
+          assert.ok(
+            !withoutDir.includes("42"),
+            `error must not include the value; got: ${withoutDir}`
+          );
           return true;
         }
       );
