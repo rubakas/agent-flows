@@ -220,6 +220,21 @@ out — clipped text nobody can read is worse than long text. The excerpt opens 
 so in its tooltip, and the handler is delegated from the panel rather than bound per row, because the
 stream replaces step rows as they advance and a row-bound handler dies with its row.
 
+**D19 — A `<td>` is never a flex container.** (Owner, 2026-09-22: "у мене кнопки поїхали".) `.actions`
+set `display: flex` on elements including `<td class="actions">`, which takes the cell out of table
+layout: the row stops sizing to its content. With a narrow Actions column the buttons wrapped to a
+second line the 30px row never made room for, and each row's last button landed on top of the row
+below — measured `tr` 30px against 60px of content. The same latent defect sat in the daemons table,
+unnoticed only because its actions had not yet wrapped.
+
+`td.actions` stays `table-cell`, the flex gap comes back as a margin, and the cell is `nowrap` so the
+greedy Description column beside it cannot squeeze the actions into two lines. Verified by measuring
+every row: no cell taller than its row, no row starting above the previous one's bottom.
+
+**CSS layout has no unit-test gate in this repo.** This class of defect is only observable in a
+browser, and the check that found it — comparing each cell's `scrollHeight` against its row's height —
+is worth re-running by hand after any change to a table's cells.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via

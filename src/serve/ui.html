@@ -427,6 +427,21 @@
         gap: 4px;
         flex-wrap: wrap;
       }
+      /* But NEVER on a table cell. `display: flex` takes a <td> out of table
+         layout, so its row stops growing with its content: at a narrow Actions
+         column the buttons wrapped to a second line the 30px row never made
+         room for, and landed on top of the row below. The gap comes back as
+         margins, and the row sizes itself again. */
+      td.actions {
+        display: table-cell;
+        /* The row's actions are one line. Without this the column is squeezed by
+           the greedy Description beside it and wraps, doubling every row's
+           height; table auto-layout gives the column the width it asks for. */
+        white-space: nowrap;
+      }
+      td.actions > * {
+        margin-right: 4px;
+      }
       .empty {
         color: var(--muted);
         padding: 8px;
