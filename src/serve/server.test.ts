@@ -2305,7 +2305,9 @@ describe("GET / — run details panel wired in served HTML (FR-019/FR-020/FR-021
       assert.ok(html.includes(id), `served HTML must contain the "${id}" element — FR-019/FR-020`);
     }
     assert.ok(
-      html.includes("HOW IT WAS RUN"),
+      // The block itself, not the JSDoc above it — matching the bare phrase
+      // passes on the comment alone and would survive the block being deleted.
+      html.includes('class="block-head">How it was run'),
       'served HTML must contain the "How it was run" block'
     );
     assert.ok(html.includes("run_pipeline("), "served HTML must render the chat call — FR-020");

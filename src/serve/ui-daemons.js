@@ -70,10 +70,13 @@ function projectName(dir) {
 export function daemonRow(d, opts) {
   const live = d?.live === true;
   const key = String(d?.projectKey ?? "");
-  const status = live
-    ? `<span class="badge running">running</span>`
-    : `<span class="badge cancelled" title="${esc(d?.staleReason ?? "")}">not responding</span>`;
-  const selfMark = d?.self === true ? ` <span class="badge active">this page</span>` : "";
+  // One chip per row: a live daemon is either the one serving this page or just
+  // another running process, and saying both takes two chips to say one thing.
+  const status = !live
+    ? `<span class="badge cancelled" title="${esc(d?.staleReason ?? "")}">not responding</span>`
+    : d?.self === true
+      ? `<span class="badge active">serving this page</span>`
+      : `<span class="badge running">running</span>`;
 
   // D3: only a verified record gets a control wired to its pid. A stale row
   // offers nothing to click, because there is nothing it could safely signal.
@@ -87,7 +90,7 @@ export function daemonRow(d, opts) {
 
   return (
     `<tr data-daemon-row="${esc(key)}">` +
-    `<td>${status}${selfMark}</td>` +
+    `<td>${status}</td>` +
     `<td class="pipeline-id" title="${esc(d?.projectDir ?? "")}">${esc(
       projectName(d?.projectDir)
     )}</td>` +
@@ -127,7 +130,7 @@ export function daemonsTable(daemons, opts) {
     .join("");
   return (
     `<table class="table"><thead><tr>` +
-    `<th>State</th><th>Project</th><th>PID</th><th>Port</th><th>Uptime</th><th>Actions</th>` +
+    `<th>State</th><th>Project</th><th>PID</th><th>Port</th><th>Uptime</th><th></th>` +
     `</tr></thead><tbody>${body}</tbody></table>`
   );
 }

@@ -57,8 +57,13 @@ describe("daemonRow — only a verified record gets a Stop (spec 042 D3, V1)", (
   });
 
   it("marks the daemon serving this page, and no other (D9)", () => {
-    assert.ok(daemonRow(entry({ self: true }), {}).includes("this page"));
-    assert.ok(!daemonRow(entry({ self: false }), {}).includes("this page"));
+    const self = daemonRow(entry({ self: true }), {});
+    assert.ok(self.includes("this page"), `the serving daemon must say so: ${self}`);
+    // One chip, not a `running` chip plus a `this page` chip saying the same thing.
+    assert.equal(self.match(/class="badge/gu)?.length, 1, `one chip per row: ${self}`);
+    const other = daemonRow(entry({ self: false }), {});
+    assert.ok(!other.includes("this page"), `only one row may claim the page: ${other}`);
+    assert.ok(other.includes(">running<"), `another live daemon still reads as running: ${other}`);
   });
 
   it("a row whose stop is in flight shows stopping…, not a second button", () => {

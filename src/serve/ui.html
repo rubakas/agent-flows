@@ -66,7 +66,8 @@
         font-family: var(--mono);
         font-variant-numeric: tabular-nums;
       }
-      /* Top bar (037 D8): name, project, state dir, tabs right-aligned. */
+      /* Top bar (037 D8): product name, tabs right-aligned. The project and its
+         state dir live in Settings and in the daemons table, not the masthead. */
       header {
         display: flex;
         align-items: baseline;
@@ -81,19 +82,6 @@
       }
       header .spacer {
         flex: 1;
-      }
-      #project-name {
-        font-family: var(--mono);
-        color: var(--ink-2);
-      }
-      #state-dir {
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--muted);
-        max-width: 40ch;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
       .btn {
         font: inherit;
@@ -322,8 +310,6 @@
       .section-header h2 {
         font-size: 12px;
         font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
         color: var(--muted);
       }
       /* One table for every list (037 D8/FR-013). */
@@ -335,8 +321,6 @@
         text-align: left;
         font-size: 11px;
         font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
         color: var(--muted);
         padding: 4px 8px;
         border-bottom: 1px solid var(--line);
@@ -455,8 +439,6 @@
         gap: 8px;
         font-size: 11px;
         font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
         color: var(--muted);
         margin-top: 8px;
       }
@@ -536,11 +518,9 @@
         color: var(--accent);
         font-weight: 600;
       }
-      /* A chip in a column header must not inherit the header's uppercase,
-         letter-spaced, muted treatment, or it scans as part of the name. */
+      /* A chip in a column header must not inherit the header's muted
+         treatment, or it scans as part of the name. */
       .table th .badge {
-        text-transform: none;
-        letter-spacing: 0;
         border: 1px solid var(--line);
       }
       .table th .badge.active {
@@ -700,8 +680,6 @@
       dialog h3 {
         font-size: 12px;
         font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
         color: var(--muted);
         margin-bottom: 10px;
       }
@@ -791,8 +769,6 @@
   <body>
     <header>
       <h1>agent-flows</h1>
-      <span id="project-name"></span>
-      <span id="state-dir"></span>
       <span class="spacer"></span>
       <nav class="tabs">
         <a class="tab" id="tab-runs" href="#/runs">Runs</a>
@@ -1861,7 +1837,7 @@
         }
 
         html += `<table class="table"><thead><tr>
-          <th>Status</th><th>Workflow</th><th>Step</th><th>Started</th><th>Duration</th><th>Actions</th>
+          <th>Status</th><th>Workflow</th><th>Step</th><th>Started</th><th>Duration</th><th></th>
         </tr></thead><tbody>`;
         for (const r of shown) {
           html += runRow(r, {
@@ -2322,7 +2298,7 @@
           ? `<button class="btn copy-btn" id="btn-toggle-inputs">${_invExpanded ? "[collapse]" : "[expand]"}</button>`
           : "";
         return `<div id="run-invocation">
-          <div class="block-head">HOW IT WAS RUN ${toggle}</div>
+          <div class="block-head">How it was run ${toggle}</div>
           <div class="block-head">Chat ${copyButton(full.chat)}</div>
           <pre class="code-block" id="run-invocation-chat">${escH(shown.chat)}</pre>
           <div class="block-head">curl ${copyButton(full.curl)}</div>
@@ -2982,26 +2958,6 @@
         );
       };
 
-      // Spec 032 FR-011: show where this project and its machine-local state live.
-      async function loadHeaderContext() {
-        try {
-          const env = await api("GET", "/api/environment");
-          const nameEl = document.getElementById("project-name");
-          if (env.projectDir) {
-            const base = env.projectDir.replace(/\/+$/u, "").split("/").pop() || env.projectDir;
-            nameEl.textContent = base;
-            nameEl.title = env.projectDir;
-          }
-          const stateEl = document.getElementById("state-dir");
-          if (env.stateDir) {
-            stateEl.textContent = `state: ${env.stateDir}`;
-            stateEl.title = env.stateDir;
-          }
-        } catch {
-          // Environment unreachable — leave the header labels empty.
-        }
-      }
-
       // ── Router (spec 034 D1/D7) ────────────────────────────────────────────
 
       const VIEW_IDS = ["runs", "run", "workflows", "workflow", "workflow-edit", "settings"];
@@ -3116,7 +3072,6 @@
       // ── Boot ───────────────────────────────────────────────────────────────
 
       (async () => {
-        loadHeaderContext();
         route();
       })();
     </script>

@@ -166,7 +166,7 @@ export function renderProviderMatrix(columns, opts = {}) {
     .map((id) => `<option value="${esc(id)}"></option>`)
     .join("")}</datalist>`;
 
-  return `${datalist}<table class="table"><thead><tr><th>role</th>${head}</tr></thead>
+  return `${datalist}<table class="table"><thead><tr><th>Role</th>${head}</tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
@@ -200,7 +200,7 @@ export function renderProviderModels(project, builtin = []) {
     .join("");
 
   return `<table class="table"><thead><tr>
-      <th>id</th><th>transport</th><th>target</th><th></th>
+      <th>ID</th><th>Transport</th><th>Target</th><th></th>
     </tr></thead><tbody>${rows}${builtinRows}</tbody></table>`;
 }
 
