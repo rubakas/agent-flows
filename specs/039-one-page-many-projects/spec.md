@@ -18,10 +18,15 @@
 > This satisfies **D1/FR-001** but **contradicts FR-002**, which planned an `Import…` dialog built on
 > the "unchanged" `GET /api/templates`, `GET /api/templates/:id`, `POST /api/templates/:id/install`
 > and `DELETE /api/templates/:id`. Those four routes no longer exist, so the saved bundles in
-> `~/.agent-flows/templates/` currently have no reader. FR-002 must either be dropped or re-specified
-> to restore the routes it depends on; `git show 355e2c9:src/serve/routes/templates.ts` is the
-> deleted implementation. `?source=bundled` on `GET /api/pipelines` and `GET /api/pipelines/:id`
-> survives but now has no caller.
+> `~/.agent-flows/templates/` currently have no reader. `?source=bundled` on `GET /api/pipelines` and
+> `GET /api/pipelines/:id` survives but now has no caller.
+>
+> **Resolved 2026-09-21 (owner): FR-002 is DROPPED, not re-specified.** Import was the only reason the
+> route group would come back, and the directory it reads is empty — so restoring four routes and a
+> dialog would add surface for a capability nobody has used. Export still writes a bundle; a bundle is
+> imported by copying the file into a writable workflow layer, where the three-layer merge already
+> picks it up. `git show 355e2c9:src/serve/routes/templates.ts` remains the deleted implementation if
+> this is ever reversed.
 
 ## Context
 
@@ -148,13 +153,18 @@ distinctly as `bundled`/`repo`, not leave implied.
 table already lists every bundled row with a fuller action set (`Run…`, `View`, `Fork…`, `Hide`) than
 the Bundled sub-table ever offered, and every row's View page already has `Export` and
 `Save as template` (`ui.html:1336-1339`). The one capability that has no other home — the "Yours" list
-of saved export bundles at `~/.agent-flows/templates/*.yaml` — moves into a new **Import…** dialog
+of saved export bundles at `~/.agent-flows/templates/*.yaml` — was to move into a new **Import…**
+dialog
 opened from the Workflows header in place of today's `btn-from-template` link; it lists those same
 bundles via the unchanged `GET /api/templates`, with `Preview` (`GET /api/templates/:id`), `Import`
 (`POST /api/templates/:id/install`) and `Delete` (`DELETE /api/templates/:id`) actions — none of these
 routes change, only the page surface that calls them. `New workflow`, `Import…` and `Show hidden`
 stay as header actions; `Run…`, `View`, `Edit`/`Fork…`, `Hide`/`Show`, `Delete` stay as row actions,
 unchanged in mechanism.
+
+**Superseded in part, 2026-09-21:** the `Import…` half of this decision is dropped with FR-002 — the
+directory it would list is empty, and a saved bundle is imported by copying the file into a writable
+workflow layer. The rest of D1 (Templates removed, not left dead) shipped in `7d3ebbd`.
 
 The Workflows table's `Layer` column renders `bundled`, `user` (labelled distinctly, e.g. "personal")
 and `repo` as three visibly different sources — the merge otherwise makes three layers look like two,
@@ -458,8 +468,8 @@ Three ships, in the owner's final order:
   directly against Ship 1's `project`-parameter shape, for whichever single project a caller currently
   selects — Ship 3 is what lets that selection change from the page itself. Done means: `#/templates`
   and `#/templates/<id>` are gone from `ui-route.js` and `ui.html`, along with their `?source=bundled`
-  page callers; the Workflows header has `New workflow`, `Import…` and `Show hidden`; `Import…` lists
-  saved bundles with `Preview`/`Import`/`Delete`; the `Layer` column labels `bundled`/`user`/`repo`
+  page callers; the Workflows header has `New workflow` and `Show hidden` (the `Import…` action falls
+  with FR-002, dropped 2026-09-21); the `Layer` column labels `bundled`/`user`/`repo`
   distinctly; `pnpm check` is green; the owner's visual pass is DEFERRED as in specs 037/038, pending
   an operator session.
 - **Ship 3 — the picker, add/remove, and the prefilled run dialog.** FRs: FR-020–FR-022. Done means:
@@ -473,17 +483,18 @@ Three ships, in the owner's final order:
 - **FR-001.** `#/templates` and `#/templates/<id>` routes, `#view-templates`/`#view-template`
   containers, and the two `?source=bundled` page callers (`ui.html:1175`, `:1634`) are removed;
   `ui-route.js`'s `VIEWS`/`hashFor` lose the `template`/`templates` entries (D1).
-- **FR-002.** An `Import…` dialog, opened from the Workflows header in place of `btn-from-template`,
-  lists `~/.agent-flows/templates/*.yaml` bundles via the unchanged `GET /api/templates`, with
-  `Preview` (`GET /api/templates/:id`), `Import` (`POST /api/templates/:id/install`) and `Delete`
-  (`DELETE /api/templates/:id`) — none of these routes change (D1).
+- **FR-002.** ~~An `Import…` dialog, opened from the Workflows header in place of
+  `btn-from-template`, lists `~/.agent-flows/templates/*.yaml` bundles via `GET /api/templates`.~~
+  **DROPPED 2026-09-21** — see the amendment at the head of this spec. The routes it named were
+  deleted in `7d3ebbd`; a saved bundle is imported by copying the file into a writable workflow
+  layer. No `Import…` header action is expected, and its absence is not a regression.
 - **FR-003.** The Workflows table's `Layer` column renders `bundled`, `user` (labelled distinctly from
   both, e.g. "personal") and `repo` as three visibly different values, by name, in a render-function
   unit test (D1).
 - **FR-004.** `pnpm check` stays green after the removal; a DOM-free render test proves the removed
-  Templates page assets are gone and the `Import…` dialog renders `templateId`/`sourcePipeline`/
-  `exportedAt` by name, matching the escaping coverage spec 037 FR-008 already required of the table it
-  replaces (D1).
+  Templates page assets are gone. (Amended 2026-09-21: the second half required the `Import…` dialog to
+  render `templateId`/`sourcePipeline`/`exportedAt` by name; it falls with FR-002, since there is no
+  dialog left to render and no route left to escape output from.)
 - **FR-005.** `opts.projectDir ?? process.cwd()` (`server.ts:722`) and the single closed-over
   `ctx.projectDir` are removed; a single prologue, run before any route's dispatch, resolves and
   validates the `project` query parameter for every request; an absent or unregistered project is
@@ -556,7 +567,9 @@ Three ships, in the owner's final order:
   paths, rendered as page dialogs with the same one-question, keep-by-default rule and the same
   never-touches-`.agent-flows` guarantee as the CLI verbs.
 - **FR-022.** The Run… dialog's `project` field is always the picker's current selection, never typed
-  by hand, and is sent as the `project` parameter on `POST /api/runs` per FR-002's shape.
+  by hand, and is sent as the `project` parameter on `POST /api/runs` per FR-007's shape.
+  (Corrected 2026-09-21: this read "per FR-002's shape", which named the templates-import dialog and
+  never defined a `project` parameter; FR-007 is the requirement that does.)
 - **FR-023.** The daemon generates a random authentication token at startup and writes it into
   `<stateRoot>/daemon.json` with the same 0600 permission as the rest of that record; every route
   requires it as a `token` query parameter except `GET /` and the four static `ui-*.js` module routes;
