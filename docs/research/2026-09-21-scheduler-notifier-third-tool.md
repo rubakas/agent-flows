@@ -130,6 +130,80 @@ migrate codex` to **copy them into your OpenClaw workspace**" (P15, emphasis min
 - **Identity file.** Both landed on the same name: OpenClaw `docs/concepts/soul.md`, Hermes
   `~/.hermes/SOUL.md` (P42, P38). Adopting either adds a third place where "who the agent is" lives.
 
+#### And a fourth concept: workflows — the largest overlap of all
+
+Hermes ships a work-orchestration layer that overlaps `af` directly. **The comparison is Kanban, not
+`delegate_task`** — Hermes says so itself. `delegate_task` is fork/join RPC, and its own table (P47,
+"Kanban vs. `delegate_task`") rules it out on the two properties `af` exists for: resumability
+"**None — failed = failed**" vs "Block → unblock → re-run; crash → reclaim"; human in the loop
+"**Not supported**" vs "Comment / unblock at any point"; audit trail "Lost on context compression" vs
+"Durable rows in SQLite forever". Its one-line summary: "`delegate_task` is a function call; Kanban is
+a work queue where every handoff is a row any profile (or human) can see and edit."
+
+**The axis that separates Kanban from `af`: where the graph comes from.** Kanban's graph is _rows
+built at runtime_ — `task_links` parent→child edges where "The dispatcher promotes `todo → ready` when
+all parents are `done`" (P47). It is authored by an orchestrator model calling
+`kanban_create(… parents=[…])`, by a human on the CLI, by `hermes kanban swarm` (one hard-coded
+root→workers→verifier→synthesizer topology), or — by default, `kanban.auto_decompose: true` — by an
+LLM decomposer that "fans the task out into a small graph of child tasks routed to the best-fit
+specialists" (P47). `af`'s graph is a _declared file_: YAML steps with explicit `dependsOn` edges and
+nested pipelines composed by reference, which can be diffed, reviewed, versioned and forked.
+
+**What Hermes genuinely does better than `af` today.** Two things, and they are not small:
+
+- **The durable-run substrate.** Three tables in `~/.hermes/kanban.db`: `tasks`, `task_runs` (one row
+  per attempt, closed with an `outcome`), and append-only `task_events` carrying `run_id`. The
+  dispatcher "reclaims stale claims, reclaims crashed workers (PID gone but TTL not yet expired)",
+  matching "by PID **and** spawn-time fingerprint, so a recycled PID is never signalled"; a circuit
+  breaker auto-blocks after `kanban.failure_limit` consecutive spawn failures; `block_loop_detected`
+  breaks unblock↔re-block cycles; orphan reconciliation requeues cards left `running` with broken
+  claim bookkeeping (P47).
+- **Multi-process worker isolation.** Each worker is a full OS process spawned as `hermes -p <assignee>`
+  with its own profile, injected `HERMES_HOME`, log file, and workspace — `scratch`, `dir:<abs path>`,
+  or a git `worktree` under `.worktrees/<id>/` (P47). `af` runs steps through provider adapters inside
+  one daemon.
+
+**What it lacks against `af`.** Four gaps, each load-bearing:
+
+- **No declared graph artifact** — there is nothing to fork, and no bundled catalogue of process
+  definitions (§ above).
+- **No per-step permissions.** The full `hermes kanban create` option set is `--body`, `--assignee`,
+  `--parent`, `--tenant`, `--workspace`, `--branch`, `--priority`, `--triage`, `--idempotency-key`,
+  `--max-runtime`, `--max-retries`, `--goal`, `--goal-max-turns`, `--skill`, `--json` — no toolset or
+  permission flag anywhere in it (P47). Tool access is scoped
+  per _profile_ and per session; the documented pattern is profile-level ("pair it with a profile whose
+  toolsets are restricted to board operations … so the orchestrator literally cannot execute
+  implementation tasks even if it tries", P47), and `delegate_task` "does not accept a model-facing
+  `toolsets` parameter" (P48). The stated threat model is "the worker runs with your uid. This is the
+  trusted-local-user threat model" (P47). **ADR-0019's "Refuses" column has no expression in Hermes.**
+- **Schema only on the ephemeral primitive.** `delegate_task` takes an `output_schema` the child's
+  answer must validate against, with "exactly one bounded correction turn carrying the validation
+  errors verbatim" (P48) — close to what `af` ships. But durable Kanban cards have no schema: their
+  handoff field is `metadata`, "free-form JSON dict on the run" (P47), unvalidated.
+- **Convergence by LLM judge, not a deterministic check.** Goal-mode cards (`--goal` plus
+  `--goal-max-turns N`, default 20) run a loop where "after every turn an auxiliary judge checks the
+  worker's output against the card's title + body (treated as the acceptance criteria)" (P47, P49).
+  `af`'s `kind: loop` converges on a check command. Different reliability class; Hermes has no "loop
+  this sub-pipeline until this command exits 0".
+
+**Forward-looking warning.** Hermes has reserved the schema for the piece it is missing (P47, "Forward
+compatibility"):
+
+> Two nullable columns on `tasks` are reserved for v2 workflow routing: `workflow_template_id` (which
+> template this task belongs to) and `current_step_key` (which step in that template is active). The v1
+> kernel ignores them for routing but lets clients write them, so a v2 release can add the routing
+> machinery without another schema migration.
+
+`hermes kanban list` already accepts `--workflow-template-id` and `--current-step-key` as filters
+against columns nothing writes for routing (P47). **If a v2 ships a workflow-template format, this
+overlap moves from partial to near-total** — the declared-graph distinction above is the whole of
+what currently separates the two.
+
+**Net for `af`:** partially redundant, not redundant. Hermes owns the runtime substrate; `af` owns the
+definition language and the per-step guarantees. No per-run cost or token accounting tied to a Kanban
+run appears anywhere in the docs — `hermes insights` exists ("Show token/cost/activity analytics",
+P50) but is never connected to `task_runs`: **UNVERIFIED**.
+
 **Can either be used as a thin trigger-and-notify layer?** Yes — and this is the honest part. Both
 ship a no-model scheduled payload:
 
@@ -468,6 +542,13 @@ never reach Telegram and that it will want to own a copy of your skills.
 7. **Hermes's `0.21.x` → `1.0` intentions.** No roadmap or stability statement was located in the repo.
 8. **The exact DIY line count.** "~40–80 lines" is my estimate from the verified API shapes (P39, P40,
    P41), not a written and measured implementation.
+9. **Per-run cost or token accounting on a Kanban run.** `task_runs` records `outcome`, `summary` and
+   free-form `metadata`, and `hermes insights` reports "token/cost/activity analytics" (P47, P50), but
+   nothing in the docs ties the two together and nothing records which model actually answered a card.
+   **UNVERIFIED** — absence in the docs, not proof of absence.
+10. **Whether Hermes's v2 workflow routing exists in code.** The reserved columns and the CLI filters
+    are documented (P47); no template format, schema or release note for it was located. Treated here
+    as a stated intention, not a shipped feature.
 
 ---
 
@@ -572,6 +653,22 @@ read 2026-09-21):
 - P43 `https://api.github.com/repos/NousResearch/hermes-agent/git/trees/main?recursive=1` — 15,724
   paths; used to enumerate `website/docs/**`, including `guides/migrate-from-openclaw.md`,
   `user-guide/import-from-other-agents.md`, `developer-guide/chronos-managed-cron-contract.md`
+- P47 `website/docs/user-guide/features/kanban.md` — "Kanban vs. `delegate_task`" table, "## Core
+  concepts" (task statuses, `task_links`, dispatcher, workspaces), "### Per-task model override",
+  "### Pinning extra skills to a specific task", "### Goal-mode cards (`--goal`)", "### How the
+  orchestrator behaves", "### Kanban Swarm topology helper", "## CLI command reference" (the full
+  `kanban create` signature), "## Runs — one row per attempt", "### Forward compatibility"
+  (`workflow_template_id` / `current_step_key`), "## Event reference" (`dependency_wait`,
+  `block_loop_detected`, `reconciled`), `kanban.auto_decompose`, `kanban.failure_limit`
+- P48 `website/docs/user-guide/features/delegation.md` — "## Structured Output (`output_schema`)",
+  "## Model Override" ("`delegate_task` has no per-task model parameter"), "## Inherited Tool Access",
+  "## Max Iterations", "## Child Timeout"
+- P49 `website/docs/user-guide/features/goals.md` — the Ralph-style judge loop, "Goals vs Kanban:
+  which one do I want?"; `website/docs/user-guide/features/loops.md` — `/loop` cadence modes
+- P50 `website/docs/reference/cli-commands.md` — `hermes insights` ("Show token/cost/activity
+  analytics"), `hermes usage`; `website/docs/guides/automation-blueprints.md` and
+  `website/docs/reference/automation-blueprints-catalog.mdx` — "A blueprint is just a skill with a
+  `metadata.hermes.blueprint` block in its `SKILL.md` frontmatter"
 - P44 `website/docs/user-guide/skills/bundled/software-development/*` — bundled skill pages
   `…-test-driven-development.md`, `…-requesting-code-review.md`, `…-systematic-debugging.md`,
   `…-spike.md`, `…-simplify-code.md`, `…-github.md`, plus
