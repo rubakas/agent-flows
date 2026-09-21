@@ -549,6 +549,23 @@ describe("POST /api/runs — non-blocking start + SSE step events", () => {
     assert.match(body.error, /no-such-profile/);
   });
 
+  // A run's inputs carry the change under review, which is the one body on this
+  // daemon that is legitimately large: a 35-file pull request diff is ~77 KB, and
+  // the 64 KB default refused it at the boundary before the reviewer ever ran.
+  it("POST /api/runs accepts a body past the 64 KB default, and still refuses a huge one", async () => {
+    const past64k = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "no-such-pipeline",
+      inputs: { plan: "d".repeat(200_000) },
+    });
+    assert.notEqual(past64k.status, 413, "a 200 KB diff must reach the handler, not the size guard");
+
+    const huge = await mutate(srv.port, "POST", "/api/runs", {
+      pipeline: "no-such-pipeline",
+      inputs: { plan: "d".repeat(2 * 1024 * 1024) },
+    });
+    assert.equal(huge.status, 413, "the limit is raised, not removed");
+  });
+
   it("POST /api/runs with a non-string provider → 400", async () => {
     const res = await mutate(srv.port, "POST", "/api/runs", {
       pipeline: "spec-creation",

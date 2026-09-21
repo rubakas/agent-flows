@@ -182,6 +182,11 @@ const BODY_LIMIT_IMPORT = 4 * 1024 * 1024; // 4 MB — /api/import carries a YAM
 // 1 MiB — /api/drafts/:id/preview carries one YAML body plus every edited
 // prompt text in a single payload, which overruns the 64 KB default (FR-004).
 const BODY_LIMIT_PREVIEW = 1024 * 1024;
+// 1 MiB — a run's `inputs` carry the change under review. A 35-file pull request
+// diff is ~77 KB on its own, so the 64 KB default refused every medium review at
+// the boundary; trimming the diff instead would hide the very files a reviewer
+// is meant to read (the falsifiability step reviews the tests).
+const BODY_LIMIT_RUN = 1024 * 1024;
 
 // ── Security helpers (FR-019) ──────────────────────────────────────────────────
 
@@ -1657,7 +1662,7 @@ async function handleRequest(
   if (method === "POST" && pathname === "/api/runs") {
     const { runService } = ctx;
     if (!requireRunService(runService, res)) return;
-    const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
+    const parsed = await requireJsonBody(req, res, BODY_LIMIT_RUN);
     if (parsed === undefined) return;
     const { pipeline, inputs, models, provider, gateMode, artifactPath } = parsed as {
       pipeline?: unknown;
