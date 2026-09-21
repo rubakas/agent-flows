@@ -103,8 +103,7 @@ import {
   RequestTooLargeError,
   safePath,
 } from "./route-helpers.js";
-import { CONTENT_CAP } from "./routes/content.js";
-import { handleSkillRoutes } from "./routes/skills.js";
+import { CONTENT_CAP, handleContentRoutes } from "./routes/content.js";
 import { handleTemplateRoutes } from "./routes/templates.js";
 import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
 import type { Role } from "../canon/types.js";
@@ -2327,7 +2326,7 @@ async function handleRequest(
     return;
   }
 
-  if (handleSkillRoutes(req, res, ctx, method, pathname)) return;
+  if (handleContentRoutes(req, res, ctx, method, pathname)) return;
 
   // GET /api/export/:id — export a pipeline and its full closure as a YAML bundle
   const exportMatch = RE_EXPORT.exec(pathname);
