@@ -144,3 +144,16 @@ export async function requireJsonBody(
   }
   return parsed.value;
 }
+
+/**
+ * Guard for route ids taken from the URL or request body. Writes the pinned
+ * 400 body naming the id kind ("Pipeline" / "Template" / "Run") and returns
+ * false when the id fails isSafeId().
+ */
+export function requireSafeId(id: string, kind: string, res: ServerResponse): boolean {
+  if (!isSafeId(id)) {
+    json(res, 400, { error: `${kind} id "${id}" is invalid` });
+    return false;
+  }
+  return true;
+}

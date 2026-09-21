@@ -106,6 +106,7 @@ import {
   readBody,
   requireJsonBody,
   requireRunService,
+  requireSafeId,
   RequestTooLargeError,
   safePath,
 } from "./route-helpers.js";
@@ -1242,10 +1243,7 @@ async function handleRequest(
     const id = decodeURIComponent(forkMatch[1]);
     const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
     if (parsed === undefined) return;
-    if (!isSafeId(id)) {
-      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(id, "Pipeline", res)) return;
     const { to, overwrite } = parsed;
     if (to !== undefined && to !== "user" && to !== "repo") {
       json(res, 400, { error: 'Field "to" must be "user" or "repo"' });
@@ -1273,10 +1271,7 @@ async function handleRequest(
     const id = decodeURIComponent(visibilityMatch[1]);
     const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
     if (parsed === undefined) return;
-    if (!isSafeId(id)) {
-      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(id, "Pipeline", res)) return;
     const { hidden } = parsed;
     if (typeof hidden !== "boolean") {
       json(res, 400, { error: 'Field "hidden" must be a boolean' });
@@ -1333,10 +1328,7 @@ async function handleRequest(
   const saveTemplateMatch = RE_PIPELINE_TEMPLATE.exec(pathname);
   if (method === "POST" && saveTemplateMatch) {
     const id = decodeURIComponent(saveTemplateMatch[1]);
-    if (!isSafeId(id)) {
-      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(id, "Pipeline", res)) return;
     const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
     if (parsed === undefined) return;
     const { templateId, overwrite } = parsed;
@@ -1347,10 +1339,7 @@ async function handleRequest(
     // The template defaults to the pipeline's own id and is re-checked either
     // way — a default is not a reason to skip validation (S5).
     const tId = typeof templateId === "string" && templateId !== "" ? templateId : id;
-    if (!isSafeId(tId)) {
-      json(res, 400, { error: `Template id "${tId}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(tId, "Template", res)) return;
     try {
       assertSafePath(ctx.templatesBase, `${tId}.yaml`);
     } catch {
@@ -1452,10 +1441,7 @@ async function handleRequest(
   if (method === "PUT" && promptWriteMatch) {
     const id = decodeURIComponent(promptWriteMatch[1]);
     const stepId = decodeURIComponent(promptWriteMatch[2]);
-    if (!isSafeId(id)) {
-      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(id, "Pipeline", res)) return;
     if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
       await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
       json(res, 403, { error: "Bundled workflows are read-only" });
@@ -1576,10 +1562,7 @@ async function handleRequest(
   if (method === "DELETE" && pipelineDetailMatch) {
     const id = decodeURIComponent(pipelineDetailMatch[1]);
     // Validate the decoded id so that percent-encoded traversal attempts are caught.
-    if (!isSafeId(id)) {
-      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(id, "Pipeline", res)) return;
     // Refuse mutations against the bundled catalog.
     if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
       json(res, 403, { error: "Cannot delete from the bundled pipeline catalog" });
@@ -2336,10 +2319,7 @@ async function handleRequest(
     const id = decodeURIComponent(manifestMatch[1]);
     // Validate the id before joining it into a path — a crafted id must not escape runs/.
     // Follows the same isSafeId pattern used for DELETE /api/pipelines/:id and template routes.
-    if (!isSafeId(id)) {
-      json(res, 400, { error: `Run id "${id}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(id, "Run", res)) return;
     const runDir = join(ctx.state.runsDir, id);
     if (!existsSync(join(runDir, "manifest.json"))) {
       json(res, 404, { error: `Run "${id}" not found` });
@@ -2698,10 +2678,7 @@ async function handleRequest(
   const exportMatch = RE_EXPORT.exec(pathname);
   if (method === "GET" && exportMatch) {
     const id = decodeURIComponent(exportMatch[1]);
-    if (!isSafeId(id)) {
-      json(res, 400, { error: `Pipeline id "${id}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(id, "Pipeline", res)) return;
     // FR-029: the layer that owns the id decides which pipelines directory the
     // bundle is read from — exporting a bundled workflow from a project that has
     // a canon of its own must not look for it in that canon.
@@ -2790,10 +2767,7 @@ async function handleRequest(
   const templateDetailMatch = RE_TEMPLATE_DETAIL.exec(pathname);
   if (method === "GET" && templateDetailMatch) {
     const tId = decodeURIComponent(templateDetailMatch[1]);
-    if (!isSafeId(tId)) {
-      json(res, 400, { error: `Template id "${tId}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(tId, "Template", res)) return;
     try {
       assertSafePath(ctx.templatesBase, `${tId}.yaml`);
     } catch {
@@ -2823,10 +2797,7 @@ async function handleRequest(
   // DELETE /api/templates/:id
   if (method === "DELETE" && templateDetailMatch) {
     const tId = decodeURIComponent(templateDetailMatch[1]);
-    if (!isSafeId(tId)) {
-      json(res, 400, { error: `Template id "${tId}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(tId, "Template", res)) return;
     try {
       assertSafePath(ctx.templatesBase, `${tId}.yaml`);
     } catch {
@@ -2848,10 +2819,7 @@ async function handleRequest(
   const templateInstallMatch = RE_TEMPLATE_INSTALL.exec(pathname);
   if (method === "POST" && templateInstallMatch) {
     const tId = decodeURIComponent(templateInstallMatch[1]);
-    if (!isSafeId(tId)) {
-      json(res, 400, { error: `Template id "${tId}" is invalid` });
-      return;
-    }
+    if (!requireSafeId(tId, "Template", res)) return;
     try {
       assertSafePath(ctx.templatesBase, `${tId}.yaml`);
     } catch {
