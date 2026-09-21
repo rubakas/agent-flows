@@ -1109,6 +1109,30 @@ function providerView(
   return { profiles, models };
 }
 
+// ── Bundled-catalog write guard ────────────────────────────────────────────────
+
+/** True when the write layer resolves to the read-only bundled catalog. */
+function isBundledCatalog(ctx: HandlerCtx): boolean {
+  return resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir);
+}
+
+/**
+ * Refuses a mutation aimed at the bundled catalog with 403 and the caller's
+ * message. Drains the request body first so the socket stays alive long
+ * enough to write the response. Returns true when the request was refused.
+ */
+async function refuseBundled(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: HandlerCtx,
+  message: string
+): Promise<boolean> {
+  if (!isBundledCatalog(ctx)) return false;
+  await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
+  json(res, 403, { error: message });
+  return true;
+}
+
 // ── Request handler ────────────────────────────────────────────────────────────
 
 async function handleRequest(
@@ -1294,7 +1318,7 @@ async function handleRequest(
       return;
     }
     // Refuse mutations against the bundled catalog — only project copies are writable.
-    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+    if (isBundledCatalog(ctx)) {
       json(res, 403, { error: "Cannot create pipelines in the bundled catalog" });
       return;
     }
@@ -1399,7 +1423,7 @@ async function handleRequest(
   const promptsMatch = RE_PIPELINE_PROMPTS.exec(pathname);
   if (method === "GET" && promptsMatch) {
     const id = decodeURIComponent(promptsMatch[1]);
-    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+    if (isBundledCatalog(ctx)) {
       json(res, 403, { error: "Bundled workflows are read-only" });
       return;
     }
@@ -1442,11 +1466,7 @@ async function handleRequest(
     const id = decodeURIComponent(promptWriteMatch[1]);
     const stepId = decodeURIComponent(promptWriteMatch[2]);
     if (!requireSafeId(id, "Pipeline", res)) return;
-    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
-      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-      json(res, 403, { error: "Bundled workflows are read-only" });
-      return;
-    }
+    if (await refuseBundled(req, res, ctx, "Bundled workflows are read-only")) return;
     // A namespaced id belongs to a nested pipeline's file: not a step this
     // route can address, so it is absent rather than refused.
     if (!RE_OWN_STEP_ID.test(stepId)) {
@@ -1564,7 +1584,7 @@ async function handleRequest(
     // Validate the decoded id so that percent-encoded traversal attempts are caught.
     if (!requireSafeId(id, "Pipeline", res)) return;
     // Refuse mutations against the bundled catalog.
-    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
+    if (isBundledCatalog(ctx)) {
       json(res, 403, { error: "Cannot delete from the bundled pipeline catalog" });
       return;
     }
@@ -1595,11 +1615,10 @@ async function handleRequest(
     const id = decodeURIComponent(openDraftMatch[1]);
     // Refuse mutations against the bundled catalog — a draft is the first step
     // of a write, so it is refused here and not only at save time.
-    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
-      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-      json(res, 403, { error: "Cannot open drafts against the bundled pipeline catalog" });
+    if (
+      await refuseBundled(req, res, ctx, "Cannot open drafts against the bundled pipeline catalog")
+    )
       return;
-    }
     const entry = findPipelineById(ctx.pipelinesDir, id);
     if (!entry) {
       json(res, 404, { error: `Pipeline "${id}" not found` });
@@ -1702,11 +1721,8 @@ async function handleRequest(
   const updateDraftMatch = RE_DRAFT_BY_ID.exec(pathname);
   if (method === "PUT" && updateDraftMatch) {
     const draftId = parseInt(updateDraftMatch[1], 10);
-    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
-      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-      json(res, 403, { error: "Cannot edit drafts of the bundled pipeline catalog" });
+    if (await refuseBundled(req, res, ctx, "Cannot edit drafts of the bundled pipeline catalog"))
       return;
-    }
     const draft = getDraft(ctx.db, draftId);
     if (!draft) {
       json(res, 404, { error: `Draft ${draftId} not found` });
@@ -1728,11 +1744,7 @@ async function handleRequest(
   const saveDraftMatch = RE_DRAFT_SAVE.exec(pathname);
   if (method === "POST" && saveDraftMatch) {
     const draftId = parseInt(saveDraftMatch[1], 10);
-    if (resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir)) {
-      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-      json(res, 403, { error: "Cannot save into the bundled pipeline catalog" });
-      return;
-    }
+    if (await refuseBundled(req, res, ctx, "Cannot save into the bundled pipeline catalog")) return;
     const draft = getDraft(ctx.db, draftId);
     if (!draft) {
       json(res, 404, { error: `Draft ${draftId} not found` });
@@ -2468,7 +2480,7 @@ async function handleRequest(
       // agents subdirectory does not exist — return empty
     }
 
-    const isBundled = resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir);
+    const isBundled = isBundledCatalog(ctx);
 
     // spec 034 D6: the Settings view reports which provider profile is in force.
     // A profile that cannot be resolved is reported as "unknown" rather than
