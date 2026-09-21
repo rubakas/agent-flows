@@ -380,6 +380,28 @@
         color: var(--accent);
         text-decoration: underline;
       }
+      /* 042 D18: a run reads as three answers to three questions — what came
+         out, what happened, what was asked. Each gets one heading in the same
+         idiom, so none of them has to be inferred from position. */
+      .run-section {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin: 18px 0 8px;
+        padding-bottom: 4px;
+        border-bottom: 1px solid var(--line);
+      }
+      .run-section h3 {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--ink);
+      }
+      .run-section .muted {
+        font-size: 11px;
+      }
+      .run-section .btn {
+        margin-left: auto;
+      }
       /* 042 D17: the run's answer, given the room a report needs. */
       #run-result {
         margin-bottom: 16px;
@@ -565,6 +587,8 @@
       .table th .badge.active {
         border-color: var(--accent);
       }
+      /* 042 D18: an excerpt is a glance. Six of these at full height made the
+         page mostly a second, worse copy of the outputs below them. */
       .step-output {
         font-family: var(--mono);
         font-size: 11px;
@@ -572,6 +596,10 @@
         margin-top: 4px;
         white-space: pre-wrap;
         word-break: break-all;
+        max-height: 4.5em;
+        overflow: hidden;
+        -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
+        mask-image: linear-gradient(to bottom, #000 60%, transparent);
       }
       .gate-box {
         background: color-mix(in srgb, var(--warn) 8%, transparent);
@@ -2119,7 +2147,7 @@
           );
           if (!res.ok) return;
           const html =
-            `<div class="section-header"><h2>Result</h2><span class="muted">${escH(sink)}</span></div>` +
+            `<div class="run-section"><h3>Result</h3><span class="muted">from ${escH(sink)}</span></div>` +
             `<div class="result-body">${renderOutput(await res.json())}</div>`;
           _runResultHtml[runId] = html;
           // The stream may have re-rendered the body while this was in flight,
@@ -2497,7 +2525,7 @@
           ? `<button class="btn copy-btn" id="btn-toggle-inputs">${_invExpanded ? "[collapse]" : "[expand]"}</button>`
           : "";
         return `<div id="run-invocation">
-          <div class="block-head">How it was run ${toggle}</div>
+          <div class="run-section"><h3>Request</h3><span class="muted">what this run was asked for</span>${toggle}</div>
           <div class="block-head">Chat ${copyButton(full.chat)}</div>
           <pre class="code-block" id="run-invocation-chat">${escH(shown.chat)}</pre>
           <div class="block-head">curl ${copyButton(full.curl)}</div>
@@ -2576,11 +2604,9 @@
           inv && inv.startedAt ? ` · started ${escH(fmtTime(inv.startedAt))}` : ""
         }</div>`;
 
-        if (inv) html += invocationHtml(inv);
-
-        // 042 D17: the answer first. A settled run's whole point is its result,
-        // which otherwise sat in the last step's collapsed Output, five steps
-        // down, indistinguishable from the prompts above it.
+        // 042 D17/D18: the answer first, above how the run was asked for. The
+        // invocation is 475px of the inputs you already know you sent; reading
+        // past it to reach the report is the wrong way round.
         html += `<div id="run-result" hidden></div>`;
         // Filled after this html lands in the DOM, and refilled on every
         // re-render the stream causes — the fill used to run once and be wiped.
@@ -2617,17 +2643,24 @@
         _judgeError = snapshot.judgeError;
         html += `<div class="run-decisions">${renderDecisions(_decisions, _judgeError)}</div>`;
 
-        // Steps table.
+        // Steps table. Mastra's synthetic merge steps are bookkeeping for parallel
+        // branches, not steps anyone wrote (042 D7) — two rows reading only
+        // "succeeded · Activity · Output" say nothing and are dropped here for
+        // the same reason they are excluded from the N-of-M count.
         const steps = snapshot.steps || {};
-        const stepIds = Object.keys(steps);
+        const stepIds = Object.keys(steps).filter((id) => !/^__merge_level_/u.test(id));
         if (stepIds.length) {
-          html += `<div class="block-head">Steps</div>`;
+          html += `<div class="run-section"><h3>Progress</h3><span class="muted">${escH(
+            String(stepIds.length)
+          )} steps</span></div>`;
           for (const sid of stepIds) {
             html += stepRowHtml(sid, steps[sid]);
           }
         } else {
           html += `<p class="empty">No steps recorded yet.</p>`;
         }
+
+        if (inv) html += invocationHtml(inv);
 
         body.innerHTML = html;
         wireCopyButtons(body);

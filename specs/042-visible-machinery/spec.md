@@ -201,6 +201,20 @@ SSE `snapshot` event re-rendered the body milliseconds later and wiped it — so
 appeared. The fill now belongs to the render itself, is cached per run so repeated snapshots cost no
 fetch, and re-looks-up its element after the await instead of holding it across one.
 
+**D18 — A run reads as three named sections, in one order.** (Owner, 2026-09-22: "не ясно де
+початкова інформація де прогрес і де результат".) The view was a flat stream of 13px labels — "Chat",
+"curl", "Steps" — with no boundaries, so which part was which had to be inferred from position.
+
+Three sections, one heading idiom, always in this order: **Result** (the answer, settled runs only),
+**Progress** (the steps), **Request** (what the run was asked for). Request moved from the top to the
+bottom: it is 475px of inputs the operator already knows they sent, and reading past it to reach the
+report was the wrong way round.
+
+Also dropped from the view: the `__merge_level_*` rows, for the same reason D7 excludes them from the
+step count — two rows reading only "succeeded · Activity · Output" are bookkeeping, not steps anyone
+wrote. And a step's inline excerpt is capped to a few lines: six of them at full height made the page
+mostly a second, worse copy of the outputs collapsed beneath them. Measured: 3038px → 1805px.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via
