@@ -112,7 +112,6 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
     assertPositiveTimeout(`Pipeline "${def.id}"`, "defaultTimeoutMs", defTimeout);
   }
 
-  // Validate defaultMaxBudgetUsd if present
   const defBudget = (def as unknown as Record<string, unknown>).defaultMaxBudgetUsd;
   if (defBudget !== undefined) {
     if (typeof defBudget !== "number" || defBudget <= 0) {
@@ -314,7 +313,6 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
         );
       }
 
-      // Validate maxBudgetUsd if present
       const budgetField = (step as unknown as Record<string, unknown>).maxBudgetUsd;
       if (budgetField !== undefined) {
         if (typeof budgetField !== "number" || budgetField <= 0) {

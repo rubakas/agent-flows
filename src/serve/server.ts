@@ -2013,6 +2013,9 @@ async function handleRequest(
     // the run's inputs. If both are provided, artifact-derived values take
     // priority — the operator is being explicit about what to hand off.
     const artifactDerivedInputs: Record<string, unknown> = {};
+    // Kept for the chain-directory computation further down, so the path is
+    // resolved and contained exactly once per request.
+    let resolvedArtifactPath: string | undefined;
     if (artifactPath !== undefined) {
       if (typeof artifactPath !== "string") {
         json(res, 400, { error: 'Field "artifactPath" must be a string' });
@@ -2026,6 +2029,7 @@ async function handleRequest(
         json(res, 400, { error: pathResult.error });
         return;
       }
+      resolvedArtifactPath = pathResult.resolved;
 
       // Load the artifact file.
       let artifactRaw: string;
@@ -2209,13 +2213,8 @@ async function handleRequest(
     // FR-006: when chaining from a parent artifact, write the new stage's artifact
     // into the parent run's directory so all stages in a chain accumulate there.
     // The chain dir is the directory that contains the source artifact file.
-    let chainArtifactDir: string | undefined;
-    if (artifactPath !== undefined && typeof artifactPath === "string") {
-      const pathResult = resolveArtifactPath(ctx.projectDir, artifactPath, stateRootOf(ctx.state));
-      if (pathResult.ok) {
-        chainArtifactDir = dirname(pathResult.resolved);
-      }
-    }
+    const chainArtifactDir =
+      resolvedArtifactPath === undefined ? undefined : dirname(resolvedArtifactPath);
 
     const result = await runService.start(pipeline, wfInput, {
       gateMode: gateMode ?? "manual",

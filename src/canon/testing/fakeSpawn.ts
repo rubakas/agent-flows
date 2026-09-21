@@ -54,24 +54,6 @@ export function makeFakeSpawn(opts: FakeChildOptions = {}): {
 }
 
 /**
- * Returns a different canned stdout per call, in order.
- * After responses are exhausted, returns an empty string.
- */
-export function makeMultiFakeSpawn(responses: string[]): {
-  spawn: SpawnFn;
-  getCallCount: () => number;
-} {
-  let callIndex = 0;
-  const spawn = ((_cmd: string, _args: string[]) => {
-    const response = responses[callIndex] ?? "";
-    callIndex++;
-    const { child } = makeFakeChild({ stdoutChunks: [response] });
-    return child;
-  }) as unknown as SpawnFn;
-  return { spawn, getCallCount: () => callIndex };
-}
-
-/**
  * Formats a plain text result into stream-json stdout that runClaudeCli can parse.
  * Wraps the text in a minimal result event preceded by a system/init event.
  */
@@ -107,71 +89,4 @@ export function makeStreamJsonChild(
     stderrChunks: opts.stderrChunks,
     exitCode: opts.exitCode,
   });
-}
-
-/**
- * Creates a fake spawn that returns different stream-json responses per call.
- * Captures stdin written to each child so callers can inspect the prompt.
- */
-export function makeMultiFakeStreamJsonSpawn(
-  responses: (string | { text: string; subtype?: string; isError?: boolean })[]
-): {
-  spawn: SpawnFn;
-  getCallCount: () => number;
-  getStdin: (callIdx: number) => Promise<string>;
-} {
-  let callIndex = 0;
-  const stdinPromises: Promise<string>[] = [];
-
-  const spawn = ((_cmd: string, _args: string[]) => {
-    const resp = responses[callIndex] ?? "";
-    const text = typeof resp === "string" ? resp : resp.text;
-    const subtype = typeof resp === "object" ? resp.subtype : undefined;
-    const isError = typeof resp === "object" ? resp.isError : false;
-    callIndex++;
-
-    const emitter = new EventEmitter();
-    const stdout = new PassThrough();
-    const stderr = new PassThrough();
-    const stdin = new PassThrough();
-    const killCalls: string[] = [];
-
-    const child = Object.assign(emitter, {
-      stdout,
-      stderr,
-      stdin,
-      kill(sig?: string) {
-        killCalls.push(sig ?? "SIGTERM");
-        // Simulate the child responding to SIGTERM by closing
-        setImmediate(() => {
-          if (!stdout.destroyed) stdout.push(null);
-          if (!stderr.destroyed) stderr.push(null);
-          emitter.emit("close", null);
-        });
-      },
-    });
-
-    // Capture stdin content
-    const stdinPromise = new Promise<string>((resolve) => {
-      let buf = "";
-      stdin.on("data", (d: Buffer) => (buf += d.toString()));
-      stdin.on("end", () => resolve(buf));
-    });
-    stdinPromises.push(stdinPromise);
-
-    setImmediate(() => {
-      stdout.push(makeStreamJsonStdout(text, { subtype, isError }));
-      stdout.push(null);
-      stderr.push(null);
-      emitter.emit("close", 0);
-    });
-
-    return child;
-  }) as unknown as SpawnFn;
-
-  return {
-    spawn,
-    getCallCount: () => callIndex,
-    getStdin: (idx: number) => stdinPromises[idx] ?? Promise.resolve(""),
-  };
 }
