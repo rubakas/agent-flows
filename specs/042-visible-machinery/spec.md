@@ -149,6 +149,28 @@ would put "serving this page" on the wrong row.
 **This is a stepping stone, not a substitute.** When spec 039 lands, the proxy route is deleted; the
 page's picker and its one API seam are what survive.
 
+**D13 — The runs list spans every live daemon, so nothing is switched by hand.** (Owner, 2026-09-22:
+"взагалі перемикати нічого не треба".) The page asks every live daemon for its runs in parallel and
+merges them newest-first, with a Project column that appears only when the list spans more than one.
+No new process: daemons already record themselves in `daemon.json`, so a hub would only add another
+thing to start, supervise and reap — the page pulls instead of daemons pushing. A daemon that fails to
+answer costs its own rows, not the list. Opening a run follows the row, which carries its own project;
+the detail view has no list to ask, so a merged row that did not carry it would be looked up in the
+wrong project. `GET /api/daemons` stays unforwarded for the reason D12 gives.
+
+**D14 — A run names what it was started against.** (Owner, 2026-09-22: "було б корисно зрозуміти
+code-review чого саме".) With seven reviews queued against seven pull requests, rows reading
+`code-review` and a step id are indistinguishable. The subject is DERIVED, never asked of a model and
+never supplied by a caller: the first non-empty line of the longest string input, stripped of
+markdown. The longest input is the substantive one — `baseline` and `introducedCommits` are short
+refs — which is steadier than first-declared, because key order depends on the caller. Live and
+disk-restored summaries derive it the same way, from the same recorded invocation.
+
+**D15 — The workflow's name is the way into it.** (Owner, 2026-09-22.) The name links to the workflow
+view; the separate `View` button beside it is removed, having said the same thing twice — the
+duplication the owner named when he called the interface "дубльований". An anchor rather than a click
+handler, so it answers the keyboard and middle-click like every other link.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via

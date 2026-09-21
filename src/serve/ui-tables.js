@@ -184,14 +184,19 @@ export function workflowRow(wf) {
   const shadows = Array.isArray(wf?.shadows) && wf.shadows.length > 0 ? wf.shadows.join(", ") : "";
   const actions = [
     btn("Run…", "data-run-wf", id),
-    btn("View", "data-view-wf", id),
     writable ? btn("Edit", "data-edit-wf", id) : btn("Fork…", "data-fork-wf", id),
     btn(hidden ? "Show" : "Hide", "data-toggle-wf", id, "", `data-wf-hidden="${hidden}"`),
     ...(writable ? [btn("Delete", "data-del-wf", id, "danger")] : []),
   ].join("");
   return (
     `<tr data-wf-row="${esc(id)}">` +
-    `<td class="pipeline-id">${esc(id)}${hidden ? ' <span class="badge">hidden</span>' : ""}</td>` +
+    // The name opens the workflow. An anchor rather than a click handler, so it
+    // carries its own affordance and answers the keyboard and middle-click the
+    // way every other link on the page does; the separate View button it
+    // replaces said the same thing twice.
+    `<td class="pipeline-id"><a class="wf-open" href="#/workflows/${encodeURIComponent(id)}">${esc(
+      id
+    )}</a>${hidden ? ' <span class="badge">hidden</span>' : ""}</td>` +
     `<td class="pipeline-desc">${esc(wf?.description ?? "")}</td>` +
     `<td>${esc(wf?.steps ?? "")}</td>` +
     `<td class="pipeline-id">${esc(inputs)}</td>` +
@@ -214,8 +219,8 @@ export function workflowRow(wf) {
  * without opening the run.
  *
  * @param {{ runId: string, pipelineId?: string, status?: string, createdAt?: string,
- *   settledAt?: string, source?: string }} r
- * @param {{ selected?: boolean, progress?: object | null }} [opts]
+ *   settledAt?: string, source?: string, projectKey?: string, projectName?: string }} r
+ * @param {{ selected?: boolean, progress?: object | null, showProject?: boolean }} [opts]
  * @returns {string}
  */
 export function runRow(r, opts) {
@@ -239,10 +244,25 @@ export function runRow(r, opts) {
   ]
     .filter(Boolean)
     .join(" ");
+  // The project column appears only when the list spans more than one, so a
+  // single-project machine gains no column it would read the same value in.
+  const projectCell = opts?.showProject
+    ? `<td class="pipeline-id muted" title="${esc(r?.projectKey ?? "")}">${esc(
+        r?.projectName ?? ""
+      )}</td>`
+    : "";
   return (
-    `<tr data-run-row="${esc(r?.runId ?? "")}"${rowClasses ? ` class="${rowClasses}"` : ""}>` +
+    `<tr data-run-row="${esc(r?.runId ?? "")}" data-run-project="${esc(r?.projectKey ?? "")}"${
+      rowClasses ? ` class="${rowClasses}"` : ""
+    }>` +
     `<td><span class="badge ${esc(sc)}">${esc(r?.status ?? "")}</span>${diskMark}</td>` +
-    `<td class="pipeline-id">${esc(r?.pipelineId ?? "")}</td>` +
+    projectCell +
+    // The workflow answers "what is this doing"; the subject answers "to what".
+    // Both belong in one cell — a run of `code-review` against one pull request
+    // is otherwise indistinguishable from a run against the next (042 D14).
+    `<td class="pipeline-id">${esc(r?.pipelineId ?? "")}${
+      r?.subject ? `<div class="run-subject" title="${esc(r.subject)}">${esc(r.subject)}</div>` : ""
+    }</td>` +
     `<td class="run-step">${progressCell(opts?.progress ?? null)}</td>` +
     `<td class="muted">${esc(fmtTime(r?.createdAt))}</td>` +
     `<td class="muted num">${elapsed}</td>` +

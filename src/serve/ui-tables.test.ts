@@ -13,13 +13,29 @@ import { emptyRunsMessage, progressCell, runProgress, runRow, workflowRow } from
 const HOSTILE = '<img src=x onerror=alert(1)>"';
 
 describe("workflowRow — actions follow the row's own layer (038 D14/D15)", () => {
-  it("a repository row offers Run…, View, Edit and Delete", () => {
+  it("a repository row offers Run…, Edit and Delete", () => {
     const html = workflowRow({ id: "investigate", layer: "repo" });
-    for (const label of ["Run…", "View", "Edit", "Delete"]) {
+    for (const label of ["Run…", "Edit", "Delete"]) {
       assert.ok(html.includes(`>${label}<`), `a repository row must offer ${label}: ${html}`);
     }
     assert.ok(html.includes('data-del-wf="investigate"'));
     assert.ok(!html.includes(">Fork…<"), "a workflow already in a writable layer needs no fork");
+  });
+
+  // The name is the way into a workflow, so a View button beside it said the
+  // same thing twice; the link has to carry that job on its own now.
+  it("the name links to the workflow, and no separate View button remains", () => {
+    const html = workflowRow({ id: "investigate", layer: "repo" });
+    assert.ok(
+      html.includes('href="#/workflows/investigate"'),
+      `the name must open the workflow: ${html}`
+    );
+    assert.ok(!html.includes(">View<"), `View duplicated the name link: ${html}`);
+  });
+
+  it("escapes an id inside the name link's href as well as its text", () => {
+    const html = workflowRow({ id: HOSTILE, layer: "repo" });
+    assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
   });
 
   it("a bundled row offers Fork… instead of Edit, and never Delete", () => {

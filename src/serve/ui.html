@@ -356,24 +356,29 @@
       .table tr.awaiting td:first-child {
         border-left: 3px solid var(--warn);
       }
-      /* 042 D12: the project selector reads as part of the masthead, not as a
-         form control competing with the product name. */
-      #project-picker {
-        background: transparent;
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        color: var(--ink-2);
-        font-family: var(--mono);
-        font-size: 12px;
-        padding: 2px 6px;
-        margin-left: 12px;
-      }
-      #project-picker:hover {
-        color: var(--ink);
-        border-color: var(--accent);
-      }
       .pipeline-id {
         font-family: var(--mono);
+      }
+      /* 042 D14: the subject sits under its workflow, quieter and not
+         monospaced — it is prose, not an identifier. */
+      .run-subject {
+        font-family: var(--ui);
+        font-size: 11px;
+        color: var(--ink-2);
+        max-width: 42ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* The workflow name is the way in; it should look like one without
+         shouting over the table. */
+      a.wf-open {
+        color: inherit;
+        text-decoration: none;
+      }
+      a.wf-open:hover {
+        color: var(--accent);
+        text-decoration: underline;
       }
       .pipeline-desc {
         color: var(--ink-2);
@@ -791,9 +796,6 @@
   <body>
     <header>
       <h1>agent-flows</h1>
-      <!-- 042 D12: which project the views below are reading. Its own daemon
-           answers directly; any other is read through this one. -->
-      <select id="project-picker" title="Project these views read"></select>
       <span class="spacer"></span>
       <nav class="tabs">
         <a class="tab" id="tab-runs" href="#/runs">Runs</a>
@@ -1046,15 +1048,29 @@
         el._t = setTimeout(() => el.classList.remove("show"), 3000);
       }
 
-      // 042 D12: the project every view below reads. Empty means this daemon's
-      // own project, which it answers directly; any other key is prefixed so the
-      // daemon serving this page forwards to that project's daemon. Kept in the
-      // URL rather than only in memory so a reload, a copied link and a restored
-      // tab all land on the same project.
+      // 042 D12: nothing is switched by hand. The runs list reads every live
+      // daemon at once and each row carries its own project, so opening a run
+      // just follows the row. `projectKey` is that row's project — empty means
+      // this daemon's own, which it answers directly. It rides in the URL so a
+      // reload or a copied link reopens the same run against the same project.
       let projectKey = new URLSearchParams(location.search).get("project") || "";
 
+      /** The path a request to `key` takes: direct for ours, forwarded otherwise. */
+      function pathFor(key, path) {
+        return !key ? path : `/api/projects/${encodeURIComponent(key)}${path}`;
+      }
+
       function apiPath(path) {
-        return projectKey === "" ? path : `/api/projects/${encodeURIComponent(projectKey)}${path}`;
+        return pathFor(projectKey, path);
+      }
+
+      /** Remember which project a run belongs to, so its detail view can reach it. */
+      function setProjectKey(key) {
+        projectKey = key || "";
+        const url = new URL(location.href);
+        if (projectKey === "") url.searchParams.delete("project");
+        else url.searchParams.set("project", projectKey);
+        history.replaceState(null, "", url.toString());
       }
 
       async function request(url, method, body) {
@@ -1073,44 +1089,8 @@
       /** Reads this daemon itself, whichever project the views are showing. */
       const apiLocal = (method, path, body) => request(path, method, body);
 
-      // 042 D12: fill the picker from the live daemons. A project with no live
-      // daemon is not offered — there would be nothing to answer for it — and
-      // changing the selection reloads, so no view can keep a row from the
-      // project you just left.
-      async function fillProjectPicker() {
-        const sel = document.getElementById("project-picker");
-        if (!sel) return;
-        let daemons = [];
-        try {
-          daemons = (await apiLocal("GET", "/api/daemons")).daemons || [];
-        } catch {
-          return;
-        }
-        const live = daemons.filter((d) => d.live);
-        // One project and it is ours: a picker with a single option is furniture.
-        if (live.length < 2) {
-          sel.hidden = true;
-          return;
-        }
-        sel.hidden = false;
-        sel.innerHTML = live
-          .map((d) => {
-            const key = d.self ? "" : d.projectKey;
-            const name = String(d.projectDir || "")
-              .split("/")
-              .pop();
-            return `<option value="${escH(key)}"${key === projectKey ? " selected" : ""}>${escH(
-              name
-            )}${d.self ? "" : ` · ${d.port}`}</option>`;
-          })
-          .join("");
-        sel.onchange = () => {
-          const url = new URL(location.href);
-          if (sel.value === "") url.searchParams.delete("project");
-          else url.searchParams.set("project", sel.value);
-          location.href = url.toString();
-        };
-      }
+      /** Reads one named project, wherever its daemon is. */
+      const apiFor = (key, method, path, body) => request(pathFor(key, path), method, body);
 
       // ── Dialogs (037 D3/D4) ────────────────────────────────────────────────
 
@@ -1170,11 +1150,6 @@
       };
 
       function wireWorkflowsTable(wrap) {
-        for (const btn of wrap.querySelectorAll("[data-view-wf]")) {
-          btn.onclick = () => {
-            location.hash = hashFor("workflow", btn.dataset.viewWf);
-          };
-        }
         for (const btn of wrap.querySelectorAll("[data-edit-wf]")) {
           btn.onclick = () => editWorkflow(btn.dataset.editWf);
         }
@@ -1826,6 +1801,9 @@
 
       /** Which chip is selected in the Runs view (D2). "active" is the default. */
       let _runsFilter = "active";
+      // True once the list spans more than one project, which is when a Project
+      // column says something (042 D13).
+      let _showProject = false;
 
       /** The run whose details are on screen, so a re-rendered table can mark it. */
       let _selectedRunId = null;
@@ -1864,7 +1842,13 @@
         await Promise.all(
           inFlight.map(async (r) => {
             try {
-              const snapshot = await api("GET", `/api/runs/${encodeURIComponent(r.runId)}`);
+              // Each run is fetched from its own project, not from whichever one
+              // the page last looked at.
+              const snapshot = await apiFor(
+                r.projectKey,
+                "GET",
+                `/api/runs/${encodeURIComponent(r.runId)}`
+              );
               const declared = await declaredStepsFor(snapshot.pipelineId || r.pipelineId);
               byRunId[r.runId] = runProgress(snapshot.steps, declared);
             } catch {
@@ -1876,11 +1860,52 @@
         return byRunId;
       }
 
+      /**
+       * Every live daemon's runs, as one list (042 D13).
+       *
+       * Asked of each daemon in parallel and merged newest-first, so the page
+       * answers "what is running on this machine" without the operator choosing
+       * a project first. A daemon that fails to answer costs its own rows, not
+       * the list: the others still render, and the daemons panel above is where
+       * a daemon that stopped answering is reported.
+       */
+      async function fetchAllRuns() {
+        let projects = [{ projectKey: "", projectName: "" }];
+        try {
+          const live = ((await apiLocal("GET", "/api/daemons")).daemons || []).filter(
+            (d) => d.live
+          );
+          if (live.length > 0) {
+            projects = live.map((d) => ({
+              projectKey: d.self ? "" : d.projectKey,
+              projectName: String(d.projectDir || "")
+                .split("/")
+                .pop(),
+            }));
+          }
+        } catch {
+          // No daemon list means no fan-out; read our own project alone.
+        }
+        const lists = await Promise.all(
+          projects.map(async (p) => {
+            try {
+              const data = await apiFor(p.projectKey, "GET", "/api/runs");
+              return (data.runs || []).map((r) => ({ ...r, ...p }));
+            } catch {
+              return [];
+            }
+          })
+        );
+        const runs = lists.flat();
+        runs.sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
+        return { runs, projectCount: projects.length };
+      }
+
       async function loadRuns() {
         const wrap = document.getElementById("runs-table-wrap");
         try {
-          const data = await api("GET", "/api/runs");
-          const runs = data.runs || [];
+          const { runs, projectCount } = await fetchAllRuns();
+          _showProject = projectCount > 1;
           renderRuns(runs, wrap, await loadRunProgress(runs));
         } catch (e) {
           wrap.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
@@ -1921,12 +1946,15 @@
         }
 
         html += `<table class="table"><thead><tr>
-          <th>Status</th><th>Workflow</th><th>Step</th><th>Started</th><th>Duration</th><th></th>
+          <th>Status</th>${
+            _showProject ? "<th>Project</th>" : ""
+          }<th>Workflow</th><th>Step</th><th>Started</th><th>Duration</th><th></th>
         </tr></thead><tbody>`;
         for (const r of shown) {
           html += runRow(r, {
             selected: r.runId === _selectedRunId,
             progress: progress?.[r.runId] ?? null,
+            showProject: _showProject,
           });
         }
         html += "</tbody></table>";
@@ -1934,18 +1962,27 @@
         wireRunsTable(wrap);
       }
 
-      /** Row and Details clicks both navigate to the run view (FR-002). */
+      /**
+       * Row and Details clicks both navigate to the run view (FR-002).
+       *
+       * The row also says which project it came from, and that is recorded
+       * before navigating: the detail view has no list to ask, so a run opened
+       * from a merged list would otherwise be looked up in the wrong project
+       * (042 D13).
+       */
       function wireRunsTable(wrap) {
+        const open = (row, runId) => {
+          setProjectKey(row?.dataset.runProject ?? "");
+          location.hash = hashFor("run", runId);
+        };
         wrap.querySelectorAll("[data-run-details]").forEach((btn) => {
           btn.onclick = (ev) => {
             ev.stopPropagation();
-            location.hash = hashFor("run", btn.dataset.runDetails);
+            open(btn.closest("[data-run-row]"), btn.dataset.runDetails);
           };
         });
         wrap.querySelectorAll("[data-run-row]").forEach((row) => {
-          row.onclick = () => {
-            location.hash = hashFor("run", row.dataset.runRow);
-          };
+          row.onclick = () => open(row, row.dataset.runRow);
         });
       }
 
@@ -3156,7 +3193,6 @@
       // ── Boot ───────────────────────────────────────────────────────────────
 
       (async () => {
-        void fillProjectPicker();
         route();
       })();
     </script>

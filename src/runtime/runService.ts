@@ -13,6 +13,7 @@ import {
   readPersistedRun,
 } from "./artifactStore.js";
 import { runJudge } from "./gateJudge.js";
+import { runSubject } from "./runSubject.js";
 import { clearRun, getRun as getStepIntrospection } from "./stepIntrospection.js";
 import {
   appendRunLogFileEvent,
@@ -260,6 +261,17 @@ export interface RunSummary {
    * settled — so a list consumer can tell "still going" from "took this long".
    */
   settledAt?: string;
+  /**
+   * One line naming what this run was started against (spec 042 D14), derived
+   * from its inputs. Absent when those carry nothing worth showing.
+   */
+  subject?: string;
+}
+
+/** The `subject` property when there is one, and nothing at all when there is not. */
+function withSubject(invocation: unknown): { subject?: string } {
+  const subject = runSubject(invocation);
+  return subject === undefined ? {} : { subject };
 }
 
 export type { JudgeDeps } from "./gateJudge.js";
@@ -751,6 +763,7 @@ export class RunService {
       status: record.status,
       createdAt: record.createdAt.toISOString(),
       ...(record.settledAt !== undefined ? { settledAt: record.settledAt } : {}),
+      ...withSubject(record.invocation),
       source: "live" as const,
     }));
     if (!this.runsDir) return live;

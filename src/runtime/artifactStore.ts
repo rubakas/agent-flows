@@ -8,6 +8,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
+import { runSubject } from "./runSubject.js";
+
 // ── Provenance types ──────────────────────────────────────────────────────────
 
 /**
@@ -302,6 +304,8 @@ export interface PersistedRunSummary {
   error?: string;
   /** Present when status is "unreadable": the file that could not be read. */
   path?: string;
+  /** One line naming what this run was started against (spec 042 D14). */
+  subject?: string;
 }
 
 /** A run's full state rebuilt from its artifact — the on-disk twin of GetResult. */
@@ -412,6 +416,12 @@ function startedAtOf(artifact: Record<string, unknown>, runDir: string): string 
  * run anything is not an error. Directories whose artifact cannot be parsed are
  * returned with status "unreadable" rather than dropped (FR-012).
  */
+/** The `subject` property when the artifact's invocation yields one. */
+function subjectOf(artifact: unknown): { subject?: string } {
+  const subject = runSubject((artifact as { invocation?: unknown })?.invocation);
+  return subject === undefined ? {} : { subject };
+}
+
 export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
   let dirEntries: string[];
   try {
@@ -453,6 +463,9 @@ export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
       status: typeof artifact.status === "string" ? artifact.status : "unreadable",
       createdAt: startedAtOf(artifact, runDir),
       ...(settledAtOf(artifact) !== "" ? { settledAt: settledAtOf(artifact) } : {}),
+      // A restored run names its subject the same way a live one does: the
+      // artifact is a serialised GetResult, so the invocation is right there.
+      ...subjectOf(artifact),
       source: "disk",
     });
   }
