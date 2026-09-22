@@ -313,6 +313,25 @@ heading below it. The heading is gone; the tab already says where you are.
 the killing — it stays as the row's title for the rare manual `kill`, not as a column read on every
 page load.
 
+**D25 — The run detail has one home at a time.** (Owner, 2026-09-22: "коли я збільшую екран, пропадає
+результат".) Reproduced exactly: at 1500px the detail renders into the split pane, at 1000px into
+`#view-run` (spec 034 FR-013) — and the abandoned one kept its markup. Two elements then carried
+`id="run-result"`, and `getElementById` returns the FIRST in document order, which is the pane's. So
+after a wide→narrow resize the result was written into the copy that is no longer on screen, and the
+visible block held **zero characters** while the hidden one held 11,470.
+
+Two changes, because either alone leaves the trap armed. The router empties the target it just left,
+so no id is ever duplicated. And `fillRunResult` takes the body it was rendered into and uses
+`scope.querySelector`, so even a stale duplicate elsewhere cannot win.
+
+**Generalise: a per-render element must never be found by `getElementById`.** The id is unique in the
+template, not in the document — any view that renders the same template into two places breaks that
+assumption silently, and the symptom is emptiness rather than an error.
+
+Verified across 1000 → 1500 → 980: one element each time, always the visible one, always filled.
+**No unit gate covers this** — it is router-and-layout behaviour, observable only in a browser, like
+D19's table-cell defect.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via

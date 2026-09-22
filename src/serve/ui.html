@@ -2173,8 +2173,10 @@
       // snapshot costs no second fetch — and so the block survives it at all.
       const _runResultHtml = {};
 
-      async function fillRunResult(runId, snapshot) {
-        const el = document.getElementById("run-result");
+      async function fillRunResult(runId, snapshot, scope) {
+        // Scoped to the body just rendered, never `getElementById`: a stale
+        // duplicate elsewhere in the document would otherwise win (042 D25).
+        const el = (scope ?? document).querySelector("#run-result");
         if (!el) return;
         if (_runResultHtml[runId] !== undefined) {
           el.innerHTML = _runResultHtml[runId];
@@ -2203,7 +2205,7 @@
           _runResultHtml[runId] = html;
           // The stream may have re-rendered the body while this was in flight,
           // so the element is looked up again rather than held across the await.
-          const target = document.getElementById("run-result");
+          const target = (scope ?? document).querySelector("#run-result");
           if (target === null || _activeRunId !== runId) return;
           target.innerHTML = html;
           target.hidden = false;
@@ -2682,7 +2684,7 @@
         html += `<div id="run-result" hidden></div>`;
         // Filled after this html lands in the DOM, and refilled on every
         // re-render the stream causes — the fill used to run once and be wiped.
-        queueMicrotask(() => void fillRunResult(runId, snapshot));
+        queueMicrotask(() => void fillRunResult(runId, snapshot, body));
 
         // A persisted run cannot be acted on: the workflow it belonged to is
         // gone with the daemon that ran it (FR-011).
@@ -3324,6 +3326,15 @@
           document.getElementById(`view-${id}`).hidden = id !== shownView;
         }
         document.getElementById("runs-pane-detail").hidden = !splitRun;
+        // 042 D25: the run detail renders into the split pane on a wide screen
+        // and into #view-run on a narrow one. Leaving the markup behind in the
+        // one it just left duplicated every id in it — and getElementById
+        // returns the FIRST match, so after a resize the result was written into
+        // the copy that is no longer on screen. Empty the abandoned target.
+        const abandoned = document.getElementById(
+          splitRun ? "run-view-body" : "runs-pane-detail-body"
+        );
+        if (abandoned !== null && view === "run") abandoned.innerHTML = "";
         // A detail view belongs to the tab its list lives on.
         const TAB_OF = {
           run: "runs",
