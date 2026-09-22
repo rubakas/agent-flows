@@ -303,8 +303,9 @@ pipeline, which is `head`'s status, not the command's.
 **The page was empty at the one moment it mattered most.** D1 opens on "In flight", which is empty
 whenever nothing is running — including the instant the work you were watching finishes, which is
 exactly when the reports are wanted. It said "Nothing is running. Start one from Workflows", pointing
-_away_ from the thirty runs it was hiding. An empty in-flight list now falls back to the most recent
-runs and says so, so the page answers "what happened" as well as "what is happening".
+_away_ from the thirty runs it was hiding. The first fix fell back to the most recent runs and said
+so — **that fix was itself wrong, and is superseded by D28**: it left the "In flight" chip lit above
+a list of finished runs.
 
 **The word `Runs` appeared twice**, 190px apart: as the highlighted nav tab and again as the section
 heading below it. The heading is gone; the tab already says where you are.
@@ -360,6 +361,19 @@ answer, with `preview` leading because the blocks are what is read first.
 
 The Copy button takes the SOURCE from either tab. Copying what the page rendered would hand over prose
 with its structure stripped out, which is the opposite of why it is being copied.
+
+**D28 — The lit chip owns the rows beneath it.** (Owner, 2026-09-22: "а чому в In flight я бачу якісь
+воркфлоу?") D24's fallback bought the right behaviour with the wrong mechanism: it overrode the
+filter's _result_ while leaving the filter's _chip_ selected, so the page displayed a control that its
+own list did not obey. A filter that shows non-matching rows is wrong however helpful the rows are.
+
+The fix resolves the DEFAULT instead of overriding the result. `resolveRunsFilter` (`ui-tables.js`)
+answers which chip is selected: with nothing in flight the default resolves to `all`, and the lit chip
+is the one the rows belong to. A clicked chip is pinned and never re-resolved — an operator who asks
+for "In flight" and gets an empty list has been answered, not overruled.
+
+Cost of the pattern being broken twice in one spec: both D19 and D25 were also caught by the owner
+looking at the screen. See the Outcome note at the end of this file.
 
 ## Functional Requirements
 
@@ -455,6 +469,36 @@ with its structure stripped out, which is the opposite of why it is being copied
   port; it must never write into another project's state directory or dispatch a run there — this
   spec adds no route that does either, and any future change to `GET /api/daemons` must preserve
   that boundary explicitly, not by omission.
+
+## Outcome — what shipping this actually found (2026-09-22)
+
+Shipped on `main` across roughly twenty commits ending at the D28 fix. Suite: 1800 tests, 0 failures.
+Recorded here rather than in a memory note because the next person to touch this page needs it.
+
+**The dogfood that produced the defects.** `code-review` was run locally against seven pull requests
+in a separate repository (`domcap/ascent-portal`, #1365-#1371) while this spec was being built. All
+seven runs succeeded; every one returned "ready to merge" with zero blocking findings. The value to
+_this_ spec was not the reviews: it was that seven real runs put thirty runs, two daemons, two
+projects and 12-20 KB markdown reports in front of the page, and the page broke under them.
+
+**Every UI defect in this spec was found by the owner looking at the screen. None was found by the
+suite.** Three, all shipped as green:
+
+- **D19** — `display: flex` on a `<td>` took the cell out of table layout and the rows overlapped.
+- **D25** — two elements carried `id="run-result"` after a resize, so `getElementById` wrote the
+  answer into the copy that was no longer on screen.
+- **D28** — the "In flight" chip stayed lit above a list of finished runs.
+
+They share a shape: each is a property of the rendered document — layout, identity, the agreement
+between a control and its list — and each was invisible to a test asserting on a string of HTML.
+After the fact, each was made falsifiable as a pure function plus a unit test (`.actions` rules,
+`fillRunResult(scope)`, `resolveRunsFilter`), and each of those tests was proven able to fail by
+neutering its mechanism. That is the right end state and it arrived in the wrong order every time.
+
+**The gap this leaves open:** there is no browser-level gate in this project. The `chrome-test`
+handoff exists but is operator-driven, so nothing in `pnpm check` can catch this class. Until that
+changes, "the suite is green" says nothing about whether the page is usable, and a change to
+`ui.html` is not verified until someone has looked at it. Closing it is separate work, not this spec.
 
 ---
 
