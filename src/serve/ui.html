@@ -380,6 +380,92 @@
         color: var(--accent);
         text-decoration: underline;
       }
+      /* 042 D26: a report is prose with structure, not a wall of monospace.
+         Colour separates the three things a finding is made of — what it is
+         (heading), how bad it is (bold), and where it is (code). */
+      .md {
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .md .md-h {
+        font-weight: 600;
+        color: var(--ink);
+        margin: 14px 0 6px;
+      }
+      .md .md-h1 {
+        font-size: 15px;
+      }
+      .md .md-h2 {
+        font-size: 14px;
+        color: var(--accent);
+      }
+      .md .md-h3 {
+        font-size: 13px;
+        color: var(--ink-2);
+      }
+      .md .md-p {
+        margin: 6px 0;
+      }
+      .md .md-list {
+        margin: 6px 0 6px 18px;
+        list-style: disc;
+      }
+      .md .md-list li {
+        margin: 3px 0;
+      }
+      .md strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .md em {
+        color: var(--ink-2);
+      }
+      .md .md-code {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--accent);
+        background: var(--sunk);
+        border-radius: 2px;
+        padding: 0 3px;
+      }
+      .md .md-pre {
+        font-family: var(--mono);
+        font-size: 11px;
+        background: var(--sunk);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 6px 8px;
+        margin: 8px 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow-x: auto;
+      }
+      .md .md-quote {
+        margin: 6px 0;
+        padding-left: 10px;
+        border-left: 2px solid var(--line);
+        color: var(--ink-2);
+      }
+      .md .md-rule {
+        border: none;
+        border-top: 1px solid var(--line);
+        margin: 12px 0;
+      }
+      /* 042 D27: the two views sit in the section header, before Copy. */
+      .result-tabs {
+        margin-left: auto;
+      }
+      .run-section .result-tabs + .btn {
+        margin-left: 6px;
+      }
+      #run-result .result-source {
+        max-height: 55vh;
+      }
+      /* The result is a report: give it room, and let it scroll on its own. */
+      #run-result .md {
+        max-height: 55vh;
+        overflow: auto;
+      }
       /* 042 D23: the account a provider column is signed in as — a fact about
          the column, quieter than its name. */
       .cfg-account {
@@ -2169,6 +2255,19 @@
        * going has no answer yet, and a pipeline with no single sink has no
        * unambiguous one, so both leave the block hidden rather than guess.
        */
+      /** Switch the result between its rendered preview and its markdown source. */
+      function wireResultTabs(scope) {
+        const chips = [...scope.querySelectorAll("[data-result-tab]")];
+        for (const chip of chips) {
+          chip.onclick = () => {
+            for (const c of chips) c.classList.toggle("active", c === chip);
+            for (const pane of scope.querySelectorAll("[data-result-pane]")) {
+              pane.hidden = pane.dataset.resultPane !== chip.dataset.resultTab;
+            }
+          };
+        }
+      }
+
       // Rendered result per run, so the re-render the stream triggers on every
       // snapshot costs no second fetch — and so the block survives it at all.
       const _runResultHtml = {};
@@ -2181,6 +2280,8 @@
         if (_runResultHtml[runId] !== undefined) {
           el.innerHTML = _runResultHtml[runId];
           el.hidden = false;
+          wireCopyButtons(el);
+          wireResultTabs(el);
           return;
         }
         const settled = ["succeeded", "failed", "rejected", "cancelled"].includes(snapshot.status);
@@ -2199,9 +2300,30 @@
             )
           );
           if (!res.ok) return;
+          const payload = await res.json();
+          // 042 D27: two views of one answer. Preview leads, because the blocks
+          // are what the operator reads at a glance; `md` is the source, because
+          // that is what gets pasted elsewhere. Copy hands over the SOURCE from
+          // either tab — copying the rendered text would deliver prose with its
+          // structure stripped out.
+          const source = typeof payload?.output === "string" ? payload.output : "";
+          const tabs =
+            source === ""
+              ? ""
+              : `<div class="chips result-tabs">` +
+                `<button class="btn chip active" data-result-tab="preview">preview</button>` +
+                `<button class="btn chip" data-result-tab="md">md</button>` +
+                `</div>${copyButton(source, "Copy")}`;
           const html =
-            `<div class="run-section"><h3>Result</h3><span class="muted">from ${escH(sink)}</span></div>` +
-            `<div class="result-body">${renderOutput(await res.json())}</div>`;
+            `<div class="run-section"><h3>Result</h3><span class="muted">from ${escH(
+              sink
+            )}</span>${tabs}</div>` +
+            `<div class="result-body" data-result-pane="preview">${renderOutput(payload)}</div>` +
+            (source === ""
+              ? ""
+              : `<pre class="code-block result-source" data-result-pane="md" hidden>${escH(
+                  source
+                )}</pre>`);
           _runResultHtml[runId] = html;
           // The stream may have re-rendered the body while this was in flight,
           // so the element is looked up again rather than held across the await.
@@ -2209,6 +2331,10 @@
           if (target === null || _activeRunId !== runId) return;
           target.innerHTML = html;
           target.hidden = false;
+          // The payload index the button carries is registered per render, so it
+          // has to be wired against the markup that was just put in place.
+          wireCopyButtons(target);
+          wireResultTabs(target);
         } catch {
           // No stored output is not an error to shout about: the step list below
           // still carries whatever the run did produce.

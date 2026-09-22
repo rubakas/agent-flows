@@ -22,6 +22,7 @@ export const PAGE_ASSETS = [
   "ui-tables.js",
   "ui-providers.js",
   "ui-daemons.js",
+  "ui-markdown.js",
 ];
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));

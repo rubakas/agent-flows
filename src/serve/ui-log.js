@@ -11,6 +11,11 @@
 // and reaches the page through prompt injection or a hostile checkout, so every
 // dynamic value passes through esc().
 
+// Relative, not "/ui-markdown.js": the browser resolves both against the daemon
+// root, but only the relative form also resolves under Node, where these modules
+// are unit-tested.
+import { looksLikeMarkdown, renderMarkdown } from "./ui-markdown.js";
+
 /**
  * Escape HTML entities. Identical to `escH` in ui.html — the page's house rule
  * is that all server data is escaped with it or written via textContent.
@@ -304,7 +309,11 @@ export function renderOutput(payload) {
     return `<pre class="code-block">${esc(text)}</pre>`;
   }
 
-  return `<pre class="code-block">${esc(str(output))}</pre>`;
+  const text = str(output);
+  // 042 D26: these reports are markdown. Rendered through our own subset — the
+  // text is untrusted, so it is escaped before any tag of ours is introduced.
+  if (looksLikeMarkdown(text)) return `<div class="md">${renderMarkdown(text)}</div>`;
+  return `<pre class="code-block">${esc(text)}</pre>`;
 }
 
 /**

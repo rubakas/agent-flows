@@ -332,6 +332,35 @@ Verified across 1000 → 1500 → 980: one element each time, always the visible
 **No unit gate covers this** — it is router-and-layout behaviour, observable only in a browser, like
 D19's table-cell defect.
 
+**D26 — The report is rendered as markdown, by us, not by a library.** (Owner, 2026-09-22: "чи можемо
+ми результат зробити більш читаємим додавши кольори в ситнаксіс?") The reports are markdown and were
+shown as one grey monospaced wall, so the finding, its severity and its file path read as the same
+thing. Rendered: headings by level, bold labels, inline code in the accent colour, fenced blocks in
+their own frame.
+
+**Why a hand-written subset and not a markdown library.** The text is untrusted model output. Every
+line is escaped FIRST and only then are our own tags introduced — after escaping there is no `<` left
+in the input, so the tag set is exactly what `ui-markdown.js` writes. A library that parses raw
+markdown to HTML hands that choice back to the text. Three tests hold the line: hostile input through
+every construct, and a probe that tries to close one of our own tags from inside the text.
+
+Two details worth keeping: a code span is lifted out BEFORE emphasis is applied, because this
+project's own output contains deny globs whose asterisks are not emphasis; and an unterminated fence
+shows the rest of the text rather than swallowing it, because the typo is the model's and hiding its
+output is worse than showing it unformatted.
+
+JSON output is untouched — `looksLikeMarkdown` refuses anything starting with `{` or `[`, and a plain
+one-sentence answer gains nothing from a paragraph tag.
+
+**D27 — The result offers both views, and Copy always hands over the source.** (Owner, 2026-09-22:
+"мені нормально що я бачу маркдаун, бо я буду його копіювати… мені важливо одразу бачити основні
+блоки" and then "можеш просто таби зробити md та preview".) Two demands that read as opposed —
+structure at a glance, and markdown to paste — are one feature: `preview` and `md` tabs over the same
+answer, with `preview` leading because the blocks are what is read first.
+
+The Copy button takes the SOURCE from either tab. Copying what the page rendered would hand over prose
+with its structure stripped out, which is the opposite of why it is being copied.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via
