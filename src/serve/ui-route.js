@@ -11,6 +11,10 @@ export const DEFAULT_VIEW = "runs";
 /**
  * Every view the page can show. "run", "workflow" and "workflow-edit" are
  * detail views, reached only through a route carrying an id.
+ *
+ * This is the list the page iterates to decide which `<section id="view-…">` is
+ * visible, so it is load-bearing rather than documentation: a view `parseHash`
+ * can return but this list omits renders nothing at all.
  */
 export const VIEWS = ["runs", "run", "workflows", "workflow", "workflow-edit", "settings"];
 

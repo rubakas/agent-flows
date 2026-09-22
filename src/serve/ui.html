@@ -1168,7 +1168,7 @@
     <div id="flash"></div>
 
     <script type="module">
-      import { parseHash, hashFor, pollersFor } from "/ui-route.js";
+      import { parseHash, hashFor, pollersFor, VIEWS } from "/ui-route.js";
       import { renderLevelsSvg } from "/ui-graph.js";
       import {
         ACTIVE_STATUSES,
@@ -3408,7 +3408,6 @@
 
       // ── Router (spec 034 D1/D7) ────────────────────────────────────────────
 
-      const VIEW_IDS = ["runs", "run", "workflows", "workflow", "workflow-edit", "settings"];
       const TAB_IDS = ["runs", "workflows", "settings"];
 
       /**
@@ -3446,7 +3445,7 @@
         // shown on a narrow one.
         const splitRun = view === "run" && WIDE.matches;
         const shownView = splitRun ? "runs" : view;
-        for (const id of VIEW_IDS) {
+        for (const id of VIEWS) {
           document.getElementById(`view-${id}`).hidden = id !== shownView;
         }
         document.getElementById("runs-pane-detail").hidden = !splitRun;

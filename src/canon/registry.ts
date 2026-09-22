@@ -52,9 +52,7 @@ export function defaultRegistry(
     // codex: no model field by default — the CLI uses its own default when no -m
     // flag is passed, and AGENT_FLOWS_CODEX_MODEL overrides it. Kept unpinned
     // because the working model is account-dependent and a hardcoded id here
-    // would break other operators. (The older note that the default resolves to
-    // gpt-5.4-mini and is rejected with HTTP 400 is STALE: as of 2026-09-22 the
-    // CLI's own picker lists gpt-5.6-terra as the default.)
+    // would break other operators.
     {
       id: "codex",
       transport: "cli",

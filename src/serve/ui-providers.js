@@ -105,20 +105,6 @@ export function providerColumns(data) {
 }
 
 /**
- * The role × profile matrix: rows are roles, columns are profiles.
- *
- * Reading a row across the columns is the point — it shows the equivalent model
- * in each provider (reasoner → opus | codex | ollama-qwen), which is what makes
- * "switch provider" an informed choice rather than a guess.
- *
- * Takes the columns rather than the response body because the page re-renders
- * from its own edited state after every add or remove, not from the last GET.
- *
- * @param {object[]} columns From `providerColumns`, then edited by the page.
- * @param {{models?: object[], accounts?: Record<string, object>, activeProfile?: string}} [opts]
- * @returns {string} HTML for the matrix table.
- */
-/**
  * One line for a column header: the plan when the CLI reports one, else how it
  * is signed in, else why neither is known (spec 042 D23).
  *
@@ -234,6 +220,20 @@ export function modelOptions(models, current, vendor) {
   return opts.join("");
 }
 
+/**
+ * The role × profile matrix: rows are roles, columns are profiles.
+ *
+ * Reading a row across the columns is the point — it shows the equivalent model
+ * in each provider (reasoner → opus | codex | ollama-qwen), which is what makes
+ * "switch provider" an informed choice rather than a guess.
+ *
+ * Takes the columns rather than the response body because the page re-renders
+ * from its own edited state after every add or remove, not from the last GET.
+ *
+ * @param {object[]} columns From `providerColumns`, then edited by the page.
+ * @param {{models?: object[], accounts?: Record<string, object>, activeProfile?: string}} [opts]
+ * @returns {string} HTML for the matrix table.
+ */
 export function renderProviderMatrix(columns, opts = {}) {
   if (columns.length === 0) return `<p class="empty">No provider profiles.</p>`;
   const models = opts.models ?? [];
