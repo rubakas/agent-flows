@@ -10,21 +10,7 @@
 // escaped and lands only in text nodes and quoted non-URL attributes — never in
 // href/xlink:href, where an escaped "javascript:" would still execute (S7).
 
-/**
- * Escape HTML entities. Identical to `escH` in ui.html and `esc` in ui-log.js —
- * the page's house rule is that all server data is escaped with it.
- *
- * @param {unknown} s
- * @returns {string}
- */
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+import { esc } from "./ui-esc.js";
 
 /** Box and spacing geometry (spec 037 D7). The container scrolls horizontally. */
 export const BOX_W = 160;

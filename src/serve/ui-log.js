@@ -14,23 +14,8 @@
 // Relative, not "/ui-markdown.js": the browser resolves both against the daemon
 // root, but only the relative form also resolves under Node, where these modules
 // are unit-tested.
+import { esc } from "./ui-esc.js";
 import { looksLikeMarkdown, renderMarkdown } from "./ui-markdown.js";
-
-/**
- * Escape HTML entities. Identical to `escH` in ui.html — the page's house rule
- * is that all server data is escaped with it or written via textContent.
- *
- * @param {unknown} s
- * @returns {string}
- */
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
 
 /** The page keeps at most this many rendered events per step (spec 036 D5). */
 export const MAX_EVENTS_PER_STEP = 2000;

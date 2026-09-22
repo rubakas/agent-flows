@@ -11,21 +11,7 @@
 // this file writes. A library that parses raw markdown to HTML would hand that
 // choice back to the text.
 
-/**
- * Escape HTML entities. Same rule as `escH` in ui.html — this module is plain
- * ESM the browser loads unbuilt, so it cannot import the page's copy.
- *
- * @param {unknown} s
- * @returns {string}
- */
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+import { esc } from "./ui-esc.js";
 
 /** Private-use marker standing in for a code span while emphasis is applied. */
 const SENTINEL = "\uE000";

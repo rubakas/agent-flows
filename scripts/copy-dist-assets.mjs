@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 export const PAGE_ASSETS = [
   "ui.html",
+  "ui-esc.js",
   "ui-route.js",
   "ui-graph.js",
   "ui-log.js",

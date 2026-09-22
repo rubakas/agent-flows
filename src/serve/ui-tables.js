@@ -7,21 +7,7 @@
 // from a bundle the owner was handed, so the escaping has to be testable
 // without a browser.
 
-/**
- * Escape HTML entities. Identical to `escH` in ui.html — the page's house rule
- * is that all server data is escaped with it or written via textContent.
- *
- * @param {unknown} s
- * @returns {string}
- */
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+import { esc } from "./ui-esc.js";
 
 /** Statuses counted as active by the In flight chip and the runs poller. */
 export const ACTIVE_STATUSES = new Set(["running", "started", "awaiting_approval"]);

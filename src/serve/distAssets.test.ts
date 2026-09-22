@@ -1,7 +1,7 @@
 // Spec 038 FR-001: `pnpm build` copies the page assets tsc never emits into
 // dist/serve/, byte for byte.
 //
-// tsconfig sets no allowJs, so ui.html and the four hand-written browser modules
+// tsconfig sets no allowJs, so ui.html and the hand-written browser modules
 // are invisible to the compiler. server.ts reads the page as join(__dirname,
 // "ui.html") and each module as a sibling of it, so a dist/ without them answers
 // 503 on every page route. The copy must also be verbatim: the browser and the

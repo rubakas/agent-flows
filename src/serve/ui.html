@@ -1168,6 +1168,7 @@
     <div id="flash"></div>
 
     <script type="module">
+      import { esc as escH } from "/ui-esc.js";
       import { parseHash, hashFor, pollersFor, VIEWS } from "/ui-route.js";
       import { renderLevelsSvg } from "/ui-graph.js";
       import {
@@ -1200,16 +1201,6 @@
       } from "/ui-providers.js";
 
       // ── DOM helpers ────────────────────────────────────────────────────────
-
-      /** Escape HTML entities. All untrusted data reaching the DOM goes through this. */
-      function escH(s) {
-        return String(s)
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#39;");
-      }
 
       function flash(msg, isErr) {
         const el = document.getElementById("flash");

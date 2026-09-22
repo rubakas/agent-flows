@@ -11,21 +11,7 @@
 // button, because signalling an unverified pid is signalling whatever process
 // the operating system has since given that number to.
 
-/**
- * Escape HTML entities. Identical to `escH` in ui.html — the page's house rule
- * is that all server data is escaped with it or written via textContent.
- *
- * @param {unknown} s
- * @returns {string}
- */
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+import { esc } from "./ui-esc.js";
 
 /**
  * Span from an ISO timestamp to now as a short human string, for uptime.

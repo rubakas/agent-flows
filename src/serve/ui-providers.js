@@ -11,21 +11,7 @@
 // `keyEnv` by NAME, so a key env var is rendered as a variable name and a
 // set/unset flag, never as a secret.
 
-/**
- * Escape HTML entities. Identical to `escH` in ui.html — the page's house rule
- * is that all server data is escaped with it or written via textContent.
- *
- * @param {unknown} s
- * @returns {string}
- */
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
+import { esc } from "./ui-esc.js";
 
 /** The roles the matrix renders as rows, in declaration order. */
 export const PROVIDER_ROLES = ["reasoner", "worker", "scout"];

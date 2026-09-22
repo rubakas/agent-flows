@@ -170,6 +170,7 @@ const RE_RUN_MANIFEST = /^\/api\/runs\/([^/]+)\/manifest$/u;
  * file next to ui.html that is not listed here.
  */
 const STATIC_MODULES: ReadonlyMap<string, string> = new Map([
+  ["/ui-esc.js", "ui-esc.js"],
   ["/ui-route.js", "ui-route.js"],
   ["/ui-graph.js", "ui-graph.js"],
   ["/ui-log.js", "ui-log.js"],
