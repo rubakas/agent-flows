@@ -17,6 +17,7 @@ export type StepLogKind =
   | "failover"
   | "decision"
   | "judge.degraded"
+  | "gate.summary.failed"
   | "log.truncated";
 
 /** Emitted once per step by the step builder, never by an adapter. */
@@ -119,6 +120,18 @@ export interface JudgeDegradedPayload {
   error: string;
 }
 
+/**
+ * Appended when a gate's summary could not be produced (spec 043 FR-003).
+ *
+ * It is a log line and never a gate-box message: the operator is mid-decision,
+ * and "the summary failed" is noise to them and a diagnosis to whoever reads
+ * the log later. The gate stays approvable either way.
+ */
+export interface GateSummaryFailedPayload {
+  gateStepId: string;
+  error: string;
+}
+
 /** Appended once when a per-run cap of D5 is reached. */
 export interface LogTruncatedPayload {
   events: number;
@@ -141,6 +154,7 @@ export type StepLogEventInput =
   | Tagged<"failover", FailoverPayload>
   | Tagged<"decision", DecisionPayload>
   | Tagged<"judge.degraded", JudgeDegradedPayload>
+  | Tagged<"gate.summary.failed", GateSummaryFailedPayload>
   | Tagged<"log.truncated", LogTruncatedPayload>;
 
 /** One line of an events file: the input plus the stamps the sink applies. */

@@ -30,6 +30,7 @@ const MARKUP = {
   "ui-providers.js": readFileSync(join(HERE, "ui-providers.js"), "utf8"),
   "ui-graph.js": readFileSync(join(HERE, "ui-graph.js"), "utf8"),
   "ui-markdown.js": readFileSync(join(HERE, "ui-markdown.js"), "utf8"),
+  "ui-gate.js": readFileSync(join(HERE, "ui-gate.js"), "utf8"),
 };
 
 /** The body of a `{ … }` block that starts at the given opening line. */

@@ -72,6 +72,7 @@ import {
 import { makeDb, type DbInstance } from "../db/index.js";
 import {
   bundledPipelinesDir as defaultBundledPipelinesDir,
+  bundledPromptsDir,
   packageVersion,
 } from "../packageRoot.js";
 import { readManifest } from "../runtime/artifactStore.js";
@@ -119,7 +120,7 @@ import { stopProjectDaemon } from "./stop.js";
 import type { ProviderAccount } from "./providerAccounts.js";
 import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
 import type { Role } from "../canon/types.js";
-import type { RunService, StepEvent } from "../runtime/runService.js";
+import type { RunService, StepEvent, GateSummaryDeps } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
 export { CONTENT_CAP };
@@ -177,6 +178,7 @@ const STATIC_MODULES: ReadonlyMap<string, string> = new Map([
   ["/ui-tables.js", "ui-tables.js"],
   ["/ui-providers.js", "ui-providers.js"],
   ["/ui-daemons.js", "ui-daemons.js"],
+  ["/ui-gate.js", "ui-gate.js"],
   ["/ui-markdown.js", "ui-markdown.js"],
 ]);
 
@@ -2629,10 +2631,35 @@ if (process.argv[1] === __filename) {
     }
   );
 
+  // Spec 043 FR-001: what a person is shown at a gate. Deliberately built here
+  // and not derived from judgeDeps, which this daemon passes as `undefined` —
+  // the run whose gate a human answers is exactly the run with no judge. An
+  // unreadable prompt leaves the deps absent, and the gate falls back (FR-003).
+  let summaryDeps: GateSummaryDeps | undefined;
+  try {
+    summaryDeps = {
+      registry,
+      profile,
+      projectDir,
+      summaryPrompt: readFileSync(join(bundledPromptsDir(), "gate-summary.md"), "utf8"),
+    };
+  } catch (err: unknown) {
+    console.error(
+      `agent-flows serve: gate summaries disabled — ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
   // Pass the state runs dir, profile, and registry so the service can write durable
   // artifacts with full provenance (spec 029 FR-001/FR-002) without requiring
   // judgeDeps in production.
-  const runService = new RunServiceClass(mastra, undefined, state.runsDir, profile, registry);
+  const runService = new RunServiceClass(
+    mastra,
+    undefined,
+    state.runsDir,
+    profile,
+    registry,
+    summaryDeps
+  );
 
   const cliIo: CliIo = {
     error: (m) => {

@@ -737,6 +737,34 @@
       .gate-actions {
         display: flex;
         gap: 8px;
+        margin-top: 10px;
+      }
+      /* Spec 043: the question is the heading of the box, the summary is its body. */
+      .gate-question {
+        font-weight: 600;
+      }
+      /* D4: the label that says which of the two summaries this is. It is small
+         but it is load-bearing — it is the only thing distinguishing a model's
+         reading of the run from a listing of the spec's own fields. */
+      .gate-label {
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: lowercase;
+      }
+      .gate-summary {
+        margin: 8px 0;
+      }
+      .gate-title {
+        font-weight: 600;
+        margin-bottom: 2px;
+      }
+      .gate-detail > summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .gate-detail[open] > summary {
+        margin-bottom: 6px;
       }
       /* Step activity, decisions and full output (spec 036 D9/D10) */
       .step-activity,
@@ -1184,6 +1212,7 @@
         workflowRow,
       } from "/ui-tables.js";
       import { daemonsTable, stopConfirmText, stopResultLine } from "/ui-daemons.js";
+      import { gateBox } from "/ui-gate.js";
       import {
         mergeLogEvents,
         renderDecisions,
@@ -2808,15 +2837,16 @@
           html += `<p class="muted" style="margin-bottom:10px">Restored from ${escH(snapshot.artifactPath || "its artifact")} — not live, no further updates.</p>`;
         }
 
-        // Gate controls — shown only when the run is awaiting approval.
+        // Gate controls — shown only when the run is awaiting approval. The box
+        // itself is built in ui-gate.js (spec 043): everything in it is model
+        // output, so the escaping has to be testable without a browser.
         if (!isDisk && status === "awaiting_approval" && snapshot.gateMessage) {
-          html += `<div class="gate-box">
-            <p>${escH(snapshot.gateMessage)}</p>
-            <div class="gate-actions">
-              <button class="btn primary" id="btn-approve-run">Approve</button>
-              <button class="btn danger" id="btn-reject-run">Reject (terminates run)</button>
-            </div>
-          </div>`;
+          html += gateBox({
+            gateMessage: snapshot.gateMessage,
+            gateSummary: snapshot.gateSummary,
+            spec: snapshot.spec,
+            gateStepId: snapshot.gateStepId,
+          });
         }
 
         // Cancel control — shown while the run can still be stopped (FR-008).

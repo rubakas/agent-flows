@@ -144,6 +144,8 @@ export function renderLogEvent(event) {
       );
     case "judge.degraded":
       return muted(kind, `judge degraded: ${str(event.error)}`);
+    case "gate.summary.failed":
+      return muted(kind, `gate summary unavailable: ${str(event.error)}`);
     case "log.truncated":
       return muted(kind, `log truncated after ${str(event.events)} events`);
     default:

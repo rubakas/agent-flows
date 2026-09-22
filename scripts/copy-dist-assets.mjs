@@ -23,6 +23,7 @@ export const PAGE_ASSETS = [
   "ui-tables.js",
   "ui-providers.js",
   "ui-daemons.js",
+  "ui-gate.js",
   "ui-markdown.js",
 ];
 

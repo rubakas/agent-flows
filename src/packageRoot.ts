@@ -74,6 +74,11 @@ export function bundledPipelinesDir(): string {
   return join(packageRoot(), "pipelines");
 }
 
+/** The bundled prompt markdown shipped with the package. */
+export function bundledPromptsDir(): string {
+  return join(packageRoot(), "prompts");
+}
+
 let cachedVersion: string | undefined;
 
 /**

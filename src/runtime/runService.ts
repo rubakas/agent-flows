@@ -24,6 +24,9 @@ import {
 } from "./stepLog.js";
 import type { ArtifactProvenance, StepProvenance } from "./artifactStore.js";
 import type { JudgeDeps, JudgeResult } from "./gateJudge.js";
+import { runGateSummary } from "./gateSummary.js";
+import type { GateSummaryDeps } from "./gateSummary.js";
+import type { GatePayload } from "./gateMaterial.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepLogEvent, StepLogEventInput } from "../canon/stepLogEvents.js";
 import type { StepDef } from "../canon/types.js";
@@ -226,6 +229,21 @@ export interface GetResult {
   /** Present only when status is "awaiting_approval" — the spec the human is being asked to approve. */
   spec?: unknown;
   /**
+   * Present only when status is "awaiting_approval", and only once it has been
+   * produced — one paragraph describing what approving would decide (spec 043).
+   *
+   * Absent is a normal state, not an error state: it is absent while the call
+   * is still in flight and absent for good when it failed. The page renders
+   * what it has (FR-003).
+   */
+  gateSummary?: string;
+  /**
+   * Present only when status is "awaiting_approval" — the dotted id of the gate
+   * step that suspended. The page names it when there is nothing else to show
+   * (spec 043 FR-005); "this gate" tells an operator nothing about which one.
+   */
+  gateStepId?: string;
+  /**
    * Present only when status is "failed", "rejected" or "cancelled" — a brief
    * description of why the run ended.
    */
@@ -281,6 +299,7 @@ function withSubject(invocation: unknown): { subject?: string } {
 }
 
 export type { JudgeDeps } from "./gateJudge.js";
+export type { GateSummaryDeps } from "./gateSummary.js";
 
 // ── Internal record ────────────────────────────────────────────────────────────
 
@@ -320,6 +339,8 @@ interface RunRecord {
   readonly listeners: Set<StepListener>;
   /** Set when the judge fails; cleared on a new suspension. */
   judgeError?: string;
+  /** The gate summary, once produced; cleared on a new suspension (spec 043). */
+  gateSummary?: string;
   result?: unknown;
   error?: string;
   suspendPayload?: unknown;
@@ -382,7 +403,13 @@ export class RunService {
      * Model registry for provenance recording (spec 029 FR-002).
      * Used to resolve step roles to ModelEntry when judgeDeps.registry is absent.
      */
-    private readonly standaloneRegistry?: ModelRegistry
+    private readonly standaloneRegistry?: ModelRegistry,
+    /**
+     * What the gate summary needs (spec 043). Separate from judgeDeps because
+     * the daemon constructs this and not that: a run whose gate a human answers
+     * is precisely the run with no judge configured.
+     */
+    private readonly summaryDeps?: GateSummaryDeps
   ) {}
 
   /**
@@ -734,6 +761,8 @@ export class RunService {
       const payload = record.suspendPayload as Record<string, unknown> | undefined;
       out.gateMessage = (payload?.message as string | undefined) ?? "Approve this spec?";
       out.spec = payload?.spec;
+      if (record.gateSummary !== undefined) out.gateSummary = record.gateSummary;
+      if (record.suspendedStep !== undefined) out.gateStepId = record.suspendedStep.join(".");
     }
     return out;
   }
@@ -1004,6 +1033,8 @@ export class RunService {
       record.suspendedStep = suspendedPath;
       // Clear any previous judge error when a new gate appears.
       record.judgeError = undefined;
+      // …and the previous gate's summary, which describes a decision already made.
+      record.gateSummary = undefined;
       const stepKey = record.suspendedStep.join(".");
       const gateStep = r.steps?.[stepKey];
       const suspendPayload = gateStep?.suspendPayload;
@@ -1061,6 +1092,10 @@ export class RunService {
         return;
       }
     }
+    // Spec 043 FR-001: a human is about to be shown two buttons and a fixed
+    // question. Fire-and-forget, and only here — an auto gate the judge will
+    // answer has no reader, so summarising it would spend on nobody.
+    void this.dispatchGateSummary(record);
     record.settle(settled);
   }
 
@@ -1177,11 +1212,51 @@ export class RunService {
   }
 
   /**
+   * Produce the gate's summary and attach it to the record (spec 043 FR-001).
+   *
+   * Fire-and-forget, and deliberately silent. The whole contract is that the
+   * gate is no worse off than before this feature existed: no deps, a model
+   * error, an empty answer — all of them simply leave `gateSummary` absent, and
+   * the page falls back to the payload's own fields (D3/FR-003).
+   *
+   * Nothing awaits this and nothing branches on it. It cannot fail the run,
+   * cannot delay the gate becoming approvable, and cannot resolve it.
+   */
+  private async dispatchGateSummary(record: RunRecord): Promise<void> {
+    if (!this.summaryDeps) return;
+    const gateStepId = record.suspendedStep?.join(".") ?? "unknown";
+    const payload = record.suspendPayload as GatePayload | undefined;
+    const result = await runGateSummary(
+      this.summaryDeps,
+      record.pipelineId,
+      gateStepId,
+      payload,
+      record.profile
+    );
+    if ("error" in result) {
+      // FR-003: the reason belongs in the log, not in the box the operator
+      // reads to decide. A failure notice there is noise at the worst moment.
+      this.appendDecision(record, gateStepId, {
+        kind: "gate.summary.failed",
+        gateStepId,
+        error: result.error,
+      });
+      return;
+    }
+    // A gate answered while the call was in flight has no reader left.
+    if (record.status !== "awaiting_approval") return;
+    record.gateSummary = result.summary;
+  }
+
+  /**
    * Degrade to manual by setting judgeError and settling as awaiting_approval.
    * Idempotent: safe to call even if the run has already settled (Promise.resolve is no-op).
    */
   private degradeToManual(record: RunRecord, error: string): void {
     record.judgeError = error;
+    // The judge was going to answer this gate and cannot; a human now will, so
+    // the gate needs the summary it was not given when it was dispatched.
+    void this.dispatchGateSummary(record);
     const gateStepId = record.suspendedStep?.join(".") ?? "unknown";
     this.appendDecision(record, gateStepId, { kind: "judge.degraded", gateStepId, error });
     const payload = record.suspendPayload as { message?: string; spec?: unknown } | undefined;

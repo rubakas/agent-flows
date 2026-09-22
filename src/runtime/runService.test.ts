@@ -2555,3 +2555,110 @@ describe("spec 039: an auto gate is judged by the profile the run was started un
     );
   });
 });
+
+// ── Spec 043: the gate summary is attached, and is allowed to fail ────────────
+
+describe("RunService gate summary (spec 043 V1/V5)", () => {
+  function summaryDeps(runner: (...a: never[]) => Promise<string>) {
+    return {
+      registry: new ModelRegistry([
+        { id: "m-small", transport: "api" as const, api: { endpoint: "https://example.invalid" } },
+      ]),
+      profile: { id: "t", roles: { reasoner: "m-big", worker: "m-mid", scout: "m-small" } },
+      projectDir: process.cwd(),
+      summaryPrompt: "Describe it.",
+      runner,
+    } as unknown as ConstructorParameters<typeof RunService>[5];
+  }
+
+  /** Let the fire-and-forget dispatch land before asserting on the record. */
+  const settleMicrotasks = () => new Promise((r) => setTimeout(r, 5));
+
+  it("attaches the summary to the suspended run (FR-001/FR-002)", async () => {
+    const id = "gs-ok";
+    const run = makeMockRun(id, suspendedResult(id), successResult());
+    const service = new RunService(
+      makeMastra(run),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      summaryDeps(async () => "It adds a Node pin and nothing else.")
+    );
+    await service.start("p", { request: "x" });
+    await service.waitForSettled(id);
+    await settleMicrotasks();
+
+    const got = service.get(id);
+    assert.equal(got?.status, "awaiting_approval");
+    assert.equal(got?.gateSummary, "It adds a Node pin and nothing else.");
+    assert.ok(got?.gateStepId, "the gate step must be named for FR-005");
+  });
+
+  it("a failed summary leaves the gate approvable (D3, FR-003, V1)", async () => {
+    const id = "gs-fail";
+    const run = makeMockRun(id, suspendedResult(id), successResult());
+    const service = new RunService(
+      makeMastra(run),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      summaryDeps(async () => {
+        throw new Error("provider is down");
+      })
+    );
+    await service.start("p", { request: "x" });
+    await service.waitForSettled(id);
+    await settleMicrotasks();
+
+    const got = service.get(id);
+    assert.equal(
+      got?.status,
+      "awaiting_approval",
+      "a failed description must not change the state"
+    );
+    assert.equal(got?.gateSummary, undefined, "absent, never an empty string");
+    assert.ok(got?.gateMessage, "the question is still there to answer");
+
+    // The whole point: it can still be approved.
+    const approved = await service.approve(id, true);
+    assert.equal(approved.status, "succeeded", JSON.stringify(approved));
+  });
+
+  it("a service with no summary deps behaves exactly as before (FR-003)", async () => {
+    const id = "gs-none";
+    const run = makeMockRun(id, suspendedResult(id), successResult());
+    const service = new RunService(makeMastra(run));
+    await service.start("p", { request: "x" });
+    await service.waitForSettled(id);
+    await settleMicrotasks();
+
+    assert.equal(service.get(id)?.gateSummary, undefined);
+    assert.equal((await service.approve(id, true)).status, "succeeded");
+  });
+
+  it("costs one call per suspension, not one per page load (D2, V5)", async () => {
+    const id = "gs-once";
+    let calls = 0;
+    const run = makeMockRun(id, suspendedResult(id), successResult());
+    const service = new RunService(
+      makeMastra(run),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      summaryDeps(async () => {
+        calls += 1;
+        return "A paragraph.";
+      })
+    );
+    await service.start("p", { request: "x" });
+    await service.waitForSettled(id);
+    await settleMicrotasks();
+
+    for (let i = 0; i < 5; i++) service.get(id);
+    await settleMicrotasks();
+    assert.equal(calls, 1, "reading the run must not re-spend on describing it");
+  });
+});
