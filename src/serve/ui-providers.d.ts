@@ -18,9 +18,13 @@ export declare function renderProviderNotices(state?: {
   saved?: boolean;
 }): string;
 export declare function providerColumns(data: Record<string, unknown>): ProviderColumn[];
+/** What a model entry resolves to, shown in the picker (spec 042 D20). */
+export declare function modelLabel(entry: Record<string, unknown>): string;
+/** The options of one role cell, with the current value always kept. */
+export declare function modelOptions(models: Record<string, unknown>[], current: string): string;
 export declare function renderProviderMatrix(
   columns: ProviderColumn[],
-  opts?: { modelIds?: string[]; activeProfile?: string }
+  opts?: { models?: Record<string, unknown>[]; activeProfile?: string }
 ): string;
 export declare function renderProviderModels(
   project: Record<string, unknown>[],

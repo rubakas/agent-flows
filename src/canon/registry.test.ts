@@ -156,11 +156,14 @@ describe("getProfile", () => {
     }
   });
 
-  it("openai profile maps all roles to codex", () => {
+  // openai used to map every role to one unpinned `codex`, so the role-to-model
+  // mapping this registry exists for did not exist on that side at all (042 D21).
+  it("openai profile tiers its roles the way anthropic does", () => {
     const p = getProfile("openai");
-    assert.equal(p.roles.reasoner, "codex");
-    assert.equal(p.roles.worker, "codex");
-    assert.equal(p.roles.scout, "codex");
+    assert.equal(p.roles.reasoner, "gpt-terra");
+    assert.equal(p.roles.worker, "gpt-terra");
+    assert.equal(p.roles.scout, "gpt-luna");
+    assert.notEqual(p.roles.scout, p.roles.reasoner, "one model for every role is not a tiering");
   });
 
   it("local profile maps all roles to ollama-qwen", () => {
@@ -228,13 +231,21 @@ describe("resolveStepModel", () => {
     assert.equal(entry.cli?.model, "claude-haiku-4-5");
   });
 
-  it("all roles on openai resolve to codex entry with no model field", () => {
+  it("every openai role resolves to a pinned codex model, on the codex binary", () => {
+    const expected = { reasoner: "gpt-5.6-terra", worker: "gpt-5.6-terra", scout: "gpt-5.6-luna" };
     for (const role of ["reasoner", "worker", "scout"] as const) {
       const entry = resolveStepModel(step({ role }), openai, reg);
-      assert.equal(entry.id, "codex", `${role} should resolve to codex`);
       assert.equal(entry.cli?.bin, "codex");
-      assert.equal(entry.cli?.model, undefined, "codex entry should have no model field");
+      assert.equal(entry.cli?.model, expected[role], `${role} must name its own model`);
     }
+  });
+
+  // The unpinned entry stays: the working model is account-dependent, and an
+  // operator whose account lacks a pinned one must still have a way through.
+  it("the unpinned codex entry survives, pinning nothing", () => {
+    const entry = reg.resolve("codex");
+    assert.equal(entry.cli?.bin, "codex");
+    assert.equal(entry.cli?.model, undefined, "it must stay the account default");
   });
 
   it("all roles on local resolve to ollama-qwen entry", () => {

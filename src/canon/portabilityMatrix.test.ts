@@ -18,10 +18,10 @@ audit          anthropic  runs
 audit          openai     runs
 audit          local      refused: correctness: step "correctness" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "read"
 build-round    anthropic  runs
-build-round    openai     refused: fix: step "fix" under profile "openai" resolves to model entry "codex" (transport cli:codex), which cannot enforce permissions.contents "write"
+build-round    openai     refused: fix: step "fix" under profile "openai" resolves to model entry "gpt-terra" (transport cli:codex), which cannot enforce permissions.contents "write"
 build-round    local      refused: fix: step "fix" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "write"
 build          anthropic  runs
-build          openai     refused: develop.implement: step "develop.implement" under profile "openai" resolves to model entry "codex" (transport cli:codex), which cannot enforce permissions.contents "write"
+build          openai     refused: develop.implement: step "develop.implement" under profile "openai" resolves to model entry "gpt-terra" (transport cli:codex), which cannot enforce permissions.contents "write"
 build          local      refused: develop.implement: step "develop.implement" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "write"
 code-review    anthropic  runs
 code-review    openai     runs
@@ -30,13 +30,13 @@ correct-plan   anthropic  runs
 correct-plan   openai     runs
 correct-plan   local      refused: revise: step "revise" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "read"
 cycle-dev      anthropic  runs
-cycle-dev      openai     refused: build.develop.implement: step "build.develop.implement" under profile "openai" resolves to model entry "codex" (transport cli:codex), which cannot enforce permissions.contents "write"
+cycle-dev      openai     refused: build.develop.implement: step "build.develop.implement" under profile "openai" resolves to model entry "gpt-terra" (transport cli:codex), which cannot enforce permissions.contents "write"
 cycle-dev      local      refused: investigate.survey: step "investigate.survey" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "read"
 cycle          anthropic  runs
-cycle          openai     refused: build.develop.implement: step "build.develop.implement" under profile "openai" resolves to model entry "codex" (transport cli:codex), which cannot enforce permissions.contents "write"
+cycle          openai     refused: build.develop.implement: step "build.develop.implement" under profile "openai" resolves to model entry "gpt-terra" (transport cli:codex), which cannot enforce permissions.contents "write"
 cycle          local      refused: investigate.survey: step "investigate.survey" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "read"
 develop        anthropic  runs
-develop        openai     refused: implement: step "implement" under profile "openai" resolves to model entry "codex" (transport cli:codex), which cannot enforce permissions.contents "write"
+develop        openai     refused: implement: step "implement" under profile "openai" resolves to model entry "gpt-terra" (transport cli:codex), which cannot enforce permissions.contents "write"
 develop        local      refused: implement: step "implement" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "write"
 investigate    anthropic  runs
 investigate    openai     runs

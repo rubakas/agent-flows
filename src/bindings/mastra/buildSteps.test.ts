@@ -1122,7 +1122,8 @@ describe("buildLlmStep — per-run provider", () => {
 
     assert.deepEqual(
       entries,
-      ["sonnet", "codex"],
+      // openai's worker role is a pinned codex model now, not the bare entry (042 D21).
+      ["sonnet", "gpt-terra"],
       "the profile must be read per execution, not captured at build time"
     );
   });
@@ -1143,7 +1144,7 @@ describe("buildLlmStep — per-run provider", () => {
 
     await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
 
-    assert.deepEqual(entries, ["codex"]);
+    assert.deepEqual(entries, ["gpt-terra"]);
   });
 
   it("an unknown provider throws naming the step and the id, without a model call", async () => {

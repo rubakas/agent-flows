@@ -50,11 +50,11 @@ export function defaultRegistry(
     { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "claude-sonnet-5" } },
     { id: "haiku", transport: "cli", cli: { bin: "claude", model: "claude-haiku-4-5" } },
     // codex: no model field by default — the CLI uses its own default when no -m
-    // flag is passed. AGENT_FLOWS_CODEX_MODEL overrides it, because that default
-    // is account-dependent: on a ChatGPT account it resolves to gpt-5.4-mini,
-    // which the endpoint rejects with HTTP 400; gpt-5.6-luna works on this
-    // machine. Set the env var rather than pinning an id here — the working model
-    // differs per account, so a hardcoded value would break other operators.
+    // flag is passed, and AGENT_FLOWS_CODEX_MODEL overrides it. Kept unpinned
+    // because the working model is account-dependent and a hardcoded id here
+    // would break other operators. (The older note that the default resolves to
+    // gpt-5.4-mini and is rejected with HTTP 400 is STALE: as of 2026-09-22 the
+    // CLI's own picker lists gpt-5.6-terra as the default.)
     {
       id: "codex",
       transport: "cli",
@@ -63,6 +63,14 @@ export function defaultRegistry(
         ...(env.AGENT_FLOWS_CODEX_MODEL ? { model: env.AGENT_FLOWS_CODEX_MODEL } : {}),
       },
     },
+    // The models the codex CLI actually offers, pinned the way the Claude tiers
+    // are. Without these the openai side had one entry for every role, so the
+    // role-to-model mapping — the thing this registry exists for — did not exist
+    // there at all. Additive: `codex` above still resolves per account, so an
+    // operator whose account lacks one of these is unaffected until they pick it.
+    { id: "gpt-terra", transport: "cli", cli: { bin: "codex", model: "gpt-5.6-terra" } },
+    { id: "gpt-luna", transport: "cli", cli: { bin: "codex", model: "gpt-5.6-luna" } },
+    { id: "gpt-5-5", transport: "cli", cli: { bin: "codex", model: "gpt-5.5" } },
     {
       id: "ollama-qwen",
       transport: "api",
@@ -123,8 +131,13 @@ const DEFAULT_PROFILES: ProviderProfile[] = [
     fallback: ["openai"],
   },
   {
+    // Tiered like `anthropic`, by the CLI's own descriptions: terra is the
+    // "balanced agentic coding model for everyday work", so it plays both the
+    // judgment and the implementation roles; luna is "fast and affordable", so
+    // it plays scout. gpt-5.5 is previous-generation and maps to no role — it
+    // stays selectable for a deliberate comparison, like fable on the other side.
     id: "openai",
-    roles: { reasoner: "codex", worker: "codex", scout: "codex" },
+    roles: { reasoner: "gpt-terra", worker: "gpt-terra", scout: "gpt-luna" },
     fallback: ["anthropic"],
   },
   {

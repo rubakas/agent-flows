@@ -2950,13 +2950,17 @@
 
       function renderProviderEditor() {
         const builtinModels = (_providers.models || []).filter((m) => m.source !== "project");
-        const modelIds = [
-          ..._providerForm.models.map((m) => m.id),
-          ...builtinModels.map((m) => m.id),
-        ].filter((id) => id !== "");
+        // The picker offers whole entries, not bare ids: it has to show which
+        // version each one resolves to (042 D20). A project entry shadows the
+        // built-in of the same id, so it wins here too.
+        const projectIds = new Set(_providerForm.models.map((m) => m.id));
+        const pickable = [
+          ..._providerForm.models,
+          ...builtinModels.filter((m) => !projectIds.has(m.id)),
+        ].filter((m) => String(m.id ?? "") !== "");
         document.getElementById("providers-matrix-wrap").innerHTML = renderProviderMatrix(
           _providerForm.profiles,
-          { modelIds, activeProfile: _providers.activeProfile }
+          { models: pickable, activeProfile: _providers.activeProfile }
         );
         document.getElementById("providers-models-wrap").innerHTML = renderProviderModels(
           _providerForm.models,

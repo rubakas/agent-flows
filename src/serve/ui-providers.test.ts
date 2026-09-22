@@ -14,6 +14,8 @@ import {
   collectProviderDocument,
   parseProviderError,
   providerColumns,
+  modelLabel,
+  modelOptions,
   renderProviderMatrix,
   renderProviderModels,
   renderProviderNotices,
@@ -91,10 +93,58 @@ describe("providerColumns — one column per id, project wins (3.5)", () => {
   });
 });
 
+describe("the model picker shows the whole list and what each one resolves to (042 D20)", () => {
+  const MODELS = [
+    { id: "opus", transport: "cli", cli: { bin: "claude", model: "claude-opus-5" } },
+    { id: "haiku", transport: "cli", cli: { bin: "claude", model: "claude-haiku-4-5" } },
+    { id: "codex", transport: "cli", cli: { bin: "codex" } },
+    { id: "ollama-qwen", transport: "api", api: { model: "qwen2.5:1.5b" } },
+  ];
+
+  it("names the version a pinned entry resolves to, not just its id", () => {
+    assert.equal(modelLabel(MODELS[0]), "opus — claude-opus-5");
+    assert.equal(modelLabel(MODELS[3]), "ollama-qwen — qwen2.5:1.5b");
+  });
+
+  it("says a CLI-default entry pins nothing rather than implying it does", () => {
+    assert.equal(modelLabel(MODELS[2]), "codex — codex default");
+  });
+
+  it("offers every entry, so the list is not something to be typed from memory", () => {
+    const html = modelOptions(MODELS, "opus");
+    for (const m of MODELS) assert.ok(html.includes(`value="${m.id}"`), `missing ${m.id}`);
+    assert.equal((html.match(/<option/gu) ?? []).length, MODELS.length);
+    assert.ok(html.includes('value="opus" selected'), "the current value must be selected");
+  });
+
+  it("keeps a value the registry no longer carries, and says so", () => {
+    const html = modelOptions(MODELS, "sonnet-legacy");
+    assert.ok(
+      html.includes('value="sonnet-legacy" selected'),
+      `dropping it would rewrite the profile silently: ${html}`
+    );
+    assert.ok(html.includes("not in the registry"));
+  });
+
+  it("offers an explicit empty choice when the role has no model yet", () => {
+    assert.ok(modelOptions(MODELS, "").includes('value="" selected'));
+  });
+
+  it("puts a real select in every cell — a datalist only suggests what you type", () => {
+    const html = renderProviderMatrix(providerColumns(sampleData()), { models: MODELS });
+    assert.ok(html.includes('<select class="cfg-input"'), `cells must be selects: ${html}`);
+    assert.ok(!html.includes("provider-model-ids"), "the datalist is gone");
+    assert.ok(html.includes("claude-opus-5"), "a version must be readable in the picker");
+  });
+});
+
 describe("renderProviderMatrix — roles are rows, profiles are columns (3.1)", () => {
   it("renders one row per role and one column per profile", () => {
     const html = renderProviderMatrix(providerColumns(sampleData()), {
-      modelIds: ["opus", "codex"],
+      models: [
+        { id: "opus", cli: { bin: "claude", model: "claude-opus-5" } },
+        { id: "codex", cli: { bin: "codex" } },
+      ],
       activeProfile: "anthropic",
     });
     for (const role of PROVIDER_ROLES) {

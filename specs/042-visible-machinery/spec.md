@@ -235,6 +235,33 @@ every row: no cell taller than its row, no row starting above the previous one's
 browser, and the check that found it — comparing each cell's `scrollHeight` against its row's height —
 is worth re-running by hand after any change to a table's cells.
 
+**D20 — The model picker shows the whole list, and what each entry resolves to.** (Owner, 2026-09-22:
+"я не бачу повного спику при виборі, по друге я не бачу версій".) The role cells were free-text inputs
+with a `datalist`, which only suggests once you have started typing — the set was never shown, and had
+to be known by heart. The options carried bare ids (`opus`, `haiku`), so the version a run would
+actually use was invisible, even though `GET /api/providers` already returned it.
+
+This is the registry's own reasoning turned against itself: the entries are pinned precisely because
+"a bare alias silently follows the newest — and therefore most expensive — model", and then the
+picker showed only the alias. Cells are now `<select>`s reading `opus — claude-opus-5`; an entry that
+pins nothing says so (`codex — codex default`); and a value the registry no longer carries is kept and
+marked rather than dropped, because silently rewriting a profile is config loss, not correction.
+
+**D21 — The openai profile is tiered, not one model three times.** (Owner, 2026-09-22, having opened
+the codex CLI: "де ці моделі?") `openai` mapped reasoner, worker AND scout to a single unpinned
+`codex` entry, so the role-to-model mapping this registry exists for did not exist on that side at
+all — every role got whatever the account defaulted to. The CLI's own picker lists `gpt-5.6-terra`
+(default, "balanced agentic coding model for everyday work"), `gpt-5.6-luna` ("fast and affordable")
+and `gpt-5.5` (previous generation); none of the three was reachable from ours.
+
+Three pinned entries added, mapped by those descriptions: reasoner and worker to `gpt-terra`, scout to
+`gpt-luna`. `gpt-5-5` maps to no role and stays selectable for a deliberate comparison, the way
+`fable` does on the Anthropic side. **The unpinned `codex` entry survives**: the working model is
+account-dependent, and an operator whose account lacks a pinned one must still have a way through.
+
+The registry's note that the codex default "resolves to gpt-5.4-mini, which the endpoint rejects with
+HTTP 400" is now marked STALE in place — the default the CLI reports today is `gpt-5.6-terra`.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via

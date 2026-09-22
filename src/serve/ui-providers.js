@@ -115,12 +115,63 @@ export function providerColumns(data) {
  * from its own edited state after every add or remove, not from the last GET.
  *
  * @param {object[]} columns From `providerColumns`, then edited by the page.
- * @param {{modelIds?: string[], activeProfile?: string}} [opts]
+ * @param {{models?: object[], activeProfile?: string}} [opts]
  * @returns {string} HTML for the matrix table.
  */
+/**
+ * What a model entry actually resolves to, for the picker (spec 042 D20).
+ *
+ * The id alone — `opus`, `haiku` — says nothing about which version a run will
+ * use, and the whole point of pinning them in the registry was that a bare alias
+ * silently follows the newest and most expensive model. The picker has to show
+ * what it pinned.
+ *
+ * @param {{ id?: string, transport?: string, cli?: { bin?: string, model?: string },
+ *   api?: { model?: string, endpoint?: string } }} entry
+ * @returns {string}
+ */
+export function modelLabel(entry) {
+  const id = String(entry?.id ?? "");
+  const version = entry?.cli?.model ?? entry?.api?.model;
+  if (typeof version === "string" && version !== "") return `${id} — ${version}`;
+  // codex pins nothing by default: the CLI picks per account, and saying so is
+  // more honest than showing the id alone as if it were pinned like the others.
+  const bin = entry?.cli?.bin;
+  return bin ? `${id} — ${bin} default` : id;
+}
+
+/**
+ * The options of one role cell, with the current value always present.
+ *
+ * A value the registry no longer carries is kept and marked rather than dropped:
+ * silently rewriting a profile's model because the picker could not offer it is
+ * how a config edit becomes a config loss.
+ *
+ * @param {object[]} models
+ * @param {string} current
+ * @returns {string}
+ */
+export function modelOptions(models, current) {
+  const entries = Array.isArray(models) ? models : [];
+  const known = entries.some((m) => String(m?.id ?? "") === current);
+  const opts = entries.map(
+    (m) =>
+      `<option value="${esc(String(m?.id ?? ""))}"${
+        String(m?.id ?? "") === current ? " selected" : ""
+      }>${esc(modelLabel(m))}</option>`
+  );
+  if (current === "") opts.unshift(`<option value="" selected>— none —</option>`);
+  else if (!known) {
+    opts.unshift(
+      `<option value="${esc(current)}" selected>${esc(current)} — not in the registry</option>`
+    );
+  }
+  return opts.join("");
+}
+
 export function renderProviderMatrix(columns, opts = {}) {
   if (columns.length === 0) return `<p class="empty">No provider profiles.</p>`;
-  const modelIds = opts.modelIds ?? [];
+  const models = opts.models ?? [];
 
   const head = columns
     .map((c) => {
@@ -153,20 +204,18 @@ export function renderProviderMatrix(columns, opts = {}) {
     const cells = columns
       .map(
         (c) =>
-          `<td class="matrix-cell"><input class="cfg-input" type="text" list="provider-model-ids"
-             data-cell-profile="${esc(c.id)}" data-cell-role="${esc(role)}"
-             value="${esc(c.roles?.[role] ?? "")}" />
+          `<td class="matrix-cell"><select class="cfg-input"
+             data-cell-profile="${esc(c.id)}" data-cell-role="${esc(role)}">${modelOptions(
+               models,
+               c.roles?.[role] ?? ""
+             )}</select>
            <div class="error-box cell-error" data-cell-error-profile="${esc(c.id)}" data-cell-error-role="${esc(role)}" hidden></div></td>`
       )
       .join("");
     return `<tr><th scope="row"><code>${esc(role)}</code></th>${cells}</tr>`;
   }).join("");
 
-  const datalist = `<datalist id="provider-model-ids">${modelIds
-    .map((id) => `<option value="${esc(id)}"></option>`)
-    .join("")}</datalist>`;
-
-  return `${datalist}<table class="table"><thead><tr><th>Role</th>${head}</tr></thead>
+  return `<table class="table"><thead><tr><th>Role</th>${head}</tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
 
