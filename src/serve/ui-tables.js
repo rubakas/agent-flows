@@ -44,6 +44,29 @@ export function emptyRunsMessage(filter) {
 }
 
 /**
+ * Which chip the Runs view actually has selected (spec 042 D24).
+ *
+ * "In flight" is the default and it is empty most of the time — it empties the
+ * moment the work you were watching finishes, which is exactly when its report
+ * matters. The first version answered that by leaving the chip lit and listing
+ * finished runs underneath it, so the page showed a filter its own list did not
+ * obey. This resolves the DEFAULT instead: with nothing in flight it is "all",
+ * and the lit chip is the one the rows below it belong to.
+ *
+ * `pinned` is set by clicking a chip. An explicit choice is never overridden —
+ * an operator who asks for "In flight" and gets an empty list has been answered.
+ *
+ * @param {string} filter The current chip.
+ * @param {{ pinned?: boolean, activeCount?: number }} state
+ * @returns {string} The chip to select and filter by.
+ */
+export function resolveRunsFilter(filter, state) {
+  if (state?.pinned === true) return filter;
+  if (filter !== "active") return filter;
+  return Number(state?.activeCount ?? 0) > 0 ? filter : "all";
+}
+
+/**
  * Mastra's own synthetic bookkeeping for parallel merge branches (spec 042 D7).
  * No pipeline author declares one, so an operator shown `__merge_level_1` as the
  * current step learns nothing and mistrusts the number next to it.

@@ -26,6 +26,10 @@ export interface RunRowData {
 
 export declare const ACTIVE_STATUSES: Set<string>;
 export declare function emptyRunsMessage(filter: string): string;
+export declare function resolveRunsFilter(
+  filter: string,
+  state: { pinned?: boolean; activeCount?: number }
+): string;
 export declare function fmtTime(iso: string | undefined): string;
 export declare function statusClass(status: string | undefined): string;
 export declare function fmtElapsed(startIso?: string, endIso?: string): string;

@@ -1173,6 +1173,7 @@
       import {
         ACTIVE_STATUSES,
         emptyRunsMessage,
+        resolveRunsFilter,
         fmtElapsed,
         fmtTime,
         runProgress,
@@ -1971,10 +1972,10 @@
       let activeRunEs = null;
 
       /** Which chip is selected in the Runs view (D2). "active" is the default. */
-      /** How many recent runs stand in for an empty "In flight" list (042 D24). */
-      const RECENT_WHEN_IDLE = 8;
-
       let _runsFilter = "active";
+      /** Set the moment a chip is clicked, so the default is never re-resolved
+       *  over an explicit choice (042 D24). */
+      let _runsFilterPinned = false;
       // True once the list spans more than one project, which is when a Project
       // column says something (042 D13).
       let _showProject = false;
@@ -2096,6 +2097,13 @@
        * list client-side (FR-002) — switching chips costs no request.
        */
       function renderRuns(runs, wrap, progress) {
+        const activeCount = runs.filter((r) => ACTIVE_STATUSES.has(r.status)).length;
+        // 042 D24: resolve the default BEFORE lighting a chip, so the chip that
+        // lights up is the one the rows below it belong to.
+        _runsFilter = resolveRunsFilter(_runsFilter, {
+          pinned: _runsFilterPinned,
+          activeCount,
+        });
         for (const chip of document.querySelectorAll("[data-runs-filter]")) {
           chip.classList.toggle("active", chip.dataset.runsFilter === _runsFilter);
         }
@@ -2105,13 +2113,7 @@
           const isActive = ACTIVE_STATUSES.has(r.status);
           return _runsFilter === "active" ? isActive : !isActive;
         };
-        // 042 D24: "In flight" is empty most of the time — it is empty the moment
-        // the work you were watching finishes, which is exactly when the reports
-        // matter. Rather than showing nothing and pointing at Workflows, fall
-        // back to the most recent runs and say that is what these are.
-        let shown = runs.filter(matches);
-        const fellBack = _runsFilter === "active" && shown.length === 0 && runs.length > 0;
-        if (fellBack) shown = runs.slice(0, RECENT_WHEN_IDLE);
+        const shown = runs.filter(matches);
 
         const awaitingApproval = runs.filter((r) => r.status === "awaiting_approval");
         let html = "";
@@ -2121,7 +2123,6 @@
             <p><strong>${escH(String(awaitingApproval.length))} ${noun} awaiting your approval.</strong></p>
           </div>`;
         }
-        const activeCount = runs.filter((r) => ACTIVE_STATUSES.has(r.status)).length;
         html += `<p class="muted" style="margin-bottom:6px">${escH(String(activeCount))} in flight, ${escH(String(runs.length))} total</p>`;
 
         if (!shown.length) {
@@ -2130,12 +2131,6 @@
           wireRunsTable(wrap);
           return;
         }
-        if (fellBack) {
-          html += `<p class="muted" style="margin-bottom:6px">Nothing is running — the ${escH(
-            String(shown.length)
-          )} most recent:</p>`;
-        }
-
         html += `<table class="table"><thead><tr>
           <th>Status</th>${
             _showProject ? "<th>Project</th>" : ""
@@ -2180,6 +2175,7 @@
       for (const chip of document.querySelectorAll("[data-runs-filter]")) {
         chip.onclick = () => {
           _runsFilter = chip.dataset.runsFilter;
+          _runsFilterPinned = true;
           loadRuns();
         };
       }

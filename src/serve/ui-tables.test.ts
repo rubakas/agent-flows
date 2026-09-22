@@ -10,6 +10,7 @@ import { describe, it } from "node:test";
 
 import {
   emptyRunsMessage,
+  resolveRunsFilter,
   progressCell,
   runProgress,
   runRow,
@@ -312,5 +313,22 @@ describe("emptyRunsMessage — an empty list invites an action (spec 042 FR-006,
     assert.match(emptyRunsMessage("active"), /Nothing is running/u);
     assert.match(emptyRunsMessage("finished"), /No run has finished/u);
     assert.match(emptyRunsMessage("all"), /No runs on record/u);
+  });
+});
+
+describe("resolveRunsFilter — the lit chip owns the rows under it (spec 042 D24)", () => {
+  it("leaves the default on In flight while anything is in flight", () => {
+    assert.equal(resolveRunsFilter("active", { activeCount: 1 }), "active");
+  });
+
+  it("resolves the default to All once nothing is in flight", () => {
+    // The bug this replaces: In flight stayed lit over a list of finished runs.
+    assert.equal(resolveRunsFilter("active", { activeCount: 0 }), "all");
+  });
+
+  it("never overrides a chip the operator clicked", () => {
+    assert.equal(resolveRunsFilter("active", { activeCount: 0, pinned: true }), "active");
+    assert.equal(resolveRunsFilter("finished", { activeCount: 0 }), "finished");
+    assert.equal(resolveRunsFilter("all", { activeCount: 3 }), "all");
   });
 });
