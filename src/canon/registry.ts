@@ -68,9 +68,18 @@ export function defaultRegistry(
     // role-to-model mapping — the thing this registry exists for — did not exist
     // there at all. Additive: `codex` above still resolves per account, so an
     // operator whose account lacks one of these is unaffected until they pick it.
+    // terra/luna/5.5 are what this machine's `codex` picker offers (2026-09-22).
     { id: "gpt-terra", transport: "cli", cli: { bin: "codex", model: "gpt-5.6-terra" } },
     { id: "gpt-luna", transport: "cli", cli: { bin: "codex", model: "gpt-5.6-luna" } },
     { id: "gpt-5-5", transport: "cli", cli: { bin: "codex", model: "gpt-5.5" } },
+    // sol and astra are documented API models the picker does NOT list, and
+    // `codex -m` takes any string — validity is decided by the account at call
+    // time, the way gpt-5.4-mini once failed with HTTP 400. Selectable so the
+    // owner can pair them with their Claude counterparts (opus↔sol, fable↔astra),
+    // but deliberately mapped to no role: a default nobody has verified on this
+    // account would break every reasoner step the first time it ran.
+    { id: "gpt-sol", transport: "cli", cli: { bin: "codex", model: "gpt-5.6-sol" } },
+    { id: "gpt-astra", transport: "cli", cli: { bin: "codex", model: "gpt-6-astra" } },
     {
       id: "ollama-qwen",
       transport: "api",

@@ -14,8 +14,11 @@ import {
   collectProviderDocument,
   parseProviderError,
   providerColumns,
+  accountLabel,
+  columnVendor,
   modelLabel,
   modelOptions,
+  modelVendor,
   renderProviderMatrix,
   renderProviderModels,
   renderProviderNotices,
@@ -101,13 +104,18 @@ describe("the model picker shows the whole list and what each one resolves to (0
     { id: "ollama-qwen", transport: "api", api: { model: "qwen2.5:1.5b" } },
   ];
 
-  it("names the version a pinned entry resolves to, not just its id", () => {
-    assert.equal(modelLabel(MODELS[0]), "opus — claude-opus-5");
-    assert.equal(modelLabel(MODELS[3]), "ollama-qwen — qwen2.5:1.5b");
+  // The id and the version are one fact: `opus` IS `claude-opus-5`, and printing
+  // both made every option say itself twice.
+  it("shows the version alone, not the id paired with it", () => {
+    assert.equal(modelLabel(MODELS[0]), "claude-opus-5");
+    assert.equal(modelLabel(MODELS[3]), "qwen2.5:1.5b");
+    assert.ok(!modelLabel(MODELS[0]).includes("opus —"), "no id/version pair");
   });
 
-  it("says a CLI-default entry pins nothing rather than implying it does", () => {
-    assert.equal(modelLabel(MODELS[2]), "codex — codex default");
+  it("says a CLI-default entry pins nothing, without naming the binary", () => {
+    // `codex` is the command, not a model — printing it beside real versions
+    // added a word that carried no information about what would run.
+    assert.equal(modelLabel(MODELS[2]), "account default");
   });
 
   it("offers every entry, so the list is not something to be typed from memory", () => {
@@ -128,6 +136,67 @@ describe("the model picker shows the whole list and what each one resolves to (0
 
   it("offers an explicit empty choice when the role has no model yet", () => {
     assert.ok(modelOptions(MODELS, "").includes('value="" selected'));
+  });
+
+  it("reads a model's provider off the entry, with no declared field to drift", () => {
+    assert.equal(modelVendor({ cli: { bin: "claude", model: "claude-opus-5" } }), "anthropic");
+    assert.equal(modelVendor({ cli: { bin: "codex", model: "gpt-5.6-terra" } }), "openai");
+    assert.equal(modelVendor({ transport: "api", api: { model: "qwen2.5:1.5b" } }), "local");
+    assert.equal(modelVendor({}), "other");
+  });
+
+  it("reads a column's provider from the models it already uses, not from its id", () => {
+    const anthropic = { id: "whatever-it-is-called", roles: { reasoner: "opus" } };
+    assert.equal(columnVendor(anthropic, MODELS), "anthropic");
+    const openai = { id: "also-misnamed", roles: { reasoner: "codex" } };
+    assert.equal(columnVendor(openai, MODELS), "openai");
+  });
+
+  it("has no vendor for a profile with nothing recognisable yet, and offers everything", () => {
+    assert.equal(columnVendor({ id: "new", roles: {} }, MODELS), undefined);
+    const html = modelOptions(MODELS, "", undefined);
+    assert.equal(
+      (html.match(/<option/gu) ?? []).length,
+      MODELS.length + 1,
+      "plus the empty choice"
+    );
+  });
+
+  it("offers a column only its own provider's models", () => {
+    const anthropic = modelOptions(MODELS, "opus", "anthropic");
+    assert.ok(anthropic.includes('value="opus"'));
+    assert.ok(anthropic.includes('value="haiku"'));
+    assert.ok(
+      !anthropic.includes('value="codex"'),
+      `no codex in an anthropic column: ${anthropic}`
+    );
+    assert.ok(!anthropic.includes("ollama"), "and no local model either");
+
+    const openai = modelOptions(MODELS, "codex", "openai");
+    assert.ok(openai.includes('value="codex"'));
+    assert.ok(!openai.includes('value="opus"'), `no claude model in an openai column: ${openai}`);
+  });
+
+  it("keeps a foreign current value rather than dropping it on filter", () => {
+    // A providers.yaml that already mixes vendors must not be silently rewritten
+    // just because the picker would not offer that combination again.
+    const html = modelOptions(MODELS, "codex", "anthropic");
+    assert.ok(html.includes('value="codex" selected'), `the set value survives: ${html}`);
+  });
+
+  it("names the account a provider column is signed in as (042 D23)", () => {
+    const html = renderProviderMatrix(providerColumns(sampleData()), {
+      models: MODELS,
+      accounts: { anthropic: { plan: "max" }, openai: { authMethod: "ChatGPT" } },
+    });
+    assert.ok(html.includes(">max<"), `the anthropic column must show its plan: ${html}`);
+    assert.ok(html.includes(">ChatGPT<"), "the openai column falls back to its auth method");
+  });
+
+  it("says nothing about an account it could not read, rather than a blank", () => {
+    assert.equal(accountLabel({ error: "not signed in" }), "not signed in");
+    assert.equal(accountLabel(undefined), "");
+    assert.equal(accountLabel({ plan: "max", authMethod: "claude.ai" }), "max");
   });
 
   it("puts a real select in every cell — a datalist only suggests what you type", () => {
@@ -157,9 +226,15 @@ describe("renderProviderMatrix — roles are rows, profiles are columns (3.1)", 
     assert.ok(html.includes('data-cell-profile="openai" data-cell-role="reasoner"'));
   });
 
-  it("marks built-in columns and the ones a project profile overrides", () => {
+  it("badges a project column and leaves the rest unlabelled", () => {
     const html = renderProviderMatrix(providerColumns(sampleData()));
-    assert.ok(html.includes("built-in"), "the built-in column must be labelled");
+    assert.ok(html.includes(">project</span>"), "a project profile is the notable one");
+    assert.ok(
+      !html.includes(">built-in</span>"),
+      `a badge on almost every column says nothing: ${html}`
+    );
+    // The override note stays: that one IS about a built-in, and it is the only
+    // place the shadowing is visible.
     assert.ok(html.includes("overrides the built-in"), "the override must be visible");
   });
 

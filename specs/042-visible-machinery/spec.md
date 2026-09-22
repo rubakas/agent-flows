@@ -262,6 +262,57 @@ account-dependent, and an operator whose account lacks a pinned one must still h
 The registry's note that the codex default "resolves to gpt-5.4-mini, which the endpoint rejects with
 HTTP 400" is now marked STALE in place — the default the CLI reports today is `gpt-5.6-terra`.
 
+**D22 — A provider column offers only that provider's models.** (Owner, 2026-09-22: "в колонці
+антропік — я маю бачити лише моделі антропіка".) Failover is per profile, so an anthropic column
+offering codex models offered a choice that meant nothing.
+
+The vendor is DERIVED from the entry — `cli.bin === "claude"`, `cli.bin === "codex"`, `transport:
+api` — not declared in a new field, which would be one more thing to keep true. The column's vendor
+is read from the models it already uses, **not from its id**: profiles can be named anything, and
+matching on the word "anthropic" would be a rule about spelling. A profile with nothing recognisable
+yet offers everything rather than guessing, and a value already in `providers.yaml` that fails the
+filter is kept and marked — silently rewriting a config because the picker would not offer that
+combination again is config loss.
+
+Also from the same look: the option label shows the version ALONE. `opus — claude-opus-5` said one
+fact twice, and `codex — codex default` named a binary, which tells a reader nothing about what will
+run; the unpinned entry now reads `account default`.
+
+**D23 — Each provider column names the account it is signed in as.** (Owner, 2026-09-22: "тобі
+динамічно треба вставляти тип підписки… вона сама може через cli подивитись це".) Correct, and it is
+the question behind every model list: availability follows the account — OpenAI's own pricing page
+says "Model availability follows the API models available to your key", and this machine's codex
+picker offers three models where the docs list five.
+
+`claude auth status` prints JSON carrying `subscriptionType`; `codex login status` prints its auth
+mode and **no plan at all**, reported as the absence it is rather than guessed. Probed once per
+daemon — two subprocesses, and a plan does not change between page loads.
+
+**Only the plan and the auth method are read.** That JSON also carries the signed-in email and an
+organisation id; the parser names the two fields it wants instead of spreading the object, and a test
+asserts neither reaches the response. A spread parser passes every other test in that file and leaks
+both — verified by mutation.
+
+**Two measurement traps, both mine.** `codex login status` prints to STDERR, so reading stdout alone
+reported a working CLI as silent. And its exit code looked like 0 only because I read `$?` after a
+pipeline, which is `head`'s status, not the command's.
+
+**D24 — The landing page is never blank, and never says the same thing twice.** (Owner, 2026-09-22:
+"подивись ui".) Three faults, found by looking at it after the seven-review batch finished:
+
+**The page was empty at the one moment it mattered most.** D1 opens on "In flight", which is empty
+whenever nothing is running — including the instant the work you were watching finishes, which is
+exactly when the reports are wanted. It said "Nothing is running. Start one from Workflows", pointing
+_away_ from the thirty runs it was hiding. An empty in-flight list now falls back to the most recent
+runs and says so, so the page answers "what happened" as well as "what is happening".
+
+**The word `Runs` appeared twice**, 190px apart: as the highlighted nav tab and again as the section
+heading below it. The heading is gone; the tab already says where you are.
+
+**The daemons table spent a column on the pid.** It is developer trivia beside a Stop button that does
+the killing — it stays as the row's title for the rare manual `kill`, not as a column read on every
+page load.
+
 ## Functional Requirements
 
 - **FR-001.** A new `GET /api/daemons` route enumerates every project state directory via

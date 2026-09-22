@@ -380,6 +380,12 @@
         color: var(--accent);
         text-decoration: underline;
       }
+      /* 042 D23: the account a provider column is signed in as — a fact about
+         the column, quieter than its name. */
+      .cfg-account {
+        font-size: 11px;
+        color: var(--muted);
+      }
       /* 042 D14: the subject leads the page the way a title does. */
       #run-detail-subject {
         font-size: 13px;
@@ -904,7 +910,7 @@
 
         <div class="section">
           <div class="section-header">
-            <h2>Runs</h2>
+            <!-- No "Runs" heading: the nav tab above already says it, highlighted. -->
             <div class="chips" id="runs-filter">
               <button class="btn chip" data-runs-filter="active">In flight</button>
               <button class="btn chip" data-runs-filter="finished">Finished</button>
@@ -1879,6 +1885,9 @@
       let activeRunEs = null;
 
       /** Which chip is selected in the Runs view (D2). "active" is the default. */
+      /** How many recent runs stand in for an empty "In flight" list (042 D24). */
+      const RECENT_WHEN_IDLE = 8;
+
       let _runsFilter = "active";
       // True once the list spans more than one project, which is when a Project
       // column says something (042 D13).
@@ -2005,11 +2014,18 @@
           chip.classList.toggle("active", chip.dataset.runsFilter === _runsFilter);
         }
 
-        const shown = runs.filter((r) => {
+        const matches = (r) => {
           if (_runsFilter === "all") return true;
           const isActive = ACTIVE_STATUSES.has(r.status);
           return _runsFilter === "active" ? isActive : !isActive;
-        });
+        };
+        // 042 D24: "In flight" is empty most of the time — it is empty the moment
+        // the work you were watching finishes, which is exactly when the reports
+        // matter. Rather than showing nothing and pointing at Workflows, fall
+        // back to the most recent runs and say that is what these are.
+        let shown = runs.filter(matches);
+        const fellBack = _runsFilter === "active" && shown.length === 0 && runs.length > 0;
+        if (fellBack) shown = runs.slice(0, RECENT_WHEN_IDLE);
 
         const awaitingApproval = runs.filter((r) => r.status === "awaiting_approval");
         let html = "";
@@ -2027,6 +2043,11 @@
           wrap.innerHTML = `${html}<p class="empty">${emptyRunsMessage(_runsFilter)}</p>`;
           wireRunsTable(wrap);
           return;
+        }
+        if (fellBack) {
+          html += `<p class="muted" style="margin-bottom:6px">Nothing is running — the ${escH(
+            String(shown.length)
+          )} most recent:</p>`;
         }
 
         html += `<table class="table"><thead><tr>
@@ -2960,7 +2981,11 @@
         ].filter((m) => String(m.id ?? "") !== "");
         document.getElementById("providers-matrix-wrap").innerHTML = renderProviderMatrix(
           _providerForm.profiles,
-          { models: pickable, activeProfile: _providers.activeProfile }
+          {
+            models: pickable,
+            accounts: _providers.accounts || {},
+            activeProfile: _providers.activeProfile,
+          }
         );
         document.getElementById("providers-models-wrap").innerHTML = renderProviderModels(
           _providerForm.models,

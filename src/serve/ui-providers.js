@@ -115,9 +115,68 @@ export function providerColumns(data) {
  * from its own edited state after every add or remove, not from the last GET.
  *
  * @param {object[]} columns From `providerColumns`, then edited by the page.
- * @param {{models?: object[], activeProfile?: string}} [opts]
+ * @param {{models?: object[], accounts?: Record<string, object>, activeProfile?: string}} [opts]
  * @returns {string} HTML for the matrix table.
  */
+/**
+ * One line for a column header: the plan when the CLI reports one, else how it
+ * is signed in, else why neither is known (spec 042 D23).
+ *
+ * Duplicated from providerAccounts.ts on purpose: this module is plain ESM the
+ * browser loads unbuilt, and importing a TypeScript server module here is not
+ * possible. Four lines, and the shape it reads is asserted on both sides.
+ *
+ * @param {{ plan?: string, authMethod?: string, error?: string } | undefined} account
+ * @returns {string}
+ */
+export function accountLabel(account) {
+  if (!account) return "";
+  if (account.error !== undefined) return String(account.error);
+  return String(account.plan ?? account.authMethod ?? "");
+}
+
+/**
+ * Which provider a model entry belongs to (spec 042 D22).
+ *
+ * Derived from what the entry already carries rather than declared in a new
+ * field: the binary a cli entry runs IS its vendor, and an api entry is
+ * something the operator hosts. A declared field would be one more thing to keep
+ * true; this one cannot drift from the entry it describes.
+ *
+ * @param {{ transport?: string, cli?: { bin?: string } }} entry
+ * @returns {"anthropic" | "openai" | "local" | "other"}
+ */
+export function modelVendor(entry) {
+  const bin = entry?.cli?.bin;
+  if (bin === "claude") return "anthropic";
+  if (bin === "codex") return "openai";
+  if (entry?.transport === "api") return "local";
+  return "other";
+}
+
+/**
+ * The vendor a profile column is for, read from the models it already uses.
+ *
+ * Not from the profile id: project profiles can be named anything, and matching
+ * on "anthropic" would be a rule about spelling rather than about models. A
+ * profile with no recognisable model yet has no vendor, and its picker offers
+ * everything rather than guessing.
+ *
+ * @param {{ roles?: Record<string, string> }} column
+ * @param {object[]} models
+ * @returns {string | undefined}
+ */
+export function columnVendor(column, models) {
+  const entries = Array.isArray(models) ? models : [];
+  for (const id of Object.values(column?.roles ?? {})) {
+    const entry = entries.find((m) => String(m?.id ?? "") === id);
+    if (entry === undefined) continue;
+    const vendor = modelVendor(entry);
+    if (vendor !== "other") return vendor;
+  }
+  return undefined;
+}
+
 /**
  * What a model entry actually resolves to, for the picker (spec 042 D20).
  *
@@ -133,11 +192,14 @@ export function providerColumns(data) {
 export function modelLabel(entry) {
   const id = String(entry?.id ?? "");
   const version = entry?.cli?.model ?? entry?.api?.model;
-  if (typeof version === "string" && version !== "") return `${id} — ${version}`;
-  // codex pins nothing by default: the CLI picks per account, and saying so is
-  // more honest than showing the id alone as if it were pinned like the others.
-  const bin = entry?.cli?.bin;
-  return bin ? `${id} — ${bin} default` : id;
+  // The version alone. Pairing it with the id said the same thing twice — `opus`
+  // and `claude-opus-5` are one fact — and the id is already the stored value,
+  // readable in the models table below.
+  if (typeof version === "string" && version !== "") return version;
+  // An entry that pins nothing has no version to name. Naming its binary instead
+  // said nothing — `codex` is the command, not a model — so say the only true
+  // thing about it: the CLI picks, and the pick depends on the account.
+  return entry?.cli?.bin ? "account default" : id;
 }
 
 /**
@@ -151,8 +213,11 @@ export function modelLabel(entry) {
  * @param {string} current
  * @returns {string}
  */
-export function modelOptions(models, current) {
-  const entries = Array.isArray(models) ? models : [];
+export function modelOptions(models, current, vendor) {
+  const all = Array.isArray(models) ? models : [];
+  // A column is for one provider: an anthropic profile offering codex models is
+  // offering a choice that means nothing, since failover is per profile.
+  const entries = vendor === undefined ? all : all.filter((m) => modelVendor(m) === vendor);
   const known = entries.some((m) => String(m?.id ?? "") === current);
   const opts = entries.map(
     (m) =>
@@ -172,10 +237,14 @@ export function modelOptions(models, current) {
 export function renderProviderMatrix(columns, opts = {}) {
   if (columns.length === 0) return `<p class="empty">No provider profiles.</p>`;
   const models = opts.models ?? [];
+  const accounts = opts.accounts ?? {};
 
   const head = columns
     .map((c) => {
-      const badge = c.source === "project" ? "project" : "built-in";
+      // Only a project profile is worth a badge. "built-in" was on every column
+      // that was not one, which is most of them — a label that is almost always
+      // present says nothing by being present.
+      const badge = c.source === "project" ? `<span class="badge">project</span>` : "";
       const note = c.overridesBuiltIn
         ? `<div class="muted">overrides the built-in "${esc(c.id)}"</div>`
         : "";
@@ -187,9 +256,16 @@ export function renderProviderMatrix(columns, opts = {}) {
       // `fallback` is a property of the profile, not a model assignment, so it
       // sits with the other profile-level facts in the header rather than as a
       // fourth row in a three-role table.
+      // 042 D23: the account this provider is signed in as. The model list
+      // follows the account — the codex picker offers three models on one plan
+      // and more on another — so the column that offers models has to say which
+      // account it is offering them for.
+      const vendor = columnVendor(c, models);
+      const account = accountLabel(vendor === undefined ? undefined : accounts[vendor]);
+      const plan = account === "" ? "" : `<span class="cfg-account">${esc(account)}</span>`;
       return `<th data-profile-col="${esc(c.id)}">
         <div class="matrix-cell">
-          <div class="cfg-head"><code>${esc(c.id)}</code><span class="badge">${esc(badge)}</span>${active}${remove}</div>
+          <div class="cfg-head"><code>${esc(c.id)}</code>${badge}${plan}${active}${remove}</div>
           ${note}
           <div class="cfg-sub"><span>fallback</span>
             <input class="cfg-input" type="text" data-fallback-profile="${esc(c.id)}"
@@ -207,7 +283,8 @@ export function renderProviderMatrix(columns, opts = {}) {
           `<td class="matrix-cell"><select class="cfg-input"
              data-cell-profile="${esc(c.id)}" data-cell-role="${esc(role)}">${modelOptions(
                models,
-               c.roles?.[role] ?? ""
+               c.roles?.[role] ?? "",
+               columnVendor(c, models)
              )}</select>
            <div class="error-box cell-error" data-cell-error-profile="${esc(c.id)}" data-cell-error-role="${esc(role)}" hidden></div></td>`
       )

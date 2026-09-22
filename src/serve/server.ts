@@ -3,6 +3,7 @@
 // DNS-rebinding and simple-form CSRF mitigations. Zero new runtime
 // dependencies — node:http only.
 
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -98,6 +99,8 @@ import {
   IDLE_MS_ENV,
   shouldExitWhenIdle,
 } from "./idleShutdown.js";
+
+import { probeProviderAccounts } from "./providerAccounts.js";
 import { resolveProxyTarget, splitProxyPath } from "./proxy.js";
 
 import {
@@ -113,6 +116,7 @@ import {
 } from "./route-helpers.js";
 import { CONTENT_CAP, handleContentRoutes } from "./routes/content.js";
 import { stopProjectDaemon } from "./stop.js";
+import type { ProviderAccount } from "./providerAccounts.js";
 import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
 import type { Role } from "../canon/types.js";
 import type { RunService, StepEvent } from "../runtime/runService.js";
@@ -806,6 +810,35 @@ async function forwardToDaemon(
     res.on("close", () => upstream.destroy());
     req.pipe(upstream);
   });
+}
+
+/**
+ * The signed-in account per provider, resolved once (spec 042 D23).
+ *
+ * Two subprocesses, so it is answered from memory after the first ask: a plan
+ * does not change between page loads, and a page that polls must not spawn a
+ * process per poll. A CLI that is missing or slow yields an error field rather
+ * than blocking the route — the rest of the providers view is still useful
+ * without it.
+ */
+let _accounts: Record<string, ProviderAccount> | undefined;
+
+function providerAccounts(): Record<string, ProviderAccount> {
+  if (_accounts !== undefined) return _accounts;
+  _accounts = probeProviderAccounts((bin, args) => {
+    try {
+      const out = spawnSync(bin, args, { encoding: "utf8", timeout: 10_000 });
+      if (out.status !== 0) return undefined;
+      // `codex login status` prints to STDERR, not stdout — reading stdout alone
+      // reported a working CLI as silent. Status on stderr is common enough that
+      // it is treated as an answer rather than as an error.
+      const stdout = (out.stdout ?? "").trim();
+      return stdout !== "" ? out.stdout : (out.stderr ?? undefined);
+    } catch {
+      return undefined;
+    }
+  });
+  return _accounts;
 }
 
 // ── Port resolution and listen failures (spec 033 D4/FR-011/FR-012) ───────────
@@ -2300,6 +2333,9 @@ async function handleRequest(
       ...(config.defaultProvider !== undefined ? { defaultProvider: config.defaultProvider } : {}),
       profiles,
       models,
+      // 042 D23: which account each CLI is signed in as. Probed once at startup —
+      // it is two subprocesses, and a plan does not change between page loads.
+      accounts: providerAccounts(),
       restartRequired,
       ...(fileError !== undefined ? { fileError } : {}),
     });

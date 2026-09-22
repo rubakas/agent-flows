@@ -32,9 +32,12 @@ function entry(over: Partial<DaemonRowData> = {}): DaemonRowData {
 }
 
 describe("daemonRow — only a verified record gets a Stop (spec 042 D3, V1)", () => {
-  it("a live row shows pid, port, uptime and a Stop wired to the project key", () => {
+  it("a live row shows port, uptime and a Stop wired to the project key", () => {
     const html = daemonRow(entry(), { now: Date.parse("2026-09-21T12:00:00.000Z") });
-    assert.ok(html.includes(">54733<"), `the pid must be visible: ${html}`);
+    // The pid lost its column (042 D24): it is developer trivia beside a Stop
+    // button, and stays only as a title for the rare manual `kill`.
+    assert.ok(html.includes('title="pid 54733"'), `the pid stays reachable: ${html}`);
+    assert.ok(!/<td[^>]*>54733</u.test(html), `but not as a column: ${html}`);
     assert.ok(html.includes(">7411<"), `the port must be visible: ${html}`);
     assert.ok(html.includes(">2d 02h<"), `uptime must be visible: ${html}`);
     assert.ok(

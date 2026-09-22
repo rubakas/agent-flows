@@ -103,8 +103,9 @@ export function daemonRow(d, opts) {
     `<td class="pipeline-id" title="${esc(d?.projectDir ?? "")}">${esc(
       projectName(d?.projectDir)
     )}</td>` +
-    `<td class="num">${esc(d?.pid ?? "")}</td>` +
-    `<td class="num">${portCell}</td>` +
+    // The pid is developer trivia beside a Stop button that does the killing;
+    // it stays on the row as a title for the rare manual `kill`, not a column.
+    `<td class="num" title="pid ${esc(d?.pid ?? "")}">${portCell}</td>` +
     `<td class="num muted">${live ? esc(fmtUptime(d?.startedAt, opts?.now)) : "—"}</td>` +
     `<td class="actions">${action}${
       opts?.result ? `<span class="muted">${esc(opts.result)}</span>` : ""
@@ -139,7 +140,7 @@ export function daemonsTable(daemons, opts) {
     .join("");
   return (
     `<table class="table"><thead><tr>` +
-    `<th>State</th><th>Project</th><th>PID</th><th>Port</th><th>Uptime</th><th></th>` +
+    `<th>State</th><th>Project</th><th>Port</th><th>Uptime</th><th></th>` +
     `</tr></thead><tbody>${body}</tbody></table>`
   );
 }
