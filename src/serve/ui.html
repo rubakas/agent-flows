@@ -2612,7 +2612,9 @@
             const target = details.querySelector(".step-output-body");
             try {
               const res = await fetch(
-                `/api/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/output`
+                apiPath(
+                  `/api/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/output`
+                )
               );
               if (res.status === 404) {
                 target.textContent = "no persisted output"; // .textContent — safe

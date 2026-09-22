@@ -4,7 +4,7 @@
 // of D8 that are mechanical — one table class, one badge set, one accent, a
 // token per theme, no shadows — are exactly the parts that rot silently when a
 // later view adds its own `<table>` or its own chip. This reads the shipped
-// page and the two ESM helpers that also emit markup, as text, and fails on
+// page and every ESM helper that also emits markup, as text, and fails on
 // anything that drifts back.
 
 import assert from "node:assert/strict";
@@ -24,6 +24,12 @@ const MARKUP = {
   "ui-tables.js": readFileSync(join(HERE, "ui-tables.js"), "utf8"),
   "ui-log.js": readFileSync(join(HERE, "ui-log.js"), "utf8"),
   "ui-daemons.js": readFileSync(join(HERE, "ui-daemons.js"), "utf8"),
+  // Every module that emits markup belongs here. This map is an allowlist, so a
+  // new ui-*.js that renders HTML and is not added is simply not gated — the
+  // providers matrix emitted two `<table>`s unchecked for exactly that reason.
+  "ui-providers.js": readFileSync(join(HERE, "ui-providers.js"), "utf8"),
+  "ui-graph.js": readFileSync(join(HERE, "ui-graph.js"), "utf8"),
+  "ui-markdown.js": readFileSync(join(HERE, "ui-markdown.js"), "utf8"),
 };
 
 /** The body of a `{ … }` block that starts at the given opening line. */
