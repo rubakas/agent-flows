@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Launch the agent-flows serve daemon under Node 22 regardless of the ambient node.
-# better-sqlite3 is built for Node 22 (NODE_MODULE_VERSION 127); the harness's
-# default node is 20, which fails with an ABI mismatch. Force 22 here.
+# Launch the agent-flows serve daemon under the project's pinned Node.
+# The version and the refusal both live in scripts/use-pinned-node.sh.
 set -euo pipefail
 # Capture the launch directory before cd changes it; the server uses this as the
 # working directory for pipeline steps so they run against the operator's project.
 AGENT_FLOWS_PROJECT_DIR="${AGENT_FLOWS_PROJECT_DIR:-$PWD}"
 export AGENT_FLOWS_PROJECT_DIR
 cd "$(dirname "$0")/.."
-export NVM_DIR="$HOME/.nvm"
-# shellcheck disable=SC1091
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 22 >/dev/null 2>&1 || true
-exec ./node_modules/.bin/tsx src/serve/server.ts --port "${PORT:-7411}" "$@"
+# shellcheck source=scripts/use-pinned-node.sh
+. "$(dirname "$0")/use-pinned-node.sh"
+# Only pass --port when PORT was actually set: the flag outranks
+# AGENT_FLOWS_PORT (spec 038 FR-012), so forcing it here would make
+# `AGENT_FLOWS_PORT=7413 pnpm serve` silently listen on 7411 instead. With
+# neither set, server.ts already defaults to 7411.
+if [ -n "${PORT:-}" ]; then
+  exec ./node_modules/.bin/tsx src/serve/server.ts --port "$PORT" "$@"
+fi
+exec ./node_modules/.bin/tsx src/serve/server.ts "$@"

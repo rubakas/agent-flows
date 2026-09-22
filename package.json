@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@10.15.0",
   "engines": {
-    "node": ">=22"
+    "node": "22.x"
   },
   "files": [
     "dist",
@@ -32,7 +32,7 @@
     "mcp": "tsx src/bindings/mastra/server.ts",
     "mastra:smoke": "tsx src/bindings/mastra/smoke.ts",
     "evals:run": "bash scripts/evals-run.sh",
-    "serve": "tsx src/serve/server.ts",
+    "serve": "bash scripts/dev-serve.sh",
     "preflight": "tsx src/doctor.ts"
   },
   "dependencies": {

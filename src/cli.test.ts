@@ -490,7 +490,7 @@ describe("bin/agent-flows: symlink resolution and project targeting", () => {
     // A silent, correct run is the point: no version complaint on the way.
     assert.doesNotMatch(
       result.stderr ?? "",
-      /Node 22 or newer is required/u,
+      /Node 22 is required/u,
       `the success path must print no version message:\n${result.stderr ?? ""}`
     );
   });
@@ -552,7 +552,7 @@ describe("bin/agent-flows: symlink resolution and project targeting", () => {
     });
     const output = (result.stdout ?? "") + (result.stderr ?? "");
     assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
-    assert.match(output, /Node 22 or newer is required/u);
+    assert.match(output, /Node 22 is required/u);
     const running = execFileSync(oldNode, ["-p", "process.versions.node"], {
       encoding: "utf8",
     }).trim();

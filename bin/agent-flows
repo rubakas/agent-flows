@@ -3,9 +3,11 @@
 //
 // It runs the compiled CLI under the ambient node: no transpiler at runtime and
 // no nvm sourcing, so it works from a global install with no dev dependencies.
-// The engines floor of 22 is enforced here instead, because better-sqlite3 is
-// built for one Node ABI (NODE_MODULE_VERSION 127 for Node 22) and any other
-// one fails deep inside a database call with an unreadable dlopen error.
+// The Node pin in package.json's engines.node is enforced here instead, because
+// better-sqlite3 is built for one Node ABI (NODE_MODULE_VERSION 127 for Node 22)
+// and any other one fails deep inside a database call with an unreadable dlopen
+// error. It is a pin, not a floor: Node 24 is newer and equally unable to load
+// the addon.
 //
 // AI CLI harnesses spawn the registered MCP command with their own PATH, which
 // is usually the machine's default node and may be older than 22. Refusing
@@ -13,22 +15,21 @@
 // running node is too old this script looks for a working interpreter and
 // re-execs itself under it, silently. It only refuses when it finds none.
 //
-// "Working" is proved by loading better-sqlite3, not by a version number: a
-// Node 24 install satisfies the floor and still cannot open a database built
-// for Node 22, and `serve` -- the daemon every harness talks to -- would then
-// fail at its first query.
+// "Working" is proved by loading better-sqlite3, not by a version number: the
+// major is necessary but not sufficient — a Node 22 that did not install these
+// dependencies can still fail to open a database, and `serve`, the daemon every
+// harness talks to, would then fail at its first query.
 //
 // The project directory is not captured here: this script never changes
 // directory, so process.cwd() in the CLI is already the invocation directory
 // and resolveProjectDir() falls back to it (AGENT_FLOWS_PROJECT_DIR still wins).
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const REQUIRED_NODE_MAJOR = 22;
 const REEXEC_MARKER = "AGENT_FLOWS_NODE_REEXEC";
 
 // Walk up to the package root rather than assuming a fixed depth: the command
@@ -50,9 +51,28 @@ while (!existsSync(join(root, "package.json"))) {
   root = parent;
 }
 
+// The one place the version is written is package.json's engines.node, which
+// this script has just located. It cannot import src/nodeVersion.ts: it runs
+// before a build exists and under a node that may not be able to load this
+// package at all.
+const REQUIRED_NODE = readPinnedMajor();
+
+function readPinnedMajor() {
+  try {
+    const declared = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))?.engines?.node;
+    const pinned = Number.parseInt(String(declared).trim(), 10);
+    if (Number.isFinite(pinned)) return pinned;
+  } catch {
+    // Fall through: an unreadable package.json is reported by the missing-CLI
+    // check below far more usefully than by a version error here.
+  }
+  process.stderr.write("agent-flows: package.json declares no usable engines.node pin.\n");
+  process.exit(1);
+}
+
 const running = process.versions.node;
 const major = Number.parseInt(running.split(".")[0], 10);
-if (!Number.isFinite(major) || major < REQUIRED_NODE_MAJOR) {
+if (!Number.isFinite(major) || major !== REQUIRED_NODE) {
   reExecOrRefuse();
 }
 
@@ -86,7 +106,7 @@ function probeMajor(binary) {
  */
 function qualify(binary) {
   const probed = probeMajor(binary);
-  if (probed === undefined || probed < REQUIRED_NODE_MAJOR) {
+  if (probed === undefined || probed !== REQUIRED_NODE) {
     return { verdict: "version", major: probed };
   }
   return { verdict: loadsNativeModule(binary) ? "ok" : "native", major: probed };
@@ -142,13 +162,12 @@ function accept(candidate, rejected) {
 }
 
 /**
- * The first nvm-installed node of major 22 or newer that qualifies.
+ * The first nvm-installed node of the pinned major that qualifies.
  *
- * Exact major 22 is tried first, then ascending majors above it, newest patch
- * within each: the engines floor is 22, so that is where the module was most
- * likely built and where the probe is most likely to succeed on the first try.
- * With the native-module probe deciding, this order is only an optimisation —
- * a wrong guess costs one probe, not a broken run.
+ * Only that major is considered — anything else cannot load the addon whatever
+ * its version number says. Newest patch first, since that is the most likely to
+ * be the one that installed the dependencies; with the native-module probe
+ * deciding, the order is an optimisation, not a correctness argument.
  */
 function fromNvm(rejected) {
   const versionsDir = join(process.env.NVM_DIR ?? join(homedir(), ".nvm"), "versions", "node");
@@ -157,11 +176,8 @@ function fromNvm(rejected) {
   const entries = readdirSync(versionsDir)
     .filter((name) => /^v\d+\.\d+\.\d+$/u.test(name))
     .map(parse)
-    .filter(([entryMajor]) => entryMajor >= REQUIRED_NODE_MAJOR)
-    .sort((a, b) => {
-      const rank = (version) => (version[0] === REQUIRED_NODE_MAJOR ? -1 : version[0]);
-      return rank(a) - rank(b) || b[1] - a[1] || b[2] - a[2];
-    });
+    .filter(([entryMajor]) => entryMajor === REQUIRED_NODE)
+    .sort((a, b) => b[1] - a[1] || b[2] - a[2]);
   for (const version of entries) {
     const candidate = join(versionsDir, `v${version.join(".")}`, "bin", "node");
     if (existsSync(candidate) && accept(candidate, rejected)) return candidate;
@@ -181,10 +197,10 @@ function overrideInterpreter(override) {
   const reason =
     verdict === "native"
       ? `it is Node ${String(probed)}, but it cannot load this package's better-sqlite3 (built for a different Node ABI)`
-      : `it is not a usable Node ${String(REQUIRED_NODE_MAJOR)}+ interpreter${probed === undefined ? "" : ` (it reports Node ${String(probed)})`}`;
+      : `it is not Node ${String(REQUIRED_NODE)}${probed === undefined ? "" : ` (it reports Node ${String(probed)})`}`;
   process.stderr.write(
     `agent-flows: AGENT_FLOWS_NODE points at ${override}, but ${reason}.\n` +
-      `Point AGENT_FLOWS_NODE at a Node ${String(REQUIRED_NODE_MAJOR)}+ binary that can load the module, or unset it.\n`
+      `Point AGENT_FLOWS_NODE at a Node ${String(REQUIRED_NODE)} binary that can load the module, or unset it.\n`
   );
   process.exit(1);
 }
@@ -209,10 +225,10 @@ function findInterpreter(rejected) {
 function refuse(rejected) {
   const nvmDir = process.env.NVM_DIR ?? join(homedir(), ".nvm");
   process.stderr.write(
-    `agent-flows: Node ${String(REQUIRED_NODE_MAJOR)} or newer is required, but this is Node ${running}.\n` +
+    `agent-flows: Node ${String(REQUIRED_NODE)} is required, but this is Node ${running}.\n` +
       (rejected.length === 0
-        ? `Switch to Node ${String(REQUIRED_NODE_MAJOR)} (for example: nvm use ${String(REQUIRED_NODE_MAJOR)}) and run the command again.\n`
-        : `Found Node ${String(REQUIRED_NODE_MAJOR)}+ interpreters, but none of them could load this package's better-sqlite3, ` +
+        ? `Switch to Node ${String(REQUIRED_NODE)} (for example: nvm use ${String(REQUIRED_NODE)}) and run the command again.\n`
+        : `Found other Node interpreters, but none of them could load this package's better-sqlite3, ` +
           `which is built for one Node ABI: ${rejected.join(", ")}.\n` +
           `Run the command under the Node that installed the dependencies, or rebuild them for one of these.\n`) +
       `Looked for one in AGENT_FLOWS_NODE, on PATH, under ${join(nvmDir, "versions", "node")}, /opt/homebrew/bin/node and /usr/local/bin/node.\n`

@@ -23,6 +23,7 @@ import { classifyIdentity, probeDaemon, readDaemonRecord } from "./runtime/daemo
 import { resolveProjectState } from "./runtime/projectState.js";
 import type { ProviderConfig } from "./canon/registry.js";
 import type { DaemonIdentity } from "./runtime/daemonRecord.js";
+import { requiredNodeMajor } from "./nodeVersion.js";
 
 const execFileAsync = promisify(execFile);
 const _require = createRequire(import.meta.url);
@@ -152,19 +153,25 @@ export function reachResult(reach: HarnessReach): CheckResult {
   };
 }
 
-// 1. Node ≥ 22 (required)
+// 1. The pinned Node (required)
+//
+// A pin, not a floor: better-sqlite3 is built for one ABI, so a NEWER Node fails
+// exactly as a older one does. Reporting "≥ 22" here told an operator on Node 24
+// that the thing about to break was fine.
 function checkNode(probes: DoctorProbes): CheckResult[] {
   const results: CheckResult[] = [];
   const raw = probes.nodeVersion().replace(/^v/, "");
   const major = parseInt(raw.split(".")[0], 10);
-  if (major >= 22) {
-    results.push({ name: "Node.js ≥ 22", status: "ok", detail: `v${raw}` });
+  const pinned = requiredNodeMajor();
+  const name = `Node.js ${pinned}`;
+  if (major === pinned) {
+    results.push({ name, status: "ok", detail: `v${raw}` });
   } else {
     results.push({
-      name: "Node.js ≥ 22",
+      name,
       status: "fail",
-      detail: `v${raw} (need ≥ 22)`,
-      hint: "nvm install 22 && nvm use  (reads .nvmrc)",
+      detail: `v${raw} (need ${pinned})`,
+      hint: `nvm install ${pinned} && nvm use  (reads .nvmrc)`,
     });
   }
   return results;

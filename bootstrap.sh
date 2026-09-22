@@ -46,10 +46,13 @@ if [[ $_need_node == 1 ]]; then
   fi
   if [[ $DRY_RUN == 0 ]]; then
     _still_bad=0
+    _pinned_node="$(tr -d '[:space:]' < "$(dirname "$0")/.nvmrc")"
     if ! command -v node &>/dev/null; then _still_bad=1
-    elif [[ $(_node_major) -lt 22 ]]; then _still_bad=1; fi
+    # A pin, not a floor: better-sqlite3 is built for one ABI, so a newer Node
+    # fails exactly as an older one does.
+    elif [[ $(_node_major) != "$_pinned_node" ]]; then _still_bad=1; fi
     if [[ $_still_bad == 1 ]]; then
-      echo "ERROR: Node ≥ 22 required. Run: nvm install 22 && nvm use  (reads .nvmrc)" >&2
+      echo "ERROR: Node $_pinned_node required. Run: nvm install $_pinned_node && nvm use  (reads .nvmrc)" >&2
       exit 1
     fi
   fi

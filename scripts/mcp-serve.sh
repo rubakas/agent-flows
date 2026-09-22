@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Launch the agent-flows MCP (Binding B) server under Node 22 regardless of the ambient
-# node. better-sqlite3 is built for Node 22 (NODE_MODULE_VERSION 127); the host's
+# Launch the agent-flows MCP (Binding B) server under the project's pinned Node. better-sqlite3 is built for Node 22 (NODE_MODULE_VERSION 127); the host's
 # default node is 20, which fails on an ABI mismatch. Force 22 here.
 set -euo pipefail
 # Capture the launch directory before cd changes it; the server uses this as the
@@ -8,8 +7,6 @@ set -euo pipefail
 AGENT_FLOWS_PROJECT_DIR="${AGENT_FLOWS_PROJECT_DIR:-$PWD}"
 export AGENT_FLOWS_PROJECT_DIR
 cd "$(dirname "$0")/.."
-export NVM_DIR="$HOME/.nvm"
-# shellcheck disable=SC1091
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-nvm use 22 >/dev/null 2>&1 || true
+# shellcheck source=scripts/use-pinned-node.sh
+. "$(dirname "$0")/use-pinned-node.sh"
 exec ./node_modules/.bin/tsx src/bindings/mastra/server.ts "$@"
