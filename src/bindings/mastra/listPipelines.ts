@@ -13,6 +13,8 @@ export interface ListedPipeline {
   id: string;
   description: string;
   inputs: string[];
+  /** The subset of `inputs` the pipeline derives for itself when a caller omits it. */
+  optionalInputs: string[];
   layer: string;
   shadows: string[];
 }
@@ -41,6 +43,7 @@ export function listPipelinesPayload(
         id: loaded.def.id,
         description: loaded.def.description,
         inputs: [...(loaded.def.inputs ?? [])],
+        optionalInputs: [...(loaded.def.optionalInputs ?? [])],
         layer: entry.layer.source,
         shadows: [...entry.shadows],
       })),

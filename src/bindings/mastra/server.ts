@@ -44,7 +44,11 @@ console.error(
 
 const listPipelinesTool = createTool({
   id: "list_pipelines",
-  description: "List all loaded pipelines with their IDs and descriptions.",
+  description:
+    "List all loaded pipelines with their IDs and descriptions. Each entry reports its " +
+    "inputs and which of them are optional (`optionalInputs`), so the required set is " +
+    "`inputs` minus `optionalInputs` — a pipeline with an empty required set can be " +
+    "started with no input values at all.",
   inputSchema: z.object({}),
   execute: async () => {
     // Resolved per call, and filtered by this project's visibility list (spec
@@ -61,7 +65,15 @@ const startInputSchema = z.object({
   inputs: z
     .record(z.string(), z.string())
     .optional()
-    .describe("Pipeline input values (optional when artifact_path is provided)"),
+    .describe(
+      "Pipeline input values, keyed by the input names list_pipelines reports for this " +
+        "pipeline. A pipeline may declare every input optional and derive what it needs " +
+        "on its own, so `{}` is a legitimate — and often the correct — call: check " +
+        "list_pipelines, which marks each input required or optional, and pass values " +
+        "only to override what the pipeline would otherwise work out for itself. Some " +
+        "pipelines do have required inputs; those must be supplied here, or seeded from " +
+        "a previous stage's artifact via artifact_path."
+    ),
   models: z
     .record(z.string(), z.string())
     .optional()
@@ -178,13 +190,13 @@ const decideEntryPointTool = createTool({
     input: z
       .string()
       .describe(
-        "Free text (feature request or task description) or an absolute path to an existing artifact file"
+        "Free text (feature request, task description, or a request to review existing work) or an absolute path to an existing artifact file"
       ),
     kind: z
-      .enum(["feature-request", "task-description"])
+      .enum(["feature-request", "task-description", "review-request"])
       .optional()
       .describe(
-        'Optional explicit kind. "feature-request" routes to formulation (investigate); "task-description" routes to development (develop).'
+        'Optional explicit kind. "feature-request" routes to formulation (investigate); "task-description" routes to development (develop); "review-request" routes to review (code-review).'
       ),
   }),
   execute: async (inputData) => {

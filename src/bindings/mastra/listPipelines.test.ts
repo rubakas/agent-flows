@@ -54,6 +54,60 @@ function makeProject(dir: string): string {
   return projectDir;
 }
 
+// A model choosing a pipeline from this payload must be able to see which inputs
+// it has to supply and which the pipeline derives for itself. The required set is
+// `inputs` minus `optionalInputs`, derived here rather than hardcoded so it tracks
+// the YAML.
+
+describe("list_pipelines reports which inputs are optional", () => {
+  it("code-review has an empty required set and a non-empty optional set", () => {
+    const dir = tempDir("af-optional-inputs-");
+    try {
+      // No project canon: the bundled layer is the whole catalogue.
+      const payload = listPipelinesPayload(join(dir, "project"), {
+        AGENT_FLOWS_HOME: join(dir, "home"),
+      });
+      const review = payload.pipelines.find((p) => p.id === "code-review");
+      assert.ok(
+        review,
+        `code-review must be listed; got: ${payload.pipelines.map((p) => p.id).join(", ")}`
+      );
+      const optional = new Set(review.optionalInputs);
+      const required = review.inputs.filter((name) => !optional.has(name));
+      assert.deepEqual(
+        required,
+        [],
+        "code-review derives everything it needs, so a model must see no required input"
+      );
+      assert.ok(
+        review.optionalInputs.length > 0,
+        "the optional inputs it accepts as overrides must still be listed"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a pipeline with a required input still reports it as required", () => {
+    const dir = tempDir("af-required-inputs-");
+    try {
+      const payload = listPipelinesPayload(join(dir, "project"), {
+        AGENT_FLOWS_HOME: join(dir, "home"),
+      });
+      const investigate = payload.pipelines.find((p) => p.id === "investigate");
+      assert.ok(investigate, "investigate must be listed");
+      const optional = new Set(investigate.optionalInputs);
+      const required = investigate.inputs.filter((name) => !optional.has(name));
+      assert.ok(
+        required.length > 0,
+        "not every pipeline is input-free; the payload must keep the distinction visible"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("FR-026: list_pipelines is filtered by this project's visibility file", () => {
   it("a hidden workflow is absent from the payload and everything else stays", () => {
     const dir = tempDir("af-vis-mcp-");

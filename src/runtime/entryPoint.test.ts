@@ -211,6 +211,72 @@ describe("FR-005: free text → investigate (conservative default)", () => {
   });
 });
 
+// ── Branch 3: review-shaped requests → code-review ───────────────────────────
+// The owner's case: a host chat model told "review this with agent-flows" must be
+// routed without interrogating the human. code-review declares every input
+// optional, so this route needs nothing else from the caller.
+
+describe("FR-005: a request to review existing work → code-review", () => {
+  it("routes an explicit kind 'review-request' to code-review", () => {
+    const result = decideEntryPoint("have a look at my work", "review-request", noFiles);
+    assert.ok(result.ok);
+    assert.equal(result.pipeline, "code-review");
+    assert.ok(
+      result.reason.includes("review-request"),
+      `reason must mention 'review-request'; got: ${result.reason}`
+    );
+  });
+
+  const reviewRequests = [
+    "review this branch",
+    "Review the changes on this branch please",
+    "can you review PR 42",
+    "do a code review of the diff",
+    "audit the commits I just pushed",
+    "critique these changes",
+  ];
+  for (const input of reviewRequests) {
+    it(`routes free text "${input}" to code-review`, () => {
+      const result = decideEntryPoint(input, undefined, noFiles);
+      assert.ok(result.ok);
+      assert.equal(
+        result.pipeline,
+        "code-review",
+        `a review-shaped request must not fall through to the free-text default; got ${
+          result.ok ? result.pipeline : "an error"
+        }`
+      );
+      assert.ok(result.reason.length > 0, "reason must be non-empty");
+    });
+  }
+
+  // The two pre-existing free-text routes must be untouched: the review rule takes
+  // a review verb AND a reference to a change that already exists, so neither of
+  // these crosses over.
+  it("leaves the pre-existing free-text and kind routes exactly as they were", () => {
+    const before: [string, string | undefined, string][] = [
+      ["Add a dark mode toggle to settings", undefined, "investigate"],
+      ["I have a bug to fix in the auth module", undefined, "investigate"],
+      ["I want dark mode", "feature-request", "investigate"],
+      ["Rewrite the auth module", "task-description", "develop"],
+    ];
+    for (const [input, kind, pipeline] of before) {
+      const result = decideEntryPoint(input, kind, noFiles);
+      assert.ok(result.ok, `"${input}" must still resolve`);
+      assert.equal(result.pipeline, pipeline, `"${input}" must still route to ${pipeline}`);
+    }
+  });
+
+  it("rejects an unknown kind and names review-request among the valid ones", () => {
+    const result = decideEntryPoint("some input", "unknown-kind", noFiles);
+    assert.ok(!result.ok);
+    assert.ok(
+      result.error.includes("review-request"),
+      `the error must list the kinds a caller may send; got: ${result.error}`
+    );
+  });
+});
+
 // ── Reason always names the branch ────────────────────────────────────────────
 // All branches above assert on reason content. This test is a belt-and-suspenders
 // check that the reason field is never empty.

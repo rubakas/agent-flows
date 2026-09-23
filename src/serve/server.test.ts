@@ -4091,6 +4091,33 @@ describe("FR-005: POST /api/runs/decide — entry-point decision route", () => {
     );
   });
 
+  it("explicit kind 'review-request' → code-review", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs/decide", {
+      input: "have a look at what I just pushed",
+      kind: "review-request",
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pipeline: string; reason: string };
+    assert.equal(body.pipeline, "code-review");
+    assert.ok(
+      body.reason.includes("review-request"),
+      `reason must mention review-request; got: ${body.reason}`
+    );
+  });
+
+  it("free text asking for a review of a branch → code-review", async () => {
+    const res = await mutate(srv.port, "POST", "/api/runs/decide", {
+      input: "review the changes on this branch",
+    });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { pipeline: string; reason: string };
+    assert.equal(
+      body.pipeline,
+      "code-review",
+      `a review request must route without the caller naming a kind; got: ${body.pipeline}`
+    );
+  });
+
   it("artifact with spec+gateDecisions → develop", async () => {
     // Write a synthetic artifact file with the artifact signature.
     const artifactDir = join(makeState(projectDir).runsDir, "decide-src-001");

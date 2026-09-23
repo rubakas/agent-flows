@@ -5,7 +5,23 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
-export type EntryKind = "feature-request" | "task-description";
+export type EntryKind = "feature-request" | "task-description" | "review-request";
+
+/**
+ * Free text that asks for existing work to be reviewed.
+ *
+ * Deliberately narrow: it takes a review verb AND a reference to a change that
+ * already exists, so "I have a bug to fix in the auth module" still routes to
+ * formulation while "review this branch" does not.
+ */
+const REVIEW_VERB = /\b(review|critique|audit)(s|ed|ing)?\b/iu;
+const CHANGE_REFERENT =
+  /\b(pr|prs|mr|pull request|pull requests|merge request|merge requests|branch|branches|diff|diffs|patch|patches|commit|commits|changes|changeset|working tree|staged)\b/iu;
+
+/** True when `input` reads as "review this branch / PR / these changes". */
+function looksLikeReviewRequest(input: string): boolean {
+  return REVIEW_VERB.test(input) && CHANGE_REFERENT.test(input);
+}
 
 export type DecideResult =
   { ok: true; pipeline: string; reason: string } | { ok: false; error: string };
@@ -16,13 +32,14 @@ export type DecideResult =
  *
  * Rule (spec 029 FR-005, Design C):
  * 1. If kind is provided: "feature-request" → investigate (formulation),
- *    "task-description" → develop (development).
+ *    "task-description" → develop (development), "review-request" → code-review.
  * 2. If kind is absent, infer from input's form only:
  *    a. Existing path whose JSON has spec+gateDecisions → develop (artifact signature).
  *    b. Existing path whose JSON has findings or plan → spec-creation (formulation feedback).
  *    c. Any other existing text file → develop (written task already exists).
  *    d. Path-like string that does not exist → error (caller returns HTTP 400).
- *    e. Free text (not a path) → investigate (conservative default).
+ *    e. Free text asking to review an existing change → code-review.
+ *    f. Free text (not a path) → investigate (conservative default).
  *
  * Returns { ok: true, pipeline, reason } or { ok: false, error }.
  * The reason always names the branch taken so the operator can correct a wrong inference
@@ -57,9 +74,18 @@ export function decideEntryPoint(
         reason: "explicit kind 'task-description' routes to development (develop)",
       };
     }
+    if (kind === "review-request") {
+      return {
+        ok: true,
+        pipeline: "code-review",
+        reason: "explicit kind 'review-request' routes to review (code-review)",
+      };
+    }
     return {
       ok: false,
-      error: `Unknown kind "${kind}"; must be "feature-request" or "task-description"`,
+      error:
+        `Unknown kind "${kind}"; must be "feature-request", "task-description" ` +
+        `or "review-request"`,
     };
   }
 
@@ -129,7 +155,18 @@ export function decideEntryPoint(
     };
   }
 
-  // ── Branch 3: free text (not a file path) — conservative default ──────────
+  // ── Branch 3: free text asking for a review of work that already exists ───
+  // code-review declares every input optional, so this route needs nothing from
+  // the caller beyond the request itself.
+  if (looksLikeReviewRequest(input)) {
+    return {
+      ok: true,
+      pipeline: "code-review",
+      reason: "free text naming a review of an existing change routes to review (code-review)",
+    };
+  }
+
+  // ── Branch 4: free text (not a file path) — conservative default ──────────
   return {
     ok: true,
     pipeline: "investigate",
