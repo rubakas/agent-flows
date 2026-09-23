@@ -323,8 +323,6 @@ function deliveryEntry(overrides: DeliveryEntry = {}): DeliveryEntry {
     source: "TICKET-000",
     classification: "implemented",
     evidence: "app/models/placeholder.rb:1",
-    decisionTaken: "not a decision",
-    optionsForeclosed: "not a decision",
     ...overrides,
   };
 }
@@ -471,5 +469,84 @@ describe("spec 044 regression — defect 6: a delivery report with no spec sourc
 
   it("accepts the empty report that says the dimension had nothing to run against", () => {
     assert.equal(validateDelivery([], false), undefined);
+  });
+});
+
+/**
+ * DEFECT 7 — the schema that threw away a correct answer.
+ *
+ * A live `code-review` run produced a complete and correct `codeReviewDelivery`
+ * array: ten requirements in spec order, `specSourcesProvided: true`, both
+ * decision fields filled on the four entries that were decisions and omitted on
+ * the six that were not. `CODE_REVIEW_DELIVERY_ENTRY` listed those two fields in
+ * `required` for every entry, so ajv refused the payload whole, the retry did not
+ * recover, and the dimension was lost — the review shipped without it.
+ *
+ * The fields are conditionally required, which `required` cannot express; the
+ * condition lives in `deliveryCrossFieldErrors`, which still refuses a
+ * `silently-decided` entry that names no decision (defect 5 above). This fixture
+ * is the exact shape of the run that was thrown away, and it must validate.
+ */
+describe("spec 044 regression — defect 7: the live run whose omitted decision fields sank the payload", () => {
+  const decided = (index: number): DeliveryEntry =>
+    deliveryEntry({
+      requirement: `Requirement ${String(index)} left a choice to whoever implemented it.`,
+      source: "TICKET-700, acceptance criteria",
+      classification: "silently-decided",
+      evidence: `app/services/example_${String(index)}.rb:12 — the line that made the choice`,
+      decisionTaken: `took option A for requirement ${String(index)}`,
+      optionsForeclosed: `option B for requirement ${String(index)}, which the ticket also allowed`,
+    });
+
+  const undecided = (index: number): DeliveryEntry =>
+    deliveryEntry({
+      requirement: `Requirement ${String(index)} states exactly one outcome.`,
+      source: "TICKET-700, acceptance criteria",
+      classification: "implemented",
+      evidence: `app/services/example_${String(index)}.rb:34 — the line that satisfies it`,
+    });
+
+  const liveRunPayload: DeliveryEntry[] = [
+    undecided(0),
+    decided(1),
+    decided(2),
+    undecided(3),
+    undecided(4),
+    undecided(5),
+    decided(6),
+    decided(7),
+    undecided(8),
+    undecided(9),
+  ];
+
+  it("accepts ten entries where four name a decision and six carry neither field", () => {
+    assert.equal(liveRunPayload.length, 10, "the fixture must stand for the whole live payload");
+    assert.equal(
+      liveRunPayload.filter((entry) => "decisionTaken" in entry).length,
+      4,
+      "four entries were decisions and named them"
+    );
+    assert.equal(
+      liveRunPayload.filter((entry) => !("optionsForeclosed" in entry)).length,
+      6,
+      "six entries took no decision and omitted both fields"
+    );
+    assert.equal(
+      validateDelivery(liveRunPayload),
+      undefined,
+      "the shape a correct live run produced must not be refused"
+    );
+  });
+
+  it("still refuses that payload when one of its silent decisions names no decision", () => {
+    const { decisionTaken: _dropped, ...silentWithNoDecision } = decided(2);
+    const report = validateDelivery([
+      ...liveRunPayload.slice(0, 2),
+      silentWithNoDecision,
+      ...liveRunPayload.slice(3),
+    ]);
+    assert.ok(report !== undefined, "an unnamed silent decision must still sink the entry");
+    assert.match(report, /codeReviewDelivery\.2/, "the report must name the offending entry");
+    assert.match(report, /"silently-decided"/, "the report must name the offending classification");
   });
 });

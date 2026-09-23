@@ -1,6 +1,6 @@
 import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
 
-import { canonSchemas, NOT_A_DECISION } from "./schemas.js";
+import { canonSchemas } from "./schemas.js";
 
 /**
  * A declared `schema:` used to be prompt text and nothing else: the output was
@@ -131,9 +131,19 @@ function isBlank(value: unknown): boolean {
   return typeof value !== "string" || value.trim().length === 0;
 }
 
-/** A required field answered with the "no decision here" convention, or not at all. */
+/**
+ * The wording a model reaches for when a field it has nothing to say in is one
+ * it believes it must fill. `silently-decided` is precisely the classification
+ * where that answer contradicts itself — the entry claims a choice was made and
+ * then names no choice — so it is refused here alongside a blank and an absent
+ * value. The schema no longer asks any other classification to say this, and
+ * nothing else needs the string, so it lives where the rule that rejects it does.
+ */
+const NO_DECISION_WORDING = "not a decision";
+
+/** A decision field answered with no decision, however the answer was spelled. */
 function isUndecided(value: unknown): boolean {
-  return isBlank(value) || (value as string).trim().toLowerCase() === NOT_A_DECISION;
+  return isBlank(value) || (value as string).trim().toLowerCase() === NO_DECISION_WORDING;
 }
 
 /**

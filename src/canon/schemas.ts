@@ -122,15 +122,6 @@ export const CODE_REVIEW_SCHEMA = {
 };
 
 /**
- * The convention for `decisionTaken` and `optionsForeclosed` on a classification
- * that took no decision. They are required on every entry — a model that may
- * omit a field omits it — so a classification with no decision behind it needs
- * a value that says so rather than an empty string that reads as an oversight.
- * `prompts/code-review-delivery.md` states the same convention to the model.
- */
-export const NOT_A_DECISION = "not a decision";
-
-/**
  * One requirement from the spec sources and what the change did with it.
  *
  * `classification` is the vocabulary `prompts/code-review-delivery.md` defines.
@@ -139,11 +130,17 @@ export const NOT_A_DECISION = "not a decision";
  * neither moved the metric. As prose, `silently-decided` was indistinguishable
  * from `implemented` — both were a sentence inside a free-text claim.
  *
- * `decisionTaken` and `optionsForeclosed` are required because `silently-decided`
- * is the class this dimension exists for and it says nothing without naming which
- * decision was made and what it ruled out. Entries that took no decision carry
- * `NOT_A_DECISION` in both; `validateOutput.ts` refuses that pair on a
- * `silently-decided` entry, which is where the vocabulary becomes load-bearing.
+ * `decisionTaken` and `optionsForeclosed` are declared but NOT in `required`, and
+ * must not be re-added: they are conditionally required, and a condition is not
+ * something a JSON-schema `required` list can state. `silently-decided` is the
+ * class this dimension exists for and says nothing without naming which decision
+ * was made and what it ruled out — `deliveryCrossFieldErrors` in
+ * `validateOutput.ts` is where that is enforced, and it refuses a blank, an
+ * absent, or a "no decision here" answer on such an entry. On the other five
+ * classifications the two fields mean nothing, so a `required` list demanding
+ * them bought only ceremonial filler: a live run classified four of ten entries
+ * correctly, omitted the fields on the six that took no decision, and had the
+ * whole dimension thrown away by ajv for it.
  */
 export const CODE_REVIEW_DELIVERY_ENTRY = {
   type: "object",
@@ -165,14 +162,7 @@ export const CODE_REVIEW_DELIVERY_ENTRY = {
     decisionTaken: { type: "string" },
     optionsForeclosed: { type: "string" },
   },
-  required: [
-    "requirement",
-    "source",
-    "classification",
-    "evidence",
-    "decisionTaken",
-    "optionsForeclosed",
-  ],
+  required: ["requirement", "source", "classification", "evidence"],
   additionalProperties: false,
 };
 

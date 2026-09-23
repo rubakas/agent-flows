@@ -211,8 +211,6 @@ function deliveryEntry(overrides: Record<string, unknown> = {}): Record<string, 
     source: "TICKET-411",
     classification: "implemented",
     evidence: "spec/fixtures/attachments.yml:1 — the fixture the ticket named",
-    decisionTaken: "not a decision",
-    optionsForeclosed: "not a decision",
     ...overrides,
   };
 }
@@ -243,14 +241,7 @@ describe("validateCanonOutput — codeReviewDelivery", () => {
     assert.match(report, /implemented, partial, not-implemented/);
   });
 
-  for (const field of [
-    "requirement",
-    "source",
-    "classification",
-    "evidence",
-    "decisionTaken",
-    "optionsForeclosed",
-  ] as const) {
+  for (const field of ["requirement", "source", "classification", "evidence"] as const) {
     it(`rejects a payload missing ${field}`, () => {
       const { [field]: _omitted, ...withoutField } = deliveryEntry();
       const report = delivery([withoutField]);
@@ -265,6 +256,22 @@ describe("validateCanonOutput — codeReviewDelivery", () => {
     assert.match(report, /unexpected field "confidence"/);
   });
 
+  it("accepts an implemented entry carrying neither decision field", () => {
+    const { decisionTaken: _d, optionsForeclosed: _o, ...entry } = deliveryEntry();
+    assert.equal(
+      delivery([entry]),
+      undefined,
+      "the two decision fields mean nothing outside silently-decided and must not be required"
+    );
+  });
+
+  it("rejects silently-decided with both decision fields absent", () => {
+    const report = delivery([deliveryEntry({ classification: "silently-decided" })]);
+    assert.ok(report !== undefined, "a silent decision naming no decision must be rejected");
+    assert.match(report, /decisionTaken is ""/, "an absent decisionTaken must be reported");
+    assert.match(report, /optionsForeclosed is ""/, "an absent optionsForeclosed must be reported");
+  });
+
   it("rejects silently-decided with no decision named", () => {
     const report = delivery([
       deliveryEntry({ classification: "silently-decided", decisionTaken: "" }),
@@ -274,8 +281,14 @@ describe("validateCanonOutput — codeReviewDelivery", () => {
     assert.match(report, /decisionTaken is ""/, "the report must name the offending value");
   });
 
-  it("rejects silently-decided that answers the decision fields with the no-decision convention", () => {
-    const report = delivery([deliveryEntry({ classification: "silently-decided" })]);
+  it("rejects silently-decided that answers the decision fields with words meaning no decision", () => {
+    const report = delivery([
+      deliveryEntry({
+        classification: "silently-decided",
+        decisionTaken: "not a decision",
+        optionsForeclosed: "not a decision",
+      }),
+    ]);
     assert.ok(report !== undefined, '"not a decision" is not a decision named');
     assert.match(report, /optionsForeclosed is "not a decision"/);
   });
