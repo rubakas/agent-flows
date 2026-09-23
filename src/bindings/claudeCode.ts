@@ -15,10 +15,20 @@ const SUPPORTED_STEP_KINDS = new Set<StepKind>(["llm", "assemble-spec"]);
 
 // Canon schema name → the JS constant name emitted into the generated script.
 // Keep in sync with canonSchemas; a missing entry would silently emit `undefined`.
+//
+// `codeReviewDelivery` has no emitter below, and that is deliberate. The only
+// step that declares it is `delivery` in code-review.yaml, and code-review is
+// Binding-A-unsupported (see the refusal in generateWorkflowScript), so the
+// branch that used to emit CODE_REVIEW_DELIVERY_SCHEMA was unreachable for every
+// pipeline we ship. The entry stays because this Record is total over
+// StepDef["schema"] and dropping it fails the typecheck — it is a placeholder,
+// not wiring. Adding a Binding-A-supported pipeline with this schema means
+// restoring the emitter here; nothing mechanical catches that today.
 const SCHEMA_CONST_BY_NAME: Record<NonNullable<StepDef["schema"]>, string> = {
   weaknesses: "WEAK_SCHEMA",
   securityFindings: "SEC_SCHEMA",
   codeReviewFindings: "CODE_REVIEW_SCHEMA",
+  codeReviewDelivery: "CODE_REVIEW_DELIVERY_SCHEMA",
 };
 
 function capitalize(s: string): string {
@@ -103,6 +113,16 @@ export function generateWorkflowScript(
   const { def, prompts } = loaded;
 
   // Refuse loudly rather than silently emit a NoOp comment for unsupported step kinds.
+  //
+  // `code-review` is refused here as of spec 044, and that is a decision, not an
+  // oversight: its `material` step runs git in the daemon through spawnSync argv
+  // arrays (see runtime/reviewMaterial.ts), and Binding A emits a Claude Code
+  // workflow script whose only primitive is `agent()`. There is nothing in a
+  // generated script that can run git without handing a shell string to a model,
+  // which is the injection D3 of that spec refuses. So code-review is
+  // Binding-A-unsupported for as long as it captures its own material, and the
+  // partition in claudeCode.test.ts pins that — a kind added to the set above
+  // without moving a pipeline across it goes red.
   for (const step of def.steps) {
     if (!SUPPORTED_STEP_KINDS.has(step.kind)) {
       throw new Error(

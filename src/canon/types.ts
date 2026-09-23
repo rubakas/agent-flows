@@ -21,7 +21,8 @@ export type StepKind =
   | "export-spec"
   | "pipeline"
   | "loop"
-  | "check";
+  | "check"
+  | "review-material";
 
 export type Role = "reasoner" | "worker" | "scout";
 
@@ -31,7 +32,7 @@ export interface StepDef {
   role?: Role;
   model?: string;
   prompt?: string;
-  schema?: "weaknesses" | "securityFindings" | "codeReviewFindings";
+  schema?: "weaknesses" | "securityFindings" | "codeReviewFindings" | "codeReviewDelivery";
   dependsOn?: readonly string[];
   message?: string;
   /**
@@ -122,8 +123,13 @@ export interface StepDef {
    * verification check — the last word on whether the tree the run produced is
    * acceptable — must do the opposite, or the run reports success over a broken tree.
    *
-   * Must be a boolean; rejected on every step kind other than `check` (FR-004 style
-   * loud load-time validation: a flag that is silently ignored is worse than absent).
+   * On a `review-material` step it means the same thing: a capture that came back
+   * unavailable fails the run instead of being carried in the context as
+   * `available: false`.
+   *
+   * Must be a boolean; rejected on every step kind other than `check` and
+   * `review-material` (FR-004 style loud load-time validation: a flag that is
+   * silently ignored is worse than absent).
    */
   required?: boolean;
   /**

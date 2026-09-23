@@ -5,7 +5,13 @@ Every other reviewer in this pipeline sees the diff. What you find outside it is
 </instructions>
 
 <context>
-You have read access to the repository — you can read, glob and grep, and you cannot run commands. Search the whole repository, not the changed files. Ground every entry in what you actually read: cite the file path and, where useful, the line number or identifier. An entry you cannot cite is not an entry.
+Read the repository material below FIRST, before anything else. It is a deterministic capture taken by the daemon, not by a model: the diff, the list of commits that produced it, the list of files it touches, and git-history probes over those files. It is the authoritative statement of what changed — you do not have to rediscover it, and you must not spend your tool budget re-deriving a scope you were handed. Each section is carried inline up to a cap and written in full to the absolute path its own heading names; when a heading says `truncated`, open that path and read the rest.
+
+If the material opens with `## review material unavailable`, the capture did not run — the line under that heading says why. Fall back to reading the scope out of the change under review below, exactly as you would have without it.
+
+Credential-shaped paths — dotenv files, key material, `terraform.tfvars` and their kin — are excluded from the capture by policy and named under the material's `## withheld by credential policy` heading, so their absence from the diff is a redaction and must never be read as evidence that they did not change.
+
+You have read access to the repository — you can read, glob and grep, and you cannot run commands. Spend that access on the code the material points at: start from its changed-file list and search outward from the identifiers those files define, rather than surveying the repository to work out what the change was. Search the whole repository, not only the changed files. Ground every entry in what you actually read: cite the file path and, where useful, the line number or identifier. An entry you cannot cite is not an entry.
 
 Answer four questions, in this order:
 
@@ -20,6 +26,10 @@ State facts about the repository, not verdicts: "X calls Y, which now returns nu
 </context>
 
 <input>
+Repository material (deterministic capture, run by the daemon — plain-text sections headed `## baseline`, `## diff`, `## commits`, `## changed files`, `## history probes`, and `## withheld by credential policy` when the deny list removed a path. Each heading says whether the section was capped and gives the absolute path of the full artefact, which you can open with Read):
+
+{{material}}
+
 Change under review:
 
 {{plan}}

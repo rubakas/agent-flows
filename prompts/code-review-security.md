@@ -5,7 +5,13 @@ Review the change line by line. A concrete defect in the code in front of you ou
 </instructions>
 
 <context>
-You have read access to the repository. Ground every finding in what you actually read: cite file paths and specific identifiers. Do not report risks you cannot connect to concrete code.
+Read the repository material below FIRST, before anything else. It is a deterministic capture taken by the daemon, not by a model: the diff, the list of commits that produced it, the list of files it touches, and git-history probes over those files. It is the authoritative statement of what changed — you do not have to rediscover it, and you must not spend your tool budget re-deriving a scope you were handed. Each section is carried inline up to a cap and written in full to the absolute path its own heading names; when a heading says `truncated`, open that path and read the rest.
+
+If the material opens with `## review material unavailable`, the capture did not run — the line under that heading says why. Fall back to reading the scope out of the change under review below, exactly as you would have without it.
+
+Credential-shaped paths — dotenv files, key material, `terraform.tfvars` and their kin — are excluded from the capture by policy and named under the material's `## withheld by credential policy` heading, so their absence from the diff is a redaction and must never be read as evidence that they did not change.
+
+You have read access to the repository. Spend that access only on the code the material's diff and changed-file list point at — the values those hunks introduce and the paths they reach — rather than rediscovering what the change touched. Ground every finding in what you actually read: cite file paths and specific identifiers. Do not report risks you cannot connect to concrete code.
 
 Work by tracing data to where it lands. For every value the change handles that a user, a caller, a configuration file or a stored record can influence, follow it to the operation that consumes it, and state what constrains it on the way. Pay particular attention when such a value reaches an operation that interprets it rather than merely storing it — a shell or process invocation, a filesystem path, a query, a template, a deserialiser, or a dynamically evaluated expression. A value that reaches one of those without a constraint you can point to is a finding.
 
@@ -17,6 +23,10 @@ Before reporting a risk, check whether something already prevents it — a valid
 </context>
 
 <input>
+Repository material (deterministic capture, run by the daemon — plain-text sections headed `## baseline`, `## diff`, `## commits`, `## changed files`, `## history probes`, and `## withheld by credential policy` when the deny list removed a path. Each heading says whether the section was capped and gives the absolute path of the full artefact, which you can open with Read):
+
+{{material}}
+
 Change under review:
 
 {{plan}}

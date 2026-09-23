@@ -105,6 +105,55 @@ describe("generateWorkflowScript — structural checks", () => {
   });
 });
 
+// Which bundled pipelines Binding A must still emit a script for, and which it
+// must refuse. The test above accepts a refusal as a legitimate outcome for ANY
+// pipeline, which is what let spec 044's `review-material` step drop code-review
+// out of Binding A with nothing going red. A partition cannot do that: dropping
+// a pipeline moves it across the line and the assertion names it.
+const MUST_GENERATE = ["audit", "correct-plan", "develop", "investigate"];
+// Each refusal is caused by a kind Binding A does not execute: `check` (test,
+// build-round), `loop` (build), `gate` (ship, spec-creation, cycle, cycle-dev)
+// and `review-material` (code-review — the decision recorded at the refusal site
+// in claudeCode.ts).
+const MUST_REFUSE = [
+  "build",
+  "build-round",
+  "code-review",
+  "cycle",
+  "cycle-dev",
+  "ship",
+  "spec-creation",
+  "test",
+];
+
+describe("generateWorkflowScript — the Binding A partition", () => {
+  it("emits a script for exactly the pipelines that must generate, and refuses exactly the rest", () => {
+    const generated: string[] = [];
+    const refused: string[] = [];
+    for (const yamlFile of listPipelines(join(repoRoot, "pipelines"))) {
+      const loaded = loadPipeline(yamlFile);
+      try {
+        generateWorkflowScript(loaded);
+        generated.push(loaded.def.id);
+      } catch {
+        refused.push(loaded.def.id);
+      }
+    }
+    assert.deepEqual(
+      generated.sort((a, b) => a.localeCompare(b)),
+      [...MUST_GENERATE].sort((a, b) => a.localeCompare(b)),
+      "a pipeline silently left Binding A (or silently joined it) — a step kind was added to a " +
+        "pipeline without deciding whether Binding A still supports it, or SUPPORTED_STEP_KINDS " +
+        "grew. Decide, then move the id between MUST_GENERATE and MUST_REFUSE."
+    );
+    assert.deepEqual(
+      refused.sort((a, b) => a.localeCompare(b)),
+      [...MUST_REFUSE].sort((a, b) => a.localeCompare(b)),
+      "the refused set changed — see above"
+    );
+  });
+});
+
 describe("generateWorkflowScript — every bundled pipeline", () => {
   // The committed .claude/workflows/*.js artifacts are gone: they are an export
   // for Claude Code that nothing in the daemon reads, and only one of the five

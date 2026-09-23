@@ -30,7 +30,12 @@ import {
   runLogFile,
   stepOutputFile,
 } from "../../runtime/stepLog.js";
-import { DEFAULT_CHECK_COMMAND, buildCheckStep, buildLlmStep } from "./buildSteps.js";
+import {
+  DEFAULT_CHECK_COMMAND,
+  buildCheckStep,
+  buildLlmStep,
+  buildReviewMaterialStep,
+} from "./buildSteps.js";
 import type { ModelEntry } from "../../canon/registry.js";
 import type { SpawnFn } from "../../canon/runClaudeCli.js";
 import type { StepLogEvent } from "../../canon/stepLogEvents.js";
@@ -1814,5 +1819,131 @@ describe("buildLlmStep — schema-gated output is validated against the canon sc
 
     assert.equal(call, 1, "a valid output must not be retried");
     assert.deepEqual(out.critic, JSON.parse(VALID_WEAKNESS));
+  });
+});
+
+// ─── review-material: deterministic capture merged into the run context ──────
+
+describe("buildReviewMaterialStep", () => {
+  const GIT_ENV = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_AUTHOR_NAME: "Fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "Fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+  };
+
+  function fixtureRepo(): { repo: string; baseline: string } {
+    const repo = mkdtempSync(join(tmpdir(), "af-review-step-"));
+    const run = (cmd: string): string =>
+      execSync(cmd, { cwd: repo, env: GIT_ENV, encoding: "utf8" });
+    run("git init -q -b main");
+    writeFileSync(join(repo, "kept.txt"), "one\n");
+    run("git add -A && git commit -qm baseline");
+    const baseline = run("git rev-parse HEAD").trim();
+    writeFileSync(join(repo, "added.txt"), "brand new\n");
+    run("git add -A && git commit -qm change");
+    return { repo, baseline };
+  }
+
+  it("merges the capture into ctx under its own id, where a dependent step reads it", async () => {
+    const { repo, baseline } = fixtureRepo();
+    const runId = "review-material-ctx";
+    const dir = mkdtempSync(join(tmpdir(), "af-steplog-review-"));
+    openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+    try {
+      const step: StepDef = { id: "material", kind: "review-material" };
+      const materialStep = buildReviewMaterialStep(step, {
+        registry: NOOP_REGISTRY,
+        store: NOOP_STORE,
+        cwd: repo,
+      });
+
+      const out = (await (materialStep as any).execute({
+        inputData: { baseline },
+        runId,
+        suspend: () => undefined as never,
+      })) as Record<string, any>;
+
+      // The ctx value is the RENDERED capture, not the structured object: ctxVars
+      // JSON-stringifies a non-string value, which would put the diff into the
+      // prompt on one line with every newline written `\n` (spec 044 D4/FR-003).
+      assert.equal(typeof out.material, "string", JSON.stringify(out.material));
+      assert.match(out.material, /^## baseline\n/u);
+      assert.match(out.material, /\n## diff \(full: \//u);
+      assert.match(out.material, /\n## changed files \(full: \//u);
+      assert.match(out.material, /added\.txt/);
+      assert.ok(
+        !out.material.includes("\\n"),
+        `the capture must reach the prompt as plain text, not escaped JSON: ${out.material}`
+      );
+
+      // A downstream llm step reaches it as {{material}}.
+      let rendered = "";
+      const runner: typeof runLlmStep = async (_entry, prompt) => {
+        rendered = prompt;
+        return "ok";
+      };
+      const reviewStep: StepDef = { id: "review", kind: "llm", prompt: "prompts/review.md" };
+      const llmStep = buildLlmStep(
+        reviewStep,
+        { review: "material follows: {{material}}" },
+        { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+        undefined
+      );
+      await (llmStep as any).execute({ inputData: out, suspend: () => undefined as never });
+
+      assert.match(rendered, /added\.txt/, `dependent step must see the capture: ${rendered}`);
+
+      const events = readRunLog(runLogFile(dir, "test-pipeline"));
+      const start = events.find((e) => e.kind === "step.start") as any;
+      assert.equal(start?.transport, "git");
+      const result = events.find((e) => e.kind === "step.result") as any;
+      assert.equal(result?.status, "succeeded");
+    } finally {
+      closeRunLog(runId);
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("an unavailable capture does not fail the run unless the step is required", async () => {
+    const { repo } = fixtureRepo();
+    const runId = "review-material-unavailable";
+    const dir = mkdtempSync(join(tmpdir(), "af-steplog-review-"));
+    openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+    try {
+      const deps = { registry: NOOP_REGISTRY, store: NOOP_STORE, cwd: repo };
+      const optional = buildReviewMaterialStep({ id: "material", kind: "review-material" }, deps);
+      const out = (await (optional as any).execute({
+        inputData: { baseline: "--upload-pack=/bin/echo" },
+        runId,
+        suspend: () => undefined as never,
+      })) as Record<string, any>;
+      assert.match(out.material, /^## review material unavailable\n/u);
+      assert.match(out.material, /option/);
+
+      const required = buildReviewMaterialStep(
+        { id: "material", kind: "review-material", required: true },
+        deps
+      );
+      await assert.rejects(
+        (required as any).execute({
+          inputData: { baseline: "--upload-pack=/bin/echo" },
+          runId,
+          suspend: () => undefined as never,
+        }),
+        (err: Error) => {
+          assert.match(err.message, /review material unavailable/);
+          return true;
+        }
+      );
+    } finally {
+      closeRunLog(runId);
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });

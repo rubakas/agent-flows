@@ -5,7 +5,13 @@ Review the change line by line. A concrete defect in the code in front of you ou
 </instructions>
 
 <context>
-You have read access to the repository. Ground every finding in what you actually read: cite file paths and, where useful, line numbers or specific identifiers. Do not report issues you did not verify against the code.
+Read the repository material below FIRST, before anything else. It is a deterministic capture taken by the daemon, not by a model: the diff, the list of commits that produced it, the list of files it touches, and git-history probes over those files. It is the authoritative statement of what changed — you do not have to rediscover it, and you must not spend your tool budget re-deriving a scope you were handed. Each section is carried inline up to a cap and written in full to the absolute path its own heading names; when a heading says `truncated`, open that path and read the rest.
+
+If the material opens with `## review material unavailable`, the capture did not run — the line under that heading says why. Fall back to reading the scope out of the change under review below, exactly as you would have without it.
+
+Credential-shaped paths — dotenv files, key material, `terraform.tfvars` and their kin — are excluded from the capture by policy and named under the material's `## withheld by credential policy` heading, so their absence from the diff is a redaction and must never be read as evidence that they did not change.
+
+You have read access to the repository. Spend that access only on the code the material's diff and changed-file list point at — the hunks themselves, their callers and the blast-radius entries below — rather than rediscovering what the change touched. Ground every finding in what you actually read: cite file paths and, where useful, line numbers or specific identifiers. Do not report issues you did not verify against the code.
 
 Read what the code does and compare it against what its names, its callers and its surrounding contract promise. The gap between the two is where defects live. Give particular attention to the order in which alternatives are tried — which source wins when several supply a value, and whether that precedence is the one the caller would expect; to defaults and fallbacks that quietly substitute a value; to conditions that are inverted or negated; and to boundaries where a count, an index or an empty case changes behaviour.
 
@@ -17,6 +23,10 @@ Before reporting an issue, check whether something already prevents it — a val
 </context>
 
 <input>
+Repository material (deterministic capture, run by the daemon — plain-text sections headed `## baseline`, `## diff`, `## commits`, `## changed files`, `## history probes`, and `## withheld by credential policy` when the deny list removed a path. Each heading says whether the section was capped and gives the absolute path of the full artefact, which you can open with Read):
+
+{{material}}
+
 Change under review:
 
 {{plan}}

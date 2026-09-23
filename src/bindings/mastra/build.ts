@@ -22,6 +22,7 @@ import {
   buildLoopStep,
   buildParallelMergeStep,
   buildPersistStep,
+  buildReviewMaterialStep,
   ctx,
 } from "./buildSteps.js";
 import type { ModelRegistry } from "../../canon/registry.js";
@@ -139,6 +140,8 @@ function buildLevelsOntoBuilder(
         builder = builder.then(outcomeStep);
       } else if (step.kind === "check") {
         builder = builder.then(buildCheckStep(step, deps, def.defaultTimeoutMs));
+      } else if (step.kind === "review-material") {
+        builder = builder.then(buildReviewMaterialStep(step, deps));
       } else if (step.kind === "export-spec") {
         const gateId = findGateAncestor(step.id, stepById);
         if (gateId === undefined) {

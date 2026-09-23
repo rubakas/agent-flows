@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -159,6 +167,68 @@ steps:
     });
     assert.equal(def.steps[0].role, "worker");
     assert.equal(def.steps[0].model, undefined);
+  });
+
+  it("accepts a review-material step with no command and no prompt", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - baseline
+steps:
+  - id: material
+    kind: review-material
+    required: true
+`;
+    const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+    });
+    assert.equal(def.steps[0].kind, "review-material");
+    assert.equal(def.steps[0].required, true);
+  });
+
+  it("throws on a review-material step that declares a command", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - baseline
+steps:
+  - id: material
+    kind: review-material
+    command: git diff
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      /material.*cannot set command/
+    );
+  });
+
+  it("throws on a review-material step that declares an env allowlist", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - baseline
+steps:
+  - id: material
+    kind: review-material
+    env:
+      - SOME_VAR
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : ""),
+        }),
+      /material.*cannot set env/
+    );
   });
 
   it("throws on role set on a non-llm step", () => {
@@ -2517,55 +2587,134 @@ describe("FR-014: ship.yaml approve step declares manualOnly: true", () => {
   });
 });
 
+// ── every pipeline — the loader's placeholder rule actually covers all of them ─
+//
+// renderPrompt throws on a placeholder the vars map has no key for, and a step's
+// vars map is exactly the pipeline's declared inputs + models/provider + the
+// output of every TRANSITIVE ancestor. loadPipeline already refuses such a
+// prompt (load.ts, "prompt references unknown placeholder"), and the unit tests
+// above prove that rule can fail. What nothing proved is that the rule is run
+// against the pipelines actually shipped: a re-wired dependsOn, or a prompt that
+// gains a placeholder, is caught only when someone loads that file. This does.
+//
+// Prove it can fail by appending "{{nope}}" to any prompt a pipeline references:
+// the file's case goes red with the step and the placeholder named.
+
+describe("every shipped pipeline loads — graph, prompts and placeholders agree", () => {
+  const pipelinesDir = join(repoRoot, "pipelines");
+  const files = readdirSync(pipelinesDir)
+    .filter((f) => f.endsWith(".yaml"))
+    .sort();
+
+  it("the pipelines directory is not empty", () => {
+    assert.ok(files.length > 0, "found no pipelines to load — this gate would pass vacuously");
+  });
+
+  for (const file of files) {
+    it(`${file} loads, and every {{placeholder}} resolves from an input or an ancestor`, () => {
+      const { def, prompts } = loadPipeline(join(pipelinesDir, file));
+      assert.ok(def.steps.length > 0, `${file} declares no steps`);
+      for (const step of def.steps) {
+        if (step.kind !== "llm") continue;
+        assert.ok(
+          (prompts[step.id] ?? "").length > 0,
+          `${file}: llm step "${step.id}" loaded an empty prompt`
+        );
+      }
+    });
+  }
+});
+
 // ── spec 030 / 040 — code-review.yaml structure ──────────────────────────────
 
 describe("code-review.yaml — structure (spec 030, spec 040)", () => {
   const codeReviewYaml = join(repoRoot, "pipelines", "code-review.yaml");
+  // The llm steps. `material` is deliberately not one: it holds no prompt and no
+  // permissions, so the per-step assertions below do not apply to it.
   const STEP_IDS = [
     "radius",
     "falsifiability",
+    "delivery",
     "correctness",
     "security",
     "verify",
     "synthesis",
   ] as const;
 
-  it("loads and defines exactly six steps", () => {
+  it("loads and defines exactly eight steps", () => {
     const { def } = loadPipeline(codeReviewYaml);
     assert.equal(def.id, "code-review");
     assert.equal(
       def.steps.length,
-      6,
-      `code-review must define exactly 6 steps (040 FR-001); got ${def.steps.length.toString()}: ${def.steps
+      8,
+      `code-review must define exactly 8 steps (040 FR-001 plus material and delivery); got ${def.steps.length.toString()}: ${def.steps
         .map((s) => s.id)
         .join(", ")}`
     );
     assert.deepEqual(
       def.steps.map((s) => s.id),
-      [...STEP_IDS],
-      "step ids must be radius, falsifiability, correctness, security, verify, synthesis"
+      ["material", ...STEP_IDS],
+      "step ids must be material, radius, falsifiability, delivery, correctness, security, " +
+        "verify, synthesis"
     );
   });
 
-  it("dependency levels are [[radius, falsifiability], [correctness, security], [verify], [synthesis]]", () => {
+  it("material is a review-material step that is not required", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    const material = def.steps.find((s) => s.id === "material");
+    assert.ok(material, "material step must exist");
+    assert.equal(material.kind, "review-material");
+    assert.notEqual(
+      material.required,
+      true,
+      "material must NOT be required: a caller reviewing a pasted diff, or a tree where git " +
+        "fails, must still get a review — the prompts fall back to {{plan}} on available: false"
+    );
+    assert.equal(
+      material.prompt,
+      undefined,
+      "material is not an llm step and must declare no prompt"
+    );
+  });
+
+  it("dependency levels are [[material], [radius, falsifiability, delivery], [correctness, security], [verify], [synthesis]]", () => {
     const { def } = loadPipeline(codeReviewYaml);
     assert.deepEqual(
       pipelineLevels(def.steps),
-      [["radius", "falsifiability"], ["correctness", "security"], ["verify"], ["synthesis"]],
-      "radius feeds the two dimension reviewers, falsifiability runs beside it and reaches " +
-        "verify directly, and verification stays its own level before synthesis (040 FR-001)"
+      [
+        ["material"],
+        ["radius", "falsifiability", "delivery"],
+        ["correctness", "security"],
+        ["verify"],
+        ["synthesis"],
+      ],
+      "the deterministic capture runs alone first (build.ts permits only llm steps in a " +
+        "parallel level), radius feeds the two dimension reviewers, falsifiability and " +
+        "delivery run beside it and reach verify directly, and verification stays its own " +
+        "level before synthesis (040 FR-001)"
     );
   });
 
-  it("verify depends on correctness, security and falsifiability — not on radius directly", () => {
+  it("material sits alone at level 0 — a non-llm step may not share a parallel level", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    const [firstLevel] = pipelineLevels(def.steps);
+    assert.deepEqual(
+      firstLevel,
+      ["material"],
+      "build.ts throws when a level holds more than one step and any of them is not an llm " +
+        "step; material is review-material, so anything that joins its level breaks the build"
+    );
+  });
+
+  it("verify depends on correctness, security, falsifiability and delivery — not on radius directly", () => {
     const { def } = loadPipeline(codeReviewYaml);
     const verify = def.steps.find((s) => s.id === "verify");
     assert.ok(verify, "verify step must exist");
     assert.deepEqual(
       verify.dependsOn,
-      ["correctness", "security", "falsifiability"],
-      "040 FR-007: the falsifiability dimension reaches the verifier directly, while radius " +
-        "reaches it only through correctness and security (D2)"
+      ["correctness", "security", "falsifiability", "delivery"],
+      "040 FR-007: the falsifiability and delivery dimensions reach the verifier directly, " +
+        "while radius reaches it only through correctness and security (D2)"
     );
   });
 
@@ -2597,12 +2746,29 @@ describe("code-review.yaml — structure (spec 030, spec 040)", () => {
     );
   });
 
-  it("declares inputs [plan, baseline, introducedCommits] with the last two optional", () => {
+  it("delivery is schema-gated on codeReviewDelivery", () => {
     const { def } = loadPipeline(codeReviewYaml);
-    assert.deepEqual(def.inputs, ["plan", "baseline", "introducedCommits"], "FR-006 inputs");
+    const delivery = def.steps.find((s) => s.id === "delivery");
+    assert.ok(delivery, "delivery step must exist");
+    assert.equal(
+      delivery.schema,
+      "codeReviewDelivery",
+      "044 D1: a new axis is a schema slot, not a sentence in a prompt — undeclared, " +
+        "`silently-decided` is indistinguishable from `implemented` in free text"
+    );
+  });
+
+  it("declares inputs [plan, baseline, introducedCommits, specSources] with the last three optional", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    assert.deepEqual(
+      def.inputs,
+      ["plan", "baseline", "introducedCommits", "specSources"],
+      "FR-006 inputs. specSources must be declared here as well as in optionalInputs: " +
+        "POST /api/runs rejects any key that is not in inputs, so a caller could not supply it"
+    );
     assert.deepEqual(
       def.optionalInputs,
-      ["baseline", "introducedCommits"],
+      ["baseline", "introducedCommits", "specSources"],
       "FR-006 optionalInputs"
     );
   });
@@ -2637,7 +2803,7 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
       placeholders.has("verify"),
       "synthesis must consume {{verify}} — it is the only input it has"
     );
-    for (const worker of ["correctness", "security", "falsifiability", "radius"]) {
+    for (const worker of ["correctness", "security", "falsifiability", "delivery", "radius"]) {
       assert.ok(
         !placeholders.has(worker),
         `prompts/code-review-synthesis.md names {{${worker}}}. synthesis may not see a worker's ` +
@@ -2656,6 +2822,8 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
     const { def, prompts } = loadPipeline(codeReviewYaml);
     const ancestors = pipelineAncestors(def.steps);
     for (const step of def.steps) {
+      // Only llm steps carry a prompt; `material` has none to check.
+      if (!(step.id in prompts)) continue;
       const visible = new Set([
         ...def.inputs,
         "models",
@@ -2678,6 +2846,153 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
       placeholders.has("falsifiability"),
       "040 FR-007: verify adjudicates falsifiability findings, so its prompt must name them — " +
         "a step whose output no prompt reads is a model call paid for and thrown away"
+    );
+  });
+
+  it("verify consumes the delivery findings", () => {
+    const placeholders = new Set(extractPlaceholders(promptText("prompts/code-review-verify.md")));
+    assert.ok(
+      placeholders.has("delivery"),
+      "verify adjudicates delivery findings like any other dimension's, so its prompt must " +
+        "name them — a step whose output no prompt reads is a model call paid for and thrown away"
+    );
+  });
+
+  it("delivery consumes the spec sources it judges the change against", () => {
+    const placeholders = new Set(
+      extractPlaceholders(promptText("prompts/code-review-delivery.md"))
+    );
+    assert.ok(
+      placeholders.has("specSources"),
+      "the delivery dimension exists to compare the change against what the ticket asked for; " +
+        "without {{specSources}} it has nothing to fail the change against"
+    );
+  });
+
+  // The whole point of the material step: seven CLI sessions each re-deriving the same
+  // diff is what a deterministic capture replaces. A dimension prompt that stops naming
+  // {{material}} silently goes back to rediscovering scope, and only the bill shows it.
+  // delivery is in this list too: it classifies a requirement `replaced-by-prose`
+  // or `silently-decided` by reading what the change actually did, which is the
+  // diff. It depends on material already; a dependency it never renders is a
+  // dependency it does not have.
+  for (const id of [
+    "radius",
+    "falsifiability",
+    "correctness",
+    "security",
+    "delivery",
+    "verify",
+  ] as const) {
+    it(`${id} consumes {{material}} — the deterministic capture, not a re-derived diff`, () => {
+      const placeholders = new Set(extractPlaceholders(promptText(`prompts/code-review-${id}.md`)));
+      assert.ok(
+        placeholders.has("material"),
+        `${id} must read the deterministically captured diff, commit list, changed-file list ` +
+          "and git-history probes; without it the step spends its tool budget rediscovering " +
+          "a scope the daemon already handed it"
+      );
+    });
+  }
+
+  it("the synthesis verdict line enumerates all five axes", () => {
+    const synthesis = promptText("prompts/code-review-synthesis.md");
+
+    // Sliced, not searched whole. All five axis names also appear in the
+    // neighbouring "Searched and not found" paragraph, so asserting against the
+    // whole file passes with the entire verdict paragraph deleted — proven by
+    // deleting it. The anchor assertions matter as much as the axis ones: a slice
+    // taken from a missing anchor is the empty string, and `"".includes(axis)` is
+    // false, but only if we never let the search start at -1.
+    const anchor = "End with a verdict line";
+    const start = synthesis.indexOf(anchor);
+    assert.notEqual(
+      start,
+      -1,
+      `prompts/code-review-synthesis.md must still open its verdict paragraph with ` +
+        `"${anchor}" — this test reads that paragraph and nothing else, and cannot check a ` +
+        "paragraph it cannot find"
+    );
+    const end = synthesis.indexOf("</output_format>", start);
+    assert.notEqual(
+      end,
+      -1,
+      "the verdict paragraph must be the last thing inside <output_format> — without that " +
+        "closing tag this test has no end to slice to"
+    );
+    const verdictParagraph = synthesis.slice(start, end);
+
+    for (const axis of [
+      "correctness",
+      "security",
+      "test falsifiability",
+      "blast radius",
+      "delivery",
+    ]) {
+      assert.ok(
+        verdictParagraph.includes(axis),
+        `prompts/code-review-synthesis.md's verdict paragraph must name the "${axis}" axis: ` +
+          "the verdict line has " +
+          "to account for every dimension that ran and every one that did not, and an axis " +
+          "it never names is indistinguishable from an axis that came back clean"
+      );
+    }
+  });
+
+  // Spec 044 V2. D8 calls this the weakest decision in the spec: synthesis emits
+  // free prose under no schema, so nothing downstream can check that the two
+  // sections stayed disjoint in an actual report. What CAN be checked is that the
+  // prompt still declares them as two sections and still forbids moving an entry
+  // from one into the other — the sentence the whole decision rests on. Each
+  // assertion reads its own paragraph, sliced from an anchor that must be found:
+  // searching the whole file would pass on the strength of the section headings
+  // alone, which is the failure this file already shipped once.
+  it("synthesis keeps Unverifiable and Questions for owners as separate sections and forbids promotion between them", () => {
+    const synthesis = promptText("prompts/code-review-synthesis.md");
+
+    const ownersAnchor = 'Then a separate "Questions for owners" section';
+    const unverifiableAnchor = 'Then a separate "Unverifiable" section';
+    const ownersAt = synthesis.indexOf(ownersAnchor);
+    const unverifiableAt = synthesis.indexOf(unverifiableAnchor);
+    assert.notEqual(
+      ownersAt,
+      -1,
+      `prompts/code-review-synthesis.md must declare its owner questions with "${ownersAnchor}" — ` +
+        "a business-decision entry merged into the prioritised list is counted as a defect the " +
+        "change has to fix"
+    );
+    assert.notEqual(
+      unverifiableAt,
+      -1,
+      `prompts/code-review-synthesis.md must declare its unverifiable entries with ` +
+        `"${unverifiableAnchor}" (spec 044 D8): an entry the verifier could not settle either ` +
+        "way is a gap in the reviewer's reach, and a report with nowhere to put it puts it " +
+        "somewhere it does not belong"
+    );
+    assert.ok(
+      unverifiableAt > ownersAt,
+      "the Unverifiable section must be declared as its own section after Questions for owners, " +
+        "not folded into it"
+    );
+
+    // The Unverifiable paragraph alone — the "never" clauses have to live where
+    // the section is defined, not anywhere in the file.
+    const paragraphEnd = synthesis.indexOf("\n\n", unverifiableAt);
+    const unverifiable = synthesis.slice(
+      unverifiableAt,
+      paragraphEnd === -1 ? synthesis.length : paragraphEnd
+    );
+
+    assert.ok(
+      unverifiable.includes("never promoted into the prioritised list"),
+      "the Unverifiable section must forbid promotion into the prioritised list — nothing was " +
+        `observed to prioritise. Paragraph read:\n${unverifiable}`
+    );
+    assert.ok(
+      unverifiable.includes('never moved into "Questions for owners"'),
+      "the Unverifiable section must forbid moving an entry into Questions for owners — that is " +
+        "the failure spec 044 was written against: a claim two git commands refute, routed to a " +
+        `human. Paragraph read:\n${unverifiable}`
     );
   });
 

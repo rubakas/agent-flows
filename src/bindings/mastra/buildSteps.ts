@@ -2,6 +2,7 @@
 // Consumed by buildLevelsOntoBuilder in build.ts.
 
 import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { assembleSpec } from "../../canon/assemble.js";
@@ -13,8 +14,14 @@ import { renderPrompt } from "../../canon/render.js";
 import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
 import { validateCanonOutput } from "../../canon/validateOutput.js";
+import { buildReviewMaterial, renderReviewMaterial } from "../../runtime/reviewMaterial.js";
 import { recordStep } from "../../runtime/stepIntrospection.js";
-import { appendStepLog, writeStepOutput } from "../../runtime/stepLog.js";
+import {
+  appendStepLog,
+  isSafeStepId,
+  runArtifactDir,
+  writeStepOutput,
+} from "../../runtime/stepLog.js";
 import { describeModel, isFailoverWorthy, runFailoverChain } from "./failover.js";
 import type { FailoverOutcome } from "./failover.js";
 import type { ModelEntry, ModelRegistry, ProviderProfile } from "../../canon/registry.js";
@@ -22,6 +29,7 @@ import type { CheckResult, StepRunnerDeps } from "../../canon/runStep.js";
 import type { StepLogEventInput } from "../../canon/stepLogEvents.js";
 import type { HardenedSpec, LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
+import type { ReviewMaterial } from "../../runtime/reviewMaterial.js";
 
 // Flexible context record used as input/output schema for all steps.
 export const ctx = z.record(z.string(), z.unknown());
@@ -745,6 +753,103 @@ export function buildCheckStep(
         }
       }
       return { ...rawCtx, [step.id]: result };
+    },
+  });
+}
+
+/** Splits a caller-supplied commit list that arrived as one string. */
+function splitCommitList(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string");
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  return value
+    .split(/[\s,]+/u)
+    .map((v) => v.trim())
+    .filter((v) => v.length > 0);
+}
+
+/**
+ * A deterministic capture of the repository material a review needs.
+ *
+ * The daemon runs git here — with argv arrays, never a shell — so the review
+ * steps themselves keep `contents: read` and no execution of any kind. See
+ * runtime/reviewMaterial.ts for why a `check` step cannot do this job.
+ */
+export function buildReviewMaterialStep(step: StepDef, deps: BuildDeps) {
+  return createStep({
+    id: step.id,
+    inputSchema: ctx,
+    outputSchema: ctx,
+    execute: async ({ inputData, abortSignal, runId }) => {
+      assertNotCancelled(step.id, abortSignal);
+      const rawCtx = inputData as Ctx;
+      const signal = combineSignals(deps.runnerDeps?.signal, abortSignal);
+
+      appendStepLog(runId, step.id, {
+        kind: "step.start",
+        model: "review-material",
+        transport: "git",
+      });
+      const startedAt = Date.now();
+      const finishStepLog = (status: StepResultStatus, error?: string): void => {
+        appendStepLog(runId, step.id, {
+          kind: "step.result",
+          status,
+          durationMs: Date.now() - startedAt,
+          ...(error !== undefined ? { error } : {}),
+        });
+      };
+
+      let result: ReviewMaterial;
+      try {
+        // Artefacts are the run's own durable files, so they live beside its
+        // events log, in a directory of this step's own.
+        const runDir = runArtifactDir(runId);
+        if (runDir === undefined) {
+          result = {
+            available: false,
+            reason: "run directory unknown — nowhere to write the review artefacts",
+          };
+        } else if (!isSafeStepId(step.id)) {
+          // Two different refusals: reporting the directory as unknown when the
+          // directory is fine and the step id is not sends a reader to look at
+          // run storage for a naming problem.
+          result = {
+            available: false,
+            reason: `step id ${JSON.stringify(step.id)} is not safe as a directory name — nowhere to write the review artefacts`,
+          };
+        } else {
+          result = buildReviewMaterial(
+            deps.cwd ?? process.cwd(),
+            rawCtx.baseline,
+            splitCommitList(rawCtx.introducedCommits),
+            join(runDir, `${step.id}.review-material`)
+          );
+        }
+      } catch (err) {
+        finishStepLog(
+          signal?.aborted === true ? "cancelled" : "failed",
+          err instanceof Error ? err.message : String(err)
+        );
+        throw err;
+      }
+
+      if (signal?.aborted === true) {
+        finishStepLog("cancelled");
+      } else if (result.available) {
+        finishStepLog("succeeded");
+      } else {
+        finishStepLog("failed", result.reason);
+        // Same rule as a check step: unavailable material is carried in the
+        // context and the run continues, unless the pipeline declared that the
+        // review is worthless without it.
+        if (step.required === true) {
+          throw new Error(`Step "${step.id}": review material unavailable: ${result.reason}`);
+        }
+      }
+      // Rendered, not handed over raw: ctxVars JSON-stringifies a non-string ctx
+      // value, and the diff a reviewer is told to read FIRST then arrives as one
+      // line with every newline written `\n`. See renderReviewMaterial.
+      return { ...rawCtx, [step.id]: renderReviewMaterial(result) };
     },
   });
 }

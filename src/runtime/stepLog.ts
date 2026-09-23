@@ -160,6 +160,15 @@ export function openRunLog(
   });
 }
 
+/**
+ * The directory a run's durable files live in, or undefined for an unknown run.
+ * A step that writes an artefact of its own writes it beside the events file.
+ */
+export function runArtifactDir(runId: string | undefined): string | undefined {
+  if (runId === undefined || runId === "") return undefined;
+  return runs.get(runId)?.dir;
+}
+
 /** Drop a run's entry. The file stays: it is the durable record. */
 export function closeRunLog(runId: string): void {
   runs.delete(runId);

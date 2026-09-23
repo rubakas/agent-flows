@@ -18,6 +18,9 @@ const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"]
 /** Fields that are illegal on every step kind OTHER than "check". */
 const NON_CHECK_FORBIDDEN = ["env", "required"] as const;
 
+/** Step kinds that may declare `required`: a failure of theirs can fail the run. */
+const REQUIRED_ALLOWED_KINDS = new Set(["check", "review-material"]);
+
 /**
  * Rejects a deadline that is not a positive whole number of milliseconds.
  *
@@ -97,13 +100,12 @@ function validateNonLlmStep(step: StepDef): void {
   if (raw.failover !== undefined) {
     throw new Error(`Step "${step.id}": failover is only allowed on llm steps`);
   }
-  // env is only valid on check steps; reject it on all other non-llm kinds.
-  if (step.kind !== "check") {
-    for (const field of NON_CHECK_FORBIDDEN) {
-      if (raw[field] !== undefined) {
-        throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
-      }
-    }
+  // env is only valid on check steps; required also on review-material steps.
+  for (const field of NON_CHECK_FORBIDDEN) {
+    if (raw[field] === undefined) continue;
+    if (step.kind === "check") continue;
+    if (field === "required" && REQUIRED_ALLOWED_KINDS.has(step.kind)) continue;
+    throw new Error(`Step "${step.id}": ${step.kind} step cannot set ${field}`);
   }
   if (step.role !== undefined) {
     throw new Error(`Step "${step.id}": role is only allowed on llm steps`);
@@ -177,6 +179,22 @@ function validateNonLlmStep(step: StepDef): void {
           );
         }
       }
+    }
+    return;
+  }
+
+  if (step.kind === "review-material") {
+    // Takes neither a command nor a prompt: what it captures is fixed, and the
+    // only run-scoped value it reads — `baseline` — is validated against a
+    // revision pattern at capture time, never rendered into anything.
+    if (raw.command !== undefined) {
+      throw new Error(`Step "${step.id}": review-material step cannot set command`);
+    }
+    const requiredField = raw.required;
+    if (requiredField !== undefined && typeof requiredField !== "boolean") {
+      throw new Error(
+        `Step "${step.id}": required must be a boolean; got ${JSON.stringify(requiredField)}`
+      );
     }
     return;
   }
@@ -433,6 +451,7 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
       step.kind === "pipeline" ||
       step.kind === "loop" ||
       step.kind === "check" ||
+      step.kind === "review-material" ||
       step.kind === "gate" ||
       step.kind === "assemble-spec" ||
       step.kind === "persist-ticket" ||

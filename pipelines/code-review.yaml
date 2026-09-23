@@ -2,35 +2,70 @@ id: code-review
 version: 1
 description: Adversarial review of a code change, with every finding verified against the repo
 # stage-handoff (spec 029 FR-011): inputs.plan ← the diff under review; inputs.baseline ←
-# the ref establishing what existed before; both optional inputs default to "" when a
-# caller omits them. No step here has shell access, so scope is read out of the diff text
-# and introducedCommits carries a precomputed commit list when a caller can supply one.
+# the ref establishing what existed before; inputs.specSources ← the ticket bodies the
+# change claims to close; all three optional inputs default to "" when a caller omits them.
+# No LLM step here has git or shell access — every reviewer holds contents: read, which is
+# Read, Glob and Grep and nothing else. The material step is where git runs: the daemon
+# executes it with argv arrays (never /bin/sh) and hands the diff, the commit list, the
+# changed-file list and the git-history probes in as data, written in full to the run's own
+# directory and rendered as labelled plain-text sections carrying the artefacts' absolute
+# paths. Every reviewing step renders it as {{material}} — radius, falsifiability, delivery,
+# correctness, security and verify — asserted one prompt at a time in canon.test.ts. Synthesis
+# is the deliberate exception: it sees {{verify}} and nothing else, for the reason below. So
+# scope is no longer re-derived by each reviewer out of the diff text, and
+# introducedCommits is no longer the only way a caller can name the commits under review —
+# it now only adds object names to probe on top of the ones git itself reports.
 # The synthesis step outputs its verdict in result (accumulated context); a caller that
 # wants the verified findings reads artifact.result.verify.
 inputs:
   - plan
   - baseline
   - introducedCommits
+  - specSources
 optionalInputs:
   - baseline
   - introducedCommits
+  - specSources
 steps:
-  # radius and falsifiability run first and unblocked (spec 040 FR-001). The canon has no
-  # conditionals, so neither can be skipped when it finds nothing; both prompts instead
-  # return a literal "nothing found" reply that the downstream prompts read as "the search
-  # ran and was empty", never as "the search did not run" (FR-009).
+  # The deterministic capture runs first and alone: it is not an llm step, and a parallel
+  # level may hold only llm steps. It is deliberately NOT required — a caller reviewing a
+  # pasted diff, or a tree where git fails, must still get a review; the capture then
+  # reports available: false and every prompt falls back to reading scope out of {{plan}}.
+  - id: material
+    kind: review-material
+  # radius, falsifiability and delivery run unblocked on the material (spec 040 FR-001).
+  # The canon has no conditionals, so none can be skipped when it finds nothing; each
+  # prompt instead returns a literal "nothing found" reply that the downstream prompts read
+  # as "the search ran and was empty", never as "the search did not run" (FR-009).
   - id: radius
     kind: llm
     role: worker # repo-wide search for what the diff's correctness depends on outside itself
     permissions:
       contents: read
+    dependsOn: [material]
     prompt: prompts/code-review-radius.md
   - id: falsifiability
     kind: llm
     role: worker # its own dimension so its contribution to finding count is measurable (D3)
     permissions:
       contents: read
+    dependsOn: [material]
     prompt: prompts/code-review-falsifiability.md
+  # Delivery asks the question no other dimension asks: not whether the code works, but
+  # whether it is the code the ticket asked for. It reads the spec sources, not the radius,
+  # so it runs beside radius and falsifiability rather than behind them.
+  - id: delivery
+    kind: llm
+    role: worker # single-dimension adversarial review, same class as correctness and security
+    permissions:
+      contents: read
+    dependsOn: [material]
+    prompt: prompts/code-review-delivery.md
+    # spec 044 D1: a new axis is a schema slot, not a sentence in a prompt. As prose,
+    # `silently-decided` was indistinguishable from `implemented` — both were a sentence
+    # inside free text. The classification, its evidence and the decision it names are now
+    # declared fields, ajv-checked, with the cross-field rules in validateOutput.ts.
+    schema: codeReviewDelivery
   # Forked from prompts/audit-*.md rather than shared with audit: these consume {{radius}},
   # which audit has no step to produce, and audit reviews a plan, not a diff. audit.yaml and
   # the three audit-*.md prompts stay byte-identical (FR-003, FR-010).
@@ -59,11 +94,11 @@ steps:
     role: reasoner # per-finding judgement against the repo; the step the whole pipeline exists for
     permissions:
       contents: read
-    dependsOn: [correctness, security, falsifiability]
+    dependsOn: [correctness, security, falsifiability, delivery]
     prompt: prompts/code-review-verify.md
     schema: codeReviewFindings
   # Synthesis receives {{verify}} only — never {{correctness}}, {{security}},
-  # {{falsifiability}} or {{radius}}. Withholding the raw worker findings makes overriding
+  # {{falsifiability}}, {{delivery}} or {{radius}}. Withholding the raw worker findings makes overriding
   # the verifier's verdict structurally impossible rather than merely forbidden: synthesis
   # cannot re-judge a finding it cannot see (spec 030 FR-008, spec 040 FR-008). The graph
   # hands a step every transitive ancestor's output, so this isolation is enforced by the

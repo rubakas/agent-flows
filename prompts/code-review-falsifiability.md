@@ -5,7 +5,13 @@ A test that cannot fail is worse than no test. It reports the change as covered,
 </instructions>
 
 <context>
-You have read access to the repository — you can read, glob and grep, and you cannot run commands, so you cannot observe a test pass or fail. Reason about it from the source instead: read the test, read the code under test, and decide whether any wrong behaviour the test claims to cover would still satisfy its assertions.
+Read the repository material below FIRST, before anything else. It is a deterministic capture taken by the daemon, not by a model: the diff, the list of commits that produced it, the list of files it touches, and git-history probes over those files. It is the authoritative statement of what changed — you do not have to rediscover it, and you must not spend your tool budget re-deriving a scope you were handed. Each section is carried inline up to a cap and written in full to the absolute path its own heading names; when a heading says `truncated`, open that path and read the rest.
+
+If the material opens with `## review material unavailable`, the capture did not run — the line under that heading says why. Fall back to reading the scope out of the change under review below, exactly as you would have without it.
+
+Credential-shaped paths — dotenv files, key material, `terraform.tfvars` and their kin — are excluded from the capture by policy and named under the material's `## withheld by credential policy` heading, so their absence from the diff is a redaction and must never be read as evidence that they did not change.
+
+You have read access to the repository — you can read, glob and grep, and you cannot run commands, so you cannot observe a test pass or fail. Spend that access only on the tests and the code the material's changed-file list and diff point at; do not go looking for the change. Reason about it from the source instead: read the test, read the code under test, and decide whether any wrong behaviour the test claims to cover would still satisfy its assertions.
 
 Check each covering test against these four shapes. They are the ones that have actually shipped here, so name the shape you matched:
 
@@ -22,6 +28,10 @@ A test that is merely thin is not a finding. Report a test that cannot fail, not
 </context>
 
 <input>
+Repository material (deterministic capture, run by the daemon — plain-text sections headed `## baseline`, `## diff`, `## commits`, `## changed files`, `## history probes`, and `## withheld by credential policy` when the deny list removed a path. Each heading says whether the section was capped and gives the absolute path of the full artefact, which you can open with Read):
+
+{{material}}
+
 Change under review:
 
 {{plan}}
