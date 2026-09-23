@@ -25,7 +25,7 @@ build          openai     refused: develop.implement: step "develop.implement" u
 build          local      refused: develop.implement: step "develop.implement" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "write"
 code-review    anthropic  runs
 code-review    openai     runs
-code-review    local      refused: radius: step "radius" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "read"
+code-review    local      refused: brief: step "brief" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "read"
 correct-plan   anthropic  runs
 correct-plan   openai     runs
 correct-plan   local      refused: revise: step "revise" under profile "local" resolves to model entry "ollama-qwen" (transport api), which cannot enforce permissions.contents "read"

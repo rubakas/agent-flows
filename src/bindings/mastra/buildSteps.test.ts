@@ -35,6 +35,7 @@ import {
   buildCheckStep,
   buildLlmStep,
   buildReviewMaterialStep,
+  unavailableStepMarker,
 } from "./buildSteps.js";
 import type { ModelEntry } from "../../canon/registry.js";
 import type { SpawnFn } from "../../canon/runClaudeCli.js";
@@ -1945,5 +1946,92 @@ describe("buildReviewMaterialStep", () => {
       rmSync(dir, { recursive: true, force: true });
       rmSync(repo, { recursive: true, force: true });
     }
+  });
+});
+
+// ─── an optional dimension may fail without taking the run with it ────────────
+
+describe("buildLlmStep — required: false is an optional dimension", () => {
+  const prompts = { delivery: "delivery prompt" };
+  const optional: StepDef = {
+    id: "delivery",
+    kind: "llm",
+    prompt: "prompts/code-review-delivery.md",
+    required: false,
+  };
+  const failingRunner: typeof runLlmStep = async () => {
+    throw new Error("schema validation failed after retry");
+  };
+
+  it("a failure fills the step's ctx key with a marker and lets the run continue", async () => {
+    const llmStep = buildLlmStep(
+      optional,
+      prompts,
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner: failingRunner },
+      undefined
+    );
+
+    const out = (await (llmStep as any).execute({
+      // The other axes have already run and are in the context.
+      inputData: { material: "## baseline\nabc", correctness: "no findings" },
+      suspend: () => undefined as never,
+    })) as Record<string, string>;
+
+    assert.equal(
+      out.delivery,
+      unavailableStepMarker("delivery", 'Step "delivery": schema validation failed after retry'),
+      "the key must hold the marker: renderPrompt throws on a placeholder with no value, so " +
+        "an absent key takes the run down through the next prompt — the opposite of optional"
+    );
+    // The marker has to be readable as "not examined", never as an empty result.
+    assert.match(out.delivery, /NOT examined/u);
+    assert.match(out.delivery, /Reason: Step "delivery": schema validation failed after retry/u);
+    assert.ok(
+      !out.delivery.includes("no findings"),
+      "the marker must carry nothing another axis produced"
+    );
+    // Everything the other axes produced survives untouched.
+    assert.equal(out.material, "## baseline\nabc");
+    assert.equal(out.correctness, "no findings");
+  });
+
+  it("the same failure on a step that did not declare required: false still fails the run", async () => {
+    const llmStep = buildLlmStep(
+      { ...optional, required: undefined },
+      prompts,
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner: failingRunner },
+      undefined
+    );
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      /schema validation failed after retry/u,
+      "required defaults to true on an llm step: every pipeline that says nothing keeps the " +
+        "behaviour it had"
+    );
+  });
+
+  it("a cancelled optional step still throws — cancellation is never optional", async () => {
+    const controller = new AbortController();
+    const cancellingRunner: typeof runLlmStep = async () => {
+      controller.abort();
+      throw new Error("aborted");
+    };
+    const llmStep = buildLlmStep(
+      optional,
+      prompts,
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner: cancellingRunner },
+      undefined
+    );
+
+    await assert.rejects(
+      (llmStep as any).execute({
+        inputData: {},
+        abortSignal: controller.signal,
+        suspend: () => undefined as never,
+      }),
+      /aborted/u,
+      "a cancelled run must not walk into its next step because this one was skippable"
+    );
   });
 });

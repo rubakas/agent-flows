@@ -3,7 +3,12 @@ version: 1
 description: Adversarial review of a code change, with every finding verified against the repo
 # stage-handoff (spec 029 FR-011): inputs.plan ← the diff under review; inputs.baseline ←
 # the ref establishing what existed before; inputs.specSources ← the ticket bodies the
-# change claims to close; all three optional inputs default to "" when a caller omits them.
+# change claims to close. EVERY input is optional and defaults to "": a caller may POST
+# {"pipeline":"code-review","inputs":{}} and get a complete review. What each omission
+# costs is made up deterministically — the material step derives a baseline from the
+# repository's default branch, fetches a named pull request or issue with `gh`, and the
+# brief step writes the change description the dimensions used to require by hand.
+# Supplying any of them makes the review better; none of them is a precondition.
 # No LLM step here has git or shell access — every reviewer holds contents: read, which is
 # Read, Glob and Grep and nothing else. The material step is where git runs: the daemon
 # executes it with argv arrays (never /bin/sh) and hands the diff, the commit list, the
@@ -23,6 +28,7 @@ inputs:
   - introducedCommits
   - specSources
 optionalInputs:
+  - plan
   - baseline
   - introducedCommits
   - specSources
@@ -30,9 +36,29 @@ steps:
   # The deterministic capture runs first and alone: it is not an llm step, and a parallel
   # level may hold only llm steps. It is deliberately NOT required — a caller reviewing a
   # pasted diff, or a tree where git fails, must still get a review; the capture then
-  # reports available: false and every prompt falls back to reading scope out of {{plan}}.
+  # reports available: false and every prompt falls back to reading scope out of the brief,
+  # which then rests on {{plan}} alone.
   - id: material
     kind: review-material
+  # The step that makes `{"pipeline":"code-review","inputs":{}}` a real review. The
+  # five dimensions were written for a change description a human wrote by hand; a caller
+  # who supplies none used to leave every one of them re-deriving the scope of a diff the
+  # capture already holds, and the delivery axis with nothing to name the change by. This
+  # step writes that description once, from the material, and the dimensions read it as
+  # {{brief}} instead of {{plan}}. It is scout-tier on purpose: it summarises what the
+  # capture already established and decides nothing, and its prompt forbids it to evaluate
+  # — a brief that pre-judged would come back confirmed by five reviewers who read it
+  # first. required: false for the same reason delivery is: a run must not die because the
+  # framing paragraph failed; the dimensions then receive the marker and fall back to the
+  # material, which is what they were doing before this step existed.
+  - id: brief
+    kind: llm
+    role: scout
+    permissions:
+      contents: read
+    dependsOn: [material]
+    prompt: prompts/code-review-brief.md
+    required: false
   # radius, falsifiability and delivery run unblocked on the material (spec 040 FR-001).
   # The canon has no conditionals, so none can be skipped when it finds nothing; each
   # prompt instead returns a literal "nothing found" reply that the downstream prompts read
@@ -42,14 +68,14 @@ steps:
     role: worker # repo-wide search for what the diff's correctness depends on outside itself
     permissions:
       contents: read
-    dependsOn: [material]
+    dependsOn: [material, brief]
     prompt: prompts/code-review-radius.md
   - id: falsifiability
     kind: llm
     role: worker # its own dimension so its contribution to finding count is measurable (D3)
     permissions:
       contents: read
-    dependsOn: [material]
+    dependsOn: [material, brief]
     prompt: prompts/code-review-falsifiability.md
   # Delivery asks the question no other dimension asks: not whether the code works, but
   # whether it is the code the ticket asked for. It reads the spec sources, not the radius,
@@ -59,8 +85,15 @@ steps:
     role: worker # single-dimension adversarial review, same class as correctness and security
     permissions:
       contents: read
-    dependsOn: [material]
+    dependsOn: [material, brief]
     prompt: prompts/code-review-delivery.md
+    # An optional dimension: delivery may fail without taking the run with it. The
+    # other four axes are worth reporting on their own, and losing correctness,
+    # security, radius and falsifiability because the ticket bodies could not be
+    # read is the failure spec 043 D3 already named for the gate summary. A failed
+    # delivery step is recorded in the step log and reaches verify as a marker
+    # saying the dimension was not examined — never as an empty result.
+    required: false
     # spec 044 D1: a new axis is a schema slot, not a sentence in a prompt. As prose,
     # `silently-decided` was indistinguishable from `implemented` — both were a sentence
     # inside free text. The classification, its evidence and the decision it names are now
@@ -74,14 +107,14 @@ steps:
     role: worker # adversarial review of one dimension; reviewer-class agents run on sonnet
     permissions:
       contents: read
-    dependsOn: [radius]
+    dependsOn: [radius, brief]
     prompt: prompts/code-review-correctness.md
   - id: security
     kind: llm
     role: worker # same reasoning as correctness — single-dimension adversarial review
     permissions:
       contents: read
-    dependsOn: [radius]
+    dependsOn: [radius, brief]
     prompt: prompts/code-review-security.md
   # Verification is a separate step, run by an agent other than the one that raised the
   # finding. audit asks the reviewer that wants to report a finding whether a guard already
@@ -94,7 +127,7 @@ steps:
     role: reasoner # per-finding judgement against the repo; the step the whole pipeline exists for
     permissions:
       contents: read
-    dependsOn: [correctness, security, falsifiability, delivery]
+    dependsOn: [correctness, security, falsifiability, delivery, brief]
     prompt: prompts/code-review-verify.md
     schema: codeReviewFindings
   # Synthesis receives {{verify}} only — never {{correctness}}, {{security}},

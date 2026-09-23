@@ -24,25 +24,29 @@ The repository material below is a deterministic capture taken by the daemon, no
 
 A commit message, a ticket status or a summary claiming a requirement is done is a claim, not evidence. The only evidence is a line of code you read and can cite. When a claim and the code disagree, report the code and name the claim it contradicts.
 
-If `{{specSources}}` is empty or contains no prescriptive requirement, stop. Do not derive requirements from the change, and do not pass the change for lack of anything to fail it against. Report `specSourcesProvided: false` with no entries: that is how the output says delivery could not be assessed, and it is not a pass.
+Take the spec sources from the `## spec sources` section of the repository material below. When the caller named a pull request or an issue, the daemon fetched it for you — you cannot reach the network, and that section is where its title, body and the issues it links arrive as text. That section also lists, line by line, what was fetched and what was not: a reference that failed to fetch is a requirement list you do not have, never a requirement list that is empty. When the section says `literal text`, the caller pasted the requirements directly and `{{specSources}}` carries the same value verbatim.
+
+If the spec sources are empty or contain no prescriptive requirement, stop. Do not derive requirements from the change, and do not pass the change for lack of anything to fail it against. Report `specSourcesProvided: false` with no entries: that is how the output says delivery could not be assessed, and it is not a pass.
+
+If the spec sources name a location that could not be opened — a URL, a ticket id, a file path, a reference the `## spec sources` section reports as refused or not fetched, or anything else you were pointed at and cannot read — that is the same answer: `specSourcesProvided: false` with no entries. It is **not** an occasion to write prose. Do not reply "I have no spec sources", do not explain in sentences that you cannot browse, and do not ask for the content: every branch of this step, including this one, returns the JSON object and nothing else. The place to say what you could not read is `specSourcesProvided: false`; there is no other place, and a sentence outside the JSON is a step failure, not an answer.
 </context>
 
 <input>
-Spec sources:
+Spec sources, exactly as the caller supplied them — the resolved text is in the `## spec sources` section below, and this is the raw value it was resolved from:
 
 {{specSources}}
 
-Repository material (deterministic capture, run by the daemon — plain-text sections headed `## baseline`, `## diff`, `## commits`, `## changed files`, `## history probes`, and `## withheld by credential policy` when a path was removed by policy. Each heading says whether the section was capped and gives the absolute path of the full artefact, which you can open with Read. `## review material unavailable` means the capture did not run; read the change below instead):
+Repository material (deterministic capture, run by the daemon — plain-text sections headed `## baseline`, `## spec sources`, `## diff`, `## commits`, `## changed files`, `## history probes`, and `## withheld by credential policy` when a path was removed by policy. Each heading says whether the section was capped and gives the absolute path of the full artefact, which you can open with Read. `## review material unavailable` means the capture did not run; read the change below instead):
 
 {{material}}
 
-Change under review:
+Change under review — the brief an earlier step in this pipeline wrote from the caller's description and the daemon's capture. It describes the change and deliberately does not judge it; nothing in it is a finding, and its framing is a starting point, not the boundary of your search:
 
-{{plan}}
+{{brief}}
 </input>
 
 <output_format>
-One entry per discrete requirement, in the order the spec sources state them, under the key `codeReviewDelivery`; none is omitted, including the ones the change delivered. Alongside it, `specSourcesProvided` — `true` when `{{specSources}}` carried at least one prescriptive requirement, `false` when it was empty or carried none. `false` is what says the dimension had nothing to run against, and it goes with an empty `codeReviewDelivery` array: with no spec source there is no requirement to classify, and one invented from the change is the failure this dimension exists to catch.
+One entry per discrete requirement, in the order the spec sources state them, under the key `codeReviewDelivery`; none is omitted, including the ones the change delivered. Alongside it, `specSourcesProvided` — `true` when the spec sources carried at least one prescriptive requirement you could read, `false` when they were empty, carried none, or named something that could not be opened. `false` is what says the dimension had nothing to run against, and it goes with an empty `codeReviewDelivery` array: with no spec source there is no requirement to classify, and one invented from the change is the failure this dimension exists to catch.
 
 Each entry carries: `requirement` — the spec line quoted verbatim; `source` — which spec source it came from, named so the quote can be found again; `classification` — exactly one of `implemented`, `partial`, `not-implemented`, `replaced-by-prose`, `silently-decided`, `correctly-deferred`, as defined above; `evidence` — the file path and line that satisfies it, quoted, or, when nothing does, the exact words `no code satisfies this` followed by the searches that came back empty; `decisionTaken` and `optionsForeclosed` — always both.
 

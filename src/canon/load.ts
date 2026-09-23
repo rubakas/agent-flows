@@ -18,7 +18,12 @@ const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"]
 /** Fields that are illegal on every step kind OTHER than "check". */
 const NON_CHECK_FORBIDDEN = ["env", "required"] as const;
 
-/** Step kinds that may declare `required`: a failure of theirs can fail the run. */
+/**
+ * Step kinds OTHER THAN `llm` that may declare `required`: a failure of theirs
+ * can fail the run. `llm` is validated in `validateLlmStep`, which never reaches
+ * this set — there `required: false` means the opposite thing, a dimension that
+ * may fail without ending the run.
+ */
 const REQUIRED_ALLOWED_KINDS = new Set(["check", "review-material"]);
 
 /**
@@ -236,9 +241,20 @@ function validateLlmStep(
   }
   // env is only valid on check steps; reject it on llm steps too.
   for (const field of NON_CHECK_FORBIDDEN) {
+    if (field === "required") continue;
     if (raw[field] !== undefined) {
       throw new Error(`Step "${step.id}": llm step cannot set ${field}`);
     }
+  }
+
+  // `required: false` makes an llm step an optional dimension: it may fail
+  // without failing the run. The default stays true, so every pipeline that
+  // does not say otherwise keeps the old behaviour.
+  const requiredField = raw.required;
+  if (requiredField !== undefined && typeof requiredField !== "boolean") {
+    throw new Error(
+      `Step "${step.id}": required must be a boolean; got ${JSON.stringify(requiredField)}`
+    );
   }
 
   // Validate timeoutMs if present (same reasoning as defaultTimeoutMs above)

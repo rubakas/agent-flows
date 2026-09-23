@@ -30,9 +30,9 @@ Repository material (deterministic capture, run by the daemon — plain-text sec
 
 {{material}}
 
-Change under review:
+Change under review — the brief an earlier step in this pipeline wrote from the caller's description and the daemon's capture. It describes the change and deliberately does not judge it; nothing in it is a finding, and its framing is a starting point, not the boundary of your search:
 
-{{plan}}
+{{brief}}
 </input>
 
 <output_format>

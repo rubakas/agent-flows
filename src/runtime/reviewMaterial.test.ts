@@ -4,7 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
-import { REVIEW_MATERIAL_CAP, buildReviewMaterial } from "./reviewMaterial.js";
+import {
+  REVIEW_MATERIAL_CAP,
+  buildReviewMaterial,
+  renderReviewMaterial,
+} from "./reviewMaterial.js";
+import type { GhRunner, ReviewMaterial } from "./reviewMaterial.js";
 
 const cleanups: (() => void)[] = [];
 
@@ -536,5 +541,398 @@ describe("the deny-list query is checked before anything is captured", () => {
       /^git diff failed/u,
       `blaming the later command means the deny-list result was accepted unchecked: ${material.reason}`
     );
+  });
+});
+
+// ─── spec sources: the daemon's only outbound network call ────────────────────
+
+/**
+ * A stand-in for `gh` that records every argv it was handed and answers from a
+ * table keyed `<tool> <owner>/<repo>#<number>`.
+ *
+ * No test in this file may make a network call, and the recorded argv is the
+ * point as much as the answer: the security gates here are about which values
+ * reach `gh` at all, so "never called" has to be observable.
+ */
+function fakeGh(table: Record<string, { title?: string; body?: string; url?: string }>): {
+  gh: GhRunner;
+  calls: string[][];
+} {
+  const calls: string[][] = [];
+  const gh: GhRunner = (args) => {
+    calls.push([...args]);
+    const [tool, , number, , repo] = args;
+    const entry = table[`${tool} ${repo}#${number}`];
+    if (entry === undefined) {
+      return { ok: false, stdout: "", reason: `no ${tool} found for ${repo}#${number}` };
+    }
+    return {
+      ok: true,
+      stdout: JSON.stringify({
+        title: entry.title ?? "",
+        body: entry.body ?? "",
+        url: entry.url ?? `https://github.com/${repo}/issues/${number}`,
+      }),
+      reason: "",
+    };
+  };
+  return { gh, calls };
+}
+
+/** The `## spec sources` section of a rendered capture, or "" when absent. */
+function specSourcesSection(material: ReviewMaterial): string {
+  const rendered = renderReviewMaterial(material);
+  const start = rendered.indexOf("## spec sources");
+  if (start === -1) return "";
+  const rest = rendered.slice(start);
+  const next = rest.indexOf("\n\n## ");
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+describe("spec sources — a GitHub reference is fetched by the daemon, not by the model", () => {
+  it("a pull-request URL is fetched with an argv array and rendered as a section", () => {
+    const { repo, baseline } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+    const { gh, calls } = fakeGh({
+      "pr domcap/ascent-portal#1365": {
+        title: "Harden the importer",
+        body: "The importer must reject an empty payload.",
+        url: "https://github.com/domcap/ascent-portal/pull/1365",
+      },
+    });
+
+    const material = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "https://github.com/domcap/ascent-portal/pull/1365",
+      gh,
+    });
+
+    assert.deepEqual(calls, [
+      ["pr", "view", "1365", "--repo", "domcap/ascent-portal", "--json", "title,body,url"],
+    ]);
+    const section = specSourcesSection(material);
+    assert.match(section, /Harden the importer/u);
+    assert.match(section, /The importer must reject an empty payload\./u);
+    assert.match(section, /domcap\/ascent-portal#1365: fetched pull request/u);
+
+    const artefact = path.join(out, "spec-sources.txt");
+    assert.ok(
+      fs.existsSync(artefact),
+      "the resolved text must be written beside the git artefacts"
+    );
+    assert.match(fs.readFileSync(artefact, "utf8"), /The importer must reject an empty payload\./u);
+  });
+
+  it("a bare #n resolves against the repository's own github.com origin", () => {
+    const { repo, baseline } = fixtureRepo();
+    git(repo, "remote", "add", "origin", "git@github.com:acme/widgets.git");
+    const out = tempDir("af-review-out-");
+    const { gh, calls } = fakeGh({
+      "pr acme/widgets#7": { title: "Seven", body: "body seven" },
+    });
+
+    const material = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "#7",
+      gh,
+    });
+
+    assert.deepEqual(calls[0], [
+      "pr",
+      "view",
+      "7",
+      "--repo",
+      "acme/widgets",
+      "--json",
+      "title,body,url",
+    ]);
+    assert.match(specSourcesSection(material), /body seven/u);
+  });
+
+  it("a short ref that is not a pull request falls back to the issue view", () => {
+    const { repo, baseline } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+    const { gh, calls } = fakeGh({
+      "issue acme/widgets#9": { title: "Nine", body: "body nine" },
+    });
+
+    const material = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "acme/widgets#9",
+      gh,
+    });
+
+    assert.deepEqual(
+      calls.map((c) => c[0]),
+      ["pr", "issue"],
+      "a short ref does not say which it is, so both views are tried, pr first"
+    );
+    assert.deepEqual(calls[1], [
+      "issue",
+      "view",
+      "9",
+      "--repo",
+      "acme/widgets",
+      "--json",
+      "title,body,url",
+    ]);
+    assert.match(specSourcesSection(material), /body nine/u);
+  });
+});
+
+describe("spec sources — hostile values never reach gh", () => {
+  // Each case is (value, what must appear in the section). The assertion that
+  // matters in every one of them is the same: `gh` was not invoked at all.
+  const refused: [string, RegExp][] = [
+    [
+      "https://evil.example.com/domcap/ascent-portal/pull/1365",
+      /host "evil\.example\.com" is not github\.com/u,
+    ],
+    ["http://github.com/domcap/ascent-portal/pull/1365", /refused/u],
+    ["https://github.com/-evil/ascent-portal/pull/1365", /not a valid GitHub owner\/repo/u],
+    ["https://github.com/domcap/ascent-portal/pull/--version", /not an issue or pull-request/u],
+    ["--repo/ascent-portal#1365", /not a valid GitHub owner\/repo/u],
+    ["#99999999999", /not an issue or pull-request/u],
+  ];
+
+  for (const [value, expected] of refused) {
+    it(`refuses ${value} before any gh call`, () => {
+      const { repo, baseline } = fixtureRepo();
+      const out = tempDir("af-review-out-");
+      const { gh, calls } = fakeGh({});
+
+      const material = buildReviewMaterial(repo, baseline, undefined, out, {
+        specSources: value,
+        gh,
+      });
+
+      assert.deepEqual(calls, [], `gh must not be invoked for ${value}`);
+      assert.match(specSourcesSection(material), expected);
+    });
+  }
+
+  it("an option-shaped value is literal text and reaches nothing", () => {
+    const { repo, baseline } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+    const { gh, calls } = fakeGh({});
+
+    const material = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "--json",
+      gh,
+    });
+
+    assert.deepEqual(calls, []);
+    const section = specSourcesSection(material);
+    assert.match(section, /literal text/u);
+    assert.match(section, /--json/u);
+  });
+});
+
+describe("spec sources — literal text is passed through unchanged", () => {
+  it('the value "none" is carried through and fetches nothing', () => {
+    const { repo, baseline } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+    const { gh, calls } = fakeGh({});
+
+    const material = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "none",
+      gh,
+    });
+
+    assert.deepEqual(calls, []);
+    const section = specSourcesSection(material);
+    assert.match(section, /literal text — no GitHub reference named/u);
+    assert.match(section, /^none$/mu);
+  });
+
+  it("a pasted ticket body survives byte for byte, including the issue numbers in it", () => {
+    const { repo, baseline } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+    const { gh, calls } = fakeGh({});
+    const body = "FR-001: the importer must reject an empty payload.\nSee #1365 for context.";
+
+    const material = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: body,
+      gh,
+    });
+
+    assert.deepEqual(calls, [], "prose that merely mentions #1365 is not a reference list");
+    assert.ok(
+      specSourcesSection(material).includes(body),
+      `the literal value must survive unchanged: ${specSourcesSection(material)}`
+    );
+  });
+});
+
+describe("spec sources — a failing gh degrades instead of throwing", () => {
+  it("records the reason, keeps the capture available, and fetches nothing else", () => {
+    const { repo, baseline } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+    const calls: string[][] = [];
+    const gh: GhRunner = (args) => {
+      calls.push([...args]);
+      // What a missing binary looks like coming out of spawnSync.
+      return { ok: false, stdout: "", reason: "spawnSync gh ENOENT" };
+    };
+
+    const material = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "https://github.com/domcap/ascent-portal/pull/1365",
+      gh,
+    });
+
+    assert.equal(material.available, true, JSON.stringify(material));
+    const section = specSourcesSection(material);
+    assert.match(section, /domcap\/ascent-portal#1365: not fetched \(spawnSync gh ENOENT\)/u);
+    assert.match(section, /0 of 1 attempted reference\(s\) fetched/u);
+    assert.equal(calls.length, 1, "a pull-request URL says which view it needs; no fallback");
+  });
+});
+
+describe("spec sources — linked issues are followed within one total cap", () => {
+  it("follows the issues a pull-request body closes and stops at ten fetches", () => {
+    const { repo, baseline } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+    const linked = Array.from({ length: 20 }, (_, i) => `Closes #${String(i + 1)}`).join("\n");
+    const table: Record<string, { title?: string; body?: string }> = {
+      "pr acme/widgets#100": { title: "The change", body: linked },
+    };
+    for (let n = 1; n <= 20; n += 1) {
+      table[`issue acme/widgets#${String(n)}`] = {
+        title: `Issue ${String(n)}`,
+        body: `body ${String(n)}`,
+      };
+    }
+    const { gh, calls } = fakeGh(table);
+
+    const material = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "https://github.com/acme/widgets/pull/100",
+      gh,
+    });
+
+    assert.equal(
+      calls.length,
+      10,
+      `the cap is on total fetches, refs and the issues they link alike; got ${String(calls.length)}`
+    );
+    const section = specSourcesSection(material);
+    assert.match(section, /body 1$/mu, "the first linked issue must actually be followed");
+    assert.match(section, /stopped at the cap of 10 fetches/u);
+    assert.ok(!section.includes("body 20"), "nothing past the cap may be fetched");
+  });
+});
+
+// ─── baseline: a caller who names none still gets a review ────────────────────
+
+/**
+ * A repo whose default branch is behind the checked-out one: `origin/main` is
+ * at the first commit, HEAD is two commits ahead on `feature`. That is the
+ * shape the merge-base rule exists for — the derived baseline must be the
+ * fork point, not HEAD~1, or the review sees only the last commit of a branch.
+ */
+function repoWithDefaultBranch(): { repo: string; forkPoint: string; second: string } {
+  const repo = tempDir("af-review-baseline-");
+  git(repo, "init", "-q", "-b", "main");
+  write(repo, "kept.txt", "one\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-qm", "the fork point");
+  const forkPoint = git(repo, "rev-parse", "HEAD").trim();
+
+  git(repo, "checkout", "-q", "-b", "feature");
+  write(repo, "first.txt", "first change\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-qm", "first commit of the branch");
+  const second = git(repo, "rev-parse", "HEAD").trim();
+  write(repo, "second.txt", "second change\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-qm", "second commit of the branch");
+
+  // The remote-tracking state a clone would have, without a network: origin/main
+  // at the fork point, and origin/HEAD naming it as the default branch.
+  git(repo, "remote", "add", "origin", "git@github.com:acme/widgets.git");
+  git(repo, "update-ref", "refs/remotes/origin/main", forkPoint);
+  git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+  return { repo, forkPoint, second };
+}
+
+describe("baseline — derived when the caller names none", () => {
+  it("takes the merge-base with the default branch and says so", () => {
+    const { repo, forkPoint } = repoWithDefaultBranch();
+    const out = tempDir("af-review-out-");
+
+    const material = buildReviewMaterial(repo, "", undefined, out);
+
+    assert.equal(material.available, true, JSON.stringify(material));
+    if (!material.available) return;
+    assert.equal(material.baseline, forkPoint);
+    assert.equal(material.baselineRule, "merge-base");
+    // Both commits of the branch are in scope — the point of the merge-base rule.
+    assert.match(material.digest.commits, /first commit of the branch/u);
+    assert.match(material.digest.commits, /second commit of the branch/u);
+    // The rule reaches the reviewer, not only the structured result.
+    const rendered = renderReviewMaterial(material);
+    assert.match(rendered, /## baseline\n[0-9a-f]{40}\nderived: no baseline was supplied/u);
+    assert.match(rendered, /merge-base of HEAD and this repository's default branch/u);
+  });
+
+  it("a caller-supplied baseline still wins over the derivation", () => {
+    const { repo, second } = repoWithDefaultBranch();
+    const out = tempDir("af-review-out-");
+
+    const material = buildReviewMaterial(repo, second, undefined, out);
+
+    assert.equal(material.available, true, JSON.stringify(material));
+    if (!material.available) return;
+    assert.equal(material.baseline, second);
+    assert.equal(material.baselineRule, "caller");
+    assert.match(renderReviewMaterial(material), /## baseline\n.*\nsupplied by the caller/u);
+    assert.doesNotMatch(material.digest.commits, /first commit of the branch/u);
+  });
+
+  it("falls back to HEAD~1 when there is no default branch to fork from", () => {
+    const { repo } = fixtureRepo(); // no origin, no remote-tracking refs at all
+    const out = tempDir("af-review-out-");
+    const previous = git(repo, "rev-parse", "HEAD~1").trim();
+
+    const material = buildReviewMaterial(repo, undefined, undefined, out);
+
+    assert.equal(material.available, true, JSON.stringify(material));
+    if (!material.available) return;
+    assert.equal(material.baseline, previous);
+    assert.equal(material.baselineRule, "previous-commit");
+    assert.match(renderReviewMaterial(material), /HEAD~1 was used/u);
+  });
+
+  it("an omitted baseline is derived; a malformed one is still refused by name", () => {
+    const { repo } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+
+    const derived = buildReviewMaterial(repo, "   ", undefined, out);
+    assert.equal(derived.available, true, "whitespace is an omission, not a value");
+
+    const refused = buildReviewMaterial(repo, "--upload-pack=/bin/echo", undefined, out);
+    assert.equal(refused.available, false, "a hostile value must never be replaced by a guess");
+    if (refused.available) return;
+    assert.match(refused.reason, /option/u);
+  });
+
+  it("reports specSourcesResolved for what the caller pointed the delivery axis at", () => {
+    const { repo, baseline } = fixtureRepo();
+    const out = tempDir("af-review-out-");
+    const { gh } = fakeGh({ "pr acme/widgets#4": { title: "Four", body: "body four" } });
+
+    const none = buildReviewMaterial(repo, baseline, undefined, out);
+    assert.equal(none.specSourcesResolved, false);
+    assert.match(none.specSourcesReason, /no spec sources were supplied/u);
+
+    const fetched = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "acme/widgets#4",
+      gh,
+    });
+    assert.equal(fetched.specSourcesResolved, true, fetched.specSourcesReason);
+    assert.equal(fetched.specSourcesReason, "");
+
+    const failed = buildReviewMaterial(repo, baseline, undefined, out, {
+      specSources: "https://evil.example.com/acme/widgets/pull/4",
+      gh,
+    });
+    assert.equal(failed.specSourcesResolved, false);
+    assert.match(failed.specSourcesReason, /nothing the caller named could be read/u);
   });
 });

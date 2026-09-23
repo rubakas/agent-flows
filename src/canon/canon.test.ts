@@ -2122,6 +2122,48 @@ steps:
     );
   });
 
+  it("accepts required: false on an llm step — an optional dimension", () => {
+    const { def } = loadYaml(`
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: delivery
+    kind: llm
+    role: worker
+    prompt: prompts/delivery.md
+    required: false
+`);
+    assert.equal(
+      def.steps[0].required,
+      false,
+      "an llm step may declare itself optional: its failure is logged, its ctx key is filled " +
+        "with the unavailable marker, and the run continues"
+    );
+  });
+
+  it("throws on a non-boolean required on an llm step", () => {
+    assert.throws(
+      () =>
+        loadYaml(`
+id: test
+version: 1
+description: test
+inputs: []
+steps:
+  - id: delivery
+    kind: llm
+    role: worker
+    prompt: prompts/delivery.md
+    required: "no"
+`),
+      /delivery.*required must be a boolean/u,
+      'required: "no" is truthy as a string and would silently make an optional dimension ' +
+        "mandatory again"
+    );
+  });
+
   it("throws on required set on a non-check step — a silently ignored gate flag is worse than none", () => {
     assert.throws(
       () =>
@@ -2632,6 +2674,7 @@ describe("code-review.yaml — structure (spec 030, spec 040)", () => {
   // The llm steps. `material` is deliberately not one: it holds no prompt and no
   // permissions, so the per-step assertions below do not apply to it.
   const STEP_IDS = [
+    "brief",
     "radius",
     "falsifiability",
     "delivery",
@@ -2641,21 +2684,42 @@ describe("code-review.yaml — structure (spec 030, spec 040)", () => {
     "synthesis",
   ] as const;
 
-  it("loads and defines exactly eight steps", () => {
+  it("loads and defines exactly nine steps", () => {
     const { def } = loadPipeline(codeReviewYaml);
     assert.equal(def.id, "code-review");
     assert.equal(
       def.steps.length,
-      8,
-      `code-review must define exactly 8 steps (040 FR-001 plus material and delivery); got ${def.steps.length.toString()}: ${def.steps
+      9,
+      `code-review must define exactly 9 steps (040 FR-001 plus material, delivery and brief); got ${def.steps.length.toString()}: ${def.steps
         .map((s) => s.id)
         .join(", ")}`
     );
     assert.deepEqual(
       def.steps.map((s) => s.id),
       ["material", ...STEP_IDS],
-      "step ids must be material, radius, falsifiability, delivery, correctness, security, " +
-        "verify, synthesis"
+      "step ids must be material, brief, radius, falsifiability, delivery, correctness, " +
+        "security, verify, synthesis"
+    );
+  });
+
+  it("brief is an optional scout step between the capture and the dimensions", () => {
+    const { def } = loadPipeline(codeReviewYaml);
+    const brief = def.steps.find((s) => s.id === "brief");
+    assert.ok(brief, "brief step must exist");
+    assert.equal(brief.kind, "llm");
+    assert.equal(
+      brief.role,
+      "scout",
+      "brief summarises a capture that already exists and decides nothing, so it runs on the " +
+        "cheapest tier; a reasoner here pays reasoning rates to restate a diff"
+    );
+    assert.deepEqual(brief.dependsOn, ["material"]);
+    assert.equal(
+      brief.required,
+      false,
+      "a failed framing paragraph must not take the run with it: the dimensions receive the " +
+        "unavailable marker and fall back to the material, which is what they did before " +
+        "this step existed"
     );
   });
 
@@ -2668,7 +2732,8 @@ describe("code-review.yaml — structure (spec 030, spec 040)", () => {
       material.required,
       true,
       "material must NOT be required: a caller reviewing a pasted diff, or a tree where git " +
-        "fails, must still get a review — the prompts fall back to {{plan}} on available: false"
+        "fails, must still get a review — on available: false the brief is written from " +
+        "{{plan}} alone and the dimensions read it as before"
     );
     assert.equal(
       material.prompt,
@@ -2677,19 +2742,21 @@ describe("code-review.yaml — structure (spec 030, spec 040)", () => {
     );
   });
 
-  it("dependency levels are [[material], [radius, falsifiability, delivery], [correctness, security], [verify], [synthesis]]", () => {
+  it("dependency levels are [[material], [brief], [radius, falsifiability, delivery], [correctness, security], [verify], [synthesis]]", () => {
     const { def } = loadPipeline(codeReviewYaml);
     assert.deepEqual(
       pipelineLevels(def.steps),
       [
         ["material"],
+        ["brief"],
         ["radius", "falsifiability", "delivery"],
         ["correctness", "security"],
         ["verify"],
         ["synthesis"],
       ],
       "the deterministic capture runs alone first (build.ts permits only llm steps in a " +
-        "parallel level), radius feeds the two dimension reviewers, falsifiability and " +
+        "parallel level), the brief is written from it before any dimension reads it, " +
+        "radius feeds the two dimension reviewers, falsifiability and " +
         "delivery run beside it and reach verify directly, and verification stays its own " +
         "level before synthesis (040 FR-001)"
     );
@@ -2712,7 +2779,7 @@ describe("code-review.yaml — structure (spec 030, spec 040)", () => {
     assert.ok(verify, "verify step must exist");
     assert.deepEqual(
       verify.dependsOn,
-      ["correctness", "security", "falsifiability", "delivery"],
+      ["correctness", "security", "falsifiability", "delivery", "brief"],
       "040 FR-007: the falsifiability and delivery dimensions reach the verifier directly, " +
         "while radius reaches it only through correctness and security (D2)"
     );
@@ -2768,8 +2835,10 @@ describe("code-review.yaml — structure (spec 030, spec 040)", () => {
     );
     assert.deepEqual(
       def.optionalInputs,
-      ["baseline", "introducedCommits", "specSources"],
-      "FR-006 optionalInputs"
+      ["plan", "baseline", "introducedCommits", "specSources"],
+      "FR-006 optionalInputs, widened: `plan` is optional too, so a caller can POST " +
+        '{"pipeline":"code-review","inputs":{}} and get a complete review — the brief step ' +
+        "writes the change description the dimensions used to require a human to supply"
     );
   });
 
@@ -2894,6 +2963,104 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
       );
     });
   }
+
+  // The brief replaced {{plan}} in every dimension. A dimension that still named
+  // {{plan}} would be reading the caller's raw description — empty on the entry path
+  // this step exists for — while the paragraph written for it went unread.
+  for (const id of [
+    "radius",
+    "falsifiability",
+    "correctness",
+    "security",
+    "delivery",
+    "verify",
+  ] as const) {
+    it(`${id} reads {{brief}} rather than the caller's raw {{plan}}`, () => {
+      const placeholders = new Set(extractPlaceholders(promptText(`prompts/code-review-${id}.md`)));
+      assert.ok(
+        placeholders.has("brief"),
+        `${id} must read the brief: {{plan}} is an optional input and is empty whenever the ` +
+          "caller did not write a change description by hand"
+      );
+      assert.ok(
+        !placeholders.has("plan"),
+        `prompts/code-review-${id}.md still names {{plan}}. The raw input is empty on the ` +
+          "entry path this pipeline now supports; the brief is where the change description is"
+      );
+    });
+  }
+
+  it("brief composes from the capture and the caller's description, and judges neither", () => {
+    const placeholders = new Set(extractPlaceholders(promptText("prompts/code-review-brief.md")));
+    assert.deepEqual(
+      [...placeholders].sort(),
+      ["material", "plan"],
+      "brief reads the deterministic capture and whatever description the caller supplied, " +
+        "and nothing else: it runs before every dimension, so there is nothing else to read"
+    );
+    // Sliced on an anchor, not searched whole: "judge" and "evaluate" appear in the
+    // surrounding prose about what the dimensions do, so a whole-file search passes
+    // with the mandate deleted.
+    const text = promptText("prompts/code-review-brief.md");
+    const anchor = "You are not the judge.";
+    assert.notEqual(
+      text.indexOf(anchor),
+      -1,
+      `prompts/code-review-brief.md must state "${anchor}" the way prompts/gate-summary.md ` +
+        "does: a brief that pre-judges is read first by five reviewers and comes back confirmed"
+    );
+  });
+
+  // The goal this whole step exists for: POST /api/runs {"pipeline":"code-review",
+  // "inputs":{}} must run a complete review. Every input is optional, so every
+  // prompt in the graph has to render with all four of them empty — renderPrompt
+  // throws on a placeholder with no value, and that throw costs a run, not a test.
+  it("every prompt renders with no caller input at all", () => {
+    const { def, prompts } = loadPipeline(codeReviewYaml);
+    const optional = new Set(def.optionalInputs ?? []);
+    for (const input of def.inputs) {
+      assert.ok(
+        optional.has(input),
+        `input "${input}" is not optional, so {"inputs":{}} is refused before a step runs`
+      );
+    }
+    const ancestors = pipelineAncestors(def.steps);
+    for (const step of def.steps) {
+      if (!(step.id in prompts)) continue;
+      // What build.ts hands the step: the inputs, defaulted to "", plus every
+      // transitive ancestor's output.
+      const vars: Record<string, string> = { models: "", provider: "" };
+      for (const input of def.inputs) vars[input] = "";
+      for (const ancestor of ancestors.get(step.id) ?? []) vars[ancestor] = `<${ancestor}>`;
+      assert.doesNotThrow(
+        () => renderPrompt(prompts[step.id], vars),
+        `step "${step.id}" cannot render with an empty input set`
+      );
+    }
+  });
+
+  it("brief composes from the material when the caller supplied no plan", () => {
+    const { prompts } = loadPipeline(codeReviewYaml);
+    const rendered = renderPrompt(prompts.brief, {
+      plan: "",
+      material: "## baseline\ndeadbeef\nderived: no baseline was supplied\n\n## diff\n+ one line",
+    });
+    assert.ok(
+      rendered.includes("+ one line"),
+      "the capture must reach the brief: it is the only thing left to write a brief from " +
+        "when the caller described nothing"
+    );
+    assert.ok(
+      !rendered.includes("{{"),
+      `an unsubstituted placeholder survived: ${rendered.slice(0, 200)}`
+    );
+    // The prompt has to say what to do in this case, not merely be renderable.
+    assert.ok(
+      prompts.brief.includes("**The caller supplied nothing.**"),
+      "the brief prompt must handle an empty description explicitly — a prompt that only " +
+        "says 'lead with the caller's intent' produces a brief about nothing"
+    );
+  });
 
   it("the synthesis verdict line enumerates all five axes", () => {
     const synthesis = promptText("prompts/code-review-synthesis.md");

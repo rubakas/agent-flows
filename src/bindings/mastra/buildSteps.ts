@@ -248,6 +248,28 @@ function combineSignals(
 }
 
 /**
+ * What a failed OPTIONAL llm step (`required: false`) leaves in the context.
+ *
+ * It has to be a renderable string and the key has to be present: `renderPrompt`
+ * throws on a placeholder it has no value for, so a downstream prompt carrying
+ * `{{delivery}}` would take the run down anyway if the key were simply omitted —
+ * the opposite of what `required: false` is for.
+ *
+ * It names the step and the reason, and says in words that the dimension was NOT
+ * examined. A marker a reader could mistake for an empty result is worse than a
+ * failure: "we looked and found nothing" and "we never looked" are the
+ * distinction the whole review verdict rests on.
+ */
+export function unavailableStepMarker(stepId: string, reason: string): string {
+  return (
+    `## ${stepId} unavailable\n` +
+    `The "${stepId}" step failed, so this dimension was NOT examined.\n` +
+    `Reason: ${reason}\n` +
+    "Treat it as not run: it is not an empty result, it is not a pass, and nothing here may be read as evidence that this dimension is clean."
+  );
+}
+
+/**
  * FR-013: a step whose execute begins after the run was cancelled must not spawn
  * anything. Mastra still starts queued steps after `run.cancel()`, so the guard
  * lives at the top of each executing step rather than in the runner.
@@ -513,11 +535,15 @@ export function buildLlmStep(
         finishStepLog("succeeded");
         return { ...rawCtx, [step.id]: value };
       } catch (err) {
-        finishStepLog(
-          signal?.aborted === true ? "cancelled" : "failed",
-          err instanceof Error ? err.message : String(err)
-        );
-        throw err;
+        const cancelled = signal?.aborted === true;
+        const message = err instanceof Error ? err.message : String(err);
+        finishStepLog(cancelled ? "cancelled" : "failed", message);
+        // An OPTIONAL dimension (`required: false`) is recorded failed and the
+        // run goes on: the step whose output it only annotates must still get
+        // to run. Cancellation is never optional — a cancelled run does not
+        // continue into its next step just because this one could be skipped.
+        if (cancelled || step.required !== false) throw err;
+        return { ...rawCtx, [step.id]: unavailableStepMarker(step.id, message) };
       }
     },
   });
@@ -808,6 +834,8 @@ export function buildReviewMaterialStep(step: StepDef, deps: BuildDeps) {
           result = {
             available: false,
             reason: "run directory unknown — nowhere to write the review artefacts",
+            specSourcesResolved: false,
+            specSourcesReason: "the capture never ran",
           };
         } else if (!isSafeStepId(step.id)) {
           // Two different refusals: reporting the directory as unknown when the
@@ -816,13 +844,16 @@ export function buildReviewMaterialStep(step: StepDef, deps: BuildDeps) {
           result = {
             available: false,
             reason: `step id ${JSON.stringify(step.id)} is not safe as a directory name — nowhere to write the review artefacts`,
+            specSourcesResolved: false,
+            specSourcesReason: "the capture never ran",
           };
         } else {
           result = buildReviewMaterial(
             deps.cwd ?? process.cwd(),
             rawCtx.baseline,
             splitCommitList(rawCtx.introducedCommits),
-            join(runDir, `${step.id}.review-material`)
+            join(runDir, `${step.id}.review-material`),
+            { specSources: rawCtx.specSources }
           );
         }
       } catch (err) {

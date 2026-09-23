@@ -127,9 +127,20 @@ export interface StepDef {
    * unavailable fails the run instead of being carried in the context as
    * `available: false`.
    *
-   * Must be a boolean; rejected on every step kind other than `check` and
-   * `review-material` (FR-004 style loud load-time validation: a flag that is
-   * silently ignored is worse than absent).
+   * On an `llm` step the default is inverted and so is the interesting value:
+   * `required` defaults to TRUE there — a failed llm step fails the run, as it
+   * always has — and `required: false` declares an OPTIONAL dimension. When such
+   * a step fails for any reason (transport error, a schema violation surviving
+   * the retry, empty output) the failure is recorded in the step log, the run
+   * continues, and the step's ctx key is filled with a plain-text marker naming
+   * the step and the reason. The key must exist: `renderPrompt` throws on a
+   * placeholder it has no value for, so an absent key would take the whole run
+   * down through the downstream step instead. Spec 043 D3 states the principle —
+   * a failed optional dimension must not block what it only annotates.
+   *
+   * Must be a boolean; rejected on every step kind other than `check`,
+   * `review-material` and `llm` (FR-004 style loud load-time validation: a flag
+   * that is silently ignored is worse than absent).
    */
   required?: boolean;
   /**
