@@ -13,7 +13,14 @@ const VALID_ROLES: Role[] = ["reasoner", "worker", "scout"];
 const RE_INPUT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 /** Fields that are illegal on every non-llm step kind. */
-const NON_LLM_FORBIDDEN = ["prompt", "model", "schema", "permissions", "skills"] as const;
+const NON_LLM_FORBIDDEN = [
+  "prompt",
+  "model",
+  "schema",
+  "permissions",
+  "skills",
+  "produces",
+] as const;
 
 /** Fields that are illegal on every step kind OTHER than "check". */
 const NON_CHECK_FORBIDDEN = ["env", "required"] as const;
@@ -261,6 +268,16 @@ function validateLlmStep(
   const timeoutField = raw.timeoutMs;
   if (timeoutField !== undefined) {
     assertPositiveTimeout(`Step "${step.id}"`, "timeoutMs", timeoutField);
+  }
+
+  // `produces: spec` publishes the step's answer as the run's spec. The value is
+  // an enum of one: a misspelling here is silent data loss — the gate would keep
+  // showing the pre-revision spec — so it is refused at load time.
+  const producesField = raw.produces;
+  if (producesField !== undefined && producesField !== "spec") {
+    throw new Error(
+      `Step "${step.id}": produces must be "spec"; got ${JSON.stringify(producesField)}`
+    );
   }
 
   // Validate the optional failover flag: false pins the step to one provider.

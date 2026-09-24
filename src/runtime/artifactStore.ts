@@ -53,6 +53,22 @@ export interface ArtifactProvenance {
 
 // ── Manifest types (spec 029 FR-006) ─────────────────────────────────────────
 
+/**
+ * Which step's output became the exported spec document.
+ *
+ * Neither ManifestStage (the stage) nor ArtifactProvenance (transport per step)
+ * says where the saved document came from, and with a revision step in the
+ * pipeline there is more than one candidate: the assembled HardenedSpec and the
+ * revised markdown are different documents, and a reader looking at a saved
+ * spec cannot tell which one they got.
+ */
+export interface SpecSource {
+  /** Step id whose output was written — an assemble step, or a revision step. */
+  stepId: string;
+  /** Absolute path of the document written to the project tree. */
+  path: string;
+}
+
 /** One stage entry in the run manifest. */
 export interface ManifestStage {
   /** Pipeline id used for this stage (e.g. "investigate", "spec-creation"). */
@@ -71,6 +87,8 @@ export interface ManifestStage {
   cancelledAt?: string;
   /** Operator-supplied cancellation reason, when one was given (spec 033 FR-004). */
   reason?: string;
+  /** Which step produced the spec document this stage exported, if it exported one. */
+  specSource?: SpecSource;
 }
 
 /** The run manifest file at <runDir>/manifest.json. */
@@ -182,7 +200,15 @@ export async function upsertManifestEntry(
   // Update existing entry for this stageId (idempotent) or append.
   const idx = manifest.stages.findIndex((s) => s.stageId === entry.stageId);
   if (idx >= 0) {
-    manifest.stages[idx] = entry;
+    // specSource is recorded mid-run by the export step; this entry is written
+    // by the run's settlement, which knows nothing about the spec document. A
+    // straight replace would erase the provenance every time, so a recorded
+    // source survives unless the incoming entry carries one of its own.
+    const previous = manifest.stages[idx];
+    manifest.stages[idx] =
+      entry.specSource === undefined && previous.specSource !== undefined
+        ? { ...entry, specSource: previous.specSource }
+        : entry;
   } else {
     manifest.stages.push(entry);
   }
@@ -197,6 +223,44 @@ export async function upsertManifestEntry(
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[agent-flows] manifest write failed at ${manifestPath}: ${msg}`);
+  }
+}
+
+/**
+ * Record which step produced the spec document a stage exported.
+ *
+ * Called by the export-spec step, which is the only place that knows both the
+ * source step and the path written. The stage entry already exists: an
+ * export-spec step requires a gate ancestor, and suspending at that gate
+ * persists the artifact and the manifest entry first.
+ *
+ * Never throws — provenance is a record of a write that already succeeded, and
+ * losing it must not fail the run.
+ */
+export async function recordManifestSpecSource(
+  artifactDir: string,
+  stageId: string,
+  specSource: SpecSource
+): Promise<void> {
+  const manifestPath = join(artifactDir, "manifest.json");
+  try {
+    const raw = await readFile(manifestPath, "utf8");
+    const manifest = JSON.parse(raw) as RunManifest;
+    const idx = manifest.stages.findIndex((s) => s.stageId === stageId);
+    if (idx < 0) {
+      console.warn(
+        `[agent-flows] spec provenance not recorded: no manifest entry for stage ${stageId} at ${manifestPath}`
+      );
+      return;
+    }
+    manifest.stages[idx] = { ...manifest.stages[idx], specSource };
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[agent-flows] spec provenance write failed at ${manifestPath}: ${msg}`);
   }
 }
 

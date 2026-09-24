@@ -152,3 +152,54 @@ describe("gateBox — the material is readable, not one escaped line per bullet"
     assert.ok(html.includes("&lt;img"), html);
   });
 });
+
+// A revision step publishes the finished document as a plain string, so the
+// spec the gate is handed is markdown and not a HardenedSpec. These fail
+// against the previous box: structuralSummary returns "" for a string, so the
+// person was shown "nothing was attached to this gate to describe" while the
+// document they were approving sat in the payload.
+describe("gateBox — a spec that is a finished document (string)", () => {
+  const DOCUMENT =
+    "# Feature T\n\n## Requirements\n\n- it must run `pnpm lint`\n- and **fail** on a warning\n";
+
+  it("renders the document as markdown instead of claiming nothing was attached", () => {
+    const html = gateBox({ gateMessage: "Approve?", spec: DOCUMENT, gateStepId: "approve" });
+    assert.ok(html.includes('<div class="md">'), `the document must be rendered: ${html}`);
+    assert.match(html, /<strong>fail<\/strong>/u, html);
+    assert.match(html, /<code class="md-code">pnpm lint<\/code>/u, html);
+    assert.ok(
+      !html.includes("no spec payload and no summary"),
+      `the document IS the payload: ${html}`
+    );
+    assert.ok(
+      !html.includes("# Feature T"),
+      `a heading left as source text is the defect: ${html}`
+    );
+  });
+
+  it("keeps the document one click away when a model summary takes the body", () => {
+    const html = gateBox({ gateSummary: "It resolves every finding.", spec: DOCUMENT });
+    assert.match(html, /written by a model/u, html);
+    assert.ok(html.includes("<details"), `the material must stay reachable: ${html}`);
+    assert.match(html, /<strong>fail<\/strong>/u, "the document travels into the expander");
+  });
+
+  it("escapes a hostile document", () => {
+    const html = gateBox({ spec: `# ${HOSTILE}\n\n- ${HOSTILE}\n` });
+    assert.ok(!html.includes("<img"), `the renderer must escape before it marks up: ${html}`);
+    assert.ok(html.includes("&lt;img"), html);
+  });
+
+  it("an object spec is shown exactly as before", () => {
+    const html = gateBox({ gateMessage: "Approve?", spec: SPEC });
+    assert.match(html, /the spec's own fields/u, html);
+    assert.ok(html.includes("Pin one Node version"), html);
+    assert.ok(html.includes("engines.node is the source"), html);
+  });
+
+  it("a blank string is no payload at all", () => {
+    const html = gateBox({ gateMessage: "Approve?", spec: "   ", gateStepId: "approve" });
+    assert.match(html, /no spec payload and no summary/u, html);
+    assert.ok(!html.includes("<details"), `an empty expander is worse than none: ${html}`);
+  });
+});

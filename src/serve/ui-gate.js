@@ -127,6 +127,14 @@ export function gateBox(gate) {
   const structural = structuralSummary(gate?.spec);
   const detail = specDetail(gate?.spec);
 
+  // A revision step publishes the finished document, not a HardenedSpec: the
+  // spec arrives as markdown and there are no fields to summarise — which is
+  // why structuralSummary returns "" for a string rather than guessing. What
+  // the person approves is the document, so it is rendered as one. renderMarkdown
+  // escapes every line before adding a tag of its own, same as everywhere else.
+  const specText = typeof gate?.spec === "string" ? gate.spec.trim() : "";
+  const document = specText === "" ? "" : `<div class="md">${renderMarkdown(specText)}</div>`;
+
   let body;
   if (summary !== "") {
     // renderMarkdown, not a bare paragraph: the prompt asks for prose, and a
@@ -134,6 +142,11 @@ export function gateBox(gate) {
     body =
       `<div class="gate-summary"><p class="gate-label">Summary — written by a model, from the run's own output</p>` +
       `<div class="md">${renderMarkdown(summary)}</div></div>`;
+  } else if (document !== "") {
+    body =
+      `<div class="gate-summary"><p class="gate-label">No summary — the document itself:</p>` +
+      document +
+      `</div>`;
   } else if (structural !== "") {
     body =
       `<div class="gate-summary"><p class="gate-label">No summary — the spec's own fields:</p>` +
@@ -147,10 +160,13 @@ export function gateBox(gate) {
       `no spec payload and no summary. The steps below are the only record of what ran.</p>`;
   }
 
+  // The document goes in the expander only when the body did not already show
+  // it — with a model summary above, the full material is still one click away.
+  const expanderBody = `${structural}${detail}${summary === "" ? "" : document}`;
   const expander =
-    detail === "" && structural === ""
+    expanderBody === ""
       ? ""
-      : `<details class="gate-detail"><summary>The full spec</summary>${structural}${detail}</details>`;
+      : `<details class="gate-detail"><summary>The full spec</summary>${expanderBody}</details>`;
 
   return (
     `<div class="gate-box">` +

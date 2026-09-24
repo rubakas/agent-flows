@@ -244,8 +244,28 @@ export async function writeSpecKitSpec(
   parentDir: string,
   runId?: string
 ): Promise<string> {
-  const body = renderSpecKitSpec(spec, meta);
-  const slug = slugifyTitle(spec.title ?? "") || fallbackSlug(body, runId);
+  return writeSpecDocument(renderSpecKitSpec(spec, meta), spec.title ?? "", parentDir, runId);
+}
+
+/**
+ * Write an already-rendered spec document, under a directory named after
+ * `title`. The body is written byte for byte.
+ *
+ * Split out of `writeSpecKitSpec` for the caller that has the finished document
+ * and no `HardenedSpec` to render: a revision step emits the complete plan as
+ * markdown, and re-rendering it through `renderSpecKitSpec` would need fields
+ * the markdown no longer has — every one of them emitted as a
+ * `[NEEDS CLARIFICATION]` marker into a document that had none.
+ *
+ * Same non-destructive suffixing as `writeSpecKitSpec`, for the same reason.
+ */
+export async function writeSpecDocument(
+  body: string,
+  title: string,
+  parentDir: string,
+  runId?: string
+): Promise<string> {
+  const slug = slugifyTitle(title ?? "") || fallbackSlug(body, runId);
 
   for (let n = 1; n <= MAX_DIR_SUFFIX; n++) {
     const outDir = join(parentDir, n === 1 ? slug : `${slug}-${n}`);
@@ -260,6 +280,6 @@ export async function writeSpecKitSpec(
   }
 
   throw new Error(
-    `Cannot export spec "${spec.title}": ${MAX_DIR_SUFFIX} directories named "${slug}[-N]" already exist under ${parentDir}`
+    `Cannot export spec "${title}": ${MAX_DIR_SUFFIX} directories named "${slug}[-N]" already exist under ${parentDir}`
   );
 }

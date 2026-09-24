@@ -6,7 +6,9 @@ description: Fold verification findings back into a plan, producing a complete r
 # from a prior correct-plan run (where artifact.spec is already a plain string).
 # inputs.findings ← artifact.result.findings (result is accumulated context; "findings" is
 # the step key). The revised plan is stored in artifact.spec as a plain string for the
-# next stage.
+# next stage — `produces: spec` on the revise step is what puts it there, in the
+# namespace of whatever step nested this pipeline, so the caller's gate and
+# export-spec steps approve and save the revision instead of the text it replaced.
 inputs:
   - plan
   - findings
@@ -16,4 +18,5 @@ steps:
     role: reasoner
     permissions:
       contents: read
+    produces: spec
     prompt: prompts/correct-plan.md

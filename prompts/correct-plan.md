@@ -26,5 +26,11 @@ Emit the complete revised plan document — not a patch, not a diff, not a summa
 
 Do not omit any section of the original plan. Do not add sections, features, or requirements not motivated by the findings.
 
-The output is the authoritative plan that downstream steps will receive.
+Your answer begins with the first character of the plan document itself. No preamble, no
+greeting, no statement of what you verified or checked, no summary of your changes, no
+closing remarks — nothing before the document and nothing after it.
+
+The output is the authoritative plan that downstream steps will receive. It is saved
+verbatim: any sentence about your own process is saved into the plan as if it were part
+of it.
 </output_format>

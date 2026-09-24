@@ -33,6 +33,18 @@ export interface StepDef {
   model?: string;
   prompt?: string;
   schema?: "weaknesses" | "securityFindings" | "codeReviewFindings" | "codeReviewDelivery";
+  /**
+   * Publishes this step's output as the run's spec, so a gate, persist-ticket or
+   * export-spec step downstream approves and saves it. Only `"spec"` is accepted.
+   *
+   * Declared on a step that REVISES a spec — `correct-plan`'s `revise`. The key
+   * it writes is namespaced one level ABOVE the step itself, because a revision
+   * is produced inside a nested pipeline but belongs to the pipeline that nested
+   * it: `correct.revise` publishes where the caller's `approve` and `export`
+   * look. Without this the revision lands in `ctx["correct.revise"]`, which
+   * nothing reads, and the gate shows the superseded pre-revision spec.
+   */
+  produces?: "spec";
   dependsOn?: readonly string[];
   message?: string;
   /**

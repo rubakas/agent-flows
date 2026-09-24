@@ -169,6 +169,16 @@ export function runArtifactDir(runId: string | undefined): string | undefined {
   return runs.get(runId)?.dir;
 }
 
+/**
+ * The pipeline id a run is executing, or undefined for an unknown run. This is
+ * the stage id the run's manifest entry is keyed by, so a step that records
+ * something against its own stage can find it.
+ */
+export function runPipelineId(runId: string | undefined): string | undefined {
+  if (runId === undefined || runId === "") return undefined;
+  return runs.get(runId)?.pipelineId;
+}
+
 /** Drop a run's entry. The file stays: it is the durable record. */
 export function closeRunLog(runId: string): void {
   runs.delete(runId);

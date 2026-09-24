@@ -31,6 +31,8 @@ import { ModelRegistry } from "../../canon/registry.js";
 import { makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
 import { makeInMemoryDb } from "../../db/index.js";
 import { bundledPipelinesDir } from "../../packageRoot.js";
+import { upsertManifestEntry } from "../../runtime/artifactStore.js";
+import { closeRunLog, openRunLog } from "../../runtime/stepLog.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
 import { mastraDbPath } from "./paths.js";
@@ -2367,5 +2369,296 @@ describe("bundled pipelines — timeoutMs regression guard (CHUNK A)", () => {
         );
       }
     }
+  });
+});
+
+// ── A revision step's output is what the gate shows and the export saves ──────
+//
+// The bug: `correct.revise` wrote only ctx["correct.revise"], which nothing
+// read. The gate went on showing the assembled HardenedSpec and the export went
+// on rendering it, so a human approved a document the run had already
+// superseded — and the rendered HardenedSpec carries [NEEDS CLARIFICATION]
+// markers for fields the type has no room for, which the revision had none of.
+//
+// These tests FAIL against the unfixed code: the gate payload is an object
+// there, and the file on disk is the rendered assemble output.
+
+const REVISED_MD = `# Feature T
+
+**Feature Branch**: \`feat/feature-t\`
+
+## Requirements
+
+- Every finding from the audit is folded in.
+- No question is left open.
+`;
+
+function revisedExportPipeline(outDir: string, withRevision: boolean): LoadedPipeline {
+  const steps = [
+    { id: "intake", kind: "llm" as const, model: "intake", dependsOn: [] },
+    { id: "enrich", kind: "llm" as const, model: "enrich", dependsOn: ["intake"] },
+    {
+      id: "critic",
+      kind: "llm" as const,
+      model: "critic",
+      schema: "weaknesses" as const,
+      dependsOn: ["enrich"],
+    },
+    {
+      id: "security",
+      kind: "llm" as const,
+      model: "security",
+      schema: "securityFindings" as const,
+      dependsOn: ["enrich"],
+    },
+    { id: "assemble", kind: "assemble-spec" as const, dependsOn: ["critic", "security"] },
+  ];
+  // The revision lives in a nested pipeline, so its id is dotted — exactly the
+  // shape expandNested produces for spec-creation's `correct` step.
+  const revision = {
+    id: "correct.revise",
+    kind: "llm" as const,
+    model: "correct.revise",
+    produces: "spec" as const,
+    dependsOn: ["assemble"],
+  };
+  const tail = [
+    {
+      id: "approve",
+      kind: "gate" as const,
+      message: "Approve?",
+      dependsOn: [withRevision ? "correct.revise" : "assemble"],
+    },
+    { id: "persist", kind: "persist-ticket" as const, dependsOn: ["approve"] },
+    { id: "export", kind: "export-spec" as const, path: outDir, dependsOn: ["persist"] },
+  ];
+  return {
+    def: {
+      id: withRevision ? "revised-export" : "assembled-export",
+      version: 1,
+      description: "Regression: a revision step's output must reach the gate and the file",
+      inputs: ["request"],
+      steps: withRevision ? [...steps, revision, ...tail] : [...steps, ...tail],
+    },
+    prompts: {
+      intake: "Draft a spec for: {{request}}",
+      enrich: "Enrich: {{intake}}",
+      critic: "Critique: {{intake}} {{enrich}}",
+      security: "Security: {{intake}} {{enrich}}",
+      "correct.revise": "Revise: {{assemble}}",
+    },
+  };
+}
+
+const REVISED_RESPONSES: Record<string, string> = {
+  intake: INTAKE_MD,
+  enrich: ENRICH_MD,
+  critic: CRITIC_JSON,
+  security: SECURITY_JSON,
+  "correct.revise": REVISED_MD,
+};
+
+describe("buildPipelineWorkflow — a revision step publishes the spec (regression)", () => {
+  it("the gate shows the revised document and the export saves it byte for byte", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-revised-export-"));
+    const outDir = join(tmp, "specs");
+    const { storage, store, cleanup } = makeTestFixture("revised-export");
+    try {
+      const pipeline = revisedExportPipeline(outDir, true);
+      const wf = buildPipelineWorkflow(pipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: makeFakeRunner(REVISED_RESPONSES),
+      });
+      const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+      const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+      const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+
+      assert.equal(r1.status, "suspended", "must suspend at the approve gate");
+      const gateStep = r1.steps?.approve as Record<string, unknown> | undefined;
+      const suspendPayload = gateStep?.suspendPayload as Record<string, unknown> | undefined;
+      assert.equal(
+        suspendPayload?.spec,
+        REVISED_MD,
+        "the gate must show the revised document — not the superseded assemble output"
+      );
+
+      const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
+      assert.equal(r2.status, "success", "must succeed after approval");
+
+      const written = await readFile(join(outDir, "feature-t", "spec.md"), "utf8");
+      assert.equal(written, REVISED_MD, "the saved file must be the approved text, verbatim");
+      assert.ok(
+        !written.includes("[NEEDS CLARIFICATION"),
+        "a revision that resolved everything must not be re-rendered into markers"
+      );
+    } finally {
+      cleanup();
+      await rm(tmp, { recursive: true });
+    }
+  });
+
+  it("without a revision step the assembled HardenedSpec is still shown and saved", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-assembled-export-"));
+    const outDir = join(tmp, "specs");
+    const { storage, store, cleanup } = makeTestFixture("assembled-export");
+    try {
+      const pipeline = revisedExportPipeline(outDir, false);
+      const wf = buildPipelineWorkflow(pipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: makeFakeRunner(REVISED_RESPONSES),
+      });
+      const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+      const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+      const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+
+      assert.equal(r1.status, "suspended", "must suspend at the approve gate");
+      const gateStep = r1.steps?.approve as Record<string, unknown> | undefined;
+      const suspendPayload = gateStep?.suspendPayload as Record<string, unknown> | undefined;
+      const spec = suspendPayload?.spec as Record<string, unknown>;
+      assert.equal(typeof spec, "object", "the object path must be untouched");
+      assert.equal(spec.title, "Feature T", "the gate still shows the assembled spec");
+
+      const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
+      assert.equal(r2.status, "success", "must succeed after approval");
+
+      const written = await readFile(join(outDir, "feature-t", "spec.md"), "utf8");
+      assert.match(
+        written,
+        /^# Feature Specification: Feature T/u,
+        "the object path must still render through renderSpecKitSpec"
+      );
+    } finally {
+      cleanup();
+      await rm(tmp, { recursive: true });
+    }
+  });
+
+  it("refuses to save a revision that still carries clarification markers", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-marker-guard-"));
+    const outDir = join(tmp, "specs");
+    const { storage, store, cleanup } = makeTestFixture("marker-guard");
+    try {
+      const pipeline = revisedExportPipeline(outDir, true);
+      const wf = buildPipelineWorkflow(pipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: makeFakeRunner({
+          ...REVISED_RESPONSES,
+          "correct.revise":
+            `# Feature T\n\n- [NEEDS CLARIFICATION: who owns this]\n` +
+            `- [NEEDS CLARIFICATION: what does done mean]\n`,
+        }),
+      });
+      const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+      const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+      const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+      assert.equal(r1.status, "suspended", "must suspend at the approve gate");
+
+      const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
+      assert.equal(r2.status, "failed", "the guard must stop the export");
+      const message = (r2 as { error?: { message?: string } }).error?.message ?? "";
+      assert.match(message, /2 "\[NEEDS CLARIFICATION\]" markers/u, `got: ${message}`);
+      assert.match(message, /correct\.revise/u, "the message must name the source step");
+      assert.ok(
+        !existsSync(join(outDir, "feature-t", "spec.md")),
+        "nothing may be written when the guard fires"
+      );
+    } finally {
+      cleanup();
+      await rm(tmp, { recursive: true });
+    }
+  });
+
+  it("records the step that produced the saved document in the manifest", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-spec-source-"));
+    const outDir = join(tmp, "specs");
+    const artifactDir = join(tmp, "run");
+    const { storage, store, cleanup } = makeTestFixture("spec-source");
+    try {
+      const pipeline = revisedExportPipeline(outDir, true);
+      const wf = buildPipelineWorkflow(pipeline, {
+        registry: FAKE_REGISTRY,
+        store,
+        runner: makeFakeRunner(REVISED_RESPONSES),
+      });
+      const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+      const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+      const runId = run.runId;
+
+      // What the daemon does: the run's log is opened on its artifact directory,
+      // and the stage entry exists by the time the gate is answered.
+      openRunLog(runId, { dir: artifactDir, pipelineId: pipeline.def.id });
+      const startedAt = new Date().toISOString();
+      await upsertManifestEntry(artifactDir, startedAt, {
+        stageId: pipeline.def.id,
+        artifactPath: join(artifactDir, `${pipeline.def.id}.json`),
+        profileId: "test",
+        status: "suspended",
+        settledAt: startedAt,
+      });
+
+      const r1 = await run.start({ inputData: { request: "Add dark mode" } });
+      assert.equal(r1.status, "suspended", "must suspend at the approve gate");
+      const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
+      assert.equal(r2.status, "success", "must succeed after approval");
+
+      const manifest = JSON.parse(await readFile(join(artifactDir, "manifest.json"), "utf8")) as {
+        stages: { specSource?: { stepId: string; path: string } }[];
+      };
+      assert.deepEqual(
+        manifest.stages[0].specSource,
+        { stepId: "correct.revise", path: join(outDir, "feature-t", "spec.md") },
+        "the manifest must name the step whose output was saved"
+      );
+
+      // The settlement entry is written after the export and must not erase it.
+      await upsertManifestEntry(artifactDir, startedAt, {
+        stageId: pipeline.def.id,
+        artifactPath: join(artifactDir, `${pipeline.def.id}.json`),
+        profileId: "test",
+        status: "succeeded",
+        settledAt: new Date().toISOString(),
+      });
+      const after = JSON.parse(await readFile(join(artifactDir, "manifest.json"), "utf8")) as {
+        stages: { status: string; specSource?: { stepId: string } }[];
+      };
+      assert.equal(after.stages[0].status, "succeeded");
+      assert.equal(
+        after.stages[0].specSource?.stepId,
+        "correct.revise",
+        "settling the stage must not drop the spec provenance"
+      );
+
+      closeRunLog(runId);
+    } finally {
+      cleanup();
+      await rm(tmp, { recursive: true });
+    }
+  });
+});
+
+// The mechanism above only reaches production if the bundled spec-creation
+// pipeline actually publishes its revision, under the key its own gate reads.
+// This pins the two ends of the wire against the real YAML.
+describe("bundled spec-creation — the revision reaches the gate's key", () => {
+  it("correct.revise declares produces: spec and publishes to the key `approve` reads", () => {
+    const loaded = loadPipeline(join(bundledPipelinesDir(), "spec-creation.yaml"));
+    const revise = loaded.def.steps.find((s) => s.id === "correct.revise");
+    assert.ok(revise, "spec-creation must expand correct-plan into a correct.revise step");
+    assert.equal(
+      revise.produces,
+      "spec",
+      "without produces the revision is written to a key nothing reads"
+    );
+
+    const gate = loaded.def.steps.find((s) => s.kind === "gate");
+    const exportStep = loaded.def.steps.find((s) => s.kind === "export-spec");
+    assert.ok(gate && exportStep, "spec-creation must still gate and export");
+    // Both are undotted, so nsKey() gives them the bare key — the same one
+    // publishedSpecKey("correct.revise") produces.
+    assert.ok(!gate.id.includes("."), `the gate reads the bare key; got id ${gate.id}`);
+    assert.ok(!exportStep.id.includes("."), `the export reads the bare key; got ${exportStep.id}`);
   });
 });

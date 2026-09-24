@@ -3367,3 +3367,68 @@ steps:
     assert.equal(def.steps[0].timeoutMs, 1_200_000);
   });
 });
+
+// `produces: spec` publishes a step's answer as the run's spec. A misspelled
+// value would be dropped in silence and the gate would keep showing the
+// superseded spec, so the canon refuses it at load time.
+describe("loadPipeline — produces", () => {
+  function yamlWith(stepLines: string): string {
+    return `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: s1
+    kind: llm
+    model: sonnet
+    prompt: prompts/s1.md
+${stepLines}
+`;
+  }
+
+  function loadWith(yaml: string) {
+    return loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => (p.endsWith(".yaml") ? yaml : "prompt content"),
+    });
+  }
+
+  it("accepts produces: spec on an llm step", () => {
+    const { def } = loadWith(yamlWith("    produces: spec"));
+    assert.equal(def.steps[0].produces, "spec");
+  });
+
+  it("rejects any other produces value", () => {
+    assert.throws(
+      () => loadWith(yamlWith("    produces: plan")),
+      (err: Error) => {
+        assert.match(err.message, /s1/u);
+        assert.match(err.message, /produces must be "spec"/u);
+        return true;
+      }
+    );
+  });
+
+  it("rejects produces on a non-llm step", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: g1
+    kind: gate
+    message: Approve?
+    produces: spec
+`;
+    assert.throws(
+      () => loadWith(yaml),
+      (err: Error) => {
+        assert.match(err.message, /gate step cannot set produces/u);
+        return true;
+      }
+    );
+  });
+});

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { assembleSpec } from "../../canon/assemble.js";
-import { writeSpecKitSpec } from "../../canon/exportSpec.js";
+import { writeSpecDocument, writeSpecKitSpec } from "../../canon/exportSpec.js";
 import { persistTicket } from "../../canon/persistTicket.js";
 import { checkPortability } from "../../canon/portability.js";
 import { getActiveProfile, getProfile, resolveStepModel } from "../../canon/registry.js";
@@ -14,12 +14,14 @@ import { renderPrompt } from "../../canon/render.js";
 import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
 import { validateCanonOutput } from "../../canon/validateOutput.js";
+import { recordManifestSpecSource } from "../../runtime/artifactStore.js";
 import { buildReviewMaterial, renderReviewMaterial } from "../../runtime/reviewMaterial.js";
 import { recordStep } from "../../runtime/stepIntrospection.js";
 import {
   appendStepLog,
   isSafeStepId,
   runArtifactDir,
+  runPipelineId,
   writeStepOutput,
   writeStepRawOutput,
 } from "../../runtime/stepLog.js";
@@ -147,6 +149,54 @@ export type LevelBuilder = (
 function nsKey(stepId: string, bare: string): string {
   const dot = stepId.lastIndexOf(".");
   return dot === -1 ? bare : `${stepId.slice(0, dot)}.${bare}`;
+}
+
+/** Bare context key holding a published revision; namespaced by the helpers below. */
+const bareRevisedSpec = "revisedSpec";
+
+/**
+ * The key a `produces: spec` step publishes its revision to.
+ *
+ * One namespace level ABOVE the step's own: a revision is produced inside a
+ * nested pipeline, but it is the nesting step's output, and the gate, persist
+ * and export steps that consume it are siblings of the nesting step. They read
+ * via `nsKey(theirOwnId, …)`, so the producer has to strip its own body's
+ * namespace as well as its own id:
+ *
+ *   "correct.revise"      → "revisedSpec"        (read by bare `approve`/`export`)
+ *   "plan.correct.revise" → "plan.revisedSpec"   (read by `plan.approve`)
+ *   "revise"              → "revisedSpec"        (correct-plan run standalone)
+ */
+function publishedSpecKey(stepId: string): string {
+  const dot = stepId.lastIndexOf(".");
+  return nsKey(dot === -1 ? "" : stepId.slice(0, dot), bareRevisedSpec);
+}
+
+/**
+ * The spec a gate shows and an export-spec step writes, plus the id of the step
+ * that produced it.
+ *
+ * A published revision wins over the assembled `HardenedSpec`: the revision was
+ * computed FROM it, folding in the verification findings, so the assembled one
+ * is superseded the moment a revision exists. Both keys are namespaced with the
+ * READER's own id, so a nested `plan.approve` still reads `plan.revisedSpec` /
+ * `plan.spec` and never a sibling pipeline's bare keys.
+ */
+function resolveApprovedSpec(
+  ctxData: Ctx,
+  readerStepId: string
+): { spec: unknown; sourceStepId: string | undefined } {
+  const revised = ctxData[nsKey(readerStepId, bareRevisedSpec)];
+  if (revised !== undefined) {
+    return {
+      spec: revised,
+      sourceStepId: ctxData[nsKey(readerStepId, "revisedSpecBy")] as string | undefined,
+    };
+  }
+  return {
+    spec: ctxData[nsKey(readerStepId, "spec")],
+    sourceStepId: ctxData[nsKey(readerStepId, "specBy")] as string | undefined,
+  };
 }
 
 function stripFences(text: string): string {
@@ -652,6 +702,18 @@ export function buildLlmStep(
           console.error(`[agent-flows] step "${step.id}": output not persisted: ${String(err)}`);
         }
         finishStepLog("succeeded");
+        // `produces: spec` also publishes the answer where the caller's gate,
+        // persist and export steps read it. Two keys, because a document and
+        // the step that wrote it are both provenance the export must record.
+        if (step.produces === "spec") {
+          const key = publishedSpecKey(step.id);
+          return {
+            ...rawCtx,
+            [step.id]: value,
+            [key]: value,
+            [`${key}By`]: step.id,
+          };
+        }
         return { ...rawCtx, [step.id]: value };
       } catch (err) {
         const cancelled = signal?.aborted === true;
@@ -714,7 +776,14 @@ export function buildAssembleStep(stepId: string) {
       });
       // Write at the step id key (ancestor-trackable, valid `with` mapping target)
       // and at the conventional <ns>.spec key (read by gate and persist-ticket via nsKey).
-      return Promise.resolve({ ...ctxData, [stepId]: spec, [pfx("spec")]: spec });
+      // <ns>.specBy names this step as the producer, so an export that saves the
+      // assembled spec records the same provenance a revision does.
+      return Promise.resolve({
+        ...ctxData,
+        [stepId]: spec,
+        [pfx("spec")]: spec,
+        [pfx("specBy")]: stepId,
+      });
     },
   });
 }
@@ -766,7 +835,7 @@ export function buildGateStep(step: StepDef) {
       }
       await suspend({
         message: step.message ?? "Approve this spec?",
-        spec: ctxData[nsKey(step.id, "spec")],
+        spec: resolveApprovedSpec(ctxData, step.id).spec,
         manualOnly: step.manualOnly ?? false,
       });
       // unreachable — suspend() throws internally; satisfies TypeScript return type
@@ -794,6 +863,37 @@ export function buildPersistStep(stepId: string, store: TicketStore, gateId: str
   });
 }
 
+/** The marker `renderSpecKitSpec` emits for data a HardenedSpec has no field for. */
+const CLARIFICATION_MARKER = "[NEEDS CLARIFICATION";
+
+/**
+ * Refuses to save a revised document that still carries clarification markers.
+ *
+ * Only the revision path is guarded. A rendered `HardenedSpec` legitimately
+ * carries seven of these — feature branch, the four user-story fields, success
+ * criteria, assumptions — because the type has no field for any of them, so the
+ * same check on that path would refuse every export the project has ever made.
+ *
+ * Fails rather than warns, unlike the directory-collision case in
+ * `writeSpecKitSpec`, because the two costs are not alike. There, both
+ * candidates are real work and suffixing keeps both. Here the markers mean the
+ * document being written is not the revision at all — a superseded or
+ * re-rendered text reached the writer — and writing it produces a file that
+ * looks authoritative and is not, which is the exact failure this guard exists
+ * for. The approved text is not lost: the run's step output is on disk under
+ * the run directory, so the operator re-exports rather than re-runs.
+ */
+function assertRevisionIsFinished(body: string, sourceStepId: string, parentDir: string): void {
+  const count = body.split(CLARIFICATION_MARKER).length - 1;
+  if (count === 0) return;
+  throw new Error(
+    `Refusing to save the spec from step "${sourceStepId}": it still contains ${count} ` +
+      `"${CLARIFICATION_MARKER}]" marker${count === 1 ? "" : "s"}. A revised document resolves ` +
+      `them or it is not the revision. Nothing was written under ${parentDir}; the step's own ` +
+      `output is kept in the run directory.`
+  );
+}
+
 export function buildExportSpecStep(stepId: string, parentDir: string, _gateId: string) {
   return createStep({
     id: stepId,
@@ -801,14 +901,37 @@ export function buildExportSpecStep(stepId: string, parentDir: string, _gateId: 
     outputSchema: ctx,
     execute: async ({ inputData, runId }) => {
       const ctxData = inputData as Ctx;
-      const specKey = nsKey(stepId, "spec");
-      const spec = ctxData[specKey] as HardenedSpec;
-      const writtenPath = await writeSpecKitSpec(
-        spec,
-        { input: ctxData.request as string | undefined },
-        parentDir,
-        runId
-      );
+      const { spec, sourceStepId } = resolveApprovedSpec(ctxData, stepId);
+
+      let writtenPath: string;
+      if (typeof spec === "string") {
+        // A string is a finished document: written byte for byte, never
+        // re-rendered. Its directory is still named from the assembled spec's
+        // title, so no part of the markdown has to be parsed back.
+        assertRevisionIsFinished(spec, sourceStepId ?? stepId, parentDir);
+        const assembled = ctxData[nsKey(stepId, "spec")] as HardenedSpec | undefined;
+        writtenPath = await writeSpecDocument(spec, assembled?.title ?? "", parentDir, runId);
+      } else {
+        writtenPath = await writeSpecKitSpec(
+          spec as HardenedSpec,
+          { input: ctxData.request as string | undefined },
+          parentDir,
+          runId
+        );
+      }
+
+      // Which step's output became the file: with a revision step in the
+      // pipeline there is more than one candidate, and the saved file does not
+      // say which one it is.
+      const artifactDir = runArtifactDir(runId);
+      const stageId = runPipelineId(runId);
+      if (artifactDir !== undefined && stageId !== undefined) {
+        await recordManifestSpecSource(artifactDir, stageId, {
+          stepId: sourceStepId ?? stepId,
+          path: writtenPath,
+        });
+      }
+
       return { ...ctxData, [stepId]: { path: writtenPath } };
     },
   });
