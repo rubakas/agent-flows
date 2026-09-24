@@ -4,7 +4,7 @@
 | ------------ | -------------------------------------------------------------------------------------------------------------------- |
 | Feature Name | Review that declares its limits                                                                                      |
 | Branch       | `main`                                                                                                               |
-| Status       | In progress 2026-09-22 — schema, prompt and validation changes under construction; material and delivery steps built |
+| Status       | Shipped 2026-09-23 — live-proven against a real PR (see Outcome)                                                    |
 | Created      | 2026-09-22                                                                                                           |
 
 ## Context
@@ -243,3 +243,55 @@ Fixture-based, not a live re-run — a live run against the real target reposito
 - **`UNVERIFIABLE` is a place to put findings.** A model under time or context pressure can mark
   something `UNVERIFIABLE` to avoid the harder work of `CONFIRMED`/`DECLINED`, and nothing in this spec
   distinguishes a genuine reach limit from a convenient one.
+
+## Outcome (2026-09-23)
+
+**Shipped.** `9744072` (spec), `6002383` (implementation), `a398a22` (self-supplying inputs),
+`daa388f` (MCP surface), `693280b` (delivery schema fix). Suite: 1986 tests, 0 failures.
+
+Built beyond the original spec, driven by live use: `code-review` now runs from `inputs: {}`.
+`material` derives its own baseline — merge-base of HEAD with `origin/HEAD`, falling back to
+`HEAD~1` — and records which rule it used. `material` also fetches GitHub PR/issue refs with `gh`
+using argv arrays, and follows `#N` references in a PR body through to the tickets they name. A new
+cheap `brief` step, role `scout`, writes the change description a human previously had to supply.
+`delivery` is `required: false`.
+
+Seams, as built:
+
+- `inputs: {}` is now a valid invocation — `baseline` and the change description are derived by
+  `material`/`brief` rather than caller-supplied, and `specSources` is optional.
+- `delivery` moved to `required: false`: a run with nothing to check delivery against no longer
+  blocks on the one axis that has nothing to say.
+- `decisionTaken` and `optionsForeclosed` moved out of `CODE_REVIEW_DELIVERY_SCHEMA`'s `required`
+  list and into `deliveryCrossFieldErrors` (`693280b`) — the only place they are now enforced, and
+  only where `classification: silently-decided` makes them meaningful. The live 10-entry payload that
+  exposed the defect is pinned as a regression fixture.
+
+**Live proof.** Two runs against domcap/ascent-portal PR 1365 (+449/-3 across 10 files,
+`feature/1315_deal_document_folders` → `develop`).
+
+Run 1 (`5c23edbe`) succeeded. `delivery` FAILED schema validation and the run survived —
+`required: false` working. Its verdict line, verbatim:
+
+> readiness here therefore covers four axes and asserts nothing about delivery
+
+Its `Unverifiable` section carried two entries, each naming the artefact it could not reach —
+`db/schema.rb`, outside the changed-file list; the model's `validates :name` line, outside the
+diff's only hunk — and escalated neither to a human. That is the failure mode from the motivating
+brief (Context, above), fixed.
+
+Run 2 (`8cc18193`), after the delivery fix, completed all nine steps. `delivery` returned 12
+requirements drawn from PR 1365 and issue 1315 — 11 `implemented`, 1 `correctly-deferred` (an ELOC
+epic phase, reported as deliberately left alone rather than as a gap).
+
+**Two runs over identical code disagreed — an open risk this spec did not anticipate.** Run 1
+returned 2 findings; run 2 returned 7 and retained 5. The only overlap was the `removable?` finding.
+Run 2 surfaced an unhandled `RecordNotUnique` 500, a check-then-act `destroy` with no lock, and an
+unfalsifiable folders-panel test that run 1 did not mention; run 1 flagged a misleading test name
+that run 2 did not raise. The consequence, plainly: a single run SAMPLES the finding space rather
+than enumerating it, so "zero blocking findings" is weaker evidence than it reads as, and the
+Verification section above is fixture-based precisely because a live run is expensive — which means
+nothing in the suite measures this. Spec 040 already chose retained-baseline-findings across runs as
+the metric for this reason (`specs/040-code-review-execution/spec.md:189-197`); these two runs are
+the first data point showing the variance is large on one diff. No fix is proposed here — this is the
+risk, recorded.
