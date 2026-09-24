@@ -64,6 +64,19 @@ describe("the page uses one visual language (spec 037 D8/FR-013)", () => {
     }
   });
 
+  it("a table in a split pane scrolls inside its wrap", () => {
+    // `.table` is width:100% with no table-layout, so a wide row paints at its
+    // intrinsic width — across the detail pane beside it. The owner caught the
+    // Runs table's Details button sitting on top of the gate box.
+    for (const wrap of ["#runs-table-wrap", "#daemons-table-wrap"]) {
+      assert.match(
+        blockAfter(UI, `${wrap} {`),
+        /overflow-x:\s*auto/u,
+        `${wrap} lets its table overflow the pane`
+      );
+    }
+  });
+
   it("--warn is defined in both themes", () => {
     const light = blockAfter(UI, ":root {");
     const dark = blockAfter(UI, "@media (prefers-color-scheme: dark) {\n        :root {");

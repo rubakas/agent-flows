@@ -323,6 +323,15 @@
         width: 100%;
         border-collapse: collapse;
       }
+      /* A table whose intrinsic width beats its pane must scroll inside it, not
+         paint across the detail pane beside it — the Details button once landed
+         on top of the gate box. Same treatment as .md-pre and .diagram. */
+      #runs-table-wrap {
+        overflow-x: auto;
+      }
+      #daemons-table-wrap {
+        overflow-x: auto;
+      }
       .table th {
         text-align: left;
         font-size: 11px;
@@ -730,6 +739,18 @@
         max-height: none;
         -webkit-mask-image: none;
         mask-image: none;
+      }
+      /* Once the full output has been fetched this is the text itself, not a
+         glance at it: it reads as content, and wraps on words. */
+      .step-output.full {
+        color: var(--ink);
+        word-break: break-word;
+      }
+      /* Says the excerpt is all the page has. Removed the moment it isn't. */
+      .step-output-note {
+        font-size: 11px;
+        color: var(--warn);
+        margin-top: 2px;
       }
       .gate-box {
         background: color-mix(in srgb, var(--warn) 8%, transparent);
@@ -2630,24 +2651,106 @@
       }
 
       /**
-       * Fetch a step's persisted output the first time its Output block is opened
-       * (spec 036 D6/D10). It is never part of the snapshot or the SSE stream.
+       * What the page says while an excerpt is all it holds.
+       *
+       * The excerpt arrives capped over SSE; the full text lives on disk and is
+       * one request away. Until that request lands, saying nothing would leave
+       * the operator reading a cut output as if it were the whole one.
        */
+      const EXCERPT_NOTE = "Excerpt only — click it to load the full output.";
+
+      /**
+       * Full step outputs already fetched, keyed run + step.
+       *
+       * Outputs are immutable once a step settles, so a second open of the same
+       * excerpt must not pay for a second request.
+       */
+      const _fullOutputs = new Map();
+
+      /** The persisted output of one step, or null when none was written. */
+      async function fetchStepOutput(runId, stepId) {
+        const key = `${runId}\u0000${stepId}`;
+        if (_fullOutputs.has(key)) return _fullOutputs.get(key);
+        const res = await fetch(
+          apiPath(
+            `/api/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/output`
+          )
+        );
+        if (res.status === 404) {
+          _fullOutputs.set(key, null);
+          return null;
+        }
+        if (!res.ok) throw new Error(`Request failed (${res.status})`);
+        const payload = await res.json();
+        _fullOutputs.set(key, payload);
+        return payload;
+      }
+
+      /** Put, update or drop the note that says this step's text is cut. */
+      function setExcerptNote(row, outEl, text) {
+        let note = row.querySelector(".step-output-note");
+        if (text === null) {
+          if (note) note.remove();
+          return;
+        }
+        if (!note) {
+          note = document.createElement("div");
+          note.className = "step-output-note";
+          outEl.insertAdjacentElement("afterend", note);
+        }
+        note.textContent = text; // .textContent — safe
+      }
+
+      /**
+       * Replace a clamped excerpt with the step's full persisted output.
+       *
+       * Expanding used to change the element's height and nothing else: the
+       * client never held more than the excerpt, so the text stayed cut however
+       * far it opened. This is the same route and the same renderer the Output
+       * block below already uses.
+       *
+       * Every failure leaves the excerpt on screen — the operator keeps what
+       * they were already reading and is told why there is no more.
+       */
+      async function loadFullOutput(el, runId) {
+        const row = el.closest?.(".step-row");
+        if (!row || !runId || el.dataset.full === "yes") return;
+        const stepId = row.dataset.stepId;
+        try {
+          const payload = await fetchStepOutput(runId, stepId);
+          if (payload === null) {
+            setExcerptNote(row, el, "Excerpt only — no full output was persisted for this step.");
+            return;
+          }
+          el.innerHTML = renderOutput(payload);
+          el.dataset.full = "yes";
+          el.classList.add("full");
+          setExcerptNote(row, el, null);
+        } catch (e) {
+          setExcerptNote(row, el, `Excerpt only — the full output failed to load: ${e.message}`);
+        }
+      }
+
       /**
        * Let a clamped excerpt open in place (042 D18).
        *
        * Delegated from the panel rather than bound per row: the stream replaces
        * step rows as they advance, and a handler bound to a row dies with it.
        */
-      function wireExcerptToggles(scope) {
+      function wireExcerptToggles(scope, runId) {
         scope.onclick = (ev) => {
           const el = ev.target.closest?.(".step-output");
           if (el === null || el === undefined || !scope.contains(el)) return;
           el.classList.toggle("expanded");
           el.title = el.classList.contains("expanded") ? "Click to collapse" : "Click to expand";
+          if (el.classList.contains("expanded")) void loadFullOutput(el, runId);
         };
       }
 
+      /**
+       * Fetch a step's persisted output the first time its Output block is opened
+       * (spec 036 D6/D10). It is never part of the snapshot or the SSE stream.
+       */
       function wireStepOutputs(scope, runId) {
         for (const details of scope.querySelectorAll(".step-output-full")) {
           const row = details.closest(".step-row");
@@ -2801,6 +2904,10 @@
           html += `<div class="step-output" title="Click to expand">${escH(
             st.outputExcerpt
           )}</div>`;
+          // The daemon capped this one; say so until the click that un-caps it.
+          if (st.outputTruncated) {
+            html += `<div class="step-output-note">${escH(EXCERPT_NOTE)}</div>`;
+          }
         }
         const detail =
           st.prompt !== undefined ? "Prompt" : st.command !== undefined ? "Command" : null;
@@ -2936,7 +3043,7 @@
         body.innerHTML = html;
         wireCopyButtons(body);
         wireStepOutputs(body, runId);
-        wireExcerptToggles(body);
+        wireExcerptToggles(body, runId);
         // The step rows are new DOM, so their activity lists are repainted from
         // the merge state rather than refetched (spec 036 D4).
         repaintLogs(body);
@@ -2997,7 +3104,7 @@
        * once its execute has run.
        */
       function updateStepRow(data) {
-        const { stepId, status, outputExcerpt } = data;
+        const { stepId, status, outputExcerpt, outputTruncated } = data;
         if (!stepId) return;
 
         const row = document.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
@@ -3035,7 +3142,12 @@
             outEl.title = "Click to expand";
             row.appendChild(outEl);
           }
-          outEl.textContent = outputExcerpt; // .textContent — safe, untrusted model output
+          // A row whose full output is already on screen must not be pushed back
+          // down to the excerpt by a later event about the same step.
+          if (outEl.dataset.full !== "yes") {
+            outEl.textContent = outputExcerpt; // .textContent — safe, untrusted model output
+            setExcerptNote(row, outEl, outputTruncated === true ? EXCERPT_NOTE : null);
+          }
         }
       }
 
