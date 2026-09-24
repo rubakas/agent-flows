@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { HardenedSpec } from "./types.js";
@@ -198,13 +199,67 @@ export function renderSpecKitSpec(spec: HardenedSpec, meta: SpecMeta = {}): stri
   ].join("\n");
 }
 
+// A directory name long enough to stay readable, short enough to survive path
+// limits when nested under a deep project path.
+const MAX_SLUG_LENGTH = 60;
+
+// Turn a spec title into a directory name: lowercase, every run of
+// non-alphanumerics collapsed to a single "-", no leading/trailing "-".
+// Unicode letters are not transliterated — they are non-[a-z0-9] and become
+// separators, so a fully non-latin title slugs to "" and the caller falls back.
+export function slugifyTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAX_SLUG_LENGTH)
+    .replace(/-+$/g, "");
+}
+
+// A spec whose title is missing or slugs to nothing still needs its own
+// directory: a shared constant here would reintroduce the overwrite bug for
+// every untitled spec. The runId is unique per run; without one, the rendered
+// body is hashed so the name is at least deterministic for identical content.
+function fallbackSlug(body: string, runId: string | undefined): string {
+  if (runId) return `spec-${slugifyTitle(runId)}`;
+  return `spec-${createHash("sha256").update(body).digest("hex").slice(0, 12)}`;
+}
+
+// Bounded so a broken caller cannot spin creating directories forever.
+const MAX_DIR_SUFFIX = 100;
+
+/**
+ * Write the Spec Kit `spec.md` into its own directory under `parentDir`, named
+ * after the spec title.
+ *
+ * Never overwrites: the file is opened with "wx", and an existing `spec.md`
+ * pushes the write to `<slug>-2`, `<slug>-3`, … We cannot tell "the same spec,
+ * re-run" from "a different spec that happens to share a title", and a loud
+ * failure here would discard work the human has already approved at the gate —
+ * so the non-destructive suffix wins and the human reconciles the duplicates.
+ */
 export async function writeSpecKitSpec(
   spec: HardenedSpec,
   meta: SpecMeta,
-  outDir: string
+  parentDir: string,
+  runId?: string
 ): Promise<string> {
-  await mkdir(outDir, { recursive: true });
-  const outPath = join(outDir, "spec.md");
-  await writeFile(outPath, renderSpecKitSpec(spec, meta), "utf8");
-  return outPath;
+  const body = renderSpecKitSpec(spec, meta);
+  const slug = slugifyTitle(spec.title ?? "") || fallbackSlug(body, runId);
+
+  for (let n = 1; n <= MAX_DIR_SUFFIX; n++) {
+    const outDir = join(parentDir, n === 1 ? slug : `${slug}-${n}`);
+    await mkdir(outDir, { recursive: true });
+    const outPath = join(outDir, "spec.md");
+    try {
+      await writeFile(outPath, body, { encoding: "utf8", flag: "wx" });
+      return outPath;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+
+  throw new Error(
+    `Cannot export spec "${spec.title}": ${MAX_DIR_SUFFIX} directories named "${slug}[-N]" already exist under ${parentDir}`
+  );
 }

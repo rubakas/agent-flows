@@ -675,19 +675,20 @@ export function buildPersistStep(stepId: string, store: TicketStore, gateId: str
   });
 }
 
-export function buildExportSpecStep(stepId: string, outDir: string, _gateId: string) {
+export function buildExportSpecStep(stepId: string, parentDir: string, _gateId: string) {
   return createStep({
     id: stepId,
     inputSchema: ctx,
     outputSchema: ctx,
-    execute: async ({ inputData }) => {
+    execute: async ({ inputData, runId }) => {
       const ctxData = inputData as Ctx;
       const specKey = nsKey(stepId, "spec");
       const spec = ctxData[specKey] as HardenedSpec;
       const writtenPath = await writeSpecKitSpec(
         spec,
         { input: ctxData.request as string | undefined },
-        outDir
+        parentDir,
+        runId
       );
       return { ...ctxData, [stepId]: { path: writtenPath } };
     },

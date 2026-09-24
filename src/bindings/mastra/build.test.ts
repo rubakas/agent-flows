@@ -1719,9 +1719,10 @@ describe("buildPipelineWorkflow — export-spec step writes spec.md", () => {
         const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
         assert.equal(r2.status, "success", "should succeed after approval");
 
-        // spec.md must exist and contain rendered Spec Kit markdown
-        const specPath = join(outDir, "spec.md");
-        assert.ok(existsSync(specPath), "spec.md must be written to the given directory");
+        // spec.md must exist and contain rendered Spec Kit markdown.
+        // "Feature T" is the canned intake title; step.path is the parent dir.
+        const specPath = join(outDir, "feature-t", "spec.md");
+        assert.ok(existsSync(specPath), "spec.md must be written under the given parent directory");
         const contents = await readFile(specPath, "utf8");
         assert.ok(
           contents.includes("# Feature Specification:"),
@@ -1766,7 +1767,10 @@ describe("buildPipelineWorkflow — export-spec step writes spec.md", () => {
         // FR-006: rejection fails the workflow immediately; export-spec never runs.
         assert.equal(r2.status, "failed", "workflow must fail on rejection (FR-006)");
 
-        assert.ok(!existsSync(join(outDir, "spec.md")), "spec.md must NOT be written on rejection");
+        assert.ok(
+          !existsSync(join(outDir, "feature-t", "spec.md")),
+          "spec.md must NOT be written on rejection"
+        );
       } finally {
         cleanup();
       }
@@ -1865,7 +1869,7 @@ describe("buildPipelineWorkflow — export-spec in nested namespace reads namesp
 
         // File must have been written — proves export read plan.spec, not undefined bare spec
         assert.ok(
-          existsSync(join(outDir, "spec.md")),
+          existsSync(join(outDir, "feature-t", "spec.md")),
           "spec.md must be written — proves plan.export read plan.spec (namespaced), not bare spec"
         );
       } finally {
@@ -2050,14 +2054,14 @@ describe("buildPipelineWorkflow — export-spec resolves relative path against d
         const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
         assert.equal(r2.status, "success");
 
-        const expectedPath = join(projectDir, relativePath, "spec.md");
+        const expectedPath = join(projectDir, relativePath, "feature-t", "spec.md");
         assert.ok(
           existsSync(expectedPath),
           `spec.md must be written to join(deps.cwd, step.path) = ${expectedPath}`
         );
 
         // Guard: it must NOT have landed in process.cwd()
-        const wrongPath = join(process.cwd(), relativePath, "spec.md");
+        const wrongPath = join(process.cwd(), relativePath, "feature-t", "spec.md");
         assert.ok(
           !existsSync(wrongPath),
           `spec.md must NOT be written to join(process.cwd(), step.path) = ${wrongPath}`
@@ -2067,6 +2071,53 @@ describe("buildPipelineWorkflow — export-spec resolves relative path against d
       }
     } finally {
       await rm(projectDir, { recursive: true });
+    }
+  });
+});
+
+// ── Data-loss regression: consecutive exports must not overwrite each other ───
+// Against the old implementation (step.path used verbatim as the output dir)
+// both runs wrote the SAME spec.md and the second run destroyed the first.
+
+describe("buildPipelineWorkflow — export-spec keeps earlier specs on disk", () => {
+  it("two runs with different spec titles write two spec.md files under the same parent", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-noclobber-"));
+    const parentDir = join(tmp, "specs");
+    try {
+      const titles = ["First Feature", "Second Feature"];
+      for (const [i, title] of titles.entries()) {
+        const pipeline = makeExportSpecPipeline(parentDir);
+        const { storage, store, cleanup } = makeTestFixture(`export-noclobber-${i}`);
+        try {
+          const wf = buildPipelineWorkflow(pipeline, {
+            registry: FAKE_REGISTRY,
+            store,
+            runner: makeFakeRunner({
+              ...CANNED_RESPONSES,
+              intake: INTAKE_MD.replace("# Feature T", `# ${title}`),
+            }),
+          });
+          const mastra = new Mastra({ storage, workflows: { [pipeline.def.id]: wf } });
+          const run = await mastra.getWorkflow(pipeline.def.id).createRun();
+          const r1 = await run.start({ inputData: { request: `req ${i}` } });
+          assert.equal(r1.status, "suspended");
+          const r2 = await run.resume({ step: r1.suspended[0], resumeData: { approved: true } });
+          assert.equal(r2.status, "success");
+        } finally {
+          cleanup();
+        }
+      }
+
+      const firstPath = join(parentDir, "first-feature", "spec.md");
+      const secondPath = join(parentDir, "second-feature", "spec.md");
+      assert.ok(existsSync(firstPath), `first run's spec must survive at ${firstPath}`);
+      assert.ok(existsSync(secondPath), `second run's spec must exist at ${secondPath}`);
+      assert.ok(
+        (await readFile(firstPath, "utf8")).includes("# Feature Specification: First Feature"),
+        "the first spec must not have been overwritten by the second run"
+      );
+    } finally {
+      await rm(tmp, { recursive: true });
     }
   });
 });

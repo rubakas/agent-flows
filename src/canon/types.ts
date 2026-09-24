@@ -144,8 +144,11 @@ export interface StepDef {
    */
   required?: boolean;
   /**
-   * For `kind: "export-spec"` steps: the directory path to write the Spec Kit
-   * `spec.md` file into. The directory is created if it does not exist.
+   * For `kind: "export-spec"` steps: the PARENT directory the export writes
+   * under (e.g. `specs`). The step creates a child directory named after the
+   * spec title and writes `spec.md` there — a fixed leaf directory here would
+   * make every run overwrite the previous run's spec. Missing directories are
+   * created.
    * Required and non-empty. Cannot be combined with `prompt`, `role`, `model`,
    * `schema`, or `permissions`.
    */

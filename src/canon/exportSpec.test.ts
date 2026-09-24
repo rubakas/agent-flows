@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { renderSpecKitSpec, writeSpecKitSpec } from "./exportSpec.js";
+import { renderSpecKitSpec, slugifyTitle, writeSpecKitSpec } from "./exportSpec.js";
 import type { HardenedSpec } from "./types.js";
 
 const baseSpec: HardenedSpec = {
@@ -353,12 +353,16 @@ describe("renderSpecKitSpec — Input falls back to the spec description", () =>
 });
 
 describe("writeSpecKitSpec", () => {
-  it("creates the directory and writes spec.md, returning the absolute path", async () => {
+  it("creates a title-named directory under the parent and writes spec.md into it", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
     try {
-      const outDir = join(tmp, "my-spec");
-      const path = await writeSpecKitSpec(baseSpec, { branch: "001-test" }, outDir);
-      assert.equal(path, join(outDir, "spec.md"), "returned path must be outDir/spec.md");
+      const parentDir = join(tmp, "specs");
+      const path = await writeSpecKitSpec(baseSpec, { branch: "001-test" }, parentDir);
+      assert.equal(
+        path,
+        join(parentDir, "auth-service", "spec.md"),
+        "returned path must be parentDir/<title-slug>/spec.md"
+      );
       const contents = await readFile(path, "utf8");
       assert.ok(
         contents.includes("# Feature Specification: Auth Service"),
@@ -372,13 +376,126 @@ describe("writeSpecKitSpec", () => {
   it("creates nested directories that do not yet exist", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
     try {
-      const outDir = join(tmp, "nested", "deep", "dir");
-      const path = await writeSpecKitSpec(baseSpec, {}, outDir);
-      assert.equal(path, join(outDir, "spec.md"), "returned path must be outDir/spec.md");
+      const parentDir = join(tmp, "nested", "deep", "dir");
+      const path = await writeSpecKitSpec(baseSpec, {}, parentDir);
+      assert.equal(path, join(parentDir, "auth-service", "spec.md"));
       const contents = await readFile(path, "utf8");
       assert.ok(contents.length > 0, "written file must not be empty");
     } finally {
       await rm(tmp, { recursive: true });
     }
+  });
+
+  // The data-loss regression: two specs exported into the same parent used to
+  // land on the same fixed path, so the second silently destroyed the first.
+  it("two different titles land in different directories and both survive", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
+    try {
+      const parentDir = join(tmp, "specs");
+      const first = await writeSpecKitSpec({ ...baseSpec, title: "Auth Service" }, {}, parentDir);
+      const second = await writeSpecKitSpec(
+        { ...baseSpec, title: "Billing Export" },
+        {},
+        parentDir
+      );
+
+      assert.notEqual(first, second, "different titles must not share a path");
+      assert.equal(first, join(parentDir, "auth-service", "spec.md"));
+      assert.equal(second, join(parentDir, "billing-export", "spec.md"));
+      assert.ok(
+        (await readFile(first, "utf8")).includes("# Feature Specification: Auth Service"),
+        "the first spec must still be on disk after the second export"
+      );
+      assert.ok(
+        (await readFile(second, "utf8")).includes("# Feature Specification: Billing Export")
+      );
+    } finally {
+      await rm(tmp, { recursive: true });
+    }
+  });
+
+  it("a repeated title gets a numeric suffix and never clobbers the earlier spec", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
+    try {
+      const parentDir = join(tmp, "specs");
+      const first = await writeSpecKitSpec(baseSpec, { input: "first run" }, parentDir);
+      const second = await writeSpecKitSpec(baseSpec, { input: "second run" }, parentDir);
+      const third = await writeSpecKitSpec(baseSpec, { input: "third run" }, parentDir);
+
+      assert.equal(first, join(parentDir, "auth-service", "spec.md"));
+      assert.equal(second, join(parentDir, "auth-service-2", "spec.md"));
+      assert.equal(third, join(parentDir, "auth-service-3", "spec.md"));
+      assert.ok(
+        (await readFile(first, "utf8")).includes('"first run"'),
+        "the first spec's content must be untouched by the later exports"
+      );
+      assert.ok((await readFile(second, "utf8")).includes('"second run"'));
+    } finally {
+      await rm(tmp, { recursive: true });
+    }
+  });
+
+  it("an empty title falls back to a runId-derived directory that does not collide", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
+    try {
+      const parentDir = join(tmp, "specs");
+      const untitled = { ...baseSpec, title: "" };
+      const first = await writeSpecKitSpec(untitled, {}, parentDir, "run-AAA");
+      const second = await writeSpecKitSpec(untitled, {}, parentDir, "run-BBB");
+
+      assert.equal(first, join(parentDir, "spec-run-aaa", "spec.md"));
+      assert.equal(second, join(parentDir, "spec-run-bbb", "spec.md"));
+      assert.ok((await readFile(first, "utf8")).length > 0, "the first untitled spec must survive");
+    } finally {
+      await rm(tmp, { recursive: true });
+    }
+  });
+
+  it("an untitled spec with no runId falls back to a content hash, not a shared path", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "agent-flows-exportspec-"));
+    try {
+      const parentDir = join(tmp, "specs");
+      const first = await writeSpecKitSpec({ ...baseSpec, title: "" }, { input: "a" }, parentDir);
+      const second = await writeSpecKitSpec({ ...baseSpec, title: "" }, { input: "b" }, parentDir);
+
+      assert.notEqual(first, second, "two untitled specs must not share a directory");
+      assert.match(dirname(first), /\/spec-[0-9a-f]{12}$/);
+      assert.ok((await readFile(first, "utf8")).includes('"a"'));
+      assert.ok((await readFile(second, "utf8")).includes('"b"'));
+    } finally {
+      await rm(tmp, { recursive: true });
+    }
+  });
+});
+
+describe("slugifyTitle", () => {
+  it("lowercases and joins words with single hyphens", () => {
+    assert.equal(slugifyTitle("Item Error Recovery"), "item-error-recovery");
+  });
+
+  it("collapses punctuation runs into one hyphen", () => {
+    assert.equal(
+      slugifyTitle("Feature Flags, Smart Defaults & More!!"),
+      "feature-flags-smart-defaults-more"
+    );
+  });
+
+  it("trims leading and trailing junk", () => {
+    assert.equal(slugifyTitle("  ---Auth Service--- "), "auth-service");
+  });
+
+  it("drops non-latin characters rather than emitting them raw", () => {
+    assert.equal(slugifyTitle("Спецификация v2"), "v2");
+  });
+
+  it("caps the length and never ends on a hyphen", () => {
+    const slug = slugifyTitle("a ".repeat(80));
+    assert.ok(slug.length <= 60, `slug must be capped; got ${slug.length}`);
+    assert.doesNotMatch(slug, /-$/, "a truncated slug must not end on a hyphen");
+  });
+
+  it("returns an empty string for a title that has nothing sluggable", () => {
+    assert.equal(slugifyTitle("— ✦ —"), "");
+    assert.equal(slugifyTitle(""), "");
   });
 });
