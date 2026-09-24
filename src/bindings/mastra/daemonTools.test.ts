@@ -110,7 +110,7 @@ describe("cancel_run — proxies POST /api/runs/:id/cancel (FR-007)", () => {
   });
 });
 
-describe("get_run — forwards per-step progress (D3/V3)", () => {
+describe("get_run verbose:true — forwards per-step progress (D3/V3)", () => {
   it("returns the daemon's steps as an array with timestamps and errors", async () => {
     handler = (_req, res) => {
       respondJson(res, 200, {
@@ -130,7 +130,7 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
       });
     };
 
-    const out = (await getRunState("run-3")) as {
+    const out = (await getRunState("run-3", true)) as {
       status: string;
       progress: string;
       steps: Record<string, unknown>[];
@@ -172,7 +172,7 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
       });
     };
 
-    const out = (await getRunState("run-3b")) as { steps: Record<string, unknown>[] };
+    const out = (await getRunState("run-3b", true)) as { steps: Record<string, unknown>[] };
     const big = out.steps.find((s) => s.id === "develop.big");
     const small = out.steps.find((s) => s.id === "develop.small");
     assert.equal(
@@ -191,7 +191,7 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
     handler = (_req, res) => {
       respondJson(res, 200, { runId: "run-4", pipelineId: "develop", status: "running" });
     };
-    const out = (await getRunState("run-4")) as { steps: unknown[] };
+    const out = (await getRunState("run-4", true)) as { steps: unknown[] };
     assert.deepEqual(out.steps, []);
   });
 
@@ -219,7 +219,7 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
       });
     };
 
-    const out = (await getRunState("run-5")) as {
+    const out = (await getRunState("run-5", true)) as {
       invocation?: Record<string, unknown>;
       steps: Record<string, unknown>[];
     };
@@ -252,7 +252,7 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
     };
 
     const forbidden = ["log", "events", "output", "prompt"];
-    const out = (await getRunState("run-6")) as Record<string, unknown> & {
+    const out = (await getRunState("run-6", true)) as Record<string, unknown> & {
       steps: Record<string, unknown>[];
     };
     for (const key of forbidden) {
@@ -261,6 +261,203 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
         assert.equal(key in step, false, `get_run must not expose "${key}" on a step`);
       }
     }
+  });
+});
+
+describe("get_run — compact by default, full only on verbose:true", () => {
+  // Sized from a real run: invocation.inputs of 1191 + 2109 chars, an
+  // outputExcerpt at OUTPUT_EXCERPT_LIMIT (2048) on every step, and a gate spec
+  // of 28k chars — the three things that made polling cost thousands of tokens.
+  const realisticRun = {
+    runId: "run-compact",
+    pipelineId: "code-review",
+    status: "awaiting_approval",
+    gateMessage: "Approve the review?",
+    spec: "S".repeat(28_000),
+    artifactPath: "/tmp/af/runs/run-compact/artifact.md",
+    result: { verdict: "R".repeat(4_000) },
+    invocation: {
+      pipeline: "code-review",
+      startedAt: "2026-09-24T10:00:00.000Z",
+      gateMode: "manual",
+      inputs: { brief: "b".repeat(1_191), baseline: "c".repeat(2_109) },
+    },
+    steps: Object.fromEntries(
+      ["gather", "read", "analyse", "verify", "write", "grade"].map((id, i) => [
+        `code-review.${id}`,
+        {
+          status: i === 5 ? "failed" : "succeeded",
+          startedAt: "2026-09-24T10:00:00.000Z",
+          finishedAt: "2026-09-24T10:01:00.000Z",
+          outputExcerpt: "x".repeat(2_048),
+          outputTruncated: true,
+          prompt: "p".repeat(9_000),
+          ...(i === 5 ? { error: "exit 1" } : {}),
+        },
+      ])
+    ),
+  };
+
+  it("omits excerpts and invocation inputs, and is an order of magnitude smaller", async () => {
+    handler = (_req, res) => respondJson(res, 200, realisticRun);
+
+    const compact = await getRunState("run-compact");
+    const verbose = await getRunState("run-compact", true);
+    const compactSize = JSON.stringify(compact).length;
+    const verboseSize = JSON.stringify(verbose).length;
+
+    assert.ok(
+      !JSON.stringify(compact).includes("x".repeat(64)),
+      "the compact payload must not carry step output excerpts"
+    );
+    assert.ok(
+      !JSON.stringify(compact).includes("b".repeat(64)),
+      "the compact payload must not carry the full invocation inputs"
+    );
+    assert.ok(
+      verboseSize > 40_000,
+      `the verbose payload is the old cost of one poll; got ${verboseSize} chars`
+    );
+    assert.ok(
+      compactSize * 10 < verboseSize,
+      `the compact payload must be an order of magnitude smaller; got ${compactSize} vs ${verboseSize} chars`
+    );
+  });
+
+  it("keeps per-step id/status/error and the artifact path", async () => {
+    handler = (_req, res) => respondJson(res, 200, realisticRun);
+
+    const out = (await getRunState("run-compact")) as {
+      status: string;
+      progress: string;
+      artifactPath?: string;
+      steps: Record<string, unknown>[];
+    };
+    assert.equal(out.status, "awaiting_approval");
+    assert.equal(out.artifactPath, "/tmp/af/runs/run-compact/artifact.md");
+    assert.equal(out.steps.length, 6);
+    assert.deepEqual(out.steps[5], { id: "code-review.grade", status: "failed", error: "exit 1" });
+    assert.deepEqual(
+      out.steps[0],
+      { id: "code-review.gather", status: "succeeded" },
+      "a compact step carries only id, status and error"
+    );
+    assert.ok(out.progress.startsWith("code-review · "), `got progress: ${out.progress}`);
+  });
+
+  it("names where every omitted field can be fetched", async () => {
+    handler = (_req, res) => respondJson(res, 200, realisticRun);
+
+    const out = (await getRunState("run-compact")) as { omitted: Record<string, string> };
+    assert.ok(out.omitted, "a compact payload must say what it left out");
+    assert.match(
+      out.omitted.mode ?? "",
+      /verbose/u,
+      "the compact payload must name the argument that returns the full one"
+    );
+    assert.match(
+      out.omitted.stepOutput ?? "",
+      /GET \/api\/runs\/run-compact\/steps\/<stepId>\/output/u,
+      `step outputs must name the route that serves them; got: ${out.omitted.stepOutput}`
+    );
+    assert.match(out.omitted.invocationInputs ?? "", /verbose/u);
+    assert.match(out.omitted.spec ?? "", /verbose/u);
+    assert.match(out.omitted.result ?? "", /verbose/u);
+  });
+
+  it("does not inline the gate spec at a gate, but keeps the gate message", async () => {
+    handler = (_req, res) => respondJson(res, 200, realisticRun);
+
+    const out = (await getRunState("run-compact")) as { gateMessage?: string };
+    assert.equal(out.gateMessage, "Approve the review?");
+    assert.ok(
+      !JSON.stringify(out).includes("S".repeat(64)),
+      "a run at a gate must not inline its spec in compact mode"
+    );
+    assert.equal("spec" in out, false, "compact mode must not carry a spec field at all");
+  });
+
+  it("names nothing omitted that the run does not have", async () => {
+    handler = (_req, res) =>
+      respondJson(res, 200, { runId: "run-bare", pipelineId: "develop", status: "running" });
+
+    const out = (await getRunState("run-bare")) as { omitted: Record<string, string> };
+    assert.deepEqual(
+      Object.keys(out.omitted),
+      ["mode"],
+      "a run with no steps, inputs, spec or result must not advertise fetching them"
+    );
+  });
+
+  it("never forwards prompts in either mode", async () => {
+    handler = (_req, res) => respondJson(res, 200, realisticRun);
+
+    for (const verbose of [false, true]) {
+      const out = await getRunState("run-compact", verbose);
+      assert.ok(
+        !JSON.stringify(out).includes("p".repeat(64)),
+        `get_run must never forward prompt text to chat (verbose=${verbose}) — D6`
+      );
+    }
+  });
+
+  // The verbose payload is pinned field by field against the shape callers got
+  // before compact mode existed. The single deliberate difference is the added
+  // `artifactPath`: verbose must be a superset of compact, and adding a key
+  // breaks no caller, while removing or changing one would.
+  it("returns the pre-compact payload unchanged, plus artifactPath", async () => {
+    handler = (_req, res) => respondJson(res, 200, realisticRun);
+
+    const step = (id: string, status: string, error?: string) => ({
+      id: `code-review.${id}`,
+      status,
+      startedAt: "2026-09-24T10:00:00.000Z",
+      finishedAt: "2026-09-24T10:01:00.000Z",
+      outputExcerpt: "x".repeat(2_048),
+      outputTruncated: true,
+      ...(error !== undefined ? { error } : {}),
+    });
+
+    const out = await getRunState("run-compact", true);
+    assert.deepEqual(out, {
+      runId: "run-compact",
+      pipelineId: "code-review",
+      status: "awaiting_approval",
+      result: { verdict: "R".repeat(4_000) },
+      gateMessage: "Approve the review?",
+      spec: "S".repeat(28_000),
+      invocation: {
+        pipeline: "code-review",
+        startedAt: "2026-09-24T10:00:00.000Z",
+        gateMode: "manual",
+        inputs: { brief: "b".repeat(1_191), baseline: "c".repeat(2_109) },
+      },
+      steps: [
+        step("gather", "succeeded"),
+        step("read", "succeeded"),
+        step("analyse", "succeeded"),
+        step("verify", "succeeded"),
+        step("write", "succeeded"),
+        step("grade", "failed", "exit 1"),
+      ],
+      progress: "code-review · awaiting_approval · 6 steps · 1m00s",
+      artifactPath: "/tmp/af/runs/run-compact/artifact.md",
+    });
+  });
+
+  it("verbose carries every key compact does, so dropping to it never loses a field", async () => {
+    handler = (_req, res) => respondJson(res, 200, realisticRun);
+
+    const compact = (await getRunState("run-compact")) as Record<string, unknown>;
+    const verbose = (await getRunState("run-compact", true)) as Record<string, unknown>;
+    // `omitted` is compact-only by design: it exists to point at what verbose
+    // already returns inline, so it would be noise in the full payload.
+    const missing = Object.keys(compact).filter((k) => k !== "omitted" && !(k in verbose));
+    assert.deepEqual(
+      missing,
+      [],
+      `verbose must be a superset of compact; these keys exist only in compact: ${missing.join(", ")}`
+    );
   });
 });
 

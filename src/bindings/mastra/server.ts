@@ -159,11 +159,17 @@ const approveTool = createTool({
 const getRunTool = createTool({
   id: "get_run",
   description:
-    "Get the current status and result of a pipeline run. This is the progress companion to start_run: poll it while a run is in flight and its `steps` array carries each step's status and output excerpt as they arrive. Show the `progress` string verbatim — it is the one-line 'pipeline · step (N of M) · elapsed' summary of all of this, and the thing to put in front of the user. Includes how it was invoked (pipeline, inputs, models, gate mode) and per-step progress (id, status, startedAt, finishedAt, output excerpt, error, resolved model for llm steps, command for check steps). Rendered prompts are not returned — read them from the run page or artifact. When the run is suspended at an approval gate, also returns the gate message and spec so the caller can review them before approving. When the run was cancelled, returns when it was cancelled and why.",
+    "Get the current status and result of a pipeline run. This is the progress companion to start_run: poll it while a run is in flight. Show the `progress` string verbatim — it is the one-line 'pipeline · step (N of M) · elapsed' summary, and the thing to put in front of the user. COMPACT BY DEFAULT (this changed; earlier versions always returned the full payload): a default call returns runId, pipelineId, status, progress, the invocation without its inputs, one `{id, status, error}` per step, the artifact path, cancellation details — and an `omitted` object naming, for every field left out, the route or call that returns it. Pass verbose:true to get the full payload instead: full invocation inputs, per-step output excerpts with startedAt/finishedAt/outputTruncated/model/command, the run result, and the gate spec inline (which can be tens of thousands of characters). Poll with the default and ask for verbose:true once, when you actually need the content. A step's whole output is also at GET /api/runs/:id/steps/:stepId/output. Rendered prompts are never returned in either mode — read them from the run page or artifact. When the run is suspended at an approval gate, both modes return the gate message; only verbose:true inlines the spec.",
   inputSchema: z.object({
     runId: z.string().describe("Run ID returned by run_pipeline"),
+    verbose: z
+      .boolean()
+      .optional()
+      .describe(
+        "Optional, default false. false returns the compact status/progress payload; true returns the full one — step output excerpts, full invocation inputs, the result and the gate spec inline. Polling with verbose:true costs many thousands of tokens per call."
+      ),
   }),
-  execute: (inputData) => getRunState(inputData.runId),
+  execute: (inputData) => getRunState(inputData.runId, inputData.verbose),
 });
 
 const cancelRunTool = createTool({

@@ -102,3 +102,35 @@ describe("decide_entry_point: its kind enum matches the daemon's routes", () => 
     );
   });
 });
+
+describe("get_run: its description says the payload is compact unless verbose is passed", () => {
+  const start = SERVER_SOURCE.indexOf(`id: "get_run"`);
+  const tool = SERVER_SOURCE.slice(start, SERVER_SOURCE.indexOf("execute:", start));
+
+  it("declares the verbose argument", () => {
+    assert.notEqual(start, -1, "the get_run tool must still be declared");
+    assert.match(
+      tool,
+      /\n {4}verbose: z\n/u,
+      `get_run must accept a verbose argument; got:\n${tool}`
+    );
+  });
+
+  it("says the default is compact and what verbose restores", () => {
+    assert.match(
+      tool,
+      /compact/iu,
+      `a model must be told the default payload is compact, not the whole run; got:\n${tool}`
+    );
+    assert.match(
+      tool,
+      /omitted/u,
+      `the description must name the field that says where the rest lives; got:\n${tool}`
+    );
+    assert.match(
+      tool,
+      /verbose:true/u,
+      `the description must name the argument that returns the full payload; got:\n${tool}`
+    );
+  });
+});

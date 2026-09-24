@@ -308,8 +308,84 @@ export async function runPipeline(input: StartRunInput): Promise<Record<string, 
   return pollRunUntilTerminal(started.runId);
 }
 
-/** `get_run` body: the run's status plus the per-step progress the daemon tracks. */
-export async function getRunState(runId: string): Promise<Record<string, unknown>> {
+/**
+ * The compact per-step view: what a poller needs to know a step exists, where it
+ * is, and whether it broke. Timestamps are left out because `progress` already
+ * carries elapsed time, and the excerpt is left out because it is the single
+ * biggest cost of polling (up to OUTPUT_EXCERPT_LIMIT = 2048 chars per step).
+ */
+function toCompactStepViews(steps: Record<string, DaemonStepState> | undefined): RunStepView[] {
+  if (!steps) return [];
+  return Object.entries(steps).map(([id, state]) => ({
+    id,
+    status: state.status,
+    ...(state.error !== undefined ? { error: state.error } : {}),
+  }));
+}
+
+/**
+ * Build the compact `get_run` payload.
+ *
+ * Every field dropped here is named in `omitted` together with the route or call
+ * that returns it: a compact response that silently hides data leaves the caller
+ * believing the run has none, which is worse than the token cost it saves.
+ */
+function compactRunState(runId: string, got: DaemonRunState): Record<string, unknown> {
+  const omitted: Record<string, string> = {
+    mode:
+      "Compact by default — call get_run again with verbose:true for the full payload " +
+      "(step output excerpts, full invocation inputs, gate spec, result).",
+  };
+  if (got.steps !== undefined && Object.keys(got.steps).length > 0) {
+    omitted.stepOutput =
+      `GET /api/runs/${runId}/steps/<stepId>/output returns a step's whole output; ` +
+      "get_run with verbose:true returns the truncated excerpts.";
+  }
+  if (got.invocation?.inputs !== undefined) {
+    omitted.invocationInputs = "get_run with verbose:true, or the run artifact.";
+  }
+  if (got.spec !== undefined) {
+    omitted.spec =
+      "The gate spec can be tens of thousands of characters; get_run with verbose:true " +
+      "returns it inline, and the run page shows it rendered.";
+  }
+  if (got.result !== undefined) {
+    omitted.result = "get_run with verbose:true.";
+  }
+
+  // The invocation minus `inputs`: pipeline, gate mode, provider and start time
+  // are a handful of characters each and are what identifies the run.
+  const invocation =
+    got.invocation === undefined
+      ? undefined
+      : Object.fromEntries(Object.entries(got.invocation).filter(([key]) => key !== "inputs"));
+
+  return {
+    runId: got.runId,
+    pipelineId: got.pipelineId,
+    status: got.status,
+    progress: formatRunProgress(got),
+    ...(got.gateMessage !== undefined ? { gateMessage: got.gateMessage } : {}),
+    ...(invocation !== undefined ? { invocation } : {}),
+    steps: toCompactStepViews(got.steps),
+    ...(got.artifactPath !== undefined ? { artifactPath: got.artifactPath } : {}),
+    ...(got.cancelled !== undefined ? { cancelled: got.cancelled } : {}),
+    omitted,
+  };
+}
+
+/**
+ * `get_run` body: the run's status plus the per-step progress the daemon tracks.
+ *
+ * Compact by default: polling a run used to cost many thousands of tokens per
+ * call, because every response carried the full `invocation.inputs`, a 2048-char
+ * excerpt per step and — at a gate — the whole spec inline. `verbose` restores
+ * that payload for the one call that actually needs it.
+ */
+export async function getRunState(
+  runId: string,
+  verbose = false
+): Promise<Record<string, unknown>> {
   const res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}`);
   if (res.status === 404) {
     return { error: `No run found for runId "${runId}"` };
@@ -318,6 +394,7 @@ export async function getRunState(runId: string): Promise<Record<string, unknown
     return { error: `daemon GET /api/runs/${runId} returned HTTP ${res.status}` };
   }
   const got = (await res.json()) as DaemonRunState;
+  if (!verbose) return compactRunState(runId, got);
   return {
     runId: got.runId,
     pipelineId: got.pipelineId,
@@ -328,6 +405,10 @@ export async function getRunState(runId: string): Promise<Record<string, unknown
     ...(got.invocation !== undefined ? { invocation: got.invocation } : {}),
     steps: toStepViews(got.steps),
     progress: formatRunProgress(got),
+    // Verbose must be a superset of compact, or "verbose returns everything" is
+    // false and a caller that drops down to it loses a field. Adding a key
+    // breaks nobody — consumers ignore keys they do not read.
+    ...(got.artifactPath !== undefined ? { artifactPath: got.artifactPath } : {}),
     ...(got.cancelled !== undefined ? { cancelled: got.cancelled } : {}),
   };
 }
