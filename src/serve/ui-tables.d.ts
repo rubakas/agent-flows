@@ -57,6 +57,18 @@ export declare function terminalStepId(
   declaredSteps: { id?: string; dependsOn?: string[] }[] | undefined
 ): string | null;
 
+/** One row of the run detail panel: a declared step and what the run knows of it. */
+export interface RunStepRow {
+  id: string;
+  state: RunStepStateData;
+}
+
+/** Every declared step of the pipeline, in order, with live state merged in. */
+export declare function declaredStepRows(
+  declaredSteps: ({ id?: string; dependsOn?: string[] } | string)[] | undefined,
+  steps: Record<string, RunStepStateData> | undefined
+): RunStepRow[];
+
 export declare function runProgress(
   steps: Record<string, RunStepStateData> | undefined,
   declaredStepIds: string[]

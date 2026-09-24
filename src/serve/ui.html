@@ -680,6 +680,14 @@
         background: color-mix(in srgb, var(--muted) 15%, transparent);
         color: var(--muted);
       }
+      /* A step the pipeline declares that the run has not reached. Inert on
+         purpose: it is the absence of a status, not a bad one. */
+      .badge.pending {
+        background: transparent;
+        color: var(--muted);
+        border: 1px dashed var(--line);
+        padding: 0 5px;
+      }
       .badge.disk {
         background: color-mix(in srgb, var(--muted) 15%, transparent);
         color: var(--muted);
@@ -729,10 +737,28 @@
         border-radius: var(--radius);
         padding: 8px 10px;
         margin: 10px 0;
+        /* The spec in this box is tens of thousands of characters of model
+           markdown. Full-page-width lines are not read, they are skimmed, and
+           this is the one box on the page whose text is a decision. */
+        max-width: 80ch;
       }
       .gate-box p {
         margin-bottom: 8px;
         color: var(--ink);
+      }
+      .gate-box p,
+      .gate-box li {
+        line-height: 1.6;
+        overflow-wrap: break-word;
+      }
+      /* The lists the gate emits carry .md-list, whose rules live under .md —
+         out here they would render as an unmarked, unindented run of lines. */
+      .gate-box .md-list {
+        margin: 6px 0 6px 18px;
+        list-style: disc;
+      }
+      .gate-box .md-list > li {
+        margin: 4px 0;
       }
       .gate-actions {
         display: flex;
@@ -1201,6 +1227,7 @@
       import { renderLevelsSvg } from "/ui-graph.js";
       import {
         ACTIVE_STATUSES,
+        declaredStepRows,
         emptyRunsMessage,
         resolveRunsFilter,
         fmtElapsed,
@@ -2801,6 +2828,19 @@
       }
 
       /**
+       * Fetch the workflow's declared steps and re-render once, for the first
+       * view of a run whose definition is not cached yet. The second render
+       * finds the cache filled, so this cannot loop.
+       */
+      async function primeDeclaredSteps(runId, snapshot, body) {
+        const pipelineId = snapshot.pipelineId;
+        if (_declaredSteps[pipelineId] !== undefined) return;
+        await declaredStepsFull(pipelineId);
+        if (_activeRunId !== runId) return;
+        renderRunDetail(runId, snapshot, body);
+      }
+
+      /**
        * Render (or re-render) the run detail panel body from a snapshot object.
        * All server data is escaped or written via textContent.
        */
@@ -2862,18 +2902,30 @@
         _judgeError = snapshot.judgeError;
         html += `<div class="run-decisions">${renderDecisions(_decisions, _judgeError)}</div>`;
 
-        // Steps table. Mastra's synthetic merge steps are bookkeeping for parallel
-        // branches, not steps anyone wrote (042 D7) — two rows reading only
-        // "succeeded · Activity · Output" say nothing and are dropped here for
+        // Steps table: every step the workflow DECLARES, not only the ones that
+        // have run. The list was built from the run's own state, so opening a
+        // fresh run showed an empty panel and a running one showed a list that
+        // grew a row at a time — the page could not say what was still to come.
+        // The definition comes from the cache the runs list already fills; a
+        // miss renders from state alone and re-renders once it lands, and a
+        // fetch that fails caches [] — today's behaviour, never a blank list.
+        //
+        // Mastra's synthetic merge steps are bookkeeping for parallel branches,
+        // not steps anyone wrote (042 D7) — two rows reading only "succeeded ·
+        // Activity · Output" say nothing, and declaredStepRows drops them for
         // the same reason they are excluded from the N-of-M count.
         const steps = snapshot.steps || {};
-        const stepIds = Object.keys(steps).filter((id) => !/^__merge_level_/u.test(id));
-        if (stepIds.length) {
+        const declared = _declaredSteps[snapshot.pipelineId];
+        if (declared === undefined && snapshot.pipelineId) {
+          queueMicrotask(() => void primeDeclaredSteps(runId, snapshot, body));
+        }
+        const stepRows = declaredStepRows(declared ?? [], steps);
+        if (stepRows.length) {
           html += `<div class="run-section"><h3>Progress</h3><span class="muted">${escH(
-            String(stepIds.length)
+            String(stepRows.length)
           )} steps</span></div>`;
-          for (const sid of stepIds) {
-            html += stepRowHtml(sid, steps[sid]);
+          for (const row of stepRows) {
+            html += stepRowHtml(row.id, row.state);
           }
         } else {
           html += `<p class="empty">No steps recorded yet.</p>`;

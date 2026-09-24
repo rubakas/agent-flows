@@ -10,7 +10,7 @@
 // all of it is asserted without a browser.
 
 import { esc } from "./ui-esc.js";
-import { renderMarkdown } from "./ui-markdown.js";
+import { looksLikeMarkdown, renderMarkdown } from "./ui-markdown.js";
 
 /** Fields of a HardenedSpec that are lists, and what to call them. */
 const SPEC_LISTS = [
@@ -25,6 +25,34 @@ function lineOf(item) {
   if (item === null || typeof item !== "object") return String(item ?? "");
   const parts = [item.severity, item.title ?? item.summary ?? item.description, item.location];
   return parts.filter((p) => p !== undefined && p !== null && p !== "").join(" — ");
+}
+
+/**
+ * One piece of a spec, as something a person can read.
+ *
+ * A requirement is model-written markdown — headings, fenced code, backticked
+ * paths — and the box used to `esc()` it into a single literal line. The
+ * escaping is not what goes: `renderMarkdown` escapes every line BEFORE it
+ * introduces a tag of its own, so no markup in the text can reach the page
+ * either way. What goes is the flattening. Same gate as the step output
+ * (ui-log.js): markdown through the renderer, anything with more than one line
+ * through a `pre`, and a single line as itself.
+ *
+ * @param {string} text
+ * @returns {string} HTML.
+ */
+function readable(text) {
+  const s = String(text ?? "");
+  if (looksLikeMarkdown(s)) return `<div class="md">${renderMarkdown(s)}</div>`;
+  if (s.includes("\n")) return `<pre class="code-block">${esc(s)}</pre>`;
+  return esc(s);
+}
+
+/** `readable`, forced to a block — for the places that used to emit a `<p>`. */
+function readableBlock(text) {
+  const s = String(text ?? "");
+  if (looksLikeMarkdown(s) || s.includes("\n")) return readable(s);
+  return `<p>${esc(s)}</p>`;
 }
 
 /**
@@ -49,7 +77,7 @@ export function structuralSummary(spec) {
 
   let html = "";
   if (title !== "") html += `<p class="gate-title">${esc(title)}</p>`;
-  if (description !== "") html += `<p>${esc(description)}</p>`;
+  if (description !== "") html += readableBlock(description);
   if (counts.length > 0) html += `<p class="muted">${esc(counts.join(" · "))}</p>`;
   return html;
 }
@@ -63,7 +91,15 @@ function specDetail(spec) {
     if (!Array.isArray(items) || items.length === 0) continue;
     html +=
       `<p class="gate-title">${esc(field.label)}</p><ul class="md-list">` +
-      items.map((i) => `<li>${esc(lineOf(i))}</li>`).join("") +
+      items
+        .map((i) =>
+          // A Finding stays one line on purpose: severity, title and location
+          // are three fields, and prose is not what they are.
+          i !== null && typeof i === "object"
+            ? `<li>${esc(lineOf(i))}</li>`
+            : `<li>${readable(i)}</li>`
+        )
+        .join("") +
       `</ul>`;
   }
   return html;

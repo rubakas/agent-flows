@@ -106,3 +106,49 @@ describe("structuralSummary", () => {
     assert.equal(structuralSummary({}), "");
   });
 });
+
+describe("gateBox — the material is readable, not one escaped line per bullet", () => {
+  const MARKDOWN =
+    "## The check\n\n- it must run `pnpm lint`\n- and **fail** on a warning\n\n```sh\npnpm lint\n```";
+
+  it("renders a markdown requirement as markup", () => {
+    const html = gateBox({ spec: { requirements: [MARKDOWN] } });
+    assert.ok(html.includes('<div class="md">'), `markdown must reach the renderer: ${html}`);
+    assert.match(html, /<strong>fail<\/strong>/u, html);
+    assert.match(html, /<code class="md-code">pnpm lint<\/code>/u, html);
+    assert.ok(
+      !html.includes("## The check"),
+      `a heading rendered as its own source text is the defect: ${html}`
+    );
+  });
+
+  it("wraps a plain multi-line requirement rather than flattening it", () => {
+    const html = gateBox({ spec: { requirements: ["first line\nsecond line"] } });
+    assert.ok(html.includes('<pre class="code-block">'), html);
+    assert.ok(html.includes("first line\nsecond line"), html);
+  });
+
+  it("leaves a one-line requirement as text", () => {
+    const html = gateBox({ spec: { requirements: ["engines.node is the source"] } });
+    assert.ok(html.includes("<li>engines.node is the source</li>"), html);
+  });
+
+  it("keeps a Finding structured rather than turning it into prose", () => {
+    const html = gateBox({
+      spec: { weaknesses: [{ severity: "minor", title: "**bold** title", location: "a.ts:1" }] },
+    });
+    assert.ok(html.includes("minor — **bold** title — a.ts:1"), html);
+    assert.ok(!html.includes("<strong>bold</strong>"), "a finding is three fields, not a blob");
+  });
+
+  it("escapes markdown that carries markup", () => {
+    const html = gateBox({
+      spec: {
+        description: `# ${HOSTILE}`,
+        requirements: [`- ${HOSTILE}`, `**${HOSTILE}**`],
+      },
+    });
+    assert.ok(!html.includes("<img"), `the renderer must escape before it marks up: ${html}`);
+    assert.ok(html.includes("&lt;img"), html);
+  });
+});

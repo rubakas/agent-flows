@@ -9,11 +9,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  declaredStepRows,
   emptyRunsMessage,
   resolveRunsFilter,
   progressCell,
   runProgress,
   runRow,
+  statusClass,
   terminalStepId,
   workflowRow,
 } from "./ui-tables.js";
@@ -330,5 +332,98 @@ describe("resolveRunsFilter — the lit chip owns the rows under it (spec 042 D2
     assert.equal(resolveRunsFilter("active", { activeCount: 0, pinned: true }), "active");
     assert.equal(resolveRunsFilter("finished", { activeCount: 0 }), "finished");
     assert.equal(resolveRunsFilter("all", { activeCount: 3 }), "all");
+  });
+});
+
+describe("declaredStepRows — the run view shows the whole pipeline, not what has started", () => {
+  const DECLARED = [
+    { id: "intake" },
+    { id: "plan", dependsOn: ["intake"] },
+    { id: "review", dependsOn: ["plan"] },
+  ];
+
+  it("gives a declared step no run has reached a pending row", () => {
+    const rows = declaredStepRows(DECLARED, { intake: { status: "succeeded" } });
+    assert.deepEqual(
+      rows.map((r) => [r.id, r.state.status]),
+      [
+        ["intake", "succeeded"],
+        ["plan", "pending"],
+        ["review", "pending"],
+      ]
+    );
+  });
+
+  it("keeps the declared order, not the order state arrived in", () => {
+    const rows = declaredStepRows(DECLARED, {
+      review: { status: "running" },
+      intake: { status: "succeeded" },
+    });
+    assert.deepEqual(
+      rows.map((r) => r.id),
+      ["intake", "plan", "review"]
+    );
+  });
+
+  it("drops Mastra's synthetic merge steps from both sides (042 D7)", () => {
+    const rows = declaredStepRows([...DECLARED, { id: "__merge_level_1" }], {
+      __merge_level_1: { status: "succeeded" },
+      intake: { status: "succeeded" },
+    });
+    assert.ok(!rows.some((r) => r.id.startsWith("__merge_level_")), JSON.stringify(rows));
+  });
+
+  it("falls back to the state's own keys when the declared list is unknown", () => {
+    const rows = declaredStepRows([], { intake: { status: "succeeded" } });
+    assert.deepEqual(
+      rows.map((r) => [r.id, r.state.status]),
+      [["intake", "succeeded"]]
+    );
+  });
+
+  it("shows a step the pipeline no longer declares rather than dropping it", () => {
+    const rows = declaredStepRows(DECLARED, { intake: { status: "succeeded" }, gone: {} });
+    assert.deepEqual(
+      rows.map((r) => r.id),
+      ["intake", "plan", "review", "gone"]
+    );
+  });
+
+  it("a loop step takes the status of its outcome, and never doubles its body", () => {
+    // A `kind: loop` step never runs under its own id: its body steps run under
+    // their own, and Mastra records `__rounds_outcome` when the loop settles.
+    const rows = declaredStepRows([{ id: "rounds" }, { id: "verify", dependsOn: ["rounds"] }], {
+      checks: { status: "succeeded" },
+      __rounds_counter: { status: "succeeded" },
+      __rounds_outcome: { status: "succeeded" },
+    });
+    assert.deepEqual(
+      rows.map((r) => [r.id, r.state.status]),
+      [
+        ["rounds", "succeeded"],
+        ["verify", "pending"],
+        ["checks", "succeeded"],
+        ["__rounds_counter", "succeeded"],
+      ],
+      "the outcome is the loop's own row, not a second one"
+    );
+  });
+
+  it("a loop still iterating reads from its body workflow", () => {
+    const rows = declaredStepRows([{ id: "rounds" }], { rounds__body: { status: "running" } });
+    assert.deepEqual(
+      rows.map((r) => [r.id, r.state.status]),
+      [["rounds", "running"]]
+    );
+  });
+});
+
+describe("statusClass — a status with no class renders as no status", () => {
+  it("has a class for a step that has not started", () => {
+    assert.notEqual(statusClass("pending"), "", "a pending badge must not fall back to muted");
+  });
+
+  it("has a class for a suspended step (runService writes it)", () => {
+    assert.notEqual(statusClass("suspended"), "");
   });
 });

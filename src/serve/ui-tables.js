@@ -129,6 +129,56 @@ export function runProgress(steps, declaredStepIds) {
 }
 
 /**
+ * Mastra's merge bookkeeping as the run view filters it — by prefix, which is
+ * what the page has always done, and deliberately looser than SYNTHETIC_STEP_ID.
+ */
+const MERGE_STEP_PREFIX = /^__merge_level_/u;
+
+/**
+ * The rows the run detail panel shows: every step the pipeline declares, in
+ * declared order, with whatever the run knows about each merged in.
+ *
+ * The panel used to list `Object.keys(steps)` — the run's own state — so a step
+ * that had not started yet had no row and the page answered "what is this
+ * workflow going to do" with "as much of it as has happened". A declared step
+ * with no state is pending; that is a status, and it is the one an operator
+ * opening a fresh run needs to see.
+ *
+ * Two ids are not the same set. `kind: pipeline` steps are expanded before the
+ * definition is served, so their children are declared under the same
+ * namespaced ids the run uses. A `kind: loop` step is NOT expanded: its body
+ * runs under the body pipeline's own ids and Mastra records the loop itself
+ * only as `__<id>_outcome` (once it settles) and `<id>__body` (while it turns).
+ * The loop's declared row takes its status from those rather than sitting at
+ * pending forever, and the body's steps are appended — a step that ran is never
+ * dropped, whether or not the current definition still declares it.
+ *
+ * @param {({ id?: string } | string)[]} declaredSteps The pipeline's own steps;
+ *   `[]` when the definition could not be fetched, which falls back to state.
+ * @param {Record<string, { status?: string }>} steps `GetResult.steps`.
+ * @returns {{ id: string, state: { status?: string } }[]}
+ */
+export function declaredStepRows(declaredSteps, steps) {
+  const state = steps ?? {};
+  const declared = (Array.isArray(declaredSteps) ? declaredSteps : [])
+    .map((s) => (typeof s === "string" ? s : s?.id))
+    .filter((id) => typeof id === "string" && id !== "" && !MERGE_STEP_PREFIX.test(id));
+
+  const taken = new Set();
+  const rows = declared.map((id) => {
+    const key = [id, `__${id}_outcome`, `${id}__body`].find((k) => state[k] !== undefined);
+    if (key !== undefined) taken.add(key);
+    return { id, state: key === undefined ? { status: "pending" } : state[key] };
+  });
+
+  for (const [id, st] of Object.entries(state)) {
+    if (taken.has(id) || MERGE_STEP_PREFIX.test(id)) continue;
+    rows.push({ id, state: st ?? {} });
+  }
+  return rows;
+}
+
+/**
  * `runProgress` as the one line the runs table shows: `verify 4 of 8`, or
  * `verify (last) 4 of 8` between steps. A step the pipeline no longer declares —
  * an old run of a since-edited workflow — keeps its id and drops the position
@@ -159,11 +209,17 @@ export function fmtTime(iso) {
 /** Return a CSS class name for a run/step status string. */
 export function statusClass(s) {
   if (s === "running" || s === "started") return "running";
-  if (s === "awaiting_approval") return "awaiting_approval";
+  // A gate's own step is recorded as "suspended" (runService), which is the
+  // same waiting the awaiting_approval chip already names.
+  if (s === "awaiting_approval" || s === "suspended") return "awaiting_approval";
   if (s === "succeeded" || s === "completed") return "succeeded";
   if (s === "rejected") return "rejected";
   if (s === "cancelled") return "cancelled";
   if (s === "failed" || s === "terminated") return "failed";
+  // A declared step the run has not reached. Without its own class it rendered
+  // as the bare muted chip, indistinguishable from a status the page cannot
+  // name at all.
+  if (s === "pending") return "pending";
   return "";
 }
 

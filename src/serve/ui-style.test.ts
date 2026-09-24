@@ -87,6 +87,7 @@ describe("the page uses one visual language (spec 037 D8/FR-013)", () => {
       "rejected",
       "cancelled",
       "awaiting_approval",
+      "pending",
       "disk",
       "active",
     ]) {
