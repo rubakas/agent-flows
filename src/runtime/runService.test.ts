@@ -841,6 +841,73 @@ describe("RunService FR-006 — per-step output accumulated on record; GetResult
     assert.equal(got.steps.big?.outputTruncated, true, "outputTruncated must be true");
   });
 
+  it("a step that returns plain text excerpts the text, not a JSON string", async () => {
+    // An llm step with no `schema:` returns markdown. JSON.stringify wrapped it
+    // in quotes and turned every newline into a literal backslash-n, so the page
+    // showed `"# Title\n\nRebuild of…"` instead of the paragraph.
+    const run = makeMockRun("run-text-out", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+
+    const markdown = "# Title\n\nRebuild of the intake step.";
+    run.emit({
+      type: "workflow-step-result",
+      payload: {
+        id: "t",
+        stepCallId: "c",
+        status: "success",
+        output: { request: "r", t: markdown },
+      },
+    });
+
+    const excerpt = service.get(runId)!.steps.t?.outputExcerpt ?? "";
+    assert.equal(excerpt, markdown);
+    assert.ok(!excerpt.startsWith('"'), "a plain string must not arrive quoted");
+    assert.ok(!excerpt.includes("\\n"), "newlines must stay newlines, not escape sequences");
+  });
+
+  it("a step that returns an object still excerpts JSON", async () => {
+    const run = makeMockRun("run-obj-out", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+
+    run.emit({
+      type: "workflow-step-result",
+      payload: {
+        id: "o",
+        stepCallId: "c",
+        status: "success",
+        output: { request: "r", o: { verdict: "PASS" } },
+      },
+    });
+
+    assert.equal(service.get(runId)!.steps.o?.outputExcerpt, '{"verdict":"PASS"}');
+  });
+
+  it("truncating text never splits a character in half", async () => {
+    // Raw text is no longer JSON-escaped, so an emoji reaches the slice as a
+    // surrogate pair. Cutting between the halves paints U+FFFD on the page.
+    const run = makeMockRun("run-emoji-out", successResult(), successResult());
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", {});
+
+    // The emoji straddles index 2048: its high half is the last kept unit.
+    const text = `${"a".repeat(2047)}🚀${"b".repeat(200)}`;
+    run.emit({
+      type: "workflow-step-result",
+      payload: { id: "e", stepCallId: "c", status: "success", output: { request: "r", e: text } },
+    });
+
+    const excerpt = service.get(runId)!.steps.e?.outputExcerpt ?? "";
+    assert.equal(service.get(runId)!.steps.e?.outputTruncated, true);
+    assert.ok(!excerpt.includes("�"), "excerpt carries a replacement character");
+    assert.ok(
+      !/[\uD800-\uDBFF]$/u.test(excerpt),
+      `excerpt ends on a lone high surrogate: ${JSON.stringify(excerpt.slice(-3))}`
+    );
+    assert.equal(excerpt, "a".repeat(2047), "the whole emoji is dropped, never half of it");
+  });
+
   it("step output that fits within 2048 chars has outputTruncated absent or false", async () => {
     const run = makeMockRun("run-small", successResult(), successResult());
     const service = new RunService(makeMastra(run));

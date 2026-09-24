@@ -104,7 +104,7 @@ export interface StepEvent {
   kind: "step-start" | "step-finish" | "step-suspended" | "step-failed" | "step-cancelled";
   stepId: string;
   suspendPayload?: unknown;
-  /** Present on step-finish: first OUTPUT_EXCERPT_LIMIT chars of JSON-serialised output. */
+  /** Present on step-finish: first OUTPUT_EXCERPT_LIMIT chars of the step's output. */
   outputExcerpt?: string;
   /** Present on step-finish when the output was truncated. */
   outputTruncated?: boolean;
@@ -153,7 +153,7 @@ export interface StepState {
   finishedAt?: string;
   /** Failure reason when status is "failed" (spec 033 D3). */
   error?: string;
-  /** First OUTPUT_EXCERPT_LIMIT chars of JSON-serialised step output, if any. */
+  /** First OUTPUT_EXCERPT_LIMIT chars of the step's output, if any. */
   outputExcerpt?: string;
   /** True when the output was longer than OUTPUT_EXCERPT_LIMIT. */
   outputTruncated?: boolean;
@@ -377,8 +377,34 @@ interface RunRecord {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/** Max characters kept in outputExcerpt (FR-006). JSON is ASCII-safe so slice is safe here. */
+/** Max characters kept in outputExcerpt (FR-006). */
 const OUTPUT_EXCERPT_LIMIT = 2048;
+
+/**
+ * The text form of a step's own output.
+ *
+ * A step with no `schema:` returns a plain markdown string. JSON.stringify would
+ * wrap it in quotes and escape every newline, and the page would show
+ * `"# Title\n\nRebuild of…"` instead of the paragraph the model wrote. Only
+ * structured output needs serialising.
+ */
+function excerptSource(value: unknown): string {
+  return typeof value === "string" ? value : String(JSON.stringify(value));
+}
+
+/**
+ * Cut to at most `limit` UTF-16 units without splitting a character.
+ *
+ * Raw model text is no longer JSON-escaped, so it carries emoji and other
+ * astral characters as surrogate pairs; a cut landing between the two halves
+ * emits U+FFFD where a character used to be.
+ */
+function sliceWholeChars(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const head = text.slice(0, limit);
+  const last = head.charCodeAt(limit - 1);
+  return last >= 0xd800 && last <= 0xdbff ? head.slice(0, limit - 1) : head;
+}
 
 // ── RunService ─────────────────────────────────────────────────────────────────
 
@@ -577,9 +603,9 @@ export class RunService {
             ? (output as Record<string, unknown>)[id]
             : undefined;
         if (ownOutput !== undefined) {
-          const serialized = JSON.stringify(ownOutput);
+          const serialized = excerptSource(ownOutput);
           if (serialized.length > OUTPUT_EXCERPT_LIMIT) {
-            state.outputExcerpt = serialized.slice(0, OUTPUT_EXCERPT_LIMIT);
+            state.outputExcerpt = sliceWholeChars(serialized, OUTPUT_EXCERPT_LIMIT);
             state.outputTruncated = true;
           } else {
             state.outputExcerpt = serialized;
