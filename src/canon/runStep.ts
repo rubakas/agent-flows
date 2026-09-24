@@ -158,6 +158,10 @@ function makeCheckOutputScrubber(
 /** Maximum combined stdout+stderr retained in CheckResult.output (64 KB). */
 export const CHECK_OUTPUT_CAP = 65_536;
 
+/** Disclosure spliced into the middle of a capped check output. */
+export const CHECK_TRUNCATION_MARKER = (droppedChars: number): string =>
+  `\n[TRUNCATED: ${droppedChars} characters omitted from the middle of this output]\n`;
+
 /** Milliseconds between SIGTERM and SIGKILL when a check step is aborted. */
 const CHECK_KILL_ESCALATION_MS = 3_000;
 
@@ -166,6 +170,10 @@ export interface CheckResult {
   passed: boolean;
   exitCode: number;
   output: string;
+  /** True when the command produced more than CHECK_OUTPUT_CAP chars. */
+  truncated: boolean;
+  /** Characters dropped from the middle of `output`; 0 when nothing was cut. */
+  droppedChars: number;
 }
 
 /**
@@ -206,15 +214,37 @@ export async function runCheckStep(
     // No stdin is needed; close it immediately so commands that read stdin don't hang.
     child.stdin.end();
 
-    let combined = "";
+    // Head-and-tail rather than the tail alone. A failing build or test names its
+    // root cause first and its verdict last; keeping only the tail silently threw
+    // away the first error, and the surviving tail reads like the whole story.
+    // Keeping both ends within the same budget loses only the middle — and the
+    // middle is disclosed inline by CHECK_TRUNCATION_MARKER.
+    const headBudget = Math.floor(CHECK_OUTPUT_CAP / 2);
+    let head = "";
+    let tail = "";
+    let droppedChars = 0;
 
     const append = (data: string) => {
-      combined += data;
-      // Keep only the last CHECK_OUTPUT_CAP chars to bound memory and context size.
-      if (combined.length > CHECK_OUTPUT_CAP) {
-        combined = combined.slice(combined.length - CHECK_OUTPUT_CAP);
+      let rest = data;
+      if (head.length < headBudget) {
+        const take = headBudget - head.length;
+        head += rest.slice(0, take);
+        rest = rest.slice(take);
+      }
+      if (rest === "") return;
+      tail += rest;
+      const tailBudget = CHECK_OUTPUT_CAP - head.length;
+      if (tail.length > tailBudget) {
+        droppedChars += tail.length - tailBudget;
+        tail = tail.slice(tail.length - tailBudget);
       }
     };
+
+    // The cut is stated in the output text itself, not only in the `truncated`
+    // field: this string is spliced into a later step's prompt, where a model
+    // reads the text and may never look at the surrounding JSON.
+    const combinedOutput = (): string =>
+      droppedChars === 0 ? head + tail : head + CHECK_TRUNCATION_MARKER(droppedChars) + tail;
 
     const scrubbers: Record<"stdout" | "stderr", StreamScrubber> = {
       stdout: makeScrubber(),
@@ -245,7 +275,13 @@ export async function runCheckStep(
 
     child.on("error", (err) => {
       deadline?.cancel();
-      resolve({ passed: false, exitCode: -1, output: `spawn error: ${err.message}` });
+      resolve({
+        passed: false,
+        exitCode: -1,
+        output: `spawn error: ${err.message}`,
+        truncated: false,
+        droppedChars: 0,
+      });
     });
 
     child.on("close", (code) => {
@@ -257,11 +293,17 @@ export async function runCheckStep(
           reason?.name === "TimeoutError"
             ? `Step timed out after ${effectiveTimeoutMs}ms`
             : "Step was cancelled";
-        resolve({ passed: false, exitCode: -1, output: msg });
+        resolve({ passed: false, exitCode: -1, output: msg, truncated: false, droppedChars: 0 });
         return;
       }
       const exitCode = code ?? -1;
-      resolve({ passed: exitCode === 0, exitCode, output: combined });
+      resolve({
+        passed: exitCode === 0,
+        exitCode,
+        output: combinedOutput(),
+        truncated: droppedChars > 0,
+        droppedChars,
+      });
     });
 
     // FR-015: signal the whole process group so forked grandchildren die too.

@@ -1087,6 +1087,50 @@ describe("step builders — one step.start and exactly one terminal step.result"
   });
 });
 
+describe("a capped check output stays disclosed once it reaches a prompt", () => {
+  it("renders the truncation marker into the downstream llm prompt", async () => {
+    // A check whose output exceeds CHECK_OUTPUT_CAP, then an llm step whose
+    // prompt interpolates that check's ctx entry — the exact path by which a
+    // model reads a check's output.
+    const command =
+      "printf 'HEADSENTINEL'; i=0; while [ $i -lt 700 ]; do printf '%0100d' $i; i=$((i+1)); done; printf 'TAILSENTINEL'";
+    const checkDef: StepDef = { id: "bigcheck", kind: "check", command };
+    const checkStep = buildCheckStep(
+      checkDef,
+      { registry: NOOP_REGISTRY, store: NOOP_STORE },
+      undefined
+    );
+    const ctx = (await (checkStep as any).execute({
+      inputData: {},
+      suspend: () => undefined as never,
+    })) as Record<string, unknown>;
+
+    const llmDef: StepDef = { id: "reader", kind: "llm", prompt: "prompts/reader.md" };
+    let rendered = "";
+    const runner: typeof runLlmStep = async (_entry, prompt) => {
+      rendered = prompt;
+      return "ok";
+    };
+    const llmStep = buildLlmStep(
+      llmDef,
+      { reader: "Read this check output:\n{{bigcheck}}" },
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+      undefined
+    );
+    await (llmStep as any).execute({ inputData: ctx, suspend: () => undefined as never });
+
+    assert.match(
+      rendered,
+      /\[TRUNCATED: \d+ characters omitted/u,
+      "the model reads the prompt text — the cut must be stated there, not only in a JSON field"
+    );
+    assert.ok(
+      rendered.includes("HEADSENTINEL") && rendered.includes("TAILSENTINEL"),
+      "both ends of the check output must reach the prompt"
+    );
+  });
+});
+
 // ─── Spec 039: the provider profile is resolved per run, not per build ────────
 
 describe("buildLlmStep — per-run provider", () => {

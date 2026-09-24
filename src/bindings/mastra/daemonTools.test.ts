@@ -155,6 +155,38 @@ describe("get_run — forwards per-step progress (D3/V3)", () => {
     ]);
   });
 
+  it("forwards outputTruncated so a cut excerpt is never read as the whole output", async () => {
+    handler = (_req, res) => {
+      respondJson(res, 200, {
+        runId: "run-3b",
+        pipelineId: "develop",
+        status: "succeeded",
+        steps: {
+          "develop.big": {
+            status: "succeeded",
+            outputExcerpt: "x".repeat(16),
+            outputTruncated: true,
+          },
+          "develop.small": { status: "succeeded", outputExcerpt: '{"ok":true}' },
+        },
+      });
+    };
+
+    const out = (await getRunState("run-3b")) as { steps: Record<string, unknown>[] };
+    const big = out.steps.find((s) => s.id === "develop.big");
+    const small = out.steps.find((s) => s.id === "develop.small");
+    assert.equal(
+      big?.outputTruncated,
+      true,
+      "get_run must tell the caller the excerpt is a prefix of a longer output"
+    );
+    assert.equal(
+      "outputTruncated" in (small ?? {}),
+      false,
+      "an untruncated excerpt must carry no truncation flag at all"
+    );
+  });
+
   it("returns an empty steps array when the daemon reports no steps yet", async () => {
     handler = (_req, res) => {
       respondJson(res, 200, { runId: "run-4", pipelineId: "develop", status: "running" });

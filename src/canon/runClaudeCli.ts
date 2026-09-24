@@ -159,41 +159,69 @@ export function makeLoopDetector(): {
 
 /**
  * Builds a bounded action digest from observed tool pairs.
- * Includes only tool names and model-authored inputs (truncated), never tool results.
+ * Includes only tool names and model-authored inputs (shortened), never tool results.
  * Exported for direct unit testing (FR-010).
+ *
+ * Every omission this function makes is stated in the text it returns. The digest
+ * is fed back to the model as the record of the interrupted attempt, and an
+ * unmarked cut reads as "this never happened" — which is exactly the wrong
+ * conclusion to hand a model deciding what to try next.
  */
 export function buildDigest(pairs: ToolPair[]): string {
   const MAX_TOTAL = 4096;
   const INPUT_TRUNCATE = 200;
   const LAST_N = 30;
 
+  const earlierOmitted = Math.max(0, pairs.length - LAST_N);
   const recent = pairs.slice(-LAST_N);
 
-  // Collapse consecutive identical pairs into a count
+  // Collapse consecutive identical pairs into a count. Comparison is on the full
+  // input: comparing a shortened stored input against a full incoming one made
+  // long repeated calls — the ones worth collapsing most — never collapse.
   const collapsed: { name: string; input: string; count: number }[] = [];
   for (const p of recent) {
     const last = collapsed[collapsed.length - 1];
     if (last?.name === p.name && last.input === p.input) {
       last.count++;
     } else {
-      collapsed.push({ name: p.name, input: p.input.slice(0, INPUT_TRUNCATE), count: 1 });
+      collapsed.push({ name: p.name, input: p.input, count: 1 });
     }
   }
 
-  const lines = collapsed.map((c) =>
-    c.count > 1 ? `${c.name}(${c.input}) ×${c.count}` : `${c.name}(${c.input})`
-  );
+  const lines = collapsed.map((c) => {
+    const input =
+      c.input.length > INPUT_TRUNCATE
+        ? `${c.input.slice(0, INPUT_TRUNCATE)}… +${c.input.length - INPUT_TRUNCATE} chars`
+        : c.input;
+    return c.count > 1 ? `${c.name}(${input}) ×${c.count}` : `${c.name}(${input})`;
+  });
 
-  // Cap total size
-  let total = 0;
+  const earlierNote =
+    earlierOmitted > 0
+      ? `…${earlierOmitted} earlier call(s) omitted — this digest keeps the last ${LAST_N}`
+      : undefined;
+  const budgetNote = (n: number) => `…and ${n} more distinct call(s) omitted — digest size limit`;
+
+  // The budget note is reserved for up front so the size cap can never be the
+  // thing that drops the disclosure of what the size cap dropped.
+  const reserve = budgetNote(lines.length).length + 1;
+  let total = earlierNote === undefined ? 0 : earlierNote.length + 1;
   const kept: string[] = [];
-  for (const line of lines) {
-    if (total + line.length > MAX_TOTAL) break;
-    kept.push(line);
-    total += line.length + 1;
+  let budgetOmitted = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (total + lines[i].length + 1 + reserve > MAX_TOTAL) {
+      budgetOmitted = lines.length - i;
+      break;
+    }
+    kept.push(lines[i]);
+    total += lines[i].length + 1;
   }
 
-  return kept.join("\n");
+  return [
+    ...(earlierNote === undefined ? [] : [earlierNote]),
+    ...kept,
+    ...(budgetOmitted > 0 ? [budgetNote(budgetOmitted)] : []),
+  ].join("\n");
 }
 
 // ── Canonical JSON (sorted keys) ──────────────────────────────────────────────

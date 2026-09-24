@@ -16,6 +16,7 @@ import {
   StepWatchdogError,
   WATCHDOG_DIGEST_OPEN,
   WATCHDOG_DIGEST_CLOSE,
+  CHECK_OUTPUT_CAP,
   runCheckStep,
   runLlmStep,
 } from "./runStep.js";
@@ -724,6 +725,37 @@ describe("runLlmStep — FR-007 budget wiring", () => {
     });
     await runLlmStep(entry, "hi", { spawn });
     assert.ok(!capturedArgs[0].includes("--max-budget-usd"), "flag must be absent");
+  });
+
+  it("outputJsonSchema on deps yields --json-schema in the claude argv", async () => {
+    const { spawn, capturedArgs } = makeFakeSpawn({
+      stdoutChunks: [makeStreamJsonStdout("ok")],
+    });
+    const schema = { type: "object", required: ["weaknesses"] };
+    await runLlmStep(entry, "hi", { spawn, outputJsonSchema: schema });
+    const idx = capturedArgs[0].indexOf("--json-schema");
+    assert.ok(idx !== -1, "--json-schema must be in argv");
+    assert.equal(capturedArgs[0][idx + 1], JSON.stringify(schema));
+  });
+
+  it("api transport ignores outputJsonSchema rather than rejecting the step", async () => {
+    const apiEntry: ModelEntry = {
+      id: "api-test",
+      transport: "api",
+      api: { endpoint: "http://localhost/v1/chat", model: "gpt" },
+    };
+    const fetchFn = async () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content: "ok" } }] }),
+        text: async () => "{}",
+      }) as Response;
+    assert.equal(
+      await runLlmStep(apiEntry, "hi", { fetchFn, outputJsonSchema: { type: "object" } }),
+      "ok",
+      "a claude-only structured-output flag must not fail an api step"
+    );
   });
 
   it("api transport rejects if maxBudgetUsd is set (runtime error)", async () => {
@@ -1632,6 +1664,52 @@ describe("runCheckStep — real execution", () => {
       result.output.toLowerCase().includes("timeout") || result.output.includes("100ms"),
       `output should mention timeout; got: ${result.output}`
     );
+  });
+});
+
+// ── runCheckStep — capped output discloses the cut ───────────────────────────
+
+describe("runCheckStep — a capped output says so", () => {
+  // 70_024 chars: a sentinel at each end so the test can tell head-keeping,
+  // tail-keeping and head-and-tail-keeping apart.
+  const HUGE = `printf 'HEADSENTINEL'; i=0; while [ $i -lt 700 ]; do printf '%0100d' $i; i=$((i+1)); done; printf 'TAILSENTINEL'`;
+  const PRODUCED = 12 + 700 * 100 + 12;
+
+  it("reports truncated:true with the exact number of dropped characters", async () => {
+    const result = await runCheckStep(HUGE);
+
+    assert.equal(result.truncated, true, "an output over the cap must declare itself truncated");
+    assert.equal(
+      result.droppedChars,
+      PRODUCED - CHECK_OUTPUT_CAP,
+      "droppedChars must be what the cap actually discarded"
+    );
+  });
+
+  it("keeps both ends and names the gap in the text a prompt will carry", async () => {
+    const result = await runCheckStep(HUGE);
+
+    assert.ok(
+      result.output.includes("HEADSENTINEL"),
+      "the first output of a failing command is its root cause — it must survive the cap"
+    );
+    assert.ok(
+      result.output.includes("TAILSENTINEL"),
+      "the verdict at the end must survive the cap too"
+    );
+    assert.match(
+      result.output,
+      new RegExp(`\\[TRUNCATED: ${PRODUCED - CHECK_OUTPUT_CAP} characters omitted`),
+      "the omission must be visible in the output text itself, not only in a sibling field"
+    );
+  });
+
+  it("claims no truncation when the command stayed under the cap", async () => {
+    const result = await runCheckStep("printf 'hello world'");
+
+    assert.equal(result.truncated, false);
+    assert.equal(result.droppedChars, 0);
+    assert.ok(!result.output.includes("TRUNCATED"), "an intact output must not claim a cut");
   });
 });
 

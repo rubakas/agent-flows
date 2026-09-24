@@ -751,6 +751,69 @@ describe("runClaudeCli — T-9 injection bounding (FR-005)", () => {
     assert.ok(!digest.includes("x".repeat(201)), "huge blob must be truncated in digest");
   });
 
+  it("discloses how many calls the LAST_N window dropped", () => {
+    const pairs = Array.from({ length: 42 }, (_, i) => ({
+      name: "Read",
+      input: `{"path":"file${i}.ts"}`,
+    }));
+
+    const digest = buildDigest(pairs);
+
+    assert.match(
+      digest,
+      /12 earlier call\(s\) omitted/,
+      "a digest that keeps only the last 30 must say how many older calls it dropped"
+    );
+    assert.ok(
+      !digest.includes("file0.ts"),
+      "sanity: the oldest call really is absent, so the note is load-bearing"
+    );
+  });
+
+  it("discloses how many calls the size budget dropped", () => {
+    // Distinct inputs near the per-entry limit, so the 4 KB budget bites well
+    // before the 30-call window does.
+    const pairs = Array.from({ length: 30 }, (_, i) => ({
+      name: "Read",
+      input: `{"path":"${String(i).padStart(3, "0")}${"p".repeat(190)}.ts"}`,
+    }));
+
+    const digest = buildDigest(pairs);
+
+    assert.ok(digest.length <= 4096, `digest must stay ≤ 4096, got ${digest.length}`);
+    const note = /…and (\d+) more distinct call\(s\) omitted/u.exec(digest);
+    assert.ok(note, `the size cap must disclose what it dropped; got:\n${digest.slice(-200)}`);
+    const kept = digest.split("\n").filter((l) => l.startsWith("Read(")).length;
+    assert.equal(
+      kept + Number(note[1]),
+      30,
+      "the disclosed count plus the kept lines must account for every distinct call"
+    );
+  });
+
+  it("marks a shortened input instead of passing off a prefix as whole", () => {
+    const full = `{"content":"${"x".repeat(1_000)}"}`;
+    const digest = buildDigest([{ name: "Edit", input: full }]);
+
+    assert.match(
+      digest,
+      new RegExp(`\\+${full.length - 200} chars`),
+      "a shortened input must state how much of it is missing"
+    );
+  });
+
+  it("carries no omission note when nothing was omitted", () => {
+    const digest = buildDigest([
+      { name: "Read", input: '{"path":"a.ts"}' },
+      { name: "Glob", input: '{"pattern":"*.ts"}' },
+    ]);
+
+    assert.ok(
+      !/omitted|chars/u.test(digest),
+      `a complete digest must not claim anything was cut; got:\n${digest}`
+    );
+  });
+
   it("digest delimiters and preamble appear in watchdog retry prompt (runStep integration tested separately)", () => {
     // This test proves buildDigest produces content suitable for the digest section
     const pairs = [

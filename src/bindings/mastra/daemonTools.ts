@@ -65,6 +65,8 @@ export interface RunStepView {
   startedAt?: string;
   finishedAt?: string;
   outputExcerpt?: string;
+  /** True when `outputExcerpt` is a prefix of a longer output. */
+  outputTruncated?: boolean;
   error?: string;
   /** Resolved model for llm steps (spec 033 D6). */
   model?: string;
@@ -77,6 +79,7 @@ interface DaemonStepState {
   startedAt?: string;
   finishedAt?: string;
   outputExcerpt?: string;
+  outputTruncated?: boolean;
   error?: string;
   /** Rendered prompt — deliberately never forwarded to chat (spec 033 D6). */
   prompt?: string;
@@ -185,6 +188,9 @@ function toStepViews(steps: Record<string, DaemonStepState> | undefined): RunSte
     ...(state.startedAt !== undefined ? { startedAt: state.startedAt } : {}),
     ...(state.finishedAt !== undefined ? { finishedAt: state.finishedAt } : {}),
     ...(state.outputExcerpt !== undefined ? { outputExcerpt: state.outputExcerpt } : {}),
+    // Without this flag the excerpt reads as the whole output, and a caller that
+    // believes it is whole treats what was cut as absent (spec 033 D3).
+    ...(state.outputTruncated !== undefined ? { outputTruncated: state.outputTruncated } : {}),
     ...(state.error !== undefined ? { error: state.error } : {}),
     ...(state.model !== undefined ? { model: state.model } : {}),
     ...(state.command !== undefined ? { command: state.command } : {}),
