@@ -13,7 +13,7 @@ import { describe, it } from "node:test";
 import { ModelRegistry } from "../canon/registry.js";
 import { packageRoot } from "../packageRoot.js";
 
-import { SUMMARY_CHAR_CAP, runGateSummary } from "./gateSummary.js";
+import { SUMMARY_CHAR_CAP, SUMMARY_SHORTENED_NOTE, runGateSummary } from "./gateSummary.js";
 import type { GateSummaryDeps } from "./gateSummary.js";
 import type { ProviderProfile } from "../canon/registry.js";
 
@@ -147,8 +147,49 @@ describe("runGateSummary — what reaches the box is bounded (D8)", () => {
       PAYLOAD
     );
     assert.ok("summary" in out);
-    assert.ok(out.summary.length <= SUMMARY_CHAR_CAP + 1, String(out.summary.length));
-    assert.ok(out.summary.endsWith("…"), "and says it was cut");
+    const body = out.summary.replace(SUMMARY_SHORTENED_NOTE, "").trimEnd();
+    assert.ok(body.length <= SUMMARY_CHAR_CAP, String(body.length));
+    assert.ok(out.summary.includes(SUMMARY_SHORTENED_NOTE), "and says it was cut");
+  });
+
+  it("ends a shortened summary at a sentence, never mid-word", async () => {
+    // The failure the owner screenshotted: "…an unguarded caller-s…". The cap
+    // lands inside the third sentence, so the second is the last one kept.
+    const tail = ` It ${"also ".repeat(200)}does.`;
+    const raw = `It adds a caller-supplied path. It never checks that path.${tail} And more.`;
+    const out = await runGateSummary(deps({ runner: async () => raw }), "p", "g", PAYLOAD);
+
+    assert.ok("summary" in out);
+    const body = out.summary.replace(SUMMARY_SHORTENED_NOTE, "").trimEnd();
+    assert.ok(body.length <= SUMMARY_CHAR_CAP, `body is ${body.length} chars`);
+    assert.match(body, /\.$/u, `must end at a sentence, got: …${body.slice(-40)}`);
+    assert.ok(
+      raw.startsWith(body),
+      "the kept text must be a prefix of what the model actually wrote"
+    );
+    assert.ok(
+      !out.summary.endsWith("…"),
+      "a bare ellipsis is not a disclosure — say the summary was shortened"
+    );
+  });
+
+  it("cuts at a word boundary when the model wrote no sentence end", async () => {
+    const out = await runGateSummary(
+      deps({ runner: async () => "word ".repeat(1000) }),
+      "p",
+      "g",
+      PAYLOAD
+    );
+    assert.ok("summary" in out);
+    const body = out.summary.replace(SUMMARY_SHORTENED_NOTE, "").trimEnd();
+    assert.ok(body.endsWith("word"), `cut mid-word: …${JSON.stringify(body.slice(-12))}`);
+  });
+
+  it("a summary within the cap is left exactly as written", async () => {
+    const raw = "It pins Node to 22.x and nothing else.";
+    const out = await runGateSummary(deps({ runner: async () => raw }), "p", "g", PAYLOAD);
+    assert.ok("summary" in out);
+    assert.equal(out.summary, raw);
   });
 
   it("strips the wrappers the prompt forbids", async () => {

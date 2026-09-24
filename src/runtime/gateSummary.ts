@@ -61,6 +61,45 @@ function tidy(raw: string): string {
 }
 
 /**
+ * What the box says when it had to drop part of the paragraph.
+ *
+ * A bare "…" claims a continuation the reader can go and find. There is none:
+ * the rest of the summary is discarded here and persisted nowhere, so the note
+ * says that instead. The material itself is untouched and still below.
+ */
+export const SUMMARY_SHORTENED_NOTE =
+  "[Shortened to fit this box — the rest of the model's paragraph is not shown. The material below is complete.]";
+
+/** Index just past the last sentence that ends at or before `end`, or -1. */
+function lastSentenceEnd(text: string, end: number): number {
+  let found = -1;
+  for (const m of text.slice(0, end).matchAll(/[.!?]["'”’)\]]*(?=\s|$)/gu)) {
+    found = m.index + m[0].length;
+  }
+  return found;
+}
+
+/**
+ * Shorten an over-long summary at a boundary a reader recognises.
+ *
+ * Preference order: the last complete sentence, then the last word. Cutting
+ * mid-word is what produced "including an unguarded caller-s…" on a screen
+ * whose entire job is to tell a human what they are approving.
+ */
+function shorten(text: string): string {
+  if (text.length <= SUMMARY_CHAR_CAP) return text;
+  const sentence = lastSentenceEnd(text, SUMMARY_CHAR_CAP);
+  let cut = sentence;
+  if (cut <= 0) {
+    // No sentence ended in time — fall back to the last whitespace, and only
+    // if even that is missing (one unbroken token) cut at the cap.
+    const space = text.slice(0, SUMMARY_CHAR_CAP).search(/\s+\S*$/u);
+    cut = space > 0 ? space : SUMMARY_CHAR_CAP;
+  }
+  return `${text.slice(0, cut).trimEnd()}\n\n${SUMMARY_SHORTENED_NOTE}`;
+}
+
+/**
  * Describe what a suspended gate is asking about.
  *
  * Returns an `error` rather than throwing, for every failure: no model, a
@@ -118,8 +157,5 @@ export async function runGateSummary(
 
   const text = tidy(String(raw ?? ""));
   if (text === "") return { error: "Summary was empty" };
-  return {
-    summary:
-      text.length > SUMMARY_CHAR_CAP ? text.slice(0, SUMMARY_CHAR_CAP).trimEnd() + "…" : text,
-  };
+  return { summary: shorten(text) };
 }
