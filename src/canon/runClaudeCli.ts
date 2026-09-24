@@ -66,6 +66,13 @@ export interface RunCliOptions {
   extraArgs?: string[];
   /** Emit --max-budget-usd <amount> when set (FR-007). */
   maxBudgetUsd?: number;
+  /**
+   * JSON Schema for the CLI's structured output (`--json-schema`). When set, the
+   * model answers through a structured-output tool call and the terminal result
+   * event carries pure JSON, so a narrated preamble or a markdown fence in the
+   * assistant text can no longer reach the caller's JSON.parse.
+   */
+  jsonSchema?: unknown;
   /** Override STALL_SILENCE_MS in tests. */
   _stallSilenceMs?: number;
   /** Receives the stream's inner events as they are parsed (spec 036 D2). */
@@ -364,7 +371,16 @@ export function runClaudeCli(
   opts: RunCliOptions = {},
   deps: { spawn?: SpawnFn; env?: NodeJS.ProcessEnv } = {}
 ): Promise<RunCliResult> {
-  const { model, cwd, signal, extraArgs = [], maxBudgetUsd, _stallSilenceMs, onEvent } = opts;
+  const {
+    model,
+    cwd,
+    signal,
+    extraArgs = [],
+    maxBudgetUsd,
+    jsonSchema,
+    _stallSilenceMs,
+    onEvent,
+  } = opts;
   const spawnFn = deps.spawn ?? defaultSpawn;
 
   // Layer-0: scrub provider keys before passing env to child
@@ -382,6 +398,7 @@ export function runClaudeCli(
     "--include-partial-messages",
     ...(model ? ["--model", model] : []),
     ...(maxBudgetUsd !== undefined ? ["--max-budget-usd", String(maxBudgetUsd)] : []),
+    ...(jsonSchema !== undefined ? ["--json-schema", JSON.stringify(jsonSchema)] : []),
     ...extraArgs,
   ];
 

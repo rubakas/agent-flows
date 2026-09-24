@@ -502,6 +502,43 @@ export function writeStepOutput(
   }
 }
 
+/**
+ * Write the raw text a schema-gated step produced, beside its outputs. Never
+ * throws, for the same reason writeStepOutput does not — and one more: this is
+ * called on the failure path, where the real error must be the one that
+ * propagates.
+ *
+ * `writeStepOutput` is only reached when a step succeeds, so before this a
+ * failed parse left nothing on disk at all and the text that broke it could
+ * only be guessed at from the error message's 200-character excerpt.
+ */
+export function writeStepRawOutput(
+  runId: string | undefined,
+  stepId: string,
+  attempts: readonly string[]
+): void {
+  if (runId === undefined || runId === "") return;
+  const entry = runs.get(runId);
+  if (entry === undefined) return;
+  if (!isSafeStepId(stepId)) return;
+
+  const path = join(entry.outputsDir, `${stepId}.raw.txt`);
+  const body = attempts.map((text, i) => `=== attempt ${i + 1} ===\n${text}`).join("\n\n");
+  try {
+    mkdirSync(entry.outputsDir, { recursive: true, mode: 0o700 });
+    writeFileSync(path, body, { encoding: "utf8", mode: 0o600 });
+  } catch (err) {
+    reportIoError(path, err);
+  }
+}
+
+/** Path of one step's persisted raw text. Throws RangeError for an unsafe id. */
+export function stepRawOutputFile(dir: string, pipelineId: string, stepId: string): string {
+  assertSafePipelineId(pipelineId);
+  assertSafeStepId(stepId);
+  return join(dir, `${pipelineId}.outputs`, `${stepId}.raw.txt`);
+}
+
 /** Read one persisted step output. Returns undefined when it is absent or unreadable. */
 export function readStepOutput(path: string): unknown {
   try {

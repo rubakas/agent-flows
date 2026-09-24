@@ -137,6 +137,8 @@ export function renderLogEvent(event) {
           event.decidedBy === "human" ? "human" : "judge"
         }`
       );
+    case "retry":
+      return muted(kind, `retry (${str(event.reason)}): ${str(event.detail)}`);
     case "failover":
       return muted(
         kind,

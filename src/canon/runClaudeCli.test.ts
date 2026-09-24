@@ -199,6 +199,29 @@ describe("runClaudeCli — arg construction (FR-001)", () => {
     assert.equal(capturedArgs[0][budgetIdx + 1], "2", "budget value must be stringified");
   });
 
+  it("passes --json-schema, before extraArgs, when jsonSchema is set", async () => {
+    const { spawn, capturedArgs } = makeFakeSpawn({
+      stdoutChunks: [makeStreamJsonStdout("ok")],
+    });
+    const schema = { type: "object", required: ["weaknesses"] };
+    await runClaudeCli("hi", { jsonSchema: schema, extraArgs: ["--restricted"] }, { spawn });
+    const idx = capturedArgs[0].indexOf("--json-schema");
+    assert.ok(idx !== -1, "must include --json-schema flag");
+    assert.equal(capturedArgs[0][idx + 1], JSON.stringify(schema));
+    assert.ok(
+      idx < capturedArgs[0].indexOf("--restricted"),
+      "--json-schema must precede the adapter's extraArgs"
+    );
+  });
+
+  it("omits --json-schema when jsonSchema is not set", async () => {
+    const { spawn, capturedArgs } = makeFakeSpawn({
+      stdoutChunks: [makeStreamJsonStdout("ok")],
+    });
+    await runClaudeCli("hi", {}, { spawn });
+    assert.ok(!capturedArgs[0].includes("--json-schema"));
+  });
+
   it("omits --max-budget-usd when maxBudgetUsd is not set", async () => {
     const { spawn, capturedArgs } = makeFakeSpawn({
       stdoutChunks: [makeStreamJsonStdout("ok")],

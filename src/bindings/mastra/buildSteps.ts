@@ -21,6 +21,7 @@ import {
   isSafeStepId,
   runArtifactDir,
   writeStepOutput,
+  writeStepRawOutput,
 } from "../../runtime/stepLog.js";
 import { describeModel, isFailoverWorthy, runFailoverChain } from "./failover.js";
 import type { FailoverOutcome } from "./failover.js";
@@ -155,6 +156,57 @@ function stripFences(text: string): string {
     .trim();
 }
 
+/**
+ * The first complete, balanced JSON object or array in `text`, or undefined.
+ *
+ * Character-by-character with string and escape state rather than a regex: a
+ * greedy `\{[\s\S]*\}` swallows trailing prose, and a lazy one stops at the
+ * first `}` inside a string value. Both are routine in a model's answer.
+ */
+function extractFirstJsonValue(text: string): string | undefined {
+  for (let start = 0; start < text.length; start += 1) {
+    const open = text[start];
+    if (open !== "{" && open !== "[") continue;
+    const close = open === "{" ? "}" : "]";
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < text.length; i += 1) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === open) depth += 1;
+      else if (ch === close) {
+        depth -= 1;
+        if (depth === 0) return text.slice(start, i + 1);
+      }
+    }
+    // Unterminated from here: the next opening character gets its own attempt,
+    // so a stray brace in the preamble does not hide the real object.
+  }
+  return undefined;
+}
+
+/**
+ * The candidate texts to try parsing, in decreasing order of trust: the answer
+ * as given, the answer with markdown fences removed, then the first balanced
+ * JSON value found anywhere in it. The last one is what survives a narrated
+ * preamble ("Now producing the final critique as JSON.") ahead of the fence.
+ */
+function jsonCandidates(raw: string): string[] {
+  const candidates = [raw.trim()];
+  const stripped = stripFences(raw);
+  if (!candidates.includes(stripped)) candidates.push(stripped);
+  const scanned = extractFirstJsonValue(raw);
+  if (scanned !== undefined && !candidates.includes(scanned)) candidates.push(scanned);
+  return candidates;
+}
+
 function ctxModelOverride(stepId: string, ctxData: Ctx): string | undefined {
   const models = ctxData.models as Record<string, string> | undefined;
   return models?.[stepId];
@@ -207,29 +259,78 @@ function ctxVars(ctxData: Ctx): Record<string, string> {
 function tryParseSchemaOutput(
   raw: string,
   schemaKey: string
-): { ok: true; value: unknown } | { ok: false; error: string; retryNote: string } {
-  const stripped = stripFences(raw);
+):
+  | { ok: true; value: unknown }
+  | { ok: false; reason: "parse" | "schema"; error: string; retryNote: string } {
+  const candidates = jsonCandidates(raw);
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(stripped) as unknown;
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    return { ok: false, error, retryNote: `Your previous output was not valid JSON (${error}).` };
+  let text = candidates[0];
+  let parseError = "";
+  let ok = false;
+  for (const candidate of candidates) {
+    try {
+      parsed = JSON.parse(candidate) as unknown;
+      text = candidate;
+      ok = true;
+      break;
+    } catch (err) {
+      // The strict attempt's message is the one reported: it describes the
+      // answer as the model actually gave it, not a rescue attempt's remains.
+      if (parseError === "") parseError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  if (!ok) {
+    return {
+      ok: false,
+      reason: "parse",
+      error: parseError,
+      retryNote: `Your previous output was not valid JSON (${parseError}).`,
+    };
   }
   if (typeof parsed !== "object" || parsed === null || !(schemaKey in parsed)) {
-    const error = `output missing required key "${schemaKey}". Got: ${stripped.slice(0, 200)}`;
-    return { ok: false, error, retryNote: `Your previous output was not valid JSON (${error}).` };
+    const error = `output missing required key "${schemaKey}". Got: ${text.slice(0, 200)}`;
+    return {
+      ok: false,
+      reason: "schema",
+      error,
+      // It parsed: telling the model its JSON was invalid sends it to fix the
+      // one thing that was already right and leaves the missing key missing.
+      retryNote:
+        `Your previous output was valid JSON but had no top-level "${schemaKey}" key.` +
+        ` Return an object whose "${schemaKey}" key holds the result.`,
+    };
   }
   const violations = validateCanonOutput(schemaKey, parsed);
   if (violations !== undefined) {
     return {
       ok: false,
-      error: `output does not match schema "${schemaKey}": ${violations}. Got: ${stripped.slice(0, 200)}`,
+      reason: "schema",
+      error: `output does not match schema "${schemaKey}": ${violations}. Got: ${text.slice(0, 200)}`,
       retryNote:
         `Your previous output did not match the required JSON Schema` + ` (${violations}).`,
     };
   }
   return { ok: true, value: parsed };
+}
+
+/**
+ * Keeps the text a schema-gated step actually produced, so a failure is
+ * diagnosable from the run directory rather than from a 200-character excerpt
+ * in an error message.
+ *
+ * Swallows everything: this runs on the way to throwing the real error, and a
+ * disk problem here must not become the failure the operator sees instead.
+ */
+function persistRawAttempts(
+  runId: string | undefined,
+  stepId: string,
+  attempts: readonly string[]
+): void {
+  try {
+    writeStepRawOutput(runId, stepId, attempts);
+  } catch (err) {
+    console.error(`[agent-flows] step "${stepId}": raw output not persisted: ${String(err)}`);
+  }
 }
 
 /**
@@ -334,15 +435,18 @@ export function buildLlmStep(
 
       let prompt = renderPrompt(prompts[step.id], ctxVars(ctxData));
 
+      const outputJsonSchema = step.schema
+        ? canonSchemas[step.schema as keyof typeof canonSchemas]
+        : undefined;
+
       // For schema-gated steps: append a strict JSON format instruction so the
       // model knows not to wrap output in markdown fences or add commentary.
-      if (step.schema) {
-        const schema = canonSchemas[step.schema as keyof typeof canonSchemas];
-        if (schema) {
-          prompt +=
-            `\n\nReturn ONLY a valid JSON object matching this JSON Schema` +
-            ` (no markdown, no code fences, no commentary):\n${JSON.stringify(schema)}`;
-        }
+      // It stays even where the transport enforces the schema natively — it is
+      // the only enforcement codex and api have.
+      if (outputJsonSchema) {
+        prompt +=
+          `\n\nReturn ONLY a valid JSON object matching this JSON Schema` +
+          ` (no markdown, no code fences, no commentary):\n${JSON.stringify(outputJsonSchema)}`;
       }
 
       // Tell the agent which skills are available and how to invoke them.
@@ -389,6 +493,10 @@ export function buildLlmStep(
             }
           : {}),
         ...(step.skills?.length ? { skills: step.skills } : {}),
+        // Structured output for the transports that have it: the claude adapter
+        // turns this into --json-schema, and the others ignore it and keep the
+        // prompt instruction above as their only guarantee.
+        ...(outputJsonSchema !== undefined ? { outputJsonSchema } : {}),
         // denyPatterns travels the same path as contentsAccess — a canon
         // declaration dropped here is the bug class this project has hit before.
         // It is gated on the SAME condition: a deny list for a step that declared
@@ -494,12 +602,22 @@ export function buildLlmStep(
         if (step.schema) {
           const r1 = tryParseSchemaOutput(raw, step.schema);
           if (!r1.ok) {
+            // A retry is otherwise only inferable from two `usage` events under
+            // one step.start/step.result pair — a run that paid twice reads as
+            // one expensive call.
+            appendStepLog(runId, step.id, {
+              kind: "retry",
+              stepId: step.id,
+              reason: r1.reason,
+              detail: r1.error,
+            });
             // One retry with explicit error feedback.
             const retryPrompt = `${prompt}\n\n${r1.retryNote} Return ONLY the JSON object.`;
             let retryRaw: string;
             try {
               retryRaw = await runner(entry, retryPrompt, runnerDeps);
             } catch (err) {
+              persistRawAttempts(runId, step.id, [raw]);
               const baseMsg = err instanceof Error ? err.message : String(err);
               const stepMsg = `Step "${step.id}": ${baseMsg}`;
               // FR-008: mirror the write-step workspace report onto the retry path —
@@ -511,6 +629,7 @@ export function buildLlmStep(
             }
             const r2 = tryParseSchemaOutput(retryRaw, step.schema);
             if (!r2.ok) {
+              persistRawAttempts(runId, step.id, [raw, retryRaw]);
               throw new Error(`Step "${step.id}": ${r2.error}`);
             }
             value = r2.value;

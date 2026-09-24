@@ -16,6 +16,7 @@ import {
   TransportFailureError,
   runLlmStep,
 } from "../../canon/runStep.js";
+import { WEAK_SCHEMA } from "../../canon/schemas.js";
 import { makeFakeChild, makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
 import { packageRoot } from "../../packageRoot.js";
 import {
@@ -29,6 +30,7 @@ import {
   readStepOutput,
   runLogFile,
   stepOutputFile,
+  stepRawOutputFile,
 } from "../../runtime/stepLog.js";
 import {
   DEFAULT_CHECK_COMMAND,
@@ -2033,5 +2035,243 @@ describe("buildLlmStep — required: false is an optional dimension", () => {
       /aborted/u,
       "a cancelled run must not walk into its next step because this one was skippable"
     );
+  });
+});
+
+// ─── Narrated, fenced and trailing-prose JSON (spec 044) ─────────────────────
+
+describe("buildLlmStep — extracting the JSON out of what the model actually says", () => {
+  const step: StepDef = {
+    id: "critic",
+    kind: "llm",
+    prompt: "prompts/critic.md",
+    schema: "weaknesses",
+  };
+  const FINDING = { text: "Ambiguous", severity: "medium", blocking: false };
+
+  /** A registered run log in a throwaway directory, with its own readers. */
+  function openTempRunLog(runId: string): {
+    dir: string;
+    events: () => StepLogEvent[];
+    rawOutput: () => string | undefined;
+    cleanup: () => void;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "af-schema-extract-"));
+    openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+    return {
+      dir,
+      events: () => readRunLog(runLogFile(dir, "test-pipeline")),
+      rawOutput: () => {
+        try {
+          return readFileSync(stepRawOutputFile(dir, "test-pipeline", step.id), "utf8");
+        } catch {
+          return undefined;
+        }
+      },
+      cleanup: () => {
+        closeRunLog(runId);
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  function runStep(runner: typeof runLlmStep, runId?: string): Promise<Record<string, unknown>> {
+    const llmStep = buildLlmStep(
+      step,
+      { critic: "critic prompt" },
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+      undefined
+    );
+    return (llmStep as any).execute({
+      inputData: {},
+      ...(runId !== undefined ? { runId } : {}),
+      suspend: () => undefined as never,
+    });
+  }
+
+  /** Answers `text` once and counts how many times the model was asked. */
+  function constantRunner(text: string): { runner: typeof runLlmStep; calls: () => number } {
+    let calls = 0;
+    const runner: typeof runLlmStep = async () => {
+      calls += 1;
+      return text;
+    };
+    return { runner, calls: () => calls };
+  }
+
+  it("parses the run that failed: narration, then a fenced object", async () => {
+    // Verbatim shape of run b565e7fd's `critic` output, which threw
+    // `Unexpected token 'N', "Now produc"... is not valid JSON`.
+    const answer = 'Now producing the final critique as JSON.\n\n```json\n{"weaknesses":[]}\n```';
+    const { runner, calls } = constantRunner(answer);
+
+    const out = await runStep(runner);
+
+    assert.equal(calls(), 1, "a recoverable answer must not be paid for twice");
+    assert.deepEqual(out.critic, { weaknesses: [] });
+  });
+
+  it("parses a bare fenced object", async () => {
+    const { runner, calls } = constantRunner(
+      '```json\n{"weaknesses":[' + JSON.stringify(FINDING) + "]}\n```"
+    );
+
+    const out = await runStep(runner);
+
+    assert.equal(calls(), 1);
+    assert.deepEqual(out.critic, { weaknesses: [FINDING] });
+  });
+
+  it("parses an object followed by trailing prose", async () => {
+    const { runner, calls } = constantRunner(
+      '{"weaknesses":[]}\n\nThat concludes the critique — let me know if you want more.'
+    );
+
+    const out = await runStep(runner);
+
+    assert.equal(calls(), 1);
+    assert.deepEqual(out.critic, { weaknesses: [] });
+  });
+
+  it("does not stop at a brace inside a string value", async () => {
+    // The scanner has to track string state: the first `}` here is inside
+    // "use {placeholder}", and an escaped quote follows it.
+    const finding = {
+      text: 'use {placeholder} and a literal " quote',
+      severity: "high",
+      blocking: true,
+    };
+    const { runner, calls } = constantRunner(
+      'Here it is:\n\n```json\n{"weaknesses":[' + JSON.stringify(finding) + "]}\n```\nDone."
+    );
+
+    const out = await runStep(runner);
+
+    assert.equal(calls(), 1);
+    assert.deepEqual(out.critic, { weaknesses: [finding] });
+  });
+
+  it("retries once, logging a parse retry, when no JSON can be found at all", async () => {
+    const runId = "schema-unparseable";
+    const log = openTempRunLog(runId);
+    try {
+      let calls = 0;
+      const runner: typeof runLlmStep = async () => {
+        calls += 1;
+        return calls === 1
+          ? "I could not complete this task."
+          : '{"weaknesses":[' + JSON.stringify(FINDING) + "]}";
+      };
+
+      const out = await runStep(runner, runId);
+
+      assert.equal(calls, 2, "an unparseable answer must be retried exactly once");
+      assert.deepEqual(out.critic, { weaknesses: [FINDING] });
+      const retries = log
+        .events()
+        .filter((e): e is Extract<StepLogEvent, { kind: "retry" }> => e.kind === "retry");
+      assert.equal(retries.length, 1, "the retry must be visible in the log");
+      assert.equal(retries[0].stepId, step.id);
+      assert.equal(retries[0].reason, "parse");
+    } finally {
+      log.cleanup();
+    }
+  });
+
+  it("retries once, logging a schema retry, when the JSON breaks the schema", async () => {
+    const runId = "schema-violation";
+    const log = openTempRunLog(runId);
+    try {
+      let calls = 0;
+      const runner: typeof runLlmStep = async () => {
+        calls += 1;
+        return calls === 1
+          ? '{"weaknesses":[{"text":"x","severity":"moderate","blocking":false}]}'
+          : '{"weaknesses":[' + JSON.stringify(FINDING) + "]}";
+      };
+
+      const out = await runStep(runner, runId);
+
+      assert.equal(calls, 2);
+      assert.deepEqual(out.critic, { weaknesses: [FINDING] });
+      const retries = log
+        .events()
+        .filter((e): e is Extract<StepLogEvent, { kind: "retry" }> => e.kind === "retry");
+      assert.equal(retries.length, 1);
+      assert.equal(retries[0].reason, "schema", "parsed-but-invalid is a schema retry");
+    } finally {
+      log.cleanup();
+    }
+  });
+
+  it("tells a model that dropped the top-level key that the key is missing", async () => {
+    const prompts: string[] = [];
+    let calls = 0;
+    const runner: typeof runLlmStep = async (_entry, prompt) => {
+      prompts.push(prompt);
+      calls += 1;
+      return calls === 1
+        ? "[" + JSON.stringify(FINDING) + "]"
+        : '{"weaknesses":[' + JSON.stringify(FINDING) + "]}";
+    };
+
+    await runStep(runner);
+
+    const retryPrompt = prompts[1] ?? "";
+    assert.match(
+      retryPrompt,
+      /valid JSON but had no top-level "weaknesses" key/u,
+      "a parsed answer must not be told it was invalid JSON"
+    );
+  });
+
+  it("fails after the retry and leaves both raw answers on disk", async () => {
+    const runId = "schema-twice-bad";
+    const log = openTempRunLog(runId);
+    try {
+      let calls = 0;
+      const runner: typeof runLlmStep = async () => {
+        calls += 1;
+        return calls === 1 ? "first narration, no JSON" : "second narration, still no JSON";
+      };
+
+      await assert.rejects(runStep(runner, runId), /Step "critic":/u);
+
+      const raw = log.rawOutput();
+      assert.ok(raw !== undefined, "a failed parse must leave its raw text on disk");
+      assert.match(raw, /first narration, no JSON/u);
+      assert.match(raw, /second narration, still no JSON/u);
+    } finally {
+      log.cleanup();
+    }
+  });
+
+  it("hands the canon schema to the runner for the transports that enforce it", async () => {
+    let captured: unknown;
+    const runner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+      captured = deps?.outputJsonSchema;
+      return '{"weaknesses":[]}';
+    };
+
+    await runStep(runner);
+
+    assert.deepEqual(captured, WEAK_SCHEMA, "the declared schema must reach the runner deps");
+  });
+
+  it("hands no schema to the runner for a step that declares none", async () => {
+    let captured: unknown = "unset";
+    const runner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+      captured = deps?.outputJsonSchema;
+      return "prose";
+    };
+    const llmStep = buildLlmStep(
+      { id: "enrich", kind: "llm", prompt: "prompts/enrich.md" },
+      { enrich: "enrich prompt" },
+      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
+      undefined
+    );
+    await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
+
+    assert.equal(captured, undefined);
   });
 });

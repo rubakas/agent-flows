@@ -159,6 +159,7 @@ async function runClaudeStep(
       cwd: resolvedWorkspaceDir,
       extraArgs,
       maxBudgetUsd: deps.maxBudgetUsd,
+      jsonSchema: deps.outputJsonSchema,
       _stallSilenceMs: deps._stallSilenceMs,
       onEvent: deps.onEvent,
     };

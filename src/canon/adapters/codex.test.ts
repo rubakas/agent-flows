@@ -116,6 +116,23 @@ function makeCapturingSpawn(mode: "ok" | "spawn-error"): {
   return { spawn, captured: () => captured };
 }
 
+describe("codex adapter — claude-only structured output is ignored", () => {
+  it("outputJsonSchema puts no --json-schema in argv and does not fail the step", async () => {
+    const { spawn, captured } = makeCapturingSpawn("ok");
+
+    const out = await codexAdapter.run("hi", codexEntry, {
+      spawn,
+      outputJsonSchema: { type: "object", required: ["weaknesses"] },
+    });
+
+    assert.equal(out, "OK", "a claude-only flag must not fail a codex step");
+    assert.ok(
+      !(captured()?.args ?? []).includes("--json-schema"),
+      "codex must never receive the claude CLI's structured-output flag"
+    );
+  });
+});
+
 describe("codex adapter — confinement and grant lifecycle (2B)", () => {
   it("read step: runs in the sanitized copy with the confinement flags and no -s", async () => {
     const repo = buildFixtureRepo();

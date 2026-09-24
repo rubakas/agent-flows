@@ -116,6 +116,17 @@ export interface StepRunnerDeps {
    */
   maxBudgetUsd?: number;
   /**
+   * JSON Schema the step's output must match, passed to the claude CLI as
+   * `--json-schema` so the answer arrives as a structured-output tool call and
+   * the result event carries pure JSON (spec 044).
+   *
+   * claude-CLI-only, and IGNORED rather than rejected by the other transports:
+   * unlike maxBudgetUsd, an absent structured-output mode is not a silently
+   * dropped cap but a missing belt — the prompt-level "return only JSON"
+   * instruction is still there and is what codex and api have always had.
+   */
+  outputJsonSchema?: unknown;
+  /**
    * Absolute path to the project workspace root. Supplied by the caller; required
    * when contentsAccess is set. Defaults to process.cwd() when absent and
    * contentsAccess is "read".
