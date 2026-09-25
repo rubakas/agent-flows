@@ -6,7 +6,7 @@
 // is unreachable from a test.
 
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, constants, mkdirSync, openSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -99,6 +99,33 @@ export function daemonChildEnv(projectDir: string, env: NodeJS.ProcessEnv): Node
 }
 
 /**
+ * An append fd on `<stateDir>/daemon.log`, or "ignore" when it cannot be opened.
+ *
+ * Previously both streams went to /dev/null, so an auto-started daemon's own
+ * account of why it stopped — the idle-retirement line above all — was thrown
+ * away, and the only remaining symptom was a tool call that could not connect.
+ * Deliberately unrotated and unformatted: this is a place for the daemon's
+ * output to land, not a logging system.
+ */
+function daemonLogFd(projectDir: string, env: NodeJS.ProcessEnv): number | "ignore" {
+  try {
+    const { dir } = resolveProjectState(projectDir, env);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // O_NOFOLLOW: the state dir is owner-only, but a log path is a predictable
+    // name and appending through a symlink someone else planted would write the
+    // daemon's output wherever it pointed.
+    return openSync(
+      join(dir, "daemon.log"),
+      constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW,
+      0o600
+    );
+  } catch {
+    // A daemon that cannot write a log must still start.
+    return "ignore";
+  }
+}
+
+/**
  * Spawn `agent-flows serve` for `projectDir`, detached and unreferenced.
  *
  * The entry point is resolved from this module's own location — the sibling
@@ -112,13 +139,21 @@ function spawnDetachedDaemon(projectDir: string, env: NodeJS.ProcessEnv): void {
   const ext = __filename.endsWith(".ts") ? ".ts" : ".js";
   const serverModule = join(__dirname, "..", "..", "serve", `server${ext}`);
   const loader = ext === ".ts" ? ["--import", "tsx/esm"] : [];
-  const child = spawn(process.execPath, [...loader, serverModule], {
-    detached: true,
-    stdio: "ignore",
-    env: daemonChildEnv(projectDir, env),
-  });
-  // Unreferenced so the MCP process can exit while the daemon keeps running.
-  child.unref();
+  const logFd = daemonLogFd(projectDir, env);
+  try {
+    const child = spawn(process.execPath, [...loader, serverModule], {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: daemonChildEnv(projectDir, env),
+    });
+    // Unreferenced so the MCP process can exit while the daemon keeps running.
+    child.unref();
+  } finally {
+    // The child holds its own duplicate; leaving ours open would leak one fd
+    // per auto-start for the lifetime of the MCP process — including when the
+    // spawn itself throws.
+    if (logFd !== "ignore") closeSync(logFd);
+  }
 }
 
 /**
