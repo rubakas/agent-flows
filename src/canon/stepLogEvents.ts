@@ -14,6 +14,7 @@ export type StepLogKind =
   | "watchdog"
   | "usage"
   | "step.result"
+  | "step.suspended"
   | "retry"
   | "failover"
   | "decision"
@@ -94,6 +95,20 @@ export interface StepResultPayload {
 }
 
 /**
+ * Emitted by a gate step immediately before it suspends.
+ *
+ * Mastra's stream reports the suspension, but nothing wrote it to the log, so a
+ * run waiting on a human read as a run that had simply stopped emitting — the
+ * one lifecycle transition the events file could not answer for.
+ */
+export interface StepSuspendedPayload {
+  /** The question the gate is asking, as the gate box shows it. */
+  message: string;
+  /** True when this gate refuses an automated verdict and needs a human. */
+  manualOnly: boolean;
+}
+
+/**
  * Emitted by the step builder when a schema-gated step's output is asked for a
  * second time (spec 044).
  *
@@ -168,6 +183,7 @@ export type StepLogEventInput =
   | Tagged<"watchdog", WatchdogPayload>
   | Tagged<"usage", UsagePayload>
   | Tagged<"step.result", StepResultPayload>
+  | Tagged<"step.suspended", StepSuspendedPayload>
   | Tagged<"retry", RetryPayload>
   | Tagged<"failover", FailoverPayload>
   | Tagged<"decision", DecisionPayload>

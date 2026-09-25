@@ -13,6 +13,7 @@ import {
   appendRunLogFileEvent,
   appendStepLog,
   closeRunLog,
+  lastSeqOfFile,
   openRunLog,
   readRunLog,
   readStepOutput,
@@ -558,6 +559,79 @@ describe("stepLog — step outputs (FR-008)", () => {
       assert.throws(() => stepOutputFile(dir, "../../x", "one"), RangeError);
     } finally {
       closeRunLog("escape-run");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── The conventions the raw-line readers depend on ───────────────────────────
+
+describe("stepLog — the line shape the filters read without parsing", () => {
+  it("serialises `kind` as the first key of every line", () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-log-shape-"));
+    try {
+      openRunLog("shape-run", { dir, pipelineId: "p" });
+      // One of each emitter shape, including the two the credential guard
+      // rewrites — a rewrite that moved `kind` would make the log route's
+      // `kinds=` filter drop the line silently. The nested `kind` in the tool
+      // input is the decoy an unanchored regex would have matched.
+      appendStepLog("shape-run", "s", { kind: "step.start", model: "m", transport: "t" });
+      appendStepLog("shape-run", "s", { kind: "message", role: "assistant", text: "hi" });
+      appendStepLog("shape-run", "s", {
+        kind: "tool.call",
+        callId: "c1",
+        name: "Read",
+        input: { file_path: "/x/.env", kind: "decoy" },
+      });
+      appendStepLog("shape-run", "s", {
+        kind: "tool.result",
+        callId: "c1",
+        ok: true,
+        excerpt: "x",
+      });
+      appendStepLog("shape-run", "s", { kind: "step.result", status: "succeeded", durationMs: 1 });
+
+      const lines = readFileSync(runLogFile(dir, "p"), "utf8")
+        .split("\n")
+        .filter((l) => l !== "");
+      assert.equal(lines.length, 5);
+      for (const line of lines) {
+        assert.ok(
+          line.startsWith('{"kind":"'),
+          `the kind filter is anchored at the line start; this line is not: ${line.slice(0, 60)}`
+        );
+      }
+    } finally {
+      closeRunLog("shape-run");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads the last seq from the file's tail alone", () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-log-lastseq-"));
+    try {
+      const file = runLogFile(dir, "p");
+      assert.equal(lastSeqOfFile(file), 0, "an absent file has no seq");
+
+      openRunLog("lastseq-run", { dir, pipelineId: "p" });
+      assert.equal(lastSeqOfFile(file), 0, "an empty file has no seq");
+
+      // Past the 64 KiB tail window, so the answer cannot come from the head.
+      for (let i = 0; i < 40; i++) {
+        appendStepLog("lastseq-run", "s", {
+          kind: "message",
+          role: "assistant",
+          text: "x".repeat(4_000),
+        });
+      }
+      assert.ok(statSync(file).size > 64 * 1024, "the fixture must exceed the tail window");
+      assert.equal(lastSeqOfFile(file), 40);
+
+      // A torn final write must not be read as the latest seq.
+      writeFileSync(file, `${readFileSync(file, "utf8")}{"kind":"message","seq":41`);
+      assert.equal(lastSeqOfFile(file), 40, "a half-written line is not an event");
+    } finally {
+      closeRunLog("lastseq-run");
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -26,7 +26,7 @@ import { readRunLog, runLogFile } from "./stepLog.js";
 import type { JudgeDeps, MastraLike, StepEvent } from "./runService.js";
 import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
 import type { StepLogEvent } from "../canon/stepLogEvents.js";
-import type { StepDef } from "../canon/types.js";
+import type { LoadedPipeline, StepDef } from "../canon/types.js";
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -2727,5 +2727,231 @@ describe("RunService gate summary (spec 043 V1/V5)", () => {
     for (let i = 0; i < 5; i++) service.get(id);
     await settleMicrotasks();
     assert.equal(calls, 1, "reading the run must not re-spend on describing it");
+  });
+});
+
+// ── The whole run in one timeline ────────────────────────────────────────────
+
+describe("RunService — structural steps reach the events file", () => {
+  /** gate / persist-ticket write no log lines of their own; llm does. */
+  const STEPS: StepDef[] = [
+    { id: "write", kind: "llm" },
+    { id: "approve", kind: "gate" },
+    { id: "persist", kind: "persist-ticket" },
+  ];
+
+  function logOf(runsDir: string, runId: string): StepLogEvent[] {
+    return readRunLog(runLogFile(join(runsDir, runId), "test-pipeline"));
+  }
+
+  /** A run whose start never settles, so its log stays open for the test. */
+  function pendingRun(runId: string): MockRun {
+    const run = makeMockRun(runId, successResult(), successResult());
+    run.start = () => new Promise<Record<string, unknown>>(() => undefined);
+    return run;
+  }
+
+  it("logs a structural step's start and result, and never the llm step's", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-structural-"));
+    try {
+      const run = pendingRun("structural-run");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+
+      run.emit({ type: "workflow-step-start", payload: { id: "approve" } });
+      run.emit({ type: "workflow-step-start", payload: { id: "write" } });
+      run.emit({ type: "workflow-step-result", payload: { id: "write", status: "success" } });
+      run.emit({ type: "workflow-step-result", payload: { id: "approve", status: "success" } });
+
+      assert.deepEqual(
+        logOf(runsDir, runId).map((e) => `${e.stepId}:${e.kind}`),
+        ["approve:step.start", "approve:step.result"],
+        "the gate must be in the log; the llm step's builder owns its own lines"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes nothing structural when the caller named no pipeline steps", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-structural-unknown-"));
+    try {
+      const run = pendingRun("structural-unknown-run");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", {});
+
+      run.emit({ type: "workflow-step-start", payload: { id: "write" } });
+      run.emit({ type: "workflow-step-result", payload: { id: "write", status: "success" } });
+
+      assert.deepEqual(
+        logOf(runsDir, runId),
+        [],
+        "a step whose kind is unknown must not be logged: guessing wrong doubles every llm step"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps exactly one terminal line per step when cancel() got there first", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-structural-cancel-"));
+    try {
+      const run = makeCancellableRun("structural-cancel-run", "approve");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+      await service.cancel(runId, "changed their mind");
+      // The step's own result lands after the cancellation closed it out.
+      run.emit({ type: "workflow-step-result", payload: { id: "approve", status: "success" } });
+      // Let settlement finish writing the artifact before the directory goes.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+      const terminal = logOf(runsDir, runId).filter((e) => e.kind === "step.result");
+      assert.equal(terminal.length, 1, "two terminal lines would make a caller count 8 of 7 done");
+      assert.equal(terminal[0].kind === "step.result" && terminal[0].status, "cancelled");
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes out a gate cancelled while suspended, exactly once", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-structural-gate-cancel-"));
+    try {
+      const run = makeMockRun("gate-cancel-run", suspendedResult("x"), successResult());
+      run.cancel = async () => undefined;
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+      await service.waitForSettled(runId);
+      // Mastra suspends the gate; the record-level watch records the state.
+      run.emit({ type: "workflow-step-suspended", payload: { id: "approve" } });
+
+      await service.cancel(runId, "changed their mind");
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+      const terminal = logOf(runsDir, runId).filter(
+        (e) => e.stepId === "approve" && e.kind === "step.result"
+      );
+      assert.equal(
+        terminal.length,
+        1,
+        "a suspended gate is in flight; cancelling it must end it, and end it once"
+      );
+      assert.equal(terminal[0].kind === "step.result" && terminal[0].status, "cancelled");
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a loop body's llm step as builder-logged, not structural", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-structural-loop-"));
+    try {
+      const run = pendingRun("structural-loop-run");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start(
+        "test-pipeline",
+        {},
+        {
+          // A loop step at the top level; its body's steps are reachable only
+          // through `bodies`, never through def.steps.
+          pipelineSteps: [{ id: "refine", kind: "loop", pipeline: "body" }],
+          pipelineBodies: {
+            refine: {
+              def: { id: "body", steps: [{ id: "draft", kind: "llm" }] },
+              prompts: {},
+            } as unknown as LoadedPipeline,
+          },
+        }
+      );
+
+      run.emit({ type: "workflow-step-start", payload: { id: "draft" } });
+      run.emit({ type: "workflow-step-result", payload: { id: "draft", status: "success" } });
+      // An id no pipeline author wrote: Mastra's parallel merge. Unknown ids
+      // fall to structural, so the timeline never has a silent hole.
+      run.emit({ type: "workflow-step-start", payload: { id: "__merge_level_0" } });
+
+      assert.deepEqual(
+        logOf(runsDir, runId).map((e) => `${e.stepId}:${e.kind}`),
+        ["__merge_level_0:step.start"],
+        "the body's llm step owns its own lines; the synthetic id does not"
+      );
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads the same stream through one translation in both watch callbacks", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-structural-agree-"));
+    try {
+      const run = pendingRun("structural-agree-run");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+
+      const seen: StepEvent[] = [];
+      service.subscribe(runId, (event) => seen.push(event));
+
+      const stream = [
+        { type: "workflow-step-start", payload: { id: "approve" } },
+        { type: "workflow-step-start", payload: { id: "persist" } },
+        { type: "workflow-step-result", payload: { id: "approve", status: "success" } },
+        { type: "workflow-step-result", payload: { id: "persist", status: "failed", error: "no" } },
+      ];
+      for (const event of stream) run.emit(event);
+
+      // The two call sites speak different vocabularies — one emits StepEvents
+      // for SSE, the other writes step log lines — so each is reduced to the
+      // transition it decided on. Those must be identical, because there is now
+      // only one function that decides.
+      const fromSubscribe = seen.map((event) => event.kind);
+      const fromLog = logOf(runsDir, runId).map((event) => {
+        if (event.kind === "step.start") return "step-start";
+        if (event.kind !== "step.result") return event.kind;
+        return event.status === "succeeded" ? "step-finish" : "step-failed";
+      });
+      assert.deepEqual(fromSubscribe, ["step-start", "step-start", "step-finish", "step-failed"]);
+      assert.deepEqual(fromLog, fromSubscribe, "one stream, one translation, one answer");
+    } finally {
+      rmSync(runsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unrecognised status instead of reporting the step finished", async () => {
+    const runsDir = mkdtempSync(join(tmpdir(), "af-structural-unknown-status-"));
+    const errors: string[] = [];
+    const realError = console.error;
+    console.error = (msg: unknown) => errors.push(String(msg));
+    try {
+      const run = pendingRun("structural-status-run");
+      const service = new RunService(makeMastra(run), undefined, runsDir);
+      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+
+      const seen: StepEvent[] = [];
+      service.subscribe(runId, (event) => seen.push(event));
+      run.emit({ type: "workflow-step-start", payload: { id: "approve" } });
+      run.emit({ type: "workflow-step-result", payload: { id: "approve", status: "done" } });
+
+      assert.deepEqual(
+        seen.map((event) => event.kind),
+        ["step-start"],
+        "an unmapped status must not be delivered as a finish"
+      );
+      assert.equal(
+        logOf(runsDir, runId).filter((e) => e.kind === "step.result").length,
+        0,
+        "nor written as one"
+      );
+      assert.equal(
+        service.get(runId)?.steps.approve.status,
+        "started",
+        "nor recorded as one: get_run and get_run_events must not disagree about a step"
+      );
+      assert.ok(
+        errors.some((msg) => msg.includes('"done"')),
+        `the unmapped status must be reported; saw: ${errors.join(" | ")}`
+      );
+    } finally {
+      console.error = realError;
+      rmSync(runsDir, { recursive: true, force: true });
+    }
   });
 });

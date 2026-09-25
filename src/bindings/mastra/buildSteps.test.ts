@@ -36,6 +36,7 @@ import {
   DEFAULT_CHECK_COMMAND,
   buildCheckStep,
   buildLlmStep,
+  buildGateStep,
   buildReviewMaterialStep,
   unavailableStepMarker,
 } from "./buildSteps.js";
@@ -2317,5 +2318,71 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
     await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
 
     assert.equal(captured, undefined);
+  });
+});
+
+// ── The gate's own suspension (the one transition the log could not answer) ───
+
+describe("buildGateStep — records that the run is waiting on a human", () => {
+  it("writes step.suspended BEFORE suspending, so the line survives", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-gate-suspend-"));
+    const runId = "gate-suspend-run";
+    try {
+      openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+      const step: StepDef = {
+        id: "approve",
+        kind: "gate",
+        message: "Approve the spec?",
+        manualOnly: true,
+      };
+      const gate = buildGateStep(step);
+
+      // suspend() throws internally in Mastra, so the real thing never returns.
+      // Throwing here is what proves the line was written before the call — a
+      // line written after it would simply not exist.
+      await assert.rejects(
+        (gate as any).execute({
+          inputData: { "approve.spec": { title: "T" } },
+          suspend: () => {
+            throw new Error("suspended");
+          },
+          runId,
+        })
+      );
+
+      const events = readRunLog(runLogFile(dir, "test-pipeline"));
+      assert.deepEqual(
+        events.map((e: StepLogEvent) => e.kind),
+        ["step.suspended"],
+        "a gate suspension must be in the events file, not only on the SSE stream"
+      );
+      const [suspended] = events;
+      assert.equal(suspended.stepId, "approve");
+      assert.equal(suspended.kind === "step.suspended" && suspended.message, "Approve the spec?");
+      assert.equal(suspended.kind === "step.suspended" && suspended.manualOnly, true);
+    } finally {
+      closeRunLog(runId);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes nothing on the resume path — the gate is no longer waiting", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-gate-resume-"));
+    const runId = "gate-resume-run";
+    try {
+      openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+      const gate = buildGateStep({ id: "approve", kind: "gate" });
+      const out = await (gate as any).execute({
+        inputData: {},
+        resumeData: { approved: true },
+        suspend: () => undefined as never,
+        runId,
+      });
+      assert.equal((out as Record<string, unknown>)["approve.approved"], true);
+      assert.deepEqual(readRunLog(runLogFile(dir, "test-pipeline")), []);
+    } finally {
+      closeRunLog(runId);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

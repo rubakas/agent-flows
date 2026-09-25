@@ -6,6 +6,7 @@
 
 import { dirname, join } from "node:path";
 import { activeProfileIdOrUnknown, resolveStepModel } from "../canon/registry.js";
+import { UnknownStepStatusError, stepTransitionOf } from "../canon/stepTransition.js";
 import {
   writeRunArtifact,
   upsertManifestEntry,
@@ -29,7 +30,8 @@ import type { GateSummaryDeps } from "./gateSummary.js";
 import type { GatePayload } from "./gateMaterial.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepLogEvent, StepLogEventInput } from "../canon/stepLogEvents.js";
-import type { StepDef } from "../canon/types.js";
+import type { StepTransition } from "../canon/stepTransition.js";
+import type { LoadedPipeline, StepDef, StepKind } from "../canon/types.js";
 import type { WorkflowStreamEvent } from "@mastra/core/stream";
 
 // ── Narrow interfaces for the Mastra API subset used here ────────────────────
@@ -101,7 +103,8 @@ export interface GateDecision {
 }
 
 export interface StepEvent {
-  kind: "step-start" | "step-finish" | "step-suspended" | "step-failed" | "step-cancelled";
+  // The stream's own vocabulary plus the one transition Mastra never reports.
+  kind: StepTransition | "step-cancelled";
   stepId: string;
   suspendPayload?: unknown;
   /** Present on step-finish: first OUTPUT_EXCERPT_LIMIT chars of the step's output. */
@@ -303,6 +306,82 @@ export type { GateSummaryDeps } from "./gateSummary.js";
 
 // ── Internal record ────────────────────────────────────────────────────────────
 
+/**
+ * Step kinds whose builder already writes its own `step.start` and single
+ * terminal `step.result` (spec 036 D2). Everything else is structural: it runs
+ * inside the workflow and writes nothing, which is why a gate, a persist or an
+ * export used to be absent from the events file entirely.
+ */
+const BUILDER_LOGGED_KINDS: ReadonlySet<StepKind> = new Set<StepKind>([
+  "llm",
+  "check",
+  "review-material",
+]);
+
+/**
+ * The ids whose builder writes its own log lines, across the WHOLE expanded
+ * pipeline — the declared steps plus every loop body, recursively.
+ *
+ * Computed by inclusion rather than by listing the structural kinds, because
+ * the structural side cannot be enumerated: Mastra also reports ids no pipeline
+ * author wrote, `__merge_level_N` and a loop's outcome step among them. Anything
+ * absent from this set is therefore treated as structural, which is the safe
+ * direction — an unknown synthetic id gets a start and a result rather than
+ * vanishing from the timeline. Loop BODY steps must be in here or their
+ * builder's lines would be written twice.
+ *
+ * Returns undefined when the caller declared no steps: which ids are
+ * builder-logged cannot then be known, and guessing wrong doubles every llm
+ * step's log.
+ */
+function builderLoggedStepIds(
+  steps: readonly StepDef[] | undefined,
+  bodies: Record<string, LoadedPipeline> | undefined
+): ReadonlySet<string> | undefined {
+  if (steps === undefined) return undefined;
+  const ids = new Set<string>();
+  const walk = (
+    stepList: readonly StepDef[],
+    bodyMap: Record<string, LoadedPipeline> | undefined
+  ): void => {
+    for (const step of stepList) {
+      if (BUILDER_LOGGED_KINDS.has(step.kind)) ids.add(step.id);
+    }
+    for (const body of Object.values(bodyMap ?? {})) walk(body.def.steps, body.bodies);
+  };
+  walk(steps, bodies);
+  return ids;
+}
+
+/**
+ * The shared stream translation, with an unknown status reported instead of
+ * thrown. A run must not die because Mastra renamed a status — but it must not
+ * pass unnoticed either, which is why the pure function throws and only this
+ * one wrapper, on the run path, swallows it.
+ */
+function transitionOrReport(event: {
+  type: string;
+  payload?: unknown;
+}): StepTransition | undefined {
+  const status = (event.payload as { status?: unknown } | undefined)?.status;
+  try {
+    return stepTransitionOf({ type: event.type, status });
+  } catch (err) {
+    // Only the mapping's own complaint is survivable here. Anything else is a
+    // fault in this module, and swallowing it would hide it behind a run that
+    // merely stops reporting steps.
+    if (!(err instanceof UnknownStepStatusError)) throw err;
+    console.error(`[agent-flows] ${err.message}`);
+    return undefined;
+  }
+}
+
+/** True when this run must write the step's own log lines for it. */
+function isStructural(record: RunRecord, stepId: string): boolean {
+  const known = record.builderLoggedSteps;
+  return known !== undefined && !known.has(stepId);
+}
+
 interface RunRecord {
   pipelineId: string;
   run: MastraRun;
@@ -323,6 +402,17 @@ interface RunRecord {
   readonly invocation: RunInvocation;
   /** Per-step states accumulated by the record-level watch (FR-006). */
   steps: Record<string, StepState>;
+  /**
+   * The ids whose builder writes its own step log lines. Every OTHER id Mastra
+   * reports — gate, assemble-spec, persist-ticket, export-spec, and the
+   * synthetic ids no author wrote — is structural, and its entry and exit are
+   * written from the record-level watch, so the events file describes the whole
+   * run and not only the parts that spawned a process.
+   *
+   * Undefined when the caller named no pipeline steps: nothing structural is
+   * written then, because guessing wrong doubles every llm step's log.
+   */
+  readonly builderLoggedSteps: ReadonlySet<string> | undefined;
   /** All gate decisions recorded so far (FR-008). */
   gateDecisions: GateDecision[];
   /**
@@ -469,6 +559,12 @@ export class RunService {
        */
       pipelineSteps?: readonly StepDef[];
       /**
+       * Resolved loop bodies, keyed by the loop step's id (`expandNested`).
+       * Their steps are absent from `pipelineSteps` but are built — and logged —
+       * exactly like top-level ones, so the log needs to know about them.
+       */
+      pipelineBodies?: Record<string, LoadedPipeline>;
+      /**
        * Directory to write artifacts into when chaining from a parent run
        * (spec 029 FR-006). Stored on the RunRecord and used by persistArtifact.
        */
@@ -537,6 +633,7 @@ export class RunService {
       settledPromise,
       settle,
       transportPerStep,
+      builderLoggedSteps: builderLoggedStepIds(opts?.pipelineSteps, opts?.pipelineBodies),
       ...(opts?.provider !== undefined ? { profile: opts.provider } : {}),
       ...(opts?.chainArtifactDir !== undefined ? { chainArtifactDir: opts.chainArtifactDir } : {}),
     };
@@ -553,11 +650,13 @@ export class RunService {
     // Record-level watch — accumulates per-step state for mid-run observability (FR-006).
     // Runs for the lifetime of the run, regardless of how many SSE subscribers are active.
     run.watch((event: WorkflowStreamEvent) => {
+      const transition = transitionOrReport(event);
       if (event.type === "workflow-step-start") {
         record.steps[event.payload.id] = {
           status: "started",
           startedAt: new Date().toISOString(),
         };
+        if (transition === "step-start") this.logStructuralStart(record, event.payload.id);
       } else if (event.type === "workflow-step-suspended") {
         const prevStartedAt = record.steps[event.payload.id]?.startedAt;
         record.steps[event.payload.id] = {
@@ -565,17 +664,29 @@ export class RunService {
           ...(prevStartedAt !== undefined ? { startedAt: prevStartedAt } : {}),
         };
       } else if (event.type === "workflow-step-result") {
-        const { id, status, output } = event.payload;
+        const { id, output } = event.payload;
         // A result landing after cancel() describes an aborted step, not a
         // finished one: runCheckStep resolves (rather than throws) when its
         // signal fires, so Mastra reports "success" and would otherwise
         // resurrect the step the cancellation just closed out.
+        //
+        // Read from the shared translation, never a second time from
+        // event.payload.status: two readings drift, and then get_run reports a
+        // step terminal while get_run_events reports it never finished.
         const uiStatus =
           record.cancelled !== undefined
             ? "cancelled"
-            : status === "success" || status === "skipped"
+            : transition === "step-finish"
               ? "succeeded"
-              : status;
+              : transition === "step-suspended"
+                ? "suspended"
+                : transition === "step-failed"
+                  ? "failed"
+                  : undefined;
+        // An unmapped status reached neither the log nor the listeners, so it
+        // must not reach the run state either: a step the translation cannot
+        // read is a step whose outcome is not known.
+        if (uiStatus === undefined) return;
         // D3: carry the start timestamp forward and stamp the finish; the result
         // event replaces the state wholesale, so anything not copied is lost.
         const prevStartedAt = record.steps[id]?.startedAt;
@@ -612,6 +723,10 @@ export class RunService {
           }
         }
         record.steps[id] = state;
+        // A structural step's builder writes nothing, so its terminal line is
+        // written here. The status comes from the shared translation, never from
+        // a second reading of event.payload.status.
+        this.logStructuralResult(record, id, state, transition);
       }
     });
 
@@ -713,6 +828,52 @@ export class RunService {
       };
     }
     return merged;
+  }
+
+  /**
+   * Write a structural step's `step.start`. `model`/`transport` name what ran
+   * rather than a provider, exactly as the check and review-material builders
+   * do for their own non-llm work.
+   */
+  private logStructuralStart(record: RunRecord, stepId: string): void {
+    if (!isStructural(record, stepId)) return;
+    appendStepLog(record.run.runId, stepId, {
+      kind: "step.start",
+      model: "workflow",
+      transport: "none",
+    });
+  }
+
+  /**
+   * Write a structural step's terminal line. Routed through appendStepLog like
+   * every other emitter, so `settledSteps` keeps guaranteeing exactly one
+   * terminal event per step even when cancel() has already written one.
+   */
+  private logStructuralResult(
+    record: RunRecord,
+    stepId: string,
+    state: StepState,
+    transition: StepTransition | undefined
+  ): void {
+    if (!isStructural(record, stepId)) return;
+    const status =
+      record.cancelled !== undefined
+        ? "cancelled"
+        : transition === "step-finish"
+          ? "succeeded"
+          : transition === "step-failed"
+            ? "failed"
+            : undefined;
+    // A suspension is not a terminal event: the gate writes its own
+    // step.suspended and the step resumes later.
+    if (status === undefined) return;
+    const startedAt = state.startedAt !== undefined ? Date.parse(state.startedAt) : Date.now();
+    appendStepLog(record.run.runId, stepId, {
+      kind: "step.result",
+      status,
+      durationMs: Date.now() - startedAt,
+      ...(state.error !== undefined ? { error: state.error } : {}),
+    });
   }
 
   private finalizeSettlement(record: RunRecord): void {
@@ -978,8 +1139,13 @@ export class RunService {
 
     // FR-003: Mastra's stream never reports a cancellation, so the in-flight
     // steps are closed out here and the synthetic event is pushed to subscribers.
+    // Suspended as well as started: a gate waiting on a human is in flight as
+    // much as a running step, and skipping it left its terminal line to be
+    // written only if Mastra happened to emit a per-step result during the
+    // rejecting resume below — before settlement closed the log, and not on the
+    // path where that resume throws.
     for (const [stepId, state] of Object.entries(record.steps)) {
-      if (state.status !== "started") continue;
+      if (state.status !== "started" && state.status !== "suspended") continue;
       state.status = "cancelled";
       state.finishedAt = at;
       // FR-014: the same reason the synthetic event exists applies to the log —
@@ -1482,31 +1648,26 @@ export class RunService {
     record.listeners.add(listener);
 
     const unwatch = record.run.watch((event: WorkflowStreamEvent) => {
-      if (event.type === "workflow-step-start") {
-        listener({ kind: "step-start", stepId: event.payload.id });
-      } else if (event.type === "workflow-step-suspended") {
-        listener({
-          kind: "step-suspended",
-          stepId: event.payload.id,
-          suspendPayload: event.payload.suspendPayload,
-        });
-      } else if (event.type === "workflow-step-result") {
-        const { id, status, suspendPayload } = event.payload;
-        if (status === "success" || status === "skipped") {
-          // Read excerpt from the record-level accumulator set by start()'s watch.
-          const stepState = record.steps[id];
-          listener({
-            kind: "step-finish",
-            stepId: id,
-            outputExcerpt: stepState?.outputExcerpt,
-            outputTruncated: stepState?.outputTruncated,
-          });
-        } else if (status === "suspended") {
-          listener({ kind: "step-suspended", stepId: id, suspendPayload });
-        } else if (status === "failed") {
-          listener({ kind: "step-failed", stepId: id });
-        }
+      const transition = transitionOrReport(event);
+      if (transition === undefined) return;
+      const payload = event.payload as { id: string; suspendPayload?: unknown };
+      const stepId = payload.id;
+      if (transition === "step-suspended") {
+        listener({ kind: "step-suspended", stepId, suspendPayload: payload.suspendPayload });
+        return;
       }
+      if (transition === "step-finish") {
+        // Read excerpt from the record-level accumulator set by start()'s watch.
+        const stepState = record.steps[stepId];
+        listener({
+          kind: "step-finish",
+          stepId,
+          outputExcerpt: stepState?.outputExcerpt,
+          outputTruncated: stepState?.outputTruncated,
+        });
+        return;
+      }
+      listener({ kind: transition, stepId });
     });
 
     return () => {

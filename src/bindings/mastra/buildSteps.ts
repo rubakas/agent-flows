@@ -823,7 +823,7 @@ export function buildGateStep(step: StepDef) {
       spec: z.unknown(),
       manualOnly: z.boolean(),
     }),
-    execute: async ({ inputData, resumeData, suspend }) => {
+    execute: async ({ inputData, resumeData, suspend, runId }) => {
       const ctxData = inputData as Ctx;
       if (resumeData) {
         if (resumeData.approved === false) {
@@ -833,10 +833,16 @@ export function buildGateStep(step: StepDef) {
         }
         return { ...ctxData, [approvedKey]: resumeData.approved };
       }
+      const message = step.message ?? "Approve this spec?";
+      const manualOnly = step.manualOnly ?? false;
+      // Written BEFORE the suspend: suspend() throws internally, so anything
+      // after it never runs and the one transition a reader most needs — the run
+      // is now waiting on a human — would never reach the file.
+      appendStepLog(runId, step.id, { kind: "step.suspended", message, manualOnly });
       await suspend({
-        message: step.message ?? "Approve this spec?",
+        message,
         spec: resolveApprovedSpec(ctxData, step.id).spec,
-        manualOnly: step.manualOnly ?? false,
+        manualOnly,
       });
       // unreachable — suspend() throws internally; satisfies TypeScript return type
       return ctxData;

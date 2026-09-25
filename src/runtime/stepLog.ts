@@ -8,7 +8,17 @@
 // Imports downward only (canon/ and node builtins), so no runtime → canon →
 // runtime edge exists and the no-cycle lint rule stays quiet.
 
-import { appendFileSync, createReadStream, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  createReadStream,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { CREDENTIAL_DENY_PATTERNS } from "../canon/denyPatterns.js";
 import {
@@ -398,6 +408,64 @@ function seqOfLine(line: string): number | undefined {
 }
 
 /**
+ * The `kind` of a raw line, read without parsing it.
+ *
+ * Anchored at the start of the line, not merely after any `{` or `,`: every
+ * emitter writes `kind` as the first key of its event literal, and anchoring
+ * turns that convention into something the regex enforces rather than assumes.
+ * A tool input carrying its own nested `"kind"` can then never be mistaken for
+ * the stamp. `writeEvent` is pinned to the same convention by a test.
+ */
+const RE_LINE_KIND = /^\{"kind":"([^"]*)"/u;
+
+function kindOfLine(line: string): string | undefined {
+  return RE_LINE_KIND.exec(line)?.[1];
+}
+
+/** How much of a file's tail is read to find its last seq. */
+const SEQ_TAIL_BYTES = 64 * 1024;
+
+/**
+ * The highest seq in a run's events file, or 0 when it has none.
+ *
+ * Reads only the tail: seq is monotonic, so the last parseable line carries the
+ * maximum, and a run's log can be tens of megabytes. A caller uses this as its
+ * next cursor, so it must never exceed what is actually on disk.
+ */
+export function lastSeqOfFile(file: string): number {
+  let fd: number;
+  try {
+    fd = openSync(file, "r");
+  } catch {
+    return 0;
+  }
+  try {
+    const { size } = fstatSync(fd);
+    const length = Math.min(size, SEQ_TAIL_BYTES);
+    if (length === 0) return 0;
+    const buf = Buffer.alloc(length);
+    readSync(fd, buf, 0, length, size - length);
+    const lines = buf.toString("utf8").split("\n");
+    // The window rarely starts on a line boundary; that first fragment is half
+    // a line whose nested values could be mistaken for the stamp.
+    if (size > length) lines.shift();
+    // The tail is either the empty string after a complete line or a write in
+    // progress; dropping it covers both, as readRunLog does. seqOfLine reads
+    // the raw text rather than parsing, so a torn line would otherwise answer.
+    lines.pop();
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const seq = seqOfLine(lines[i]);
+      if (seq !== undefined) return seq;
+    }
+    return 0;
+  } catch {
+    return 0;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Read a run's events file. Returns an empty list when the file is absent — a
  * run recorded before this spec simply has no log. A final line without its
  * newline is a write in progress and is dropped rather than parsed.
@@ -444,9 +512,10 @@ export function readRunLog(file: string, opts: { after?: number } = {}): StepLog
 export async function pipeRunLog(
   file: string,
   out: { write: (chunk: string) => unknown },
-  opts: { after?: number } = {}
+  opts: { after?: number; kinds?: ReadonlySet<string> } = {}
 ): Promise<void> {
   const after = opts.after ?? 0;
+  const { kinds } = opts;
   const stream = createReadStream(file, { encoding: "utf8" });
 
   await new Promise<void>((resolve) => {
@@ -454,6 +523,12 @@ export async function pipeRunLog(
     const emit = (line: string): void => {
       const seq = seqOfLine(line);
       if (seq === undefined || seq <= after) return;
+      // Filtered on the raw line like the cursor is: a caller that wants only
+      // the lifecycle of a run must not pay to materialise its every message.
+      if (kinds !== undefined) {
+        const kind = kindOfLine(line);
+        if (kind === undefined || !kinds.has(kind)) return;
+      }
       out.write(`${line}\n`);
     };
     stream.on("data", (chunk) => {
