@@ -384,7 +384,7 @@ export type PersistedRun = Record<string, unknown> & {
  * The run id reaches these functions from a URL path segment, and join() happily
  * resolves "..", so the guard lives here rather than only at the route.
  */
-function isSafeRunId(runId: string): boolean {
+export function isSafeRunId(runId: string): boolean {
   return (
     runId.length > 0 &&
     runId.length <= 200 &&

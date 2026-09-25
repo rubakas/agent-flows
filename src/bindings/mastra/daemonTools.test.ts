@@ -4,17 +4,21 @@
 // their actual fetch/status handling rather than a stubbed transport.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { packageVersion } from "../../packageRoot.js";
+import { resolveProjectState } from "../../runtime/projectState.js";
 import { clearDaemonBaseCache } from "./daemonResolver.js";
 import {
+  LIFECYCLE_KINDS,
   TERMINAL_RUN_STATUSES,
+  approveRun,
   cancelRun,
   formatRunProgress,
+  getRunEvents,
   getRunState,
   pollRunUntilTerminal,
   runPipeline,
@@ -70,6 +74,11 @@ after(async () => {
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
+
+/** The fake daemon's own base, for the push handles the tools derive from it. */
+function daemonBase(): string {
+  return `http://127.0.0.1:${process.env.AGENT_FLOWS_PORT}`;
+}
 
 function respondJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -275,6 +284,7 @@ describe("get_run — compact by default, full only on verbose:true", () => {
     gateMessage: "Approve the review?",
     spec: "S".repeat(28_000),
     artifactPath: "/tmp/af/runs/run-compact/artifact.md",
+    eventsPath: "/tmp/af/runs/run-compact/code-review.events.jsonl",
     result: { verdict: "R".repeat(4_000) },
     invocation: {
       pipeline: "code-review",
@@ -402,9 +412,9 @@ describe("get_run — compact by default, full only on verbose:true", () => {
   });
 
   // The verbose payload is pinned field by field against the shape callers got
-  // before compact mode existed. The single deliberate difference is the added
-  // `artifactPath`: verbose must be a superset of compact, and adding a key
-  // breaks no caller, while removing or changing one would.
+  // before compact mode existed. The deliberate differences are `artifactPath`
+  // and the two push handles: verbose must be a superset of compact, and adding
+  // a key breaks no caller, while removing or changing one would.
   it("returns the pre-compact payload unchanged, plus artifactPath", async () => {
     handler = (_req, res) => respondJson(res, 200, realisticRun);
 
@@ -442,6 +452,8 @@ describe("get_run — compact by default, full only on verbose:true", () => {
       ],
       progress: "code-review · awaiting_approval · 6 steps · 1m00s",
       artifactPath: "/tmp/af/runs/run-compact/artifact.md",
+      eventsPath: "/tmp/af/runs/run-compact/code-review.events.jsonl",
+      eventsUrl: `${daemonBase()}/api/runs/run-compact/events`,
     });
   });
 
@@ -572,7 +584,11 @@ describe("start_run — starts the run without blocking on it", () => {
       artifact_path: "/tmp/spec.json",
     });
 
-    assert.deepEqual(out, { runId: "run-10", status: "running" });
+    assert.deepEqual(out, {
+      runId: "run-10",
+      status: "running",
+      eventsUrl: `${daemonBase()}/api/runs/run-10/events`,
+    });
     assert.equal(posts, 1, "start_run must start the run exactly once");
     assert.equal(gets, 0, "start_run must not poll — the caller drives progress with get_run");
     assert.deepEqual(JSON.parse(seenBody), {
@@ -745,6 +761,291 @@ describe("formatRunProgress — the glanceable line", () => {
         T0 + 5_000
       ),
       "ship · starting · 5s"
+    );
+  });
+});
+
+// ── get_run_events: the cheap progress call, and the run dir behind it ───────
+
+describe("get_run_events — lifecycle lines, nothing else", () => {
+  const LINES = [
+    { seq: 1, at: "2026-09-25T10:00:00.000Z", stepId: "gather", kind: "step.start" },
+    {
+      seq: 2,
+      at: "2026-09-25T10:00:30.000Z",
+      stepId: "gather",
+      kind: "step.result",
+      status: "succeeded",
+    },
+    { seq: 3, at: "2026-09-25T10:00:31.000Z", stepId: "approve", kind: "step.suspended" },
+  ];
+
+  /**
+   * The fake daemon's log route. `maxSeq` is the run's own highest seq, which a
+   * real run carries far beyond the lifecycle lines the filter returns.
+   */
+  function serveLog(seen: { url?: string }, maxSeq = 3) {
+    return (req: IncomingMessage, res: ServerResponse) => {
+      seen.url = req.url;
+      const after = Number(new URL(req.url ?? "", "http://x").searchParams.get("after") ?? 0);
+      res.writeHead(200, {
+        "content-type": "application/x-ndjson",
+        "x-run-status": "awaiting_approval",
+        "x-run-pipeline-id": "code-review",
+        "x-run-max-seq": String(maxSeq),
+        "x-run-events-path": encodeURIComponent("/tmp/af/runs/run-e/code-review.events.jsonl"),
+      });
+      res.end(
+        LINES.filter((line) => line.seq > after)
+          .map((line) => JSON.stringify(line))
+          .join("\n") + "\n"
+      );
+    };
+  }
+
+  it("returns the run's transitions, its identity and a cursor", async () => {
+    const seen: { url?: string } = {};
+    handler = serveLog(seen);
+
+    const out = await getRunEvents("run-e");
+    assert.equal(out.runId, "run-e");
+    assert.equal(out.pipelineId, "code-review");
+    assert.equal(out.status, "awaiting_approval");
+    assert.equal(out.eventsPath, "/tmp/af/runs/run-e/code-review.events.jsonl");
+    assert.equal(out.nextSeq, 4, "the cursor must be one past the run's highest seq");
+    assert.ok(typeof out.daemonReachableAt === "string");
+    assert.deepEqual(out.events, LINES);
+
+    // The default asks the daemon to drop the transcript, not the caller.
+    assert.ok(
+      seen.url?.includes(`kinds=${encodeURIComponent(LIFECYCLE_KINDS.join(","))}`),
+      `the request must carry the lifecycle allowlist; got ${String(seen.url)}`
+    );
+  });
+
+  it("excludes events the caller has already seen", async () => {
+    const seen: { url?: string } = {};
+    handler = serveLog(seen);
+
+    const out = await getRunEvents("run-e", 2);
+    assert.ok(seen.url?.includes("after=2"));
+    assert.deepEqual(
+      (out.events as { seq: number }[]).map((event) => event.seq),
+      [3],
+      "a cursor poll must never re-deliver a line"
+    );
+    assert.equal(out.nextSeq, 4);
+  });
+
+  it("advances the cursor past the lines the filter dropped", async () => {
+    // A chatty run: 900 lines on disk, three of them lifecycle. A cursor that
+    // only advanced past what came back would re-scan the other 897 forever.
+    handler = serveLog({}, 900);
+    const out = await getRunEvents("run-e");
+    assert.deepEqual(
+      (out.events as { seq: number }[]).map((event) => event.seq),
+      [1, 2, 3]
+    );
+    assert.equal(out.nextSeq, 901, "the cursor must clear every line already considered");
+  });
+
+  it("never advances the cursor past lines that do not exist yet", async () => {
+    handler = serveLog({}, 3);
+    const out = await getRunEvents("run-e", 5);
+    assert.deepEqual(out.events, []);
+    assert.equal(out.nextSeq, 5, "a stale max seq must not move a cursor backwards or forwards");
+  });
+
+  it("carries none of the run's content — that is the whole point", async () => {
+    handler = serveLog({});
+    const out = await getRunEvents("run-e");
+    for (const key of ["invocation", "spec", "plan", "result", "steps", "gateMessage", "prompt"]) {
+      assert.equal(key in out, false, `get_run_events must not expose "${key}"`);
+    }
+    for (const event of out.events as Record<string, unknown>[]) {
+      assert.deepEqual(
+        Object.keys(event).filter((k) => !["seq", "at", "stepId", "kind", "status"].includes(k)),
+        [],
+        "an event line carries only its identity and its transition"
+      );
+    }
+  });
+
+  it("returns an error, not a fallback, for a run the daemon does not know", async () => {
+    handler = (_req, res) => respondJson(res, 404, { error: "No run found" });
+    const out = await getRunEvents("run-missing");
+    assert.match(String(out.error), /No run found for runId "run-missing"/u);
+  });
+});
+
+describe("daemon down — reads degrade, writes do not", () => {
+  const RUN_ID = "run-orphan";
+  let fallbackHome: string;
+  let previousFallbackHome: string | undefined;
+  let runsDir: string;
+  let runDir: string;
+
+  // Its own temp home: this suite writes and deletes run directories, and
+  // ~/.agent-flows/projects/*/runs holds irreplaceable run evidence that a
+  // run-id collision would destroy.
+  before(() => {
+    previousFallbackHome = process.env.AGENT_FLOWS_HOME;
+    fallbackHome = mkdtempSync(join(realpathSync(tmpdir()), "af-daemon-down-"));
+    process.env.AGENT_FLOWS_HOME = fallbackHome;
+    runsDir = resolveProjectState(process.cwd()).runsDir;
+    runDir = join(runsDir, RUN_ID);
+  });
+
+  after(() => {
+    if (previousFallbackHome === undefined) delete process.env.AGENT_FLOWS_HOME;
+    else process.env.AGENT_FLOWS_HOME = previousFallbackHome;
+    rmSync(fallbackHome, { recursive: true, force: true });
+  });
+
+  /** A run directory as a daemon that died would have left it. */
+  function writeRunDir(status: string, withEvents = true): void {
+    rmSync(runDir, { recursive: true, force: true });
+    mkdirSync(runDir, { recursive: true });
+    if (withEvents) {
+      const line = (extra: Record<string, unknown>) =>
+        JSON.stringify({
+          runId: RUN_ID,
+          pipelineId: "code-review",
+          stepId: "gather",
+          at: "2026-09-25T10:00:00.000Z",
+          ...extra,
+        });
+      writeFileSync(
+        join(runDir, "code-review.events.jsonl"),
+        [
+          line({ seq: 1, kind: "step.start" }),
+          line({ seq: 2, kind: "message", role: "assistant", text: "chatter" }),
+          line({ seq: 3, kind: "step.result", status: "succeeded", durationMs: 2000 }),
+        ].join("\n") + "\n"
+      );
+      writeFileSync(
+        join(runDir, "code-review.json"),
+        JSON.stringify({ runId: RUN_ID, pipelineId: "code-review", status })
+      );
+    }
+  }
+
+  /** Kill the connection: the transport failure a retired daemon produces. */
+  function daemonGone(): void {
+    handler = (_req, res) => res.destroy();
+  }
+
+  it("never reports a persisted 'running' as the current status", async () => {
+    writeRunDir("running");
+    daemonGone();
+
+    const out = await getRunState(RUN_ID);
+    assert.equal(out.status, "unknown", "no daemon means no current status — saying one is a lie");
+    assert.equal(
+      out.lastPersistedStatus,
+      "orphaned",
+      "'running' on disk with no daemon to advance it would make a poller wait forever"
+    );
+    assert.ok(typeof out.lastPersistedAt === "string");
+    assert.ok(typeof out.staleSeconds === "number");
+    assert.ok(typeof out.daemonUnreachableAt === "string");
+    assert.match(String(out.note), /retires after about 15 minutes/u);
+    assert.equal(out.pipelineId, "code-review");
+    assert.equal(out.eventsPath, join(runDir, "code-review.events.jsonl"));
+  });
+
+  it("treats a persisted 'awaiting_approval' as orphaned too", async () => {
+    writeRunDir("awaiting_approval");
+    daemonGone();
+
+    const out = await getRunState(RUN_ID);
+    // Suspended runs live in the daemon's memory only, so this one cannot be
+    // approved. Reporting the status verbatim sends the caller to a throw.
+    assert.equal(out.lastPersistedStatus, "orphaned");
+  });
+
+  it("reports a settled run's own status under lastPersistedStatus", async () => {
+    writeRunDir("succeeded");
+    daemonGone();
+
+    const out = await getRunState(RUN_ID);
+    assert.equal(out.status, "unknown");
+    assert.equal(out.lastPersistedStatus, "succeeded");
+  });
+
+  it("serves the run's lifecycle from its own directory", async () => {
+    writeRunDir("succeeded");
+    daemonGone();
+
+    const out = await getRunEvents(RUN_ID);
+    assert.equal(out.status, "unknown");
+    assert.equal(out.lastPersistedStatus, "succeeded");
+    assert.deepEqual(
+      (out.events as { kind: string }[]).map((event) => event.kind),
+      ["step.start", "step.result"],
+      "the transcript line must be filtered out on the disk path too"
+    );
+    assert.equal(out.nextSeq, 4, "the cursor clears the chatter line the filter dropped");
+    assert.equal(out.eventsPath, join(runDir, "code-review.events.jsonl"));
+  });
+
+  it("names no file to tail when the directory names no pipeline", async () => {
+    writeRunDir("succeeded", false);
+    daemonGone();
+
+    const out = await getRunEvents(RUN_ID);
+    assert.equal("eventsPath" in out, false, "a path that does not exist is worse than none");
+    assert.equal("pipelineId" in out, false);
+    assert.equal(out.lastPersistedStatus, "orphaned");
+  });
+
+  it("refuses a run id that is a path rather than a run id", async () => {
+    daemonGone();
+    // The fallback fires whenever the daemon is retired — routinely — so an
+    // unguarded join here is a directory-existence, filename, mtime and
+    // JSON-status oracle for any path on the machine.
+    for (const evil of ["../../../../etc", "..", "a/b", ".hidden", "x\u0000y"]) {
+      await assert.rejects(
+        () => getRunEvents(evil),
+        /is not a run id/u,
+        `traversal-shaped run id ${JSON.stringify(evil)} must be refused before the join`
+      );
+      await assert.rejects(() => getRunState(evil), /is not a run id/u);
+    }
+  });
+
+  it("throws, specifically, for a run id with no directory either", async () => {
+    daemonGone();
+    await assert.rejects(() => getRunEvents("no-such-run-at-all"), /has no directory under/u);
+  });
+
+  it("still fails loudly for every mutating tool", async () => {
+    writeRunDir("running");
+    daemonGone();
+
+    // A write that quietly reports success is a far worse lie than a read that
+    // says "unknown", so the fallback must never spread to these.
+    await assert.rejects(() => cancelRun(RUN_ID, "stop"), /cannot reach the daemon/u);
+    await assert.rejects(() => approveRun(RUN_ID, true), /cannot reach the daemon/u);
+    await assert.rejects(
+      () => startRun({ pipeline: "develop", inputs: {} }),
+      /cannot reach the daemon/u
+    );
+    await assert.rejects(
+      () => runPipeline({ pipeline: "develop", inputs: {} }),
+      /cannot reach the daemon/u
+    );
+  });
+
+  it("does not call the retirement a crash", async () => {
+    daemonGone();
+    await assert.rejects(
+      () => cancelRun(RUN_ID),
+      (err: Error) => {
+        assert.doesNotMatch(err.message, /crash/u, "an idle retirement is by design, not a fault");
+        assert.match(err.message, /the next call starts a new one/u);
+        return true;
+      }
     );
   });
 });

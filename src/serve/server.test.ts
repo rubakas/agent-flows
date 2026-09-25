@@ -902,6 +902,45 @@ describe("step log delivery (FR-006/FR-007/FR-008)", () => {
     assert.equal(tail.length, 1, "after must return only the lines beyond the given seq");
   });
 
+  it("filters to the kinds asked for, and rejects a malformed list (FR-lifecycle)", async () => {
+    appendStepLog(liveRunId, "two", { kind: "step.start", model: "m", transport: "t" });
+    appendStepLog(liveRunId, "two", { kind: "message", role: "assistant", text: "chatter" });
+    appendStepLog(liveRunId, "two", { kind: "step.result", status: "succeeded", durationMs: 1 });
+
+    const url = `http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/log`;
+    const res = await fetch(`${url}?kinds=step.start,step.result`);
+    assert.equal(res.status, 200);
+    const kinds = (await res.text())
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => (JSON.parse(l) as { kind: string }).kind);
+    assert.deepEqual(
+      [...new Set(kinds)].sort(),
+      ["step.result", "step.start"],
+      "a kind outside the allowlist must not be on the wire at all"
+    );
+    assert.ok(kinds.length > 0, "the filter must not swallow the lines it was asked for");
+
+    // The identity headers are what make one request enough for a poller.
+    assert.equal(res.headers.get("x-run-status"), "running");
+    assert.equal(res.headers.get("x-run-pipeline-id"), "test-pipeline");
+    // The run's own highest seq, not the highest this filtered body carries:
+    // without it a poller's cursor never clears the lines the filter dropped.
+    const unfiltered = (await (await fetch(url)).text()).split("\n").filter((l) => l !== "");
+    const lastSeq = (JSON.parse(unfiltered[unfiltered.length - 1]) as { seq: number }).seq;
+    assert.ok(lastSeq > kinds.length, "the fixture must have lines the filter drops");
+    assert.equal(Number(res.headers.get("x-run-max-seq")), lastSeq);
+    assert.ok(
+      decodeURIComponent(res.headers.get("x-run-events-path") ?? "").endsWith(
+        "test-pipeline.events.jsonl"
+      )
+    );
+
+    const bad = await fetch(`${url}?kinds=step.start,../../etc`);
+    assert.equal(bad.status, 400);
+    assert.deepEqual(await bad.json(), { error: "invalid kinds" });
+  });
+
   it("rejects a non-numeric after with 400 and an unknown run with 404", async () => {
     const logUrl = `http://127.0.0.1:${srv.port}/api/runs/${liveRunId}/log`;
     const bad = await fetch(`${logUrl}?after=abc`);

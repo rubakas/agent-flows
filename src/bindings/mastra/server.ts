@@ -8,7 +8,15 @@ import { createTool } from "@mastra/core/tools";
 import { MCPServer } from "@mastra/mcp";
 import { z } from "zod";
 import { resolveLayers } from "../../canon/layers.js";
-import { cancelRun, daemonFetch, getRunState, runPipeline, startRun } from "./daemonTools.js";
+import {
+  approveRun,
+  cancelRun,
+  daemonFetch,
+  getRunEvents,
+  getRunState,
+  runPipeline,
+  startRun,
+} from "./daemonTools.js";
 import { instructionsFor } from "./instructions.js";
 import { listPipelinesPayload } from "./listPipelines.js";
 import { resolveProjectDir } from "./projectDir.js";
@@ -126,40 +134,13 @@ const approveTool = createTool({
       .optional()
       .describe("Optional free-text reason for the decision, stored with the gate decision"),
   }),
-  execute: async (inputData) => {
-    const { runId, approved, reason } = inputData;
-    const res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}/approve`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ approved, ...(reason !== undefined ? { reason } : {}) }),
-    });
-    const data = (await res.json()) as {
-      error?: string;
-      status?: string;
-      result?: unknown;
-    };
-    // Only a 4xx/5xx response with no status field is a tool failure.
-    // A rejection (status:"rejected") is a normal lifecycle outcome — no error.
-    if (!res.ok && data.status === undefined) {
-      return { error: data.error ?? `HTTP ${res.status}` };
-    }
-    if (data.status === "succeeded") {
-      return { runId, status: "succeeded", result: data.result };
-    }
-    if (data.status === "rejected") {
-      return { runId, status: "rejected" };
-    }
-    if (data.status === "awaiting_approval") {
-      return { runId, status: "awaiting_approval" };
-    }
-    return { runId, status: "failed" };
-  },
+  execute: (inputData) => approveRun(inputData.runId, inputData.approved, inputData.reason),
 });
 
 const getRunTool = createTool({
   id: "get_run",
   description:
-    "Get the current status and result of a pipeline run. This is the progress companion to start_run: poll it while a run is in flight. Show the `progress` string verbatim — it is the one-line 'pipeline · step (N of M) · elapsed' summary, and the thing to put in front of the user. COMPACT BY DEFAULT (this changed; earlier versions always returned the full payload): a default call returns runId, pipelineId, status, progress, the invocation without its inputs, one `{id, status, error}` per step, the artifact path, cancellation details — and an `omitted` object naming, for every field left out, the route or call that returns it. Pass verbose:true to get the full payload instead: full invocation inputs, per-step output excerpts with startedAt/finishedAt/outputTruncated/model/command, the run result, and the gate spec inline (which can be tens of thousands of characters). Poll with the default and ask for verbose:true once, when you actually need the content. A step's whole output is also at GET /api/runs/:id/steps/:stepId/output. Rendered prompts are never returned in either mode — read them from the run page or artifact. When the run is suspended at an approval gate, both modes return the gate message; only verbose:true inlines the spec.",
+    "Get the current status and result of a pipeline run. This is the progress companion to start_run: poll it while a run is in flight. Show the `progress` string verbatim — it is the one-line 'pipeline · step (N of M) · elapsed' summary, and the thing to put in front of the user. COMPACT BY DEFAULT (this changed; earlier versions always returned the full payload): a default call returns runId, pipelineId, status, progress, the invocation without its inputs, one `{id, status, error}` per step, the artifact path, cancellation details — and an `omitted` object naming, for every field left out, the route or call that returns it. Pass verbose:true to get the full payload instead: full invocation inputs, per-step output excerpts with startedAt/finishedAt/outputTruncated/model/command, the run result, and the gate spec inline (which can be tens of thousands of characters). Poll with the default and ask for verbose:true once, when you actually need the content. For progress alone, use get_run_events instead of polling this: it returns only step transitions and is a fraction of the size. A step's whole output is also at GET /api/runs/:id/steps/:stepId/output. Rendered prompts are never returned in either mode — read them from the run page or artifact. When the run is suspended at an approval gate, both modes return the gate message; only verbose:true inlines the spec.",
   inputSchema: z.object({
     runId: z.string().describe("Run ID returned by run_pipeline"),
     verbose: z
@@ -170,6 +151,22 @@ const getRunTool = createTool({
       ),
   }),
   execute: (inputData) => getRunState(inputData.runId, inputData.verbose),
+});
+
+const getRunEventsTool = createTool({
+  id: "get_run_events",
+  description:
+    "Get a run's step transitions since a cursor - the cheap way to follow a run. Use this instead of polling get_run for progress: it returns one small {seq, at, stepId, kind, status} line per transition (step.start, step.result, step.suspended) and none of the run's content - no invocation, no spec, no result, no output excerpts. Poll it with sinceSeq set to the nextSeq of the previous call and you will never see the same line twice. Better still, do not poll at all: the response carries `eventsPath`, the absolute path of the run's events file, which exists from the moment the run starts and can be tailed or watched for push-style updates - an external reader must skip a final line that has no trailing newline, because that is a write in progress and not an event. `GET /api/runs/:id/events` is the documented SSE stream for the same thing over HTTP. One limitation when counting transitions: a step inside a `loop` body runs once per iteration and emits a step.start each time, but only ONE step.result for the whole loop, so such a step reads as permanently in flight - do not infer from that that it hung. If the daemon is not running, this returns the run's last persisted lines from disk with status 'unknown', a `lastPersistedStatus` and a `staleSeconds` - nothing there is current, and `lastPersistedStatus: \"orphaned\"` means the run was mid-flight when its daemon went away.",
+  inputSchema: z.object({
+    runId: z.string().describe("Run ID returned by start_run or run_pipeline"),
+    sinceSeq: z
+      .number()
+      .optional()
+      .describe(
+        "Return only transitions with a higher seq. Pass the previous call's nextSeq to poll without overlap; omit it for the whole history."
+      ),
+  }),
+  execute: (inputData) => getRunEvents(inputData.runId, inputData.sinceSeq),
 });
 
 const cancelRunTool = createTool({
@@ -237,6 +234,7 @@ const server = new MCPServer({
     run_pipeline: runPipelineTool,
     approve: approveTool,
     get_run: getRunTool,
+    get_run_events: getRunEventsTool,
     cancel_run: cancelRunTool,
     decide_entry_point: decideEntryPointTool,
   },

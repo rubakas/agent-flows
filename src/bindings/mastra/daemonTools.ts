@@ -5,7 +5,14 @@
 // over the daemon's HTTP API so the tool behaviour is unit-testable against a
 // fake daemon.
 
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { isSafeRunId } from "../../runtime/artifactStore.js";
+import { resolveProjectState } from "../../runtime/projectState.js";
+import { readRunLog, runLogFile } from "../../runtime/stepLog.js";
 import { resolveDaemonBase } from "./daemonResolver.js";
+import { resolveProjectDir } from "./projectDir.js";
+import type { StepLogEvent } from "../../canon/stepLogEvents.js";
 
 export async function daemonFetch(path: string, init?: RequestInit): Promise<Response> {
   // Resolved per call (spec 038 FR-013): the daemon is found by identity — this
@@ -20,9 +27,13 @@ export async function daemonFetch(path: string, init?: RequestInit): Promise<Res
     res = await fetch(url, init);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Deliberately does NOT assert a crash: an auto-started daemon retires by
+    // design after about 15 minutes with no runs, and calling that a crash sent
+    // callers hunting a fault that was never there.
     throw new Error(
-      `agent-flows MCP: cannot reach the daemon at ${base}; it answered the identity ` +
-        `handshake earlier in this session, so it has since stopped or crashed. (${msg})`,
+      `agent-flows MCP: cannot reach the daemon at ${base}. An auto-started daemon ` +
+        `retires after about 15 minutes with no runs; the next call starts a new one. ` +
+        `(${msg})`,
       { cause: err }
     );
   }
@@ -98,6 +109,8 @@ export interface DaemonRunState {
   invocation?: { startedAt?: string; [key: string]: unknown };
   steps?: Record<string, DaemonStepState>;
   cancelled?: { at: string; reason?: string };
+  /** Daemon-derived path of the run's events file; never caller-supplied. */
+  eventsPath?: string;
 }
 
 /**
@@ -266,7 +279,9 @@ export interface StartRunInput {
  * they cannot drift in how they build the request body — the only difference
  * between them is what they do with the id afterwards.
  */
-async function postRun(input: StartRunInput): Promise<{ runId: string } | { error: string }> {
+async function postRun(
+  input: StartRunInput
+): Promise<{ runId: string; eventsPath?: string } | { error: string }> {
   const { pipeline, inputs, models, provider, gateMode, artifact_path } = input;
   const body = {
     pipeline,
@@ -287,8 +302,34 @@ async function postRun(input: StartRunInput): Promise<{ runId: string } | { erro
     const e = (await res.json().catch(() => ({}))) as { error?: string };
     return { error: e.error ?? `daemon POST /api/runs returned HTTP ${res.status}` };
   }
-  const { runId } = (await res.json()) as { runId: string };
-  return { runId };
+  const { runId, eventsPath } = (await res.json()) as { runId: string; eventsPath?: string };
+  return { runId, ...(eventsPath !== undefined ? { eventsPath } : {}) };
+}
+
+/**
+ * The two push handles a caller can use instead of polling: the events file to
+ * tail, and the SSE stream to subscribe to. Both are derived from the daemon's
+ * own base and the daemon's own path — nothing a caller supplies reaches
+ * either, because the daemon is unauthenticated and a caller-named path or
+ * command would be a write primitive.
+ *
+ * A reader tailing the file must skip a final line with no trailing newline: it
+ * is a write in progress, not an event.
+ */
+async function pushHandles(
+  runId: string,
+  eventsPath: string | undefined
+): Promise<Record<string, string>> {
+  let eventsUrl: string | undefined;
+  try {
+    eventsUrl = `${await resolveDaemonBase()}/api/runs/${encodeURIComponent(runId)}/events`;
+  } catch {
+    // No daemon to name a URL on; the file is still the durable record.
+  }
+  return {
+    ...(eventsPath !== undefined ? { eventsPath } : {}),
+    ...(eventsUrl !== undefined ? { eventsUrl } : {}),
+  };
 }
 
 /**
@@ -298,7 +339,11 @@ async function postRun(input: StartRunInput): Promise<{ runId: string } | { erro
 export async function startRun(input: StartRunInput): Promise<Record<string, unknown>> {
   const started = await postRun(input);
   if ("error" in started) return started;
-  return { runId: started.runId, status: "running" };
+  return {
+    runId: started.runId,
+    status: "running",
+    ...(await pushHandles(started.runId, started.eventsPath)),
+  };
 }
 
 /** `run_pipeline` body: start the run, then block on it until it stops advancing. */
@@ -330,11 +375,20 @@ function toCompactStepViews(steps: Record<string, DaemonStepState> | undefined):
  * that returns it: a compact response that silently hides data leaves the caller
  * believing the run has none, which is worse than the token cost it saves.
  */
-function compactRunState(runId: string, got: DaemonRunState): Record<string, unknown> {
+function compactRunState(
+  runId: string,
+  got: DaemonRunState,
+  push: Record<string, string>
+): Record<string, unknown> {
   const omitted: Record<string, string> = {
+    // Not a key of its own: `omitted` names data this payload dropped, and a
+    // pointer to a cheaper tool is not that. It rides on `mode`, which is the
+    // entry about how to read the response rather than about any one field.
     mode:
       "Compact by default — call get_run again with verbose:true for the full payload " +
-      "(step output excerpts, full invocation inputs, gate spec, result).",
+      "(step output excerpts, full invocation inputs, gate spec, result). For progress " +
+      "alone, call get_run_events, tail `eventsPath`, or subscribe to `eventsUrl` — all " +
+      "three are cheaper than polling this.",
   };
   if (got.steps !== undefined && Object.keys(got.steps).length > 0) {
     omitted.stepOutput =
@@ -370,6 +424,7 @@ function compactRunState(runId: string, got: DaemonRunState): Record<string, unk
     steps: toCompactStepViews(got.steps),
     ...(got.artifactPath !== undefined ? { artifactPath: got.artifactPath } : {}),
     ...(got.cancelled !== undefined ? { cancelled: got.cancelled } : {}),
+    ...push,
     omitted,
   };
 }
@@ -386,7 +441,22 @@ export async function getRunState(
   runId: string,
   verbose = false
 ): Promise<Record<string, unknown>> {
-  const res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}`);
+  let res: Response;
+  try {
+    res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}`);
+  } catch {
+    // A retired daemon must not turn a status question into an exception — but
+    // nothing read from disk may be presented as current. This is a READ tool;
+    // approve and cancel_run still fail loudly, because a write that quietly
+    // reports success is a far worse lie than a read that says "unknown".
+    const disk = readRunFromDisk(runId);
+    return {
+      runId,
+      ...(disk.pipelineId !== undefined ? { pipelineId: disk.pipelineId } : {}),
+      ...diskEventsPathField(disk),
+      ...daemonDownFields(disk),
+    };
+  }
   if (res.status === 404) {
     return { error: `No run found for runId "${runId}"` };
   }
@@ -394,7 +464,8 @@ export async function getRunState(
     return { error: `daemon GET /api/runs/${runId} returned HTTP ${res.status}` };
   }
   const got = (await res.json()) as DaemonRunState;
-  if (!verbose) return compactRunState(runId, got);
+  const push = await pushHandles(runId, got.eventsPath);
+  if (!verbose) return compactRunState(runId, got, push);
   return {
     runId: got.runId,
     pipelineId: got.pipelineId,
@@ -410,7 +481,298 @@ export async function getRunState(
     // breaks nobody — consumers ignore keys they do not read.
     ...(got.artifactPath !== undefined ? { artifactPath: got.artifactPath } : {}),
     ...(got.cancelled !== undefined ? { cancelled: got.cancelled } : {}),
+    ...push,
   };
+}
+
+// ── Reading a run with no daemon to ask ───────────────────────────────────────
+
+/**
+ * What a run's own directory can still say once the daemon is gone.
+ *
+ * Every field is named for what it is: the LAST PERSISTED state, not the
+ * current one. A daemon that died mid-run leaves `running` on disk and nothing
+ * will ever update it, so reporting that as `status` would make a polling
+ * caller wait forever on a run that stopped hours ago.
+ */
+interface DiskRun {
+  dir: string;
+  /** Undefined when the directory names no events file and no artifact. */
+  pipelineId?: string;
+  lastPersistedStatus: string;
+  lastPersistedAt?: string;
+  staleSeconds?: number;
+}
+
+/** The note every daemon-down payload carries, so the caller reads it as one. */
+const DAEMON_DOWN_NOTE =
+  "The daemon is not running — an auto-started one retires after about 15 minutes with " +
+  'no runs. Nothing here is current: `status` is "unknown" and `lastPersistedStatus` is ' +
+  "what the run's own directory last recorded. Start a run, or open the page, to bring a " +
+  "daemon back.";
+
+function readJsonFile(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The run's last recorded status, or "orphaned".
+ *
+ * "orphaned" covers both a run whose artifact says `running` — no daemon is
+ * left to advance it, so that word describes a state that no longer exists —
+ * and a run that persisted no terminal status at all. Neither can be reported
+ * as in-flight without inventing a run that is still going.
+ */
+const ORPHANED_ON_DISK: ReadonlySet<string> = new Set(["running", "awaiting_approval"]);
+
+function lastPersistedStatusOf(dir: string, pipelineId: string | undefined): string {
+  if (pipelineId === undefined) return "orphaned";
+  const artifact = readJsonFile(join(dir, `${pipelineId}.json`)) as
+    { status?: unknown } | undefined;
+  const manifest = readJsonFile(join(dir, "manifest.json")) as
+    { stages?: { stageId?: string; status?: string }[] } | undefined;
+  const stage = manifest?.stages?.find((entry) => entry.stageId === pipelineId);
+  const recorded =
+    typeof artifact?.status === "string"
+      ? artifact.status
+      : typeof stage?.status === "string"
+        ? stage.status
+        : undefined;
+  // `awaiting_approval` is as dead as `running`: RunService holds suspended runs
+  // in memory only, so no daemon is left to accept the approval this status
+  // invites. Reporting it verbatim sends the caller to `approve` for a throw.
+  if (recorded === undefined || ORPHANED_ON_DISK.has(recorded)) return "orphaned";
+  return recorded;
+}
+
+/** When anything in the run's directory last changed, as an ISO timestamp. */
+function lastWriteOf(dir: string, entries: readonly string[]): number | undefined {
+  const times = entries
+    .map((name) => {
+      try {
+        return statSync(join(dir, name)).mtimeMs;
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((ms): ms is number => ms !== undefined);
+  return times.length === 0 ? undefined : Math.max(...times);
+}
+
+/**
+ * Locate a run's directory under this project's state and read what it says.
+ *
+ * The pipeline id comes from the events file's own name: that file is created
+ * at run start (stepLog D1), so it is there for an in-flight run too, which
+ * neither the artifact nor the manifest can claim. Throws when the directory
+ * does not exist — a wrong run id is a different failure from a retired daemon
+ * and must not read like one.
+ */
+function readRunFromDisk(runId: string): DiskRun {
+  // The run id arrives from an MCP caller as a bare string and is about to be
+  // joined onto a filesystem path. Without this, "../../.config/x" turns the
+  // fallback — which fires whenever the daemon is retired, i.e. routinely —
+  // into a directory-existence, filename, mtime and JSON-status oracle for any
+  // path on the machine. The HTTP side has always guarded this; the guard is
+  // shared rather than restated.
+  if (!isSafeRunId(runId)) {
+    throw new Error(
+      `agent-flows MCP: run id ${JSON.stringify(runId.slice(0, 80))} is not a run id.`
+    );
+  }
+  const { runsDir } = resolveProjectState(resolveProjectDir());
+  const dir = join(runsDir, runId);
+  if (!existsSync(dir)) {
+    throw new Error(
+      `agent-flows MCP: the daemon is unreachable and run "${runId}" has no directory ` +
+        `under ${runsDir}, so there is nothing to report. Check the run id.`
+    );
+  }
+  const entries = readdirSync(dir);
+  const events = entries.find((name) => name.endsWith(".events.jsonl"));
+  const pipelineId =
+    events !== undefined
+      ? events.slice(0, -".events.jsonl".length)
+      : entries.find((name) => name.endsWith(".json") && name !== "manifest.json")?.slice(0, -5);
+  const lastWriteMs = lastWriteOf(dir, entries);
+  return {
+    dir,
+    pipelineId,
+    lastPersistedStatus: lastPersistedStatusOf(dir, pipelineId),
+    ...(lastWriteMs !== undefined
+      ? {
+          lastPersistedAt: new Date(lastWriteMs).toISOString(),
+          staleSeconds: Math.max(0, Math.round((Date.now() - lastWriteMs) / 1_000)),
+        }
+      : {}),
+  };
+}
+
+/**
+ * The run's events file, or `{}` when the directory named no pipeline. Handing
+ * back a path that does not exist tells the caller to tail nothing.
+ */
+function diskEventsPathField(disk: DiskRun): { eventsPath?: string } {
+  if (disk.pipelineId === undefined) return {};
+  return { eventsPath: runLogFile(disk.dir, disk.pipelineId) };
+}
+
+/** The daemon-down half of any read tool's payload. Never used by a mutating tool. */
+function daemonDownFields(disk: DiskRun): Record<string, unknown> {
+  return {
+    // Never the persisted value: an agent reads `status` as current, and no
+    // wording next to it undoes that.
+    status: "unknown",
+    lastPersistedStatus: disk.lastPersistedStatus,
+    ...(disk.lastPersistedAt !== undefined ? { lastPersistedAt: disk.lastPersistedAt } : {}),
+    ...(disk.staleSeconds !== undefined ? { staleSeconds: disk.staleSeconds } : {}),
+    daemonUnreachableAt: new Date().toISOString(),
+    note: DAEMON_DOWN_NOTE,
+  };
+}
+
+// ── get_run_events ────────────────────────────────────────────────────────────
+
+/**
+ * The kinds that describe where a run is, as opposed to what was said inside
+ * it. The default for `get_run_events`: everything else in an events file is
+ * transcript, and a poller asking for it defeats the point of the tool.
+ */
+export const LIFECYCLE_KINDS: readonly string[] = ["step.start", "step.result", "step.suspended"];
+
+/** One lifecycle line as MCP callers see it — nothing from the run's content. */
+export interface RunEventView {
+  seq: number;
+  at: string;
+  stepId: string;
+  kind: string;
+  /** Present on step.result: "succeeded" | "failed" | "cancelled". */
+  status?: string;
+}
+
+function toEventView(event: StepLogEvent): RunEventView {
+  const status = (event as { status?: unknown }).status;
+  return {
+    seq: event.seq,
+    at: event.at,
+    stepId: event.stepId,
+    kind: event.kind,
+    ...(typeof status === "string" ? { status } : {}),
+  };
+}
+
+/**
+ * The cursor for the next poll.
+ *
+ * Taken from the run's HIGHEST seq, not from the highest seq RETURNED: the
+ * filter drops most of a chatty run's lines, so advancing only past what came
+ * back would leave the cursor pinned near the start and every later poll would
+ * re-scan the same megabytes forever — which is precisely what this tool exists
+ * to avoid. Every line at or below `maxSeq` has been considered, so skipping
+ * past them loses nothing.
+ */
+function nextSeqOf(maxSeq: number | undefined, sinceSeq: number): number {
+  if (maxSeq === undefined || maxSeq < sinceSeq) return sinceSeq;
+  return maxSeq + 1;
+}
+
+/**
+ * `get_run_events` body: the run's lifecycle lines beyond `sinceSeq`.
+ *
+ * Deliberately minimal — no invocation, no spec, no result, no output excerpts
+ * — because the whole point is a call cheap enough to make every few seconds,
+ * and `eventsPath` exists so a caller need not make it at all.
+ */
+export async function getRunEvents(
+  runId: string,
+  sinceSeq?: number
+): Promise<Record<string, unknown>> {
+  const since = sinceSeq ?? 0;
+  const query = `after=${since}&kinds=${encodeURIComponent(LIFECYCLE_KINDS.join(","))}`;
+
+  let res: Response;
+  try {
+    res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}/log?${query}`);
+  } catch {
+    const disk = readRunFromDisk(runId);
+    const wanted = new Set(LIFECYCLE_KINDS);
+    const path = diskEventsPathField(disk);
+    const all = path.eventsPath === undefined ? [] : readRunLog(path.eventsPath, { after: since });
+    const events = all.filter((event) => wanted.has(event.kind)).map(toEventView);
+    const maxSeq = all.length === 0 ? undefined : Math.max(...all.map((event) => event.seq));
+    return {
+      runId,
+      ...(disk.pipelineId !== undefined ? { pipelineId: disk.pipelineId } : {}),
+      events,
+      nextSeq: nextSeqOf(maxSeq, since),
+      ...path,
+      ...daemonDownFields(disk),
+    };
+  }
+
+  if (res.status === 404) {
+    return { error: `No run found for runId "${runId}"` };
+  }
+  if (!res.ok) {
+    return { error: `daemon GET /api/runs/${runId}/log returned HTTP ${res.status}` };
+  }
+
+  const body = await res.text();
+  const events = body
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => toEventView(JSON.parse(line) as StepLogEvent));
+  const encodedPath = res.headers.get("x-run-events-path");
+  const rawMaxSeq = Number(res.headers.get("x-run-max-seq"));
+  return {
+    runId,
+    pipelineId: res.headers.get("x-run-pipeline-id") ?? "",
+    status: res.headers.get("x-run-status") ?? "unknown",
+    events,
+    nextSeq: nextSeqOf(Number.isFinite(rawMaxSeq) ? rawMaxSeq : undefined, since),
+    ...(encodedPath ? { eventsPath: decodeURIComponent(encodedPath) } : {}),
+    daemonReachableAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * `approve` body: proxy to `POST /api/runs/:id/approve`.
+ *
+ * Lives here rather than inline in the MCP server so it is reachable by a test.
+ * It is a mutating tool, so it has no disk fallback and must keep throwing when
+ * the daemon is unreachable: a write that quietly reports success is a worse
+ * lie than a read that says "unknown".
+ */
+export async function approveRun(
+  runId: string,
+  approved: boolean,
+  reason?: string
+): Promise<Record<string, unknown>> {
+  const res = await daemonFetch(`/api/runs/${encodeURIComponent(runId)}/approve`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ approved, ...(reason !== undefined ? { reason } : {}) }),
+  });
+  const data = (await res.json()) as { error?: string; status?: string; result?: unknown };
+  // Only a 4xx/5xx response with no status field is a tool failure.
+  // A rejection (status:"rejected") is a normal lifecycle outcome — no error.
+  if (!res.ok && data.status === undefined) {
+    return { error: data.error ?? `HTTP ${res.status}` };
+  }
+  if (data.status === "succeeded") {
+    return { runId, status: "succeeded", result: data.result };
+  }
+  if (data.status === "rejected") {
+    return { runId, status: "rejected" };
+  }
+  if (data.status === "awaiting_approval") {
+    return { runId, status: "awaiting_approval" };
+  }
+  return { runId, status: "failed" };
 }
 
 /**

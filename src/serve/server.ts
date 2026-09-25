@@ -85,6 +85,7 @@ import { decideEntryPoint } from "../runtime/entryPoint.js";
 import { ensureProjectState, type ProjectState } from "../runtime/projectState.js";
 import {
   isSafeStepId,
+  lastSeqOfFile,
   pipeRunLog,
   readStepOutput,
   runLogFile,
@@ -161,6 +162,8 @@ const RE_RUN_EVENTS = /^\/api\/runs\/([^/]+)\/events$/u;
 const RE_RUN_LOG = /^\/api\/runs\/([^/]+)\/log$/u;
 const RE_RUN_STEP_OUTPUT = /^\/api\/runs\/([^/]+)\/steps\/([^/]+)\/output$/u;
 const RE_AFTER_SEQ = /^\d+$/u;
+/** One entry of the log route's `kinds=` allowlist. Same character class as a StepLogKind. */
+const RE_LOG_KIND = /^[a-z][a-z.]*$/u;
 const RE_RUN_BY_ID = /^\/api\/runs\/([^/]+)$/u;
 const RE_RUN_APPROVE = /^\/api\/runs\/([^/]+)\/approve$/u;
 const RE_RUN_CANCEL = /^\/api\/runs\/([^/]+)\/cancel$/u;
@@ -1117,6 +1120,23 @@ function runNotFound(res: ServerResponse, id: string): void {
  * Looks up a run snapshot for a route that has already narrowed its
  * RunService. Writes the 404 body and returns undefined for an unknown id.
  */
+/**
+ * The run's events file as `{ eventsPath }`, or `{}` when the run has no
+ * artifact directory or an unaddressable pipeline id. Spread into a response so
+ * a caller can tail the file instead of polling — and, because the daemon is
+ * unauthenticated, so that nothing a caller supplies ever names a path.
+ */
+function eventsPathField(runService: RunService, id: string): { eventsPath?: string } {
+  const location = runService.logLocation(id);
+  if (location === undefined) return {};
+  try {
+    return { eventsPath: runLogFile(location.dir, location.pipelineId) };
+  } catch (err) {
+    if (!(err instanceof RangeError)) throw err;
+    return {};
+  }
+}
+
 function requireRun(
   runService: RunService,
   res: ServerResponse,
@@ -1971,11 +1991,16 @@ async function handleRequest(
     const result = await runService.start(pipeline, wfInput, {
       gateMode: gateMode ?? "manual",
       ...(pipelineEntry !== undefined ? { pipelineSteps: pipelineEntry.loaded.def.steps } : {}),
+      // Loop bodies are built like top-level steps but are absent from
+      // def.steps, so without them their llm steps would be logged twice.
+      ...(pipelineEntry?.loaded.bodies !== undefined
+        ? { pipelineBodies: pipelineEntry.loaded.bodies }
+        : {}),
       ...(chainArtifactDir !== undefined ? { chainArtifactDir } : {}),
       ...(typeof artifactPath === "string" ? { artifactPath } : {}),
       ...(runProfile !== undefined ? { provider: runProfile } : {}),
     });
-    json(res, 200, result);
+    json(res, 200, { ...result, ...eventsPathField(runService, result.runId) });
     return;
   }
 
@@ -2062,7 +2087,20 @@ async function handleRequest(
       json(res, 400, { error: "invalid after" });
       return;
     }
-    if (!requireRun(runService, res, id)) return;
+    // Comma-separated allowlist; absent means every kind, as before. A caller
+    // tracking a run's lifecycle asks for three kinds and skips the messages.
+    const kindsRaw = url.searchParams.get("kinds");
+    let kinds: Set<string> | undefined;
+    if (kindsRaw !== null) {
+      const parts = kindsRaw.split(",").filter((part) => part !== "");
+      if (parts.length === 0 || parts.some((part) => !RE_LOG_KIND.test(part))) {
+        json(res, 400, { error: "invalid kinds" });
+        return;
+      }
+      kinds = new Set(parts);
+    }
+    const state = requireRun(runService, res, id);
+    if (!state) return;
     // A run recorded before this spec has no events file: an empty body, not a 404.
     const location = runService.logLocation(id);
     const after = Number(afterRaw ?? 0);
@@ -2079,9 +2117,20 @@ async function handleRequest(
     res.writeHead(200, {
       "Content-Type": "application/x-ndjson",
       "X-Content-Type-Options": "nosniff",
+      // What the run is and where its file lives ride in headers, so a poller
+      // that only wants the lifecycle still needs exactly one request. The path
+      // is percent-encoded: a header field is ASCII and a home directory is not
+      // obliged to be.
+      "X-Run-Status": state.status,
+      "X-Run-Pipeline-Id": location?.pipelineId ?? "",
+      // The run's own highest seq, not the highest this response carries: a
+      // filtered request drops most lines, and a cursor advanced only past what
+      // came back would make every later poll re-scan the same tail.
+      "X-Run-Max-Seq": String(file === undefined ? 0 : lastSeqOfFile(file)),
+      ...(file !== undefined ? { "X-Run-Events-Path": encodeURIComponent(file) } : {}),
     });
     // Streamed line by line: a long run's log must not be held in memory per request.
-    if (file !== undefined) await pipeRunLog(file, res, { after });
+    if (file !== undefined) await pipeRunLog(file, res, { after, ...(kinds ? { kinds } : {}) });
     res.end();
     return;
   }
@@ -2156,7 +2205,7 @@ async function handleRequest(
     const id = decodeURIComponent(runGetMatch[1]);
     const state = requireRun(runService, res, id);
     if (!state) return;
-    json(res, 200, state);
+    json(res, 200, { ...state, ...eventsPathField(runService, id) });
     return;
   }
 
