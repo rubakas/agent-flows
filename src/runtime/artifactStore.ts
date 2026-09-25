@@ -4,8 +4,9 @@
 // Intentionally does not import from runService.ts — the two modules form a
 // one-way dependency (runService → artifactStore) so there is no cycle.
 
+import { randomBytes } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import { runSubject } from "./runSubject.js";
@@ -103,6 +104,37 @@ export interface RunManifest {
   stages: ManifestStage[];
 }
 
+// ── Atomic publication ────────────────────────────────────────────────────────
+
+/**
+ * Serialise `data` as JSON and publish it at `path` atomically.
+ *
+ * writeFile is open(O_TRUNC) → write → close, so between the open and the write
+ * a zero-length file exists at the final name. A concurrent reader — the daemon
+ * serving GET /api/runs, for instance — then parses "" and reports a healthy run
+ * as unreadable. Writing a sibling temp file and renaming it means a reader only
+ * ever sees a complete file: the previous one or the new one.
+ *
+ * The temp file is a sibling so it is on the same filesystem (rename is only
+ * atomic within one), carries a unique suffix so concurrent writers in the same
+ * directory cannot collide, and ends in ".tmp" rather than ".json" so the
+ * directory scans that pick artifacts out of a run dir cannot select it.
+ *
+ * Throws on failure, after removing the temp file; callers own the reporting.
+ */
+async function writeJsonAtomic(path: string, data: unknown): Promise<void> {
+  const tempPath = `${path}.${process.pid.toString(36)}-${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    // mode applies at creation, and rename carries it to the final name.
+    await writeFile(tempPath, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
+    await rename(tempPath, path);
+  } catch (err: unknown) {
+    // A temp file that was never created is not a second problem to report.
+    await unlink(tempPath).catch(() => undefined);
+    throw err;
+  }
+}
+
 // ── Artifact I/O ──────────────────────────────────────────────────────────────
 
 /**
@@ -130,10 +162,7 @@ export async function writeRunArtifact(
     // Owner-only: an artifact holds rendered prompts and step output, i.e. the
     // repository's content. Same modes as everything else under the state dir.
     await mkdir(artifactDir, { recursive: true, mode: 0o700 });
-    await writeFile(artifactPath, JSON.stringify(artifactData, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    await writeJsonAtomic(artifactPath, artifactData);
     return artifactPath;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -216,10 +245,7 @@ export async function upsertManifestEntry(
   manifest.status = deriveChainStatus(manifest.stages);
 
   try {
-    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    await writeJsonAtomic(manifestPath, manifest);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[agent-flows] manifest write failed at ${manifestPath}: ${msg}`);
@@ -254,10 +280,7 @@ export async function recordManifestSpecSource(
       return;
     }
     manifest.stages[idx] = { ...manifest.stages[idx], specSource };
-    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    await writeJsonAtomic(manifestPath, manifest);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[agent-flows] spec provenance write failed at ${manifestPath}: ${msg}`);

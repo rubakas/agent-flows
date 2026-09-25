@@ -1849,11 +1849,19 @@ function makeCancellableRun(runId: string, stepId: string): CancellableRun {
   };
 }
 
-/** Wait for the fire-and-forget persistArtifact write to land, or give up. */
+/**
+ * Wait for the persistArtifact write to land, or give up.
+ *
+ * Readiness is parseable content, not mere existence: a file that exists but is
+ * empty or half-written satisfies readFileSync, so an existence check would
+ * return "" on the first poll and never use the retry budget.
+ */
 async function waitForFile(path: string, attempts = 50): Promise<string | undefined> {
   for (let i = 0; i < attempts; i++) {
     try {
-      return readFileSync(path, "utf8");
+      const raw = readFileSync(path, "utf8");
+      JSON.parse(raw);
+      return raw;
     } catch {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }

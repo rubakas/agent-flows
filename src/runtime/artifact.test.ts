@@ -1348,3 +1348,123 @@ describe("spec 039: provenance names the provider that answered after a failover
     );
   });
 });
+
+// ── Atomic publication ────────────────────────────────────────────────────────
+
+/**
+ * Count how many times a concurrent reader sees an incomplete file at `path`
+ * while `write` republishes it `iterations` times.
+ *
+ * A non-atomic writeFile leaves a zero-length file at the final name between
+ * the open and the write, and `pickArtifact` reports a run whose artifact will
+ * not parse as "unreadable" — so any count above zero is a run the daemon can
+ * misreport. The reader yields with setImmediate so it interleaves with the
+ * write's threadpool round-trips.
+ */
+async function countIncompleteReads(
+  path: string,
+  iterations: number,
+  write: (i: number) => Promise<unknown>
+): Promise<number> {
+  let incomplete = 0;
+  let writing = true;
+
+  const reader = (async () => {
+    while (writing) {
+      try {
+        const raw = readFileSync(path, "utf8");
+        if (raw === "") {
+          incomplete++;
+        } else {
+          JSON.parse(raw);
+        }
+      } catch (err: unknown) {
+        // Absent before the first publication is fine; anything else — a parse
+        // error on a half-written file — is a read the daemon would have failed.
+        if ((err as { code?: string }).code !== "ENOENT") incomplete++;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  })();
+
+  for (let i = 0; i < iterations; i++) await write(i);
+  writing = false;
+  await reader;
+
+  return incomplete;
+}
+
+describe("artifact publication is atomic (spec 029 FR-001)", () => {
+  it("never exposes an empty or unparseable artifact at the final path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-atomic-artifact-"));
+    try {
+      const artifactPath = join(dir, "test-pipeline.json");
+      const incomplete = await countIncompleteReads(artifactPath, 500, (i) =>
+        writeRunArtifact(dir, "atomic-run", "test-pipeline", {
+          runId: "atomic-run",
+          status: "succeeded",
+          iteration: i,
+          provenance: { pipelineId: "test-pipeline", profileId: "anthropic", settledAt: "now" },
+        })
+      );
+
+      assert.equal(
+        incomplete,
+        0,
+        `a reader observed ${incomplete} incomplete artifacts — publication must be atomic`
+      );
+      // No temp file may survive a successful write, and nothing beside the
+      // artifact may end in .json where pickArtifact would select it.
+      assert.deepEqual(readdirSync(dir), ["test-pipeline.json"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never exposes an empty or unparseable manifest at the final path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-atomic-manifest-"));
+    try {
+      const startedAt = new Date().toISOString();
+      const incomplete = await countIncompleteReads(join(dir, "manifest.json"), 300, (i) =>
+        upsertManifestEntry(dir, startedAt, {
+          stageId: `stage-${i % 4}`,
+          artifactPath: join(dir, `stage-${i % 4}.json`),
+          profileId: "anthropic",
+          status: "succeeded",
+          settledAt: new Date().toISOString(),
+        })
+      );
+
+      assert.equal(
+        incomplete,
+        0,
+        `a reader observed ${incomplete} incomplete manifests — publication must be atomic`
+      );
+      assert.deepEqual(readdirSync(dir), ["manifest.json"]);
+      const manifest = await readManifest(dir);
+      assert.equal(manifest.stages.length, 4, "idempotent upserts must not duplicate stages");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps owner-only mode on the renamed artifact and manifest", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "af-atomic-mode-"));
+    try {
+      const path = await writeRunArtifact(dir, "mode-run", "test-pipeline", { runId: "mode-run" });
+      assert.ok(path !== undefined);
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+
+      await upsertManifestEntry(dir, new Date().toISOString(), {
+        stageId: "test-pipeline",
+        artifactPath: path,
+        profileId: "anthropic",
+        status: "succeeded",
+        settledAt: new Date().toISOString(),
+      });
+      assert.equal(statSync(join(dir, "manifest.json")).mode & 0o777, 0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

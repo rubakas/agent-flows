@@ -459,6 +459,12 @@ interface RunRecord {
    */
   artifactPath?: string;
   /**
+   * The artifact/manifest writes started for this run, chained so they cannot
+   * interleave. waitForSettled awaits it, so a caller that has observed
+   * settlement can rely on the artifact being complete on disk.
+   */
+  persistPromise?: Promise<void>;
+  /**
    * Directory this run's artifact and event log live in, resolved once in start()
    * (spec 036 D1). Internal: it is not part of GetResult or the artifact.
    */
@@ -771,7 +777,13 @@ export class RunService {
   async waitForSettled(runId: string): Promise<SettledResult | undefined> {
     const record = this.registry.get(runId);
     if (!record) return undefined;
-    return record.settledPromise;
+    const settled = await record.settledPromise;
+    // The settlement paths start the artifact write synchronously, before or
+    // immediately after resolving settledPromise, so the promise is already on
+    // the record here. Awaiting it means an observer of settlement never races
+    // the write (spec 029 FR-001).
+    await record.persistPromise;
+    return settled;
   }
 
   /**
@@ -1072,7 +1084,7 @@ export class RunService {
 
     // Spec 029 FR-001: write artifact for every gate suspension and terminal
     // transition reached through the human-approval path.
-    void this.persistArtifact(record);
+    this.beginPersist(record);
 
     if (settled.status === "awaiting_approval") {
       return {
@@ -1191,7 +1203,7 @@ export class RunService {
 
     this.finalizeSettlement(record);
     record.settle({ status: "cancelled", error: record.error });
-    void this.persistArtifact(record);
+    this.beginPersist(record);
     return { ok: true };
   }
 
@@ -1274,7 +1286,7 @@ export class RunService {
     if (settled.status !== "awaiting_approval") this.finalizeSettlement(record);
     // Persist before potentially dispatching the judge so the gate-suspension
     // state is captured on disk even for auto runs (spec 029 FR-001).
-    void this.persistArtifact(record);
+    this.beginPersist(record);
 
     if (settled.status === "awaiting_approval" && record.gateMode === "auto") {
       const payload = record.suspendPayload as { manualOnly?: boolean } | undefined;
@@ -1541,12 +1553,29 @@ export class RunService {
    * Assemble and write a durable artifact to disk, then update the chain manifest.
    *
    * Swallows all errors — a disk problem must never lose a completed run's
-   * result (spec 029 FR-001/FR-006). The write is fire-and-forget from all callers.
+   * result (spec 029 FR-001/FR-006). Callers start it through beginPersist and
+   * do not block on it.
    *
    * When record.chainArtifactDir is set (chaining from a parent run), artifacts
    * and the manifest are written into the parent's directory so that all stages
    * in a chain accumulate in one place (spec 029 FR-006).
    */
+  /**
+   * Start persisting the artifact without blocking the caller.
+   *
+   * Still fire-and-forget for the settlement paths — a disk problem must not
+   * change a run's outcome — but the promise is kept on the record so
+   * waitForSettled can await it. Writes for one run are chained rather than
+   * overlapped, and rejections are swallowed here so the retained promise can
+   * never become an unhandled rejection.
+   */
+  private beginPersist(record: RunRecord): void {
+    const previous = record.persistPromise ?? Promise.resolve();
+    record.persistPromise = previous
+      .then(() => this.persistArtifact(record))
+      .catch(() => undefined);
+  }
+
   private async persistArtifact(record: RunRecord): Promise<void> {
     const runId = record.run.runId;
     const artifactDir = this.artifactDirFor(record);
