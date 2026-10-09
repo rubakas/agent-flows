@@ -391,6 +391,8 @@ export const codexAdapter: ProviderAdapter = {
       // The step's deny globs are excluded from the sanitized copy, so a denied
       // path is not merely unreadable — it is not there.
       stepDenyPatterns: true,
+      // The adapter has no skills channel; a declared skill would be dropped.
+      skills: false,
     };
   },
   run: runCodexStep,

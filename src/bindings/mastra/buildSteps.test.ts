@@ -1792,6 +1792,45 @@ describe("buildLlmStep — provider failover", () => {
     }
   });
 
+  it("a step that declares skills is never failed over onto a transport that ignores them", async () => {
+    const seen: string[] = [];
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      throw transportFailure();
+    };
+    const registry = new ModelRegistry([
+      { id: "m1", transport: "cli" as const, cli: { bin: "claude" as const, model: "m1" } },
+      { id: "m-codex", transport: "cli" as const, cli: { bin: "codex" as const, model: "gpt" } },
+    ]);
+    const chained = {
+      id: "primary",
+      roles: { reasoner: "m1", worker: "m1", scout: "m1" },
+      fallback: ["codex-profile"],
+    };
+    const codexProfile = {
+      id: "codex-profile",
+      roles: { reasoner: "m-codex", worker: "m-codex", scout: "m-codex" },
+    };
+    const skillsStep: StepDef = { ...step, skills: ["review"] };
+
+    const llmStep = buildLlmStep(
+      skillsStep,
+      prompts,
+      { ...makeDeps(runner, chained, [chained, codexProfile]), registry },
+      undefined
+    );
+
+    await assert.rejects(
+      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
+      (err: Error) => {
+        assert.match(err.message, /codex-profile: skipped/);
+        assert.match(err.message, /skills/);
+        return true;
+      }
+    );
+    assert.deepEqual(seen, ["m1"], "the codex candidate would silently drop the skills");
+  });
+
   it("a schema retry after a failover runs on the model that answered, not the failed primary", async () => {
     const seen: string[] = [];
     const answers: Record<string, string[]> = {

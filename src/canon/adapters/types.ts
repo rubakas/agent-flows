@@ -26,6 +26,12 @@ export interface AdapterCapabilities {
    * wrote is a boundary, and a boundary only one provider honours is none.
    */
   stepDenyPatterns: boolean;
+  /**
+   * Can hand the step's declared `skills` to the model. A transport that cannot
+   * must never be handed a step that declares them — the step would run without
+   * the skills it names and nothing would say so.
+   */
+  skills: boolean;
 }
 
 /** Adapter-level configuration resolved by the caller, not by the adapter. */

@@ -202,6 +202,8 @@ export const claudeAdapter: ProviderAdapter = {
       workspaceWrite: true,
       budgetCap: true,
       stepDenyPatterns: true,
+      // --plugin-dir hands the installed skills to the CLI.
+      skills: true,
     };
   },
   run: runClaudeStep,

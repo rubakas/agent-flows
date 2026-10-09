@@ -53,6 +53,9 @@ export function checkPortability(
   if (step.permissions?.deny?.length && !capabilities.stepDenyPatterns) {
     return refuse("the step's declared permissions.deny globs");
   }
+  if (step.skills?.length && !capabilities.skills) {
+    return refuse("the step's declared skills");
+  }
 
   const contents = step.permissions?.contents;
   if (contents === "read" && !capabilities.workspaceRead) {

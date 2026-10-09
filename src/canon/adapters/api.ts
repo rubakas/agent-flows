@@ -117,6 +117,7 @@ export const apiAdapter: ProviderAdapter = {
       workspaceWrite: false,
       budgetCap: false,
       stepDenyPatterns: false,
+      skills: false,
     };
   },
   run: runApiTransportStep,

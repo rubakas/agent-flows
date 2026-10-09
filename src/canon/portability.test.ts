@@ -65,6 +65,18 @@ describe("checkPortability — refusals (V4)", () => {
     assert.match(reason, /permissions\.deny/);
   });
 
+  for (const [label, entry] of [
+    ["codex", codex],
+    ["the api transport", api],
+  ] as const) {
+    it(`refuses ${label} for a step that declares skills — only claude passes them on`, () => {
+      const reason = reasonOf(checkPortability(step({ skills: ["review"] }), entry, "other"));
+      assert.match(reason, /"verify"/);
+      assert.match(reason, /"other"/);
+      assert.match(reason, /skills/);
+    });
+  }
+
   it("refuses codex with maxBudgetUsd", () => {
     const reason = reasonOf(checkPortability(step({ maxBudgetUsd: 0.5 }), codex, "openai"));
     assert.match(reason, /"verify"/);
@@ -107,6 +119,12 @@ describe("checkPortability — accepted combinations", () => {
 
   it("accepts claude with maxBudgetUsd", () => {
     assert.deepEqual(checkPortability(step({ maxBudgetUsd: 1 }), claude, "anthropic"), {
+      ok: true,
+    });
+  });
+
+  it("accepts claude for a step that declares skills", () => {
+    assert.deepEqual(checkPortability(step({ skills: ["review"] }), claude, "anthropic"), {
       ok: true,
     });
   });
