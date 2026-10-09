@@ -105,6 +105,41 @@ describe("generateWorkflowScript — structural checks", () => {
   });
 });
 
+describe("generateWorkflowScript — executing the generated script", () => {
+  // node --check cannot see a ReferenceError: a later prompt that reads a parallel
+  // step's result under a name the parallel block never bound parses fine and
+  // throws only when the script runs. So run it, with stub workflow globals.
+  it("audit: the synthesis prompt receives both parallel steps' results", async () => {
+    const script = getGenerated().replace(/\bexport const meta\b/, "const meta");
+    const prompts = new Map<string, string>();
+
+    const agent = async (prompt: string, opts: { label: string }): Promise<string> => {
+      prompts.set(opts.label, prompt);
+      return `OUT:${opts.label}`;
+    };
+    const parallel = async (fns: (() => Promise<unknown>)[]): Promise<unknown[]> =>
+      Promise.all(fns.map((fn) => fn()));
+    const noop = (): void => undefined;
+
+    const AsyncFunction = Object.getPrototypeOf(async function () {
+      /* constructor lookup only */
+    }).constructor as new (...params: string[]) => (...values: unknown[]) => Promise<unknown>;
+    const run = new AsyncFunction("agent", "parallel", "phase", "log", "args", script);
+    await run(agent, parallel, noop, noop, { plan: "the plan" });
+
+    const synthesis = prompts.get("synthesis");
+    assert.ok(
+      synthesis,
+      `the synthesis step never ran; steps that ran: ${[...prompts.keys()].join(", ")}`
+    );
+    assert.ok(
+      synthesis.includes("OUT:correctness"),
+      "synthesis prompt lost the correctness result"
+    );
+    assert.ok(synthesis.includes("OUT:security"), "synthesis prompt lost the security result");
+  });
+});
+
 // Which bundled pipelines Binding A must still emit a script for, and which it
 // must refuse. The test above accepts a refusal as a legitimate outcome for ANY
 // pipeline, which is what let spec 044's `review-material` step drop code-review

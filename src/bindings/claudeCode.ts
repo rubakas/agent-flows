@@ -245,9 +245,9 @@ export function generateWorkflowScript(
 
         if (llmInLevel.length > 1) {
           // Parallel block — mirrors the existing phase-path parallel block exactly.
-          const resultVars = llmInLevel.map((gs) => `${safeId(gs.id)}Res`);
+          const resultVars = llmInLevel.map((gs) => `r_${safeId(gs.id)}`);
           for (const gs of llmInLevel) {
-            stepVarNames.set(gs.id, `${safeId(gs.id)}Res`);
+            stepVarNames.set(gs.id, `r_${safeId(gs.id)}`);
             emittedLlmIds.push(gs.id);
           }
 
@@ -269,7 +269,8 @@ export function generateWorkflowScript(
           // Null-guard extractions for schema fields
           for (const gs of llmInLevel) {
             if (gs.schema) {
-              out.push(`const ${gs.schema} = (${gs.id}Res && ${gs.id}Res.${gs.schema}) || []`);
+              const resVar = `r_${safeId(gs.id)}`;
+              out.push(`const ${gs.schema} = (${resVar} && ${resVar}.${gs.schema}) || []`);
             }
           }
           out.push("");
