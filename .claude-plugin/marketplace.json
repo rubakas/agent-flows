@@ -1,0 +1,14 @@
+{
+  "name": "agent-flows",
+  "description": "agent-flows plugins for Claude Code and Codex",
+  "owner": {
+    "name": "Eugene Naumov"
+  },
+  "plugins": [
+    {
+      "name": "af",
+      "source": "./plugin",
+      "description": "agent-flows code review with independent verification, run natively in the CLI (no daemon)"
+    }
+  ]
+}
