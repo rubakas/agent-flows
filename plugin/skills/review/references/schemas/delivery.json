@@ -1,0 +1,156 @@
+{
+  "type": "object",
+  "properties": {
+    "specSourcesProvided": {
+      "type": "boolean"
+    },
+    "codeReviewDelivery": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "requirement": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "classification": {
+            "type": "string",
+            "enum": [
+              "implemented",
+              "partial",
+              "not-implemented",
+              "replaced-by-prose",
+              "silently-decided",
+              "correctly-deferred"
+            ]
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "decisionTaken": {
+            "type": "string"
+          },
+          "optionsForeclosed": {
+            "type": "string"
+          }
+        },
+        "required": ["requirement", "source", "classification", "evidence"],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "description": "Rule: classification silently-decided needs decisionTaken naming the option the change took (not blank, not 'not a decision'); name it or classify the entry implemented.",
+            "if": {
+              "required": ["classification"],
+              "properties": {
+                "classification": {
+                  "const": "silently-decided"
+                }
+              }
+            },
+            "then": {
+              "required": ["decisionTaken"],
+              "properties": {
+                "decisionTaken": {
+                  "type": "string",
+                  "pattern": "\\S",
+                  "not": {
+                    "pattern": "^\\s*[Nn][Oo][Tt] [Aa] [Dd][Ee][Cc][Ii][Ss][Ii][Oo][Nn]\\s*$"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "description": "Rule: classification silently-decided needs optionsForeclosed naming what the change ruled out (not blank, not 'not a decision'); name it or classify the entry implemented.",
+            "if": {
+              "required": ["classification"],
+              "properties": {
+                "classification": {
+                  "const": "silently-decided"
+                }
+              }
+            },
+            "then": {
+              "required": ["optionsForeclosed"],
+              "properties": {
+                "optionsForeclosed": {
+                  "type": "string",
+                  "pattern": "\\S",
+                  "not": {
+                    "pattern": "^\\s*[Nn][Oo][Tt] [Aa] [Dd][Ee][Cc][Ii][Ss][Ii][Oo][Nn]\\s*$"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "description": "Rule: classification implemented or partial needs evidence naming a file: a path with a separator (app/models/lot.rb) or name:line (lot.rb:42); otherwise use not-implemented or replaced-by-prose.",
+            "if": {
+              "required": ["classification"],
+              "properties": {
+                "classification": {
+                  "enum": ["implemented", "partial"]
+                }
+              }
+            },
+            "then": {
+              "required": ["evidence"],
+              "properties": {
+                "evidence": {
+                  "type": "string",
+                  "pattern": "[\\w.-]+\\/[\\w.-]+|[\\w-]+\\.[A-Za-z]\\w*:\\d+"
+                }
+              }
+            }
+          },
+          {
+            "description": "Rule: classification correctly-deferred needs requirement to quote the deferring spec line (not blank); otherwise use not-implemented.",
+            "if": {
+              "required": ["classification"],
+              "properties": {
+                "classification": {
+                  "const": "correctly-deferred"
+                }
+              }
+            },
+            "then": {
+              "required": ["requirement"],
+              "properties": {
+                "requirement": {
+                  "type": "string",
+                  "pattern": "\\S"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "required": ["specSourcesProvided", "codeReviewDelivery"],
+  "additionalProperties": false,
+  "title": "codeReviewDelivery",
+  "allOf": [
+    {
+      "description": "Rule: specSourcesProvided false means no requirement exists to classify, so codeReviewDelivery must be empty; report zero entries or set specSourcesProvided true.",
+      "if": {
+        "required": ["specSourcesProvided"],
+        "properties": {
+          "specSourcesProvided": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "required": ["codeReviewDelivery"],
+        "properties": {
+          "codeReviewDelivery": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ]
+}
