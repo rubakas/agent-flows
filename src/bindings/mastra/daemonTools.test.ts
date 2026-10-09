@@ -665,7 +665,7 @@ describe("formatRunProgress — the glanceable line", () => {
       scope: { status: "succeeded", startedAt: at(0), finishedAt: at(30_000) },
       read: { status: "succeeded", startedAt: at(30_000), finishedAt: at(70_000) },
       judge: { status: "succeeded", startedAt: at(70_000), finishedAt: at(120_000) },
-      verify: { status: "running", startedAt: at(120_000) },
+      verify: { status: "started", startedAt: at(120_000) },
       report: { status: "pending" },
       finish: { status: "pending" },
     },
@@ -674,6 +674,21 @@ describe("formatRunProgress — the glanceable line", () => {
   it("names the running step and its position, and counts elapsed to now", () => {
     assert.equal(formatRunProgress(midRun, T0 + 192_000), "code-review · verify (4 of 6) · 3m12s");
   });
+
+  // The producer (RunService) records a running step as "started" and a step at
+  // a gate as "suspended" — never "running".
+  for (const status of ["started", "suspended"] as const) {
+    it(`names the step the producer reports as "${status}"`, () => {
+      const live: DaemonRunState = {
+        ...midRun,
+        steps: {
+          a: { status: "succeeded", startedAt: at(0), finishedAt: at(30_000) },
+          b: { status, startedAt: at(30_000) },
+        },
+      };
+      assert.equal(formatRunProgress(live, T0 + 60_000), "code-review · b (2 of 2) · 1m00s");
+    });
+  }
 
   it("excludes synthetic __merge_level_* entries from the position and the count", () => {
     const withMerges: DaemonRunState = {
@@ -684,7 +699,7 @@ describe("formatRunProgress — the glanceable line", () => {
         read: { status: "succeeded", startedAt: at(30_000), finishedAt: at(70_000) },
         judge: { status: "succeeded", startedAt: at(70_000), finishedAt: at(120_000) },
         __merge_level_4: { status: "succeeded", startedAt: at(120_000), finishedAt: at(120_001) },
-        verify: { status: "running", startedAt: at(120_000) },
+        verify: { status: "started", startedAt: at(120_000) },
         report: { status: "pending" },
         finish: { status: "pending" },
       },

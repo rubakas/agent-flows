@@ -170,9 +170,12 @@ export function formatRunProgress(state: DaemonRunState, now: number = Date.now(
     return [state.pipelineId, state.status, count, elapsed].join(" · ");
   }
 
-  // The running step, or — between steps, or while a synthetic merge is in
-  // flight — the last one to finish, so the line never goes blank mid-run.
-  let currentIndex = steps.findIndex(([, st]) => st.status === "running");
+  // The running step (the producer says "started", or "suspended" at a gate), or
+  // — between steps, or while a synthetic merge is in flight — the last one to
+  // finish, so the line never goes blank mid-run.
+  let currentIndex = steps.findIndex(
+    ([, st]) => st.status === "started" || st.status === "suspended"
+  );
   if (currentIndex === -1) {
     for (let i = steps.length - 1; i >= 0; i--) {
       if (steps[i][1].finishedAt !== undefined) {
