@@ -882,6 +882,40 @@ describe("capture.mjs: audit L7 git hardening", () => {
     cli(repo, ["check-tree", runDir]);
     assert.equal(existsSync(marker), false, "core.fsmonitor ran");
   });
+
+  it("never runs a repo-local gpg.program for a forged signature header", () => {
+    const { repo, base } = twoCommitRepo();
+    const marker = join(scratch("gpg-marker"), "ran");
+    const program = join(scratch("gpg-program"), "gpg.sh");
+    writeFileSync(program, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+    // A commit object nobody signed, carrying a signature header: with
+    // log.showSignature on, git hands it to gpg.program to verify.
+    const tree = sh(repo, ["rev-parse", "HEAD^{tree}"]).trim();
+    const parent = sh(repo, ["rev-parse", "HEAD"]).trim();
+    const forged = join(scratch("gpg-forged"), "commit.txt");
+    writeFileSync(
+      forged,
+      [
+        `tree ${tree}`,
+        `parent ${parent}`,
+        "author A <a@example.invalid> 0 +0000",
+        "committer A <a@example.invalid> 0 +0000",
+        "gpgsig -----BEGIN PGP SIGNATURE-----",
+        " x",
+        " -----END PGP SIGNATURE-----",
+        "",
+        "forged",
+        "",
+      ].join("\n")
+    );
+    const forgedOid = sh(repo, ["hash-object", "-t", "commit", "-w", forged]).trim();
+    sh(repo, ["reset", "-q", "--hard", forgedOid]);
+    sh(repo, ["config", "log.showSignature", "true"]);
+    sh(repo, ["config", "gpg.program", program]);
+
+    captureOk(repo, ["--base", base]);
+    assert.equal(existsSync(marker), false, "a repo-configured gpg.program ran");
+  });
 });
 
 describe("capture.mjs: audit L8/L9 snapshot", () => {

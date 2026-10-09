@@ -287,23 +287,37 @@ function gitTimeoutMs() {
 /**
  * Environment for every git spawn: no optional locks (a read-only capture must not
  * contend with the user's own git), no system config, no pager, no prompts.
+ * Built per call so a caller that pins HOME or GIT_* after import is honoured.
  */
-const GIT_ENV = {
-  ...process.env,
-  GIT_OPTIONAL_LOCKS: "0",
-  GIT_CONFIG_NOSYSTEM: "1",
-  GIT_PAGER: "cat",
-  GIT_TERMINAL_PROMPT: "0",
-  // Messages are matched on, so they must not depend on the user's locale.
-  LC_ALL: "C",
-  LANGUAGE: "C",
-};
+function gitEnv() {
+  return {
+    ...process.env,
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_PAGER: "cat",
+    GIT_TERMINAL_PROMPT: "0",
+    // A partial clone would otherwise fetch a missing object over the network,
+    // and that runs the repository's own `core.sshCommand`.
+    GIT_NO_LAZY_FETCH: "1",
+    // Messages are matched on, so they must not depend on the user's locale.
+    LC_ALL: "C",
+    LANGUAGE: "C",
+  };
+}
 
 /**
  * `-c` overrides beat the repository's own config: a repo-local `core.fsmonitor`
- * is a command git would run on every index refresh.
+ * is a command git would run on every index refresh, and `log.showSignature`
+ * hands any commit carrying a signature header to the repo's `gpg.program`.
  */
-const GIT_CONFIG_OVERRIDES = ["-c", "core.fsmonitor=false", "-c", "color.ui=false"];
+const GIT_CONFIG_OVERRIDES = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "color.ui=false",
+  "-c",
+  "log.showSignature=false",
+];
 
 function git(projectDir, args) {
   const outcome = run(
@@ -311,7 +325,7 @@ function git(projectDir, args) {
     projectDir,
     [...GIT_CONFIG_OVERRIDES, ...args],
     gitTimeoutMs(),
-    GIT_ENV
+    gitEnv()
   );
   if (outcome.timedOut) {
     throw new GitTimeoutError(
