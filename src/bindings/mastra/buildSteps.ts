@@ -6,13 +6,12 @@ import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { assembleSpec } from "../../canon/assemble.js";
 import { writeSpecDocument, writeSpecKitSpec } from "../../canon/exportSpec.js";
+import { schemaContract } from "../../canon/outputContract.js";
 import { persistTicket } from "../../canon/persistTicket.js";
 import { checkPortability } from "../../canon/portability.js";
 import { getActiveProfile, getProfile, resolveStepModel } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
 import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
-import { canonSchemas } from "../../canon/schemas.js";
-import { validateCanonOutput } from "../../canon/validateOutput.js";
 import { recordManifestSpecSource } from "../../runtime/artifactStore.js";
 import { projectGitStatus } from "../../runtime/projectGitStatus.js";
 import { buildReviewMaterial, renderReviewMaterial } from "../../runtime/reviewMaterial.js";
@@ -199,64 +198,6 @@ function resolveApprovedSpec(
   };
 }
 
-function stripFences(text: string): string {
-  return text
-    .replace(/^```(?:json)?\s*\n?/im, "")
-    .replace(/\n?```\s*$/im, "")
-    .trim();
-}
-
-/**
- * The first complete, balanced JSON object or array in `text`, or undefined.
- *
- * Character-by-character with string and escape state rather than a regex: a
- * greedy `\{[\s\S]*\}` swallows trailing prose, and a lazy one stops at the
- * first `}` inside a string value. Both are routine in a model's answer.
- */
-function extractFirstJsonValue(text: string): string | undefined {
-  for (let start = 0; start < text.length; start += 1) {
-    const open = text[start];
-    if (open !== "{" && open !== "[") continue;
-    const close = open === "{" ? "}" : "]";
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let i = start; i < text.length; i += 1) {
-      const ch = text[i];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (ch === "\\") escaped = true;
-        else if (ch === '"') inString = false;
-        continue;
-      }
-      if (ch === '"') inString = true;
-      else if (ch === open) depth += 1;
-      else if (ch === close) {
-        depth -= 1;
-        if (depth === 0) return text.slice(start, i + 1);
-      }
-    }
-    // Unterminated from here: the next opening character gets its own attempt,
-    // so a stray brace in the preamble does not hide the real object.
-  }
-  return undefined;
-}
-
-/**
- * The candidate texts to try parsing, in decreasing order of trust: the answer
- * as given, the answer with markdown fences removed, then the first balanced
- * JSON value found anywhere in it. The last one is what survives a narrated
- * preamble ("Now producing the final critique as JSON.") ahead of the fence.
- */
-function jsonCandidates(raw: string): string[] {
-  const candidates = [raw.trim()];
-  const stripped = stripFences(raw);
-  if (!candidates.includes(stripped)) candidates.push(stripped);
-  const scanned = extractFirstJsonValue(raw);
-  if (scanned !== undefined && !candidates.includes(scanned)) candidates.push(scanned);
-  return candidates;
-}
-
 function ctxModelOverride(stepId: string, ctxData: Ctx): string | undefined {
   const models = ctxData.models as Record<string, string> | undefined;
   return models?.[stepId];
@@ -301,66 +242,6 @@ function ctxVars(ctxData: Ctx): Record<string, string> {
     vars[k] = serialized;
   }
   return vars;
-}
-
-// Try to parse a schema-gated step output; returns ok/error so callers can retry.
-// `retryNote` is what the one retry tells the model; `error` is what a failed step
-// reports. A schema violation names the field and the constraint in both.
-function tryParseSchemaOutput(
-  raw: string,
-  schemaKey: string
-):
-  | { ok: true; value: unknown }
-  | { ok: false; reason: "parse" | "schema"; error: string; retryNote: string } {
-  const candidates = jsonCandidates(raw);
-  let parsed: unknown;
-  let text = candidates[0];
-  let parseError = "";
-  let ok = false;
-  for (const candidate of candidates) {
-    try {
-      parsed = JSON.parse(candidate) as unknown;
-      text = candidate;
-      ok = true;
-      break;
-    } catch (err) {
-      // The strict attempt's message is the one reported: it describes the
-      // answer as the model actually gave it, not a rescue attempt's remains.
-      if (parseError === "") parseError = err instanceof Error ? err.message : String(err);
-    }
-  }
-  if (!ok) {
-    return {
-      ok: false,
-      reason: "parse",
-      error: parseError,
-      retryNote: `Your previous output was not valid JSON (${parseError}).`,
-    };
-  }
-  if (typeof parsed !== "object" || parsed === null || !(schemaKey in parsed)) {
-    const error = `output missing required key "${schemaKey}". Got: ${text.slice(0, 200)}`;
-    return {
-      ok: false,
-      reason: "schema",
-      error,
-      // It parsed: telling the model its JSON was invalid sends it to fix the
-      // one thing that was already right and leaves the missing key missing.
-      retryNote:
-        `Your previous output was valid JSON but had no top-level "${schemaKey}" key.` +
-        ` Return an object whose "${schemaKey}" key holds the result.`,
-    };
-  }
-  const violations = validateCanonOutput(schemaKey, parsed);
-  if (violations !== undefined) {
-    return {
-      ok: false,
-      reason: "schema",
-      error: `output does not match schema "${schemaKey}": ${violations}. Got: ${text.slice(0, 200)}`,
-      retryNote:
-        `Your previous output did not match the required JSON Schema` + ` (${violations}).`,
-    };
-  }
-  return { ok: true, value: parsed };
 }
 
 /**
@@ -485,9 +366,8 @@ export function buildLlmStep(
 
       let prompt = renderPrompt(prompts[step.id], ctxVars(ctxData));
 
-      const outputJsonSchema = step.schema
-        ? canonSchemas[step.schema as keyof typeof canonSchemas]
-        : undefined;
+      const contract = step.schema ? schemaContract(step.schema) : undefined;
+      const outputJsonSchema = contract?.jsonSchema;
 
       // For schema-gated steps: append a strict JSON format instruction so the
       // model knows not to wrap output in markdown fences or add commentary.
@@ -649,8 +529,8 @@ export function buildLlmStep(
         }
 
         let value: unknown = raw;
-        if (step.schema) {
-          const r1 = tryParseSchemaOutput(raw, step.schema);
+        if (contract) {
+          const r1 = contract.parse(raw);
           if (!r1.ok) {
             // A retry is otherwise only inferable from two `usage` events under
             // one step.start/step.result pair — a run that paid twice reads as
@@ -662,7 +542,7 @@ export function buildLlmStep(
               detail: r1.error,
             });
             // One retry with explicit error feedback.
-            const retryPrompt = `${prompt}\n\n${r1.retryNote} Return ONLY the JSON object.`;
+            const retryPrompt = `${prompt}\n\n${r1.retryNote}`;
             let retryRaw: string;
             try {
               // After a failover the primary is the model that just failed; the
@@ -679,7 +559,7 @@ export function buildLlmStep(
               }
               throw new Error(stepMsg, { cause: err });
             }
-            const r2 = tryParseSchemaOutput(retryRaw, step.schema);
+            const r2 = contract.parse(retryRaw);
             if (!r2.ok) {
               persistRawAttempts(runId, step.id, [raw, retryRaw]);
               throw new Error(`Step "${step.id}": ${r2.error}`);

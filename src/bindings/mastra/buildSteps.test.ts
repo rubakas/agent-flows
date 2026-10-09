@@ -2221,46 +2221,6 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
     assert.deepEqual(out.critic, { weaknesses: [] });
   });
 
-  it("parses a bare fenced object", async () => {
-    const { runner, calls } = constantRunner(
-      '```json\n{"weaknesses":[' + JSON.stringify(FINDING) + "]}\n```"
-    );
-
-    const out = await runStep(runner);
-
-    assert.equal(calls(), 1);
-    assert.deepEqual(out.critic, { weaknesses: [FINDING] });
-  });
-
-  it("parses an object followed by trailing prose", async () => {
-    const { runner, calls } = constantRunner(
-      '{"weaknesses":[]}\n\nThat concludes the critique — let me know if you want more.'
-    );
-
-    const out = await runStep(runner);
-
-    assert.equal(calls(), 1);
-    assert.deepEqual(out.critic, { weaknesses: [] });
-  });
-
-  it("does not stop at a brace inside a string value", async () => {
-    // The scanner has to track string state: the first `}` here is inside
-    // "use {placeholder}", and an escaped quote follows it.
-    const finding = {
-      text: 'use {placeholder} and a literal " quote',
-      severity: "high",
-      blocking: true,
-    };
-    const { runner, calls } = constantRunner(
-      'Here it is:\n\n```json\n{"weaknesses":[' + JSON.stringify(finding) + "]}\n```\nDone."
-    );
-
-    const out = await runStep(runner);
-
-    assert.equal(calls(), 1);
-    assert.deepEqual(out.critic, { weaknesses: [finding] });
-  });
-
   it("retries once, logging a parse retry, when no JSON can be found at all", async () => {
     const runId = "schema-unparseable";
     const log = openTempRunLog(runId);
@@ -2312,27 +2272,6 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
     } finally {
       log.cleanup();
     }
-  });
-
-  it("tells a model that dropped the top-level key that the key is missing", async () => {
-    const prompts: string[] = [];
-    let calls = 0;
-    const runner: typeof runLlmStep = async (_entry, prompt) => {
-      prompts.push(prompt);
-      calls += 1;
-      return calls === 1
-        ? "[" + JSON.stringify(FINDING) + "]"
-        : '{"weaknesses":[' + JSON.stringify(FINDING) + "]}";
-    };
-
-    await runStep(runner);
-
-    const retryPrompt = prompts[1] ?? "";
-    assert.match(
-      retryPrompt,
-      /valid JSON but had no top-level "weaknesses" key/u,
-      "a parsed answer must not be told it was invalid JSON"
-    );
   });
 
   it("fails after the retry and leaves both raw answers on disk", async () => {
