@@ -30,6 +30,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { CREDENTIAL_DENY_PATTERNS } from "../canon/denyPatterns.js";
+import type { SpawnSyncReturns } from "node:child_process";
 
 /**
  * Max characters of any single artefact carried in the digest. Mirrors
@@ -80,6 +81,9 @@ const RE_OID = /^[0-9a-f]{40}$/u;
  * post-filter runs on a string that already holds the secret. With `:(exclude)`
  * the content never enters this process's memory at all.
  *
+ * `icase` so `.ENV` and `Credentials.json` are matched as the names they are,
+ * whatever the repository's `core.ignorecase` says.
+ *
  * Magic: `top` anchors each pattern at the repository root rather than at the
  * working directory the capture runs from, and `glob` gives `**` its
  * gitignore-style meaning ("at any depth, including the root"), which is how the
@@ -89,7 +93,7 @@ const RE_OID = /^[0-9a-f]{40}$/u;
  * Imported, never re-spelled: a hand-copied second list drifts from the first.
  */
 const CREDENTIAL_EXCLUDE_PATHSPECS: readonly string[] = CREDENTIAL_DENY_PATTERNS.map(
-  (pattern) => `:(top,exclude,glob)${pattern}`
+  (pattern) => `:(top,exclude,glob,icase)${pattern}`
 );
 
 /** The exclusions plus "the whole tree", for a query that names no path of its own. */
@@ -97,7 +101,7 @@ const SAFE_PATHSPECS: readonly string[] = [":/", ...CREDENTIAL_EXCLUDE_PATHSPECS
 
 /** The same list inverted: matches ONLY the credential-shaped paths. */
 const CREDENTIAL_PATHSPECS: readonly string[] = CREDENTIAL_DENY_PATTERNS.map(
-  (pattern) => `:(top,glob)${pattern}`
+  (pattern) => `:(top,glob,icase)${pattern}`
 );
 
 /**
@@ -581,37 +585,106 @@ export type ReviewMaterial = ReviewMaterialAvailable | ReviewMaterialUnavailable
 interface GitOutcome {
   ok: boolean;
   stdout: string;
+  stderr: string;
   reason: string;
 }
 
+/** A git call that did not answer in time. Raised, never returned: see `git()`. */
+class GitTimeoutError extends Error {}
+
+/** Deadline for one git call. The env override exists so a test can exercise the timeout. */
+function gitTimeoutMs(): number {
+  const override = Number(process.env.AF_REVIEW_GIT_TIMEOUT_MS);
+  return Number.isInteger(override) && override > 0 ? override : 120_000;
+}
+
 /**
- * One git invocation as an argv array. Never throws and never uses a shell:
- * a spawn error, a non-zero exit and a thrown exception all come back as
- * `ok: false` with a one-line reason, the same defensive shape
- * `captureGitStatus` in gateMaterial.ts uses.
+ * Git's environment: the daemon's own, with messages pinned so they do not
+ * depend on the user's locale, no optional locks (a read-only capture must not
+ * contend with the user's own git) and no prompts. Built per call so a caller
+ * that pins HOME or GIT_* after import is honoured.
+ */
+function gitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    // A partial clone would otherwise fetch a missing object over the network,
+    // and that runs the repository's own `core.sshCommand`.
+    GIT_NO_LAZY_FETCH: "1",
+    LC_ALL: "C",
+  };
+}
+
+/**
+ * `-c` overrides beat the repository's own config: a repo-local `core.fsmonitor`
+ * is a command git would run on every index refresh, `color.ui=always` would put
+ * escape codes into the artefacts, and `log.showSignature` hands any commit that
+ * carries a signature header to the repository's own `gpg.program`.
+ */
+const GIT_CONFIG_OVERRIDES: readonly string[] = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "color.ui=false",
+  "-c",
+  "log.showSignature=false",
+];
+
+/**
+ * Passed to every diff/show/log: a repo-local `diff.external` or textconv driver
+ * could otherwise run a command, or change what the reviewer is shown.
+ */
+const NO_DRIVERS: readonly string[] = ["--no-ext-diff", "--no-textconv", "--no-color"];
+
+/**
+ * One git invocation as an argv array. Never uses a shell: a spawn error, a
+ * non-zero exit and a thrown exception all come back as `ok: false` with a
+ * one-line reason, the same defensive shape `captureGitStatus` in
+ * gateMaterial.ts uses.
+ *
+ * The one exception is a timeout, which throws GitTimeoutError:
+ * `buildReviewMaterial` turns it into an unavailable capture. Returned as a
+ * plain failure it would read as "git said no" and several callers carry on
+ * with a fallback (a different baseline, an "unavailable" history section),
+ * i.e. a partial material presented as a complete one.
  */
 function git(projectDir: string, args: readonly string[]): GitOutcome {
+  const timeout = gitTimeoutMs();
+  let result: SpawnSyncReturns<string>;
   try {
-    const result = spawnSync("git", [...args], {
+    result = spawnSync("git", [...GIT_CONFIG_OVERRIDES, ...args], {
       cwd: projectDir,
       encoding: "utf8",
       maxBuffer: GIT_MAX_BUFFER,
+      timeout,
+      env: gitEnv(),
     });
-    if (result.error !== null && result.error !== undefined) {
-      return { ok: false, stdout: "", reason: result.error.message };
-    }
-    if (result.status !== 0) {
-      const stderr = (result.stderr ?? "").trim().split("\n")[0] ?? "";
-      return {
-        ok: false,
-        stdout: "",
-        reason: stderr === "" ? `git exited ${String(result.status)}` : stderr,
-      };
-    }
-    return { ok: true, stdout: result.stdout ?? "", reason: "" };
   } catch (err) {
-    return { ok: false, stdout: "", reason: err instanceof Error ? err.message : String(err) };
+    return {
+      ok: false,
+      stdout: "",
+      stderr: "",
+      reason: err instanceof Error ? err.message : String(err),
+    };
   }
+  const stderr = result.stderr ?? "";
+  if (result.error !== null && result.error !== undefined) {
+    if ((result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+      throw new GitTimeoutError(`git ${String(args[0])} timed out after ${String(timeout)} ms`);
+    }
+    return { ok: false, stdout: "", stderr, reason: result.error.message };
+  }
+  if (result.status !== 0) {
+    const firstLine = stderr.trim().split("\n")[0] ?? "";
+    return {
+      ok: false,
+      stdout: "",
+      stderr,
+      reason: firstLine === "" ? `git exited ${String(result.status)}` : firstLine,
+    };
+  }
+  return { ok: true, stdout: result.stdout ?? "", stderr, reason: "" };
 }
 
 /**
@@ -821,9 +894,24 @@ function renameCounterparts(
   projectDir: string,
   oid: string,
   denied: ReadonlySet<string>
-): string[] {
-  const pairs = git(projectDir, ["diff", "--name-status", "-M", "-z", `${oid}...HEAD`, "--", ":/"]);
-  if (!pairs.ok) return [];
+): { paths: string[]; incomplete: boolean } {
+  const pairs = git(projectDir, [
+    "diff",
+    ...NO_DRIVERS,
+    "--name-status",
+    "-M",
+    "-z",
+    `${oid}...HEAD`,
+    "--",
+    ":/",
+  ]);
+  // Past diff.renameLimit git prints a warning and SKIPS inexact rename detection,
+  // so a denied file renamed with one line changed arrives as a plain add. A pass
+  // that failed or was skipped cannot vouch for the pairs it did not find. ANY
+  // stderr counts, not just git's English wording: the caller only runs this
+  // pass when a denied path changed, and a warning worded differently by a newer
+  // git must not read as "all clear".
+  if (!pairs.ok || pairs.stderr.trim() !== "") return { paths: [], incomplete: true };
 
   const counterparts: string[] = [];
   const fields = nulFields(pairs.stdout);
@@ -843,7 +931,7 @@ function renameCounterparts(
     }
     i += 2;
   }
-  return [...new Set(counterparts)];
+  return { paths: [...new Set(counterparts)], incomplete: false };
 }
 
 /**
@@ -870,6 +958,26 @@ function renameCounterparts(
  * @param options Untrusted `specSources`, and the `gh` seam the tests substitute.
  */
 export function buildReviewMaterial(
+  projectDir: string,
+  baseline: unknown,
+  introducedCommits: readonly string[] | undefined,
+  outDir: string,
+  options: { specSources?: unknown; gh?: GhRunner } = {}
+): ReviewMaterial {
+  try {
+    return captureReviewMaterial(projectDir, baseline, introducedCommits, outDir, options);
+  } catch (err) {
+    if (!(err instanceof GitTimeoutError)) throw err;
+    return {
+      available: false,
+      reason: err.message,
+      specSourcesResolved: false,
+      specSourcesReason: "git timed out before the spec sources were resolved",
+    };
+  }
+}
+
+function captureReviewMaterial(
   projectDir: string,
   baseline: unknown,
   introducedCommits: readonly string[] | undefined,
@@ -930,6 +1038,7 @@ export function buildReviewMaterial(
   // because the rename pass below needs to know which paths are denied.
   const excluded = git(projectDir, [
     "diff",
+    ...NO_DRIVERS,
     "--name-only",
     "-z",
     `${oid}...HEAD`,
@@ -953,21 +1062,43 @@ export function buildReviewMaterial(
 
   // A repo-wide rename pass costs a process and there is nothing for it to pair
   // when the deny list matched no changed path.
-  const counterparts = denied.length === 0 ? [] : renameCounterparts(projectDir, oid, deniedSet);
+  const pairs =
+    denied.length === 0
+      ? { paths: [], incomplete: false }
+      : renameCounterparts(projectDir, oid, deniedSet);
+  if (pairs.incomplete) {
+    return {
+      available: false,
+      reason:
+        `${String(denied.length)} credential-shaped path(s) changed in this range, but git's rename detection ` +
+        "was skipped or failed (too many changed files for diff.renameLimit), so a rename of one of them " +
+        "cannot be ruled out — refusing to capture. Review a smaller range, or raise diff.renameLimit.",
+      ...specFields,
+    };
+  }
+  const counterparts = pairs.paths;
   const extraExclusions = counterparts.map(asLiteralExclusion);
   const safePathspecs = [...SAFE_PATHSPECS, ...extraExclusions];
   const withheld = [...denied, ...counterparts];
 
-  const diff = git(projectDir, ["diff", `${oid}...HEAD`, "--", ...safePathspecs]);
+  const diff = git(projectDir, [
+    "diff",
+    ...NO_DRIVERS,
+    "--text",
+    `${oid}...HEAD`,
+    "--",
+    ...safePathspecs,
+  ]);
   if (!diff.ok)
     return { available: false, reason: `git diff failed: ${diff.reason}`, ...specFields };
 
-  const commits = git(projectDir, ["log", "--format=%H %s", `${oid}..HEAD`, "--"]);
+  const commits = git(projectDir, ["log", ...NO_DRIVERS, "--format=%H %s", `${oid}..HEAD`, "--"]);
   if (!commits.ok)
     return { available: false, reason: `git log failed: ${commits.reason}`, ...specFields };
 
   const changed = git(projectDir, [
     "diff",
+    ...NO_DRIVERS,
     "--name-only",
     "-z",
     `${oid}...HEAD`,
@@ -994,6 +1125,7 @@ export function buildReviewMaterial(
   if (changedPaths.length > 0) {
     const fileHistory = git(projectDir, [
       "log",
+      ...NO_DRIVERS,
       "--all",
       "--diff-filter=AD",
       "--name-status",
@@ -1012,7 +1144,15 @@ export function buildReviewMaterial(
     );
   }
   for (const sha of probeCommits(projectDir, commits.stdout, introducedCommits)) {
-    const stat = git(projectDir, ["show", "--stat", "--format=%H %s", sha, "--", ...safePathspecs]);
+    const stat = git(projectDir, [
+      "show",
+      ...NO_DRIVERS,
+      "--stat",
+      "--format=%H %s",
+      sha,
+      "--",
+      ...safePathspecs,
+    ]);
     historyParts.push(
       stat.ok ? `# git show --stat ${sha}\n${stat.stdout}` : `# ${sha} unavailable: ${stat.reason}`
     );

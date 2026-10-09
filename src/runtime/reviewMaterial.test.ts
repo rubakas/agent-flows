@@ -508,6 +508,172 @@ describe("buildReviewMaterial", () => {
   });
 });
 
+describe("repository configuration cannot change what the capture shows", () => {
+  /** A baseline commit, then one change to each named file. */
+  function repoChanging(
+    setup: (repo: string) => void,
+    files: Record<string, [before: string, after: string]>
+  ): { repo: string; baseline: string } {
+    const repo = tempDir("af-review-config-");
+    git(repo, "init", "-q", "-b", "main");
+    setup(repo);
+    for (const [name, [before]] of Object.entries(files)) write(repo, name, before);
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "baseline commit");
+    const baseline = git(repo, "rev-parse", "HEAD").trim();
+    for (const [name, [, after]] of Object.entries(files)) write(repo, name, after);
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "the change under review");
+    return { repo, baseline };
+  }
+
+  it("a committed `* -diff` does not blank the patch into 'Binary files differ'", () => {
+    const { repo, baseline } = repoChanging(() => undefined, {
+      ".gitattributes": ["* -diff\n", "* -diff\n"],
+      "notes.txt": ["alpha\n", "alpha\nbeta-added-line\n"],
+    });
+
+    const material = buildReviewMaterial(repo, baseline, undefined, tempDir("af-review-out-"));
+
+    assert.equal(material.available, true);
+    if (!material.available) return;
+    assert.ok(
+      material.digest.diff.includes("+beta-added-line"),
+      `the changed line is missing from the patch: ${material.digest.diff}`
+    );
+    assert.ok(!material.digest.diff.includes("Binary files"), material.digest.diff);
+  });
+
+  it("an upper-case credential name is withheld like its lower-case spelling", () => {
+    // core.ignorecase is pinned off so the pathspec is the only thing that can
+    // match: on a case-insensitive filesystem git would otherwise init with it on.
+    const { repo, baseline } = repoChanging(
+      (r) => {
+        git(r, "config", "core.ignorecase", "false");
+      },
+      {
+        ".ENV": [`${CANARY}\n`, "CANARY_NOT_A_SECRET=yyy\n"],
+        "kept.txt": ["one\n", "one\ntwo\n"],
+      }
+    );
+
+    const material = buildReviewMaterial(repo, baseline, undefined, tempDir("af-review-out-"));
+
+    assert.equal(material.available, true);
+    if (!material.available) return;
+    assert.ok(!allCapturedText(material).includes("CANARY_NOT_A_SECRET"));
+    assert.match(material.digest.diff, /\+two/u);
+    assert.match(material.digest.changedFiles, /# \.ENV/u);
+  });
+
+  it("a textconv driver in the repository's own config does not alter the patch", () => {
+    const driverDir = tempDir("af-review-driver-");
+    const driver = path.join(driverDir, "upper.sh");
+    fs.writeFileSync(driver, '#!/bin/sh\ntr a-z A-Z < "$1"\n', { mode: 0o755 });
+    const { repo, baseline } = repoChanging(
+      (r) => {
+        git(r, "config", "diff.upper.textconv", driver);
+      },
+      {
+        ".gitattributes": ["*.txt diff=upper\n", "*.txt diff=upper\n"],
+        "notes.txt": ["alpha\n", "alpha\nbeta-added-line\n"],
+      }
+    );
+
+    const material = buildReviewMaterial(repo, baseline, undefined, tempDir("af-review-out-"));
+
+    assert.equal(material.available, true);
+    if (!material.available) return;
+    assert.ok(
+      material.digest.diff.includes("+beta-added-line"),
+      `the textconv output replaced the real patch: ${material.digest.diff}`
+    );
+    assert.ok(!material.digest.diff.includes("BETA-ADDED-LINE"), material.digest.diff);
+  });
+
+  it("never runs a repo-local gpg.program for a forged signature header", () => {
+    const marker = path.join(tempDir("af-review-marker-"), "ran");
+    const program = path.join(tempDir("af-review-gpg-"), "gpg.sh");
+    fs.writeFileSync(program, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+    const { repo, baseline } = repoChanging(() => undefined, {
+      "notes.txt": ["alpha\n", "alpha\nbeta\n"],
+    });
+    // A commit object nobody signed, carrying a signature header: with
+    // log.showSignature on, git hands it to gpg.program to verify.
+    const tree = git(repo, "rev-parse", "HEAD^{tree}").trim();
+    const parent = git(repo, "rev-parse", "HEAD").trim();
+    const forged = path.join(tempDir("af-review-forged-"), "commit.txt");
+    fs.writeFileSync(
+      forged,
+      [
+        `tree ${tree}`,
+        `parent ${parent}`,
+        "author A <a@example.invalid> 0 +0000",
+        "committer A <a@example.invalid> 0 +0000",
+        "gpgsig -----BEGIN PGP SIGNATURE-----",
+        " x",
+        " -----END PGP SIGNATURE-----",
+        "",
+        "forged",
+        "",
+      ].join("\n")
+    );
+    const forgedOid = git(repo, "hash-object", "-t", "commit", "-w", forged).trim();
+    git(repo, "reset", "-q", "--hard", forgedOid);
+    git(repo, "config", "log.showSignature", "true");
+    git(repo, "config", "gpg.program", program);
+
+    const material = buildReviewMaterial(repo, baseline, undefined, tempDir("af-review-out-"));
+
+    assert.equal(fs.existsSync(marker), false, "a repo-configured gpg.program ran");
+    assert.equal(material.available, true);
+  });
+
+  it("refuses to capture when rename detection was skipped and a denied path changed", () => {
+    const body = Array.from({ length: 30 }, (_, i) => `RENAMELEAK${String(i)} padding`).join("\n");
+    const repo = tempDir("af-review-renamelimit-");
+    git(repo, "init", "-q", "-b", "main");
+    git(repo, "config", "diff.renameLimit", "1");
+    write(repo, ".env", `${body}\n`);
+    write(repo, "other-old-a.txt", "first old file\n".repeat(20));
+    write(repo, "other-old-b.txt", "second old file\n".repeat(20));
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "baseline commit");
+    const baseline = git(repo, "rev-parse", "HEAD").trim();
+    // Rename the denied file with one line edited, among other adds and deletes.
+    git(repo, "mv", ".env", "notes.txt");
+    write(repo, "notes.txt", `${body.replace("RENAMELEAK3 ", "RENAMELEAK3-edited ")}\n`);
+    git(repo, "rm", "-q", "other-old-a.txt", "other-old-b.txt");
+    write(repo, "other-new-a.txt", "brand new a\n".repeat(20));
+    write(repo, "other-new-b.txt", "brand new b\n".repeat(20));
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "rename with an edit, among other changes");
+
+    const material = buildReviewMaterial(repo, baseline, undefined, tempDir("af-review-out-"));
+
+    const captured = material.available ? allCapturedText(material) : JSON.stringify(material);
+    assert.ok(!captured.includes("RENAMELEAK"), "the denied file's content reached the material");
+    assert.equal(material.available, false);
+    assert.match(material.available ? "" : material.reason, /rename detection/u);
+  });
+
+  it("reports a git call that outlives its deadline as unavailable, not as partial material", () => {
+    const { repo, baseline } = repoChanging(() => undefined, {
+      "notes.txt": ["alpha\n", "alpha\nbeta\n"],
+    });
+    const previous = process.env.AF_REVIEW_GIT_TIMEOUT_MS;
+    process.env.AF_REVIEW_GIT_TIMEOUT_MS = "1";
+    try {
+      const material = buildReviewMaterial(repo, baseline, undefined, tempDir("af-review-out-"));
+      assert.equal(material.available, false);
+      assert.match(material.available ? "" : material.reason, /timed out/u);
+    } finally {
+      if (previous === undefined) delete process.env.AF_REVIEW_GIT_TIMEOUT_MS;
+      else process.env.AF_REVIEW_GIT_TIMEOUT_MS = previous;
+    }
+  });
+});
+
 describe("the deny-list query is checked before anything is captured", () => {
   // `excluded.ok` used to be unread. `denied` then came back `[]` from a query
   // that never ran, `withheld` came back `[]`, and the capture went on to state
