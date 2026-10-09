@@ -1060,7 +1060,9 @@
       <section class="view" id="view-runs" hidden>
         <!-- Daemons (042 D1/D2/FR-002). Every project on this machine, not just
              this one: two daemons once ran for two days unnoticed. Refreshed by
-             the runs poller, so there is no second Refresh button here. -->
+             the runs poller — including while a run stream is open, which the
+             stream itself does not cover — and by the Refresh button below, so
+             there is no second Refresh button here. -->
         <div class="section">
           <div class="section-header">
             <h2>Daemons</h2>
@@ -2248,7 +2250,26 @@
         };
       }
 
-      document.getElementById("btn-refresh-runs").onclick = () => loadRuns();
+      /**
+       * Refresh everything the runs view is showing, not only the list.
+       *
+       * The daemons panel above the list and the detail pane beside it are on
+       * the same screen and were left stale by a Refresh that called loadRuns()
+       * alone — the button redrew a third of what the operator was looking at.
+       * refreshRunSnapshot returns immediately when no run is open, so this is
+       * two requests on the list view and three with a run beside it.
+       */
+      async function refreshRunsView() {
+        const btn = document.getElementById("btn-refresh-runs");
+        btn.disabled = true;
+        try {
+          await Promise.all([loadRuns(), loadDaemons(), refreshRunSnapshot()]);
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      document.getElementById("btn-refresh-runs").onclick = () => void refreshRunsView();
 
       // ── Runs auto-refresh ──────────────────────────────────────────────────
 
@@ -2264,6 +2285,10 @@
           // 042: a daemon that crashed since the last read must show as stale on
           // the next one, so liveness is re-probed every poll, never cached.
           loadDaemons();
+          // Deliberately above the return below: the open stream drives the runs
+          // list and the detail pane, and nothing else refreshes the daemons
+          // panel while it is open.
+          //
           // The runs list is driven by the open stream while one is open.
           if (activeRunEs !== null) return;
           loadRuns();
@@ -2747,6 +2772,35 @@
         };
       }
 
+      /** Step ids whose excerpt is currently open on its full persisted output. */
+      function expandedOutputStepIds(body) {
+        const ids = [];
+        for (const el of body.querySelectorAll(".step-output")) {
+          if (el.dataset.full !== "yes") continue;
+          const stepId = el.closest(".step-row")?.dataset.stepId;
+          if (stepId) ids.push(stepId);
+        }
+        return ids;
+      }
+
+      /**
+       * Re-open the outputs that were expanded before a re-render replaced the
+       * rows holding them. The text comes back through loadFullOutput, which
+       * reads the cache fetchStepOutput already filled — a restore costs no
+       * second request, and a step whose output has since gone keeps its
+       * excerpt and the note saying so.
+       */
+      function restoreExpandedOutputs(body, runId, stepIds) {
+        for (const stepId of stepIds) {
+          const row = body.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
+          const el = row?.querySelector(".step-output");
+          if (!el) continue;
+          el.classList.add("expanded");
+          el.title = "Click to collapse";
+          void loadFullOutput(el, runId);
+        }
+      }
+
       /**
        * Fetch a step's persisted output the first time its Output block is opened
        * (spec 036 D6/D10). It is never part of the snapshot or the SSE stream.
@@ -3040,10 +3094,15 @@
 
         if (inv) html += invocationHtml(inv);
 
+        // 042 D18: this re-render replaces every step row, so an excerpt the
+        // operator had opened onto its full output would snap back to the
+        // clamped text. The ids are read before the wipe and re-opened after.
+        const expanded = expandedOutputStepIds(body);
         body.innerHTML = html;
         wireCopyButtons(body);
         wireStepOutputs(body, runId);
         wireExcerptToggles(body, runId);
+        restoreExpandedOutputs(body, runId, expanded);
         // The step rows are new DOM, so their activity lists are repainted from
         // the merge state rather than refetched (spec 036 D4).
         repaintLogs(body);
