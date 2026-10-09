@@ -6,9 +6,11 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -291,6 +293,31 @@ describe("saveDraft — conflict", () => {
 
       const onDisk = readFileSync(pipelinePath, "utf8");
       assert.equal(onDisk, modified, "file must not have been overwritten");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ── Atomic publication (spec 047 FR-8) ────────────────────────────────────────
+
+describe("saveDraft — the file is published atomically", () => {
+  it("replaces the file by rename and leaves no temp file behind", () => {
+    const { db, draftId, pipelinePath, cleanup } = setup(GATE_PIPELINE);
+    try {
+      const inodeBefore = statSync(pipelinePath).ino;
+      const result = saveDraft(db, draftId);
+      assert.ok(result.ok);
+
+      // An in-place writeFileSync keeps the inode (O_TRUNC, exposing a zero-length
+      // file at the final name); a temp file renamed over it gets a new one.
+      assert.notEqual(statSync(pipelinePath).ino, inodeBefore, "the write must be a rename");
+      assert.equal(readFileSync(pipelinePath, "utf8"), GATE_PIPELINE, "the target is complete");
+      assert.deepEqual(
+        readdirSync(join(pipelinePath, "..")),
+        ["test.yaml"],
+        "no temp file may remain in the pipelines directory"
+      );
     } finally {
       cleanup();
     }

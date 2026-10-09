@@ -7,8 +7,8 @@
 //   4. Write through yaml's Document AST to preserve comments and key order.
 //   5. Update stored hashes so the next save is not a false conflict.
 
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { parseDocument } from "yaml";
@@ -20,6 +20,7 @@ import {
   updateDraftBaseHash,
   updateSourceHash,
 } from "./draftStore.js";
+import { hashContent } from "./hash.js";
 import { loadPipeline } from "./load.js";
 import { loadProviders } from "./loadProviders.js";
 import { defaultRegistry, getActiveProfile } from "./registry.js";
@@ -99,7 +100,7 @@ export function saveDraft(db: DbInstance, draftId: number): SaveResult {
   // input when the document has not been structurally modified.
   const doc = parseDocument(draft.body);
   const output = docToString(doc);
-  writeFileSync(filePath, output, "utf8");
+  writeFileAtomic(filePath, output);
 
   // ── Step 5: update stored hashes ─────────────────────────────────────────
   const newHash = hashContent(output);
@@ -164,8 +165,29 @@ export function saveDraftAndRegenerate(db: DbInstance, draftId: number): SaveAnd
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-export function hashContent(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
+export { hashContent };
+
+/**
+ * Publish `content` at `path` atomically (spec 047 FR-8).
+ *
+ * writeFileSync is open(O_TRUNC) → write → close, so a zero-length file exists
+ * at the final name for an instant. The daemon reloads a pipeline on every run
+ * start, and a load that lands in that window sees an empty pipeline. Writing a
+ * sibling temp file and renaming it means a reader sees the previous file or
+ * the new one, never a partial one.
+ *
+ * The temp file is a sibling (rename is atomic only within one filesystem) and
+ * ends in ".tmp", not ".yaml", so the pipeline-directory scan cannot pick it up.
+ */
+function writeFileAtomic(path: string, content: string): void {
+  const tempPath = `${path}.${process.pid.toString(36)}-${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tempPath, content, "utf8");
+    renameSync(tempPath, path);
+  } catch (err) {
+    rmSync(tempPath, { force: true });
+    throw err;
+  }
 }
 
 /**
