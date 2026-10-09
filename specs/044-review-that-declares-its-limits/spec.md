@@ -1,11 +1,11 @@
 # 044. A review that declares its limits
 
-| Field        | Value                                                                                                                |
-| ------------ | -------------------------------------------------------------------------------------------------------------------- |
-| Feature Name | Review that declares its limits                                                                                      |
-| Branch       | `main`                                                                                                               |
-| Status       | Shipped 2026-09-23 — live-proven against a real PR (see Outcome)                                                    |
-| Created      | 2026-09-22                                                                                                           |
+| Field        | Value                                                            |
+| ------------ | ---------------------------------------------------------------- |
+| Feature Name | Review that declares its limits                                  |
+| Branch       | `main`                                                           |
+| Status       | Shipped 2026-09-23 — live-proven against a real PR (see Outcome) |
+| Created      | 2026-09-22                                                       |
 
 ## Context
 
