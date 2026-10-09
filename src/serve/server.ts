@@ -120,7 +120,7 @@ import { CONTENT_CAP, handleContentRoutes } from "./routes/content.js";
 import { stopProjectDaemon } from "./stop.js";
 import type { ProviderAccount } from "./providerAccounts.js";
 import type { ModelEntry, ProviderConfig, ProviderProfile } from "../canon/registry.js";
-import type { Role } from "../canon/types.js";
+import type { LoadedPipeline, Role } from "../canon/types.js";
 import type { RunService, StepEvent, GateSummaryDeps } from "../runtime/runService.js";
 import type { AddressInfo } from "node:net";
 
@@ -2648,25 +2648,42 @@ if (process.argv[1] === __filename) {
   const checkCommand = readAgentFlowsConfig(projectDir);
 
   const { loaded: startupPipelines } = loadCatalogPipelines(startupCatalog);
+  const buildDeps = {
+    registry,
+    store,
+    profile,
+    providerProfiles: providers.profiles,
+    cwd: projectDir,
+    ...(checkCommand !== undefined ? { checkCommand } : {}),
+  };
+  // Spec 047 FR-8: a pipeline whose build throws must not take the daemon down.
+  // It is left out of the initial instance and handed to the wrapper, which
+  // throws its (named) build error when that pipeline is requested.
   const workflows: Record<string, unknown> = {};
+  const startupBuilt: LoadedPipeline[] = [];
+  const startupFailures: { loaded: LoadedPipeline; message: string }[] = [];
   for (const { loaded } of startupPipelines) {
-    workflows[loaded.def.id] = buildPipelineWorkflow(loaded, {
-      registry,
-      store,
-      profile,
-      providerProfiles: providers.profiles,
-      cwd: projectDir,
-      ...(checkCommand !== undefined ? { checkCommand } : {}),
-    });
+    try {
+      workflows[loaded.def.id] = buildPipelineWorkflow(loaded, buildDeps);
+      startupBuilt.push(loaded);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`agent-flows serve: pipeline "${loaded.def.id}" failed to build: ${message}`);
+      startupFailures.push({ loaded, message });
+    }
   }
 
   const initialMastra = new Mastra({ storage: mastraStorage, workflows });
 
-  // FR-004: wrap the Mastra instance so that pipelines installed or edited while
-  // the daemon is running become executable without a restart.  The wrapper catches
-  // "not found" throws from getWorkflow, rescans the current canon, rebuilds all
-  // workflow objects, and retries — matching the per-request canon resolution that
-  // the listing endpoint already performs.
+  // FR-004 / spec 047 FR-8: wrap the Mastra instance so that pipelines installed
+  // or edited while the daemon is running become executable, and run as edited,
+  // without a restart.  On every getWorkflow the wrapper loads the current canon
+  // and compares the pipeline's content fingerprint with the one its build was
+  // made from; a new or changed pipeline rebuilds all workflow objects.
+  // `initialPipelines` tells it what the startup instance was built from, so an
+  // unchanged pipeline is served without a rebuild; `initialFailures` are the
+  // pipelines that did not build. The requested id fails closed: a deleted,
+  // unloadable or unbuildable pipeline throws and never runs from the cache.
   const mastra = createDynamicMastra(
     // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
     initialMastra,
@@ -2674,15 +2691,12 @@ if (process.argv[1] === __filename) {
       MastraClass: Mastra,
       mastraStorage,
       buildFn: buildPipelineWorkflow,
-      buildDeps: {
-        registry,
-        store,
-        profile,
-        providerProfiles: providers.profiles,
-        cwd: projectDir,
-        ...(checkCommand !== undefined ? { checkCommand } : {}),
-      },
-      projectDir,
+      buildDeps,
+      // The same resolution the route context uses (no pinned pipelinesDir in
+      // the daemon), so the route validates and the executor runs the same file.
+      resolveCatalog: () => resolveCatalog(projectDir),
+      initialPipelines: startupBuilt,
+      initialFailures: startupFailures,
     }
   );
 
