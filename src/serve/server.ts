@@ -2178,10 +2178,16 @@ async function handleRequest(
     // Validate the id before joining it into a path — a crafted id must not escape runs/.
     // Follows the same isSafeId pattern used for DELETE /api/pipelines/:id.
     if (!requireSafeId(id, "Run", res)) return;
-    const runDir = join(ctx.state.runsDir, id);
+    let runDir = join(ctx.state.runsDir, id);
     if (!existsSync(join(runDir, "manifest.json"))) {
-      runNotFound(res, id);
-      return;
+      // A chained stage writes into its anchor's directory, so its own id has
+      // none; the live run knows where it wrote.
+      const chained = ctx.runService?.getManifestPath(id);
+      if (chained === undefined || !existsSync(chained)) {
+        runNotFound(res, id);
+        return;
+      }
+      runDir = dirname(chained);
     }
     let manifest: unknown;
     try {

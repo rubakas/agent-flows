@@ -4415,6 +4415,100 @@ describe("FR-006: GET /api/runs/:id/manifest — disk fallback, no live run requ
   });
 });
 
+// A chained stage writes into its anchor's directory (artifactDirFor), so its own
+// run id has no directory of its own. Its manifest is the anchor's.
+describe("FR-006: GET /api/runs/:id/manifest — a chained stage's run id", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+  let state: ProjectState;
+  const anchorId = "chain-anchor-0001";
+  const childId = "chain-child-0001";
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(tmpdir(), "af-manifest-chain-")));
+    projectDir = join(tmpDir, "project");
+    mkdirSync(projectDir, { recursive: true });
+    state = makeState(projectDir, tmpDir);
+    const profile = { id: "test-profile", roles: { reasoner: "m", worker: "m", scout: "m" } };
+    srv = await startServer({
+      port: 0,
+      dbPath: ":memory:",
+      pipelinesDir: REAL_PIPELINES_DIR,
+      projectDir,
+      state,
+      runService: new RunService(
+        makeMastra(makeMockRun(childId, successResult(), successResult())),
+        undefined,
+        state.runsDir,
+        profile
+      ),
+    });
+  });
+  after(async () => {
+    await srv.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("serves the anchor's manifest for the chained run's id", async () => {
+    const anchorDir = join(state.runsDir, anchorId);
+    mkdirSync(anchorDir, { recursive: true });
+    const artifactPath = join(anchorDir, "spec-creation.json");
+    writeFileSync(
+      artifactPath,
+      JSON.stringify({
+        runId: anchorId,
+        pipelineId: "spec-creation",
+        status: "succeeded",
+        spec: "the spec text",
+        provenance: {
+          pipelineId: "spec-creation",
+          profileId: "anthropic",
+          transportPerStep: {},
+          startedAt: "2026-09-07T00:00:00.000Z",
+          settledAt: "2026-09-07T00:01:00.000Z",
+        },
+      }),
+      "utf8"
+    );
+    writeFileSync(
+      join(anchorDir, "manifest.json"),
+      JSON.stringify({
+        runId: anchorId,
+        startedAt: "2026-09-07T00:00:00.000Z",
+        status: "completed",
+        stages: [
+          {
+            stageId: "spec-creation",
+            artifactPath,
+            profileId: "anthropic",
+            status: "succeeded",
+            settledAt: "2026-09-07T00:01:00.000Z",
+          },
+        ],
+      }),
+      "utf8"
+    );
+
+    const start = await mutate(srv.port, "POST", "/api/runs", { pipeline: "build", artifactPath });
+    assert.equal(
+      start.status,
+      200,
+      `chained start must succeed; body: ${await start.clone().text()}`
+    );
+    const { runId } = (await start.json()) as { runId: string };
+    assert.equal(runId, childId);
+    // Let the fire-and-forget artifact and manifest writes finish before cleanup.
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/${childId}/manifest`);
+    assert.equal(res.status, 200, `expected 200; body: ${await res.clone().text()}`);
+    const body = (await res.json()) as { runId: string; stages: { stageId: string }[] };
+    assert.equal(body.runId, anchorId, "the manifest is the chain's, keyed by its anchor");
+    assert.equal(body.stages[0]?.stageId, "spec-creation");
+  });
+});
+
 // ── FR-009: GET /api/runs/:id includes artifactPath ───────────────────────────
 
 describe("FR-009: GET /api/runs/:id includes artifactPath after settlement", () => {
