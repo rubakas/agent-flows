@@ -1791,6 +1791,32 @@ describe("buildLlmStep — provider failover", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("a schema retry after a failover runs on the model that answered, not the failed primary", async () => {
+    const seen: string[] = [];
+    const answers: Record<string, string[]> = {
+      m2: [`{"weaknesses":"not-an-array"}`, `{"weaknesses":[]}`],
+    };
+    const runner: typeof runLlmStep = async (entry) => {
+      seen.push(entry.id);
+      if (entry.id === "m1") throw transportFailure();
+      return answers[entry.id]?.shift() ?? "";
+    };
+    const schemaStep: StepDef = { ...step, schema: "weaknesses" };
+
+    const llmStep = buildLlmStep(schemaStep, prompts, makeDeps(runner, PRIMARY), undefined);
+    const out = (await (llmStep as any).execute({
+      inputData: {},
+      suspend: () => undefined as never,
+    })) as Record<string, unknown>;
+
+    assert.deepEqual(
+      seen,
+      ["m1", "m2", "m2"],
+      "the retry must go to the failover candidate, not back to the primary that just failed"
+    );
+    assert.deepEqual(out["investigate.survey"], { weaknesses: [] });
+  });
 });
 
 // ─── Declared schema is enforced, not just pasted into the prompt ─────────────

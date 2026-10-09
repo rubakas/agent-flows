@@ -665,7 +665,9 @@ export function buildLlmStep(
             const retryPrompt = `${prompt}\n\n${r1.retryNote} Return ONLY the JSON object.`;
             let retryRaw: string;
             try {
-              retryRaw = await runner(entry, retryPrompt, runnerDeps);
+              // After a failover the primary is the model that just failed; the
+              // correction goes to the one that answered.
+              retryRaw = await runner(actualEntry ?? entry, retryPrompt, runnerDeps);
             } catch (err) {
               persistRawAttempts(runId, step.id, [raw]);
               const baseMsg = err instanceof Error ? err.message : String(err);
