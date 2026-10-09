@@ -10,7 +10,7 @@
 // working tree is whatever the checkout contains. The block is fenced and
 // labelled as data so a prompt injection inside it has to argue with the fence.
 
-import { spawnSync } from "node:child_process";
+import { projectGitStatus } from "./projectGitStatus.js";
 
 /** Max bytes of spec JSON included in gate material. */
 export const GATE_SPEC_CAP = 64 * 1024;
@@ -27,10 +27,7 @@ export interface GatePayload {
 /** Capture `git status --porcelain` for gate material. Never throws. */
 export function captureGitStatus(projectDir: string): string {
   try {
-    const result = spawnSync("git", ["status", "--porcelain"], {
-      cwd: projectDir,
-      encoding: "utf8",
-    });
+    const result = projectGitStatus(projectDir);
     if (result.error !== null && result.error !== undefined) return "(git status unavailable)";
     const lines = (result.stdout ?? "")
       .trim()

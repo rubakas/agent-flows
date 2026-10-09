@@ -1,7 +1,6 @@
 // Binding B helpers: context/parsing helpers and per-kind Mastra step builders.
 // Consumed by buildLevelsOntoBuilder in build.ts.
 
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
@@ -15,6 +14,7 @@ import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
 import { canonSchemas } from "../../canon/schemas.js";
 import { validateCanonOutput } from "../../canon/validateOutput.js";
 import { recordManifestSpecSource } from "../../runtime/artifactStore.js";
+import { projectGitStatus } from "../../runtime/projectGitStatus.js";
 import { buildReviewMaterial, renderReviewMaterial } from "../../runtime/reviewMaterial.js";
 import { recordStep } from "../../runtime/stepIntrospection.js";
 import {
@@ -72,7 +72,7 @@ function lastLines(text: string, max: number): string {
  * sandboxed step) when a write step fails, so the operator knows what was left behind.
  */
 function workspaceDirtyMessage(cwd: string): string {
-  const result = spawnSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
+  const result = projectGitStatus(cwd);
   // git exits 128 when the directory is not a git repository.
   if (result.error !== undefined || result.status === 128) {
     return "Workspace may contain partial writes; not a git repository, dirty-file listing unavailable.";
