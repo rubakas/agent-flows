@@ -451,7 +451,10 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
   // Declared input names become JavaScript identifiers in the generated Binding
   // A script and placeholder keys at render time, so anything that is not a
   // plain identifier is refused here rather than emitted into a script.
-  for (const name of def.inputs ?? []) {
+  if (!Array.isArray(def.inputs)) {
+    throw new Error(`Pipeline "${def.id}": "inputs" must be a list (use inputs: [] for none)`);
+  }
+  for (const name of def.inputs) {
     if (typeof name !== "string" || !RE_INPUT_NAME.test(name)) {
       throw new Error(
         `Pipeline "${def.id}": input ${JSON.stringify(name)} is not a valid identifier — ` +
@@ -537,7 +540,9 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
   // at runtime: pipeline inputs plus transitive ancestor step ids.
   // Uses extractPlaceholders from render.ts so the pattern cannot diverge.
   const ancestorMap = pipelineAncestors(expanded.def.steps);
-  const alwaysAvailable = new Set([...expanded.def.inputs, "models"]);
+  // `models` and `provider` ride in the run context but are dropped before
+  // rendering (ctxVars), so they are not placeholders a prompt may name.
+  const alwaysAvailable = new Set(expanded.def.inputs);
   for (const step of expanded.def.steps) {
     const promptText = expanded.prompts[step.id];
     if (promptText === undefined) continue;

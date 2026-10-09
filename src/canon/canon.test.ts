@@ -1549,6 +1549,65 @@ steps:
     );
   });
 
+  // The run context carries `models` and `provider`, but ctxVars drops both before
+  // rendering, so a prompt naming either would load and then throw at render time.
+  for (const reserved of ["models", "provider"]) {
+    it(`throws at load when a prompt references {{${reserved}}}, which the runtime never provides`, () => {
+      const yaml = `
+id: test
+version: 1
+description: test
+inputs:
+  - request
+steps:
+  - id: findings
+    kind: llm
+    model: sonnet
+    prompt: prompts/findings.md
+`;
+      assert.throws(
+        () =>
+          loadPipeline("/fake/pipelines/test.yaml", {
+            readFile: (p) => (p.endsWith(".yaml") ? yaml : `Use {{${reserved}}}`),
+          }),
+        (err: Error) => {
+          assert.ok(err.message.includes("findings"), "error names the step");
+          assert.ok(
+            err.message.includes(`unknown placeholder "{{${reserved}}}"`),
+            `error names the placeholder: ${err.message}`
+          );
+          return true;
+        }
+      );
+    });
+  }
+
+  it("refuses a pipeline that declares no inputs list, naming the field", () => {
+    const yaml = `
+id: test
+version: 1
+description: test
+steps:
+  - id: findings
+    kind: llm
+    model: sonnet
+    prompt: prompts/findings.md
+`;
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/test.yaml", {
+          readFile: (p) => (p.endsWith(".yaml") ? yaml : "Findings"),
+        }),
+      (err: Error) => {
+        assert.equal(
+          err.message,
+          'Pipeline "test": "inputs" must be a list (use inputs: [] for none)'
+        );
+        return true;
+      }
+    );
+  });
+
   it("throws when a prompt references a sibling step id (non-ancestor)", () => {
     // survey and findings are siblings at level 0 — neither is an ancestor of the other
     const yaml = `
@@ -2632,8 +2691,8 @@ describe("FR-014: ship.yaml approve step declares manualOnly: true", () => {
 // ── every pipeline — the loader's placeholder rule actually covers all of them ─
 //
 // renderPrompt throws on a placeholder the vars map has no key for, and a step's
-// vars map is exactly the pipeline's declared inputs + models/provider + the
-// output of every TRANSITIVE ancestor. loadPipeline already refuses such a
+// vars map is exactly the pipeline's declared inputs + the output of every
+// TRANSITIVE ancestor. loadPipeline already refuses such a
 // prompt (load.ts, "prompt references unknown placeholder"), and the unit tests
 // above prove that rule can fail. What nothing proved is that the rule is run
 // against the pipelines actually shipped: a re-wired dependsOn, or a prompt that
