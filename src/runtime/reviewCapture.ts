@@ -163,6 +163,22 @@ export function nulFields(stdout: string): string[] {
   return stdout.split("\0").filter((field) => field.length > 0);
 }
 
+// A file name or commit subject is attacker-chosen text that lands in a document a
+// model reads as structure: an embedded newline plus `## ...` would forge a heading.
+// Every control character except TAB is written out as \uXXXX (newline included).
+// eslint-disable-next-line no-control-regex
+const RE_CONTROL = /[\x00-\x08\x0a-\x1f\x7f]/gu;
+
+/** One name or line with its control characters written out. */
+function escapeControl(text: string): string {
+  return text.replace(RE_CONTROL, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** `escapeControl` for a multi-line body: the line breaks themselves stay. */
+function escapeLines(text: string): string {
+  return text.split("\n").map(escapeControl).join("\n");
+}
+
 /** The artefacts captured for a review. */
 export type ReviewArtefact = "diff" | "commits" | "changedFiles" | "history";
 
@@ -1041,7 +1057,8 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
   // pathspecs below, where the quoted spelling matches nothing at all.
   const allChangedPaths = nulFields(changed.stdout);
   const changedPaths = allChangedPaths.slice(0, MAX_HISTORY_PATHS);
-  const changedList = allChangedPaths.length === 0 ? "" : allChangedPaths.join("\n") + "\n";
+  const changedList =
+    allChangedPaths.length === 0 ? "" : allChangedPaths.map(escapeControl).join("\n") + "\n";
 
   // Provenance probes. `--` separates the pathspecs from the revision arguments
   // so a file literally named like an option is still read as a path.
@@ -1063,7 +1080,7 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
     ]);
     historyParts.push(
       fileHistory.ok
-        ? `# add/delete history of the changed files\n${fileHistory.stdout}`
+        ? `# add/delete history of the changed files\n${escapeLines(fileHistory.stdout)}`
         : `# add/delete history unavailable: ${fileHistory.reason}`
     );
   }
@@ -1078,7 +1095,9 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
       ...safePathspecs,
     ]);
     historyParts.push(
-      stat.ok ? `# git show --stat ${sha}\n${stat.stdout}` : `# ${sha} unavailable: ${stat.reason}`
+      stat.ok
+        ? `# git show --stat ${sha}\n${escapeLines(stat.stdout)}`
+        : `# ${sha} unavailable: ${stat.reason}`
     );
   }
 
@@ -1091,7 +1110,7 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
       ? ""
       : `\n# ${String(withheld.length)} changed path(s) withheld by credential policy` +
         ` — excluded from the diff, this list and the history probes:\n` +
-        withheld.map((p) => `# ${p}`).join("\n") +
+        withheld.map((p) => `# ${escapeControl(p)}`).join("\n") +
         "\n";
 
   return {
@@ -1102,7 +1121,7 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
     withheld,
     bodies: {
       diff: diff.stdout,
-      commits: commits.stdout,
+      commits: escapeLines(commits.stdout),
       changedFiles: changedList + disclosure,
       history: historyParts.join("\n"),
     },
@@ -1210,7 +1229,7 @@ export function renderMaterial(view: MaterialView, specSections: readonly string
     sections.push(
       `## withheld by credential policy (${String(view.withheld.length)} path(s))\n` +
         "Excluded from every section above — the diff you were given is not complete:\n" +
-        view.withheld.join("\n")
+        view.withheld.map(escapeControl).join("\n")
     );
   }
 

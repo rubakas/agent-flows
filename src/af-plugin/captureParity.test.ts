@@ -276,12 +276,6 @@ function differingFields(daemon: View, pluginSide: View): Field[] {
  * removes it; the entry and its uses are deleted in that commit.
  */
 const INTENDED: Record<string, { reason: string; closedBy?: string }> = {
-  "control-char-escaping": {
-    reason:
-      "the plugin writes control characters of paths and commit subjects as \\uXXXX; " +
-      "the daemon writes them raw into the prompt",
-    closedBy: "fix(runtime): escape control characters in the daemon capture",
-  },
   "whitespace-baseline": {
     reason:
       "the daemon reads a whitespace-only baseline as omitted and derives one; " +
@@ -488,7 +482,17 @@ const fixtures: Fixture[] = [
       commit(repo, "add odd name");
       return { repo, baseline };
     },
-    intended: [{ id: "control-char-escaping", fields: ["changedFiles", "rendered"] }],
+    intended: [],
+  },
+  {
+    name: "audit L11: a withheld path with a newline and a forged heading",
+    build: () => {
+      const { repo, baseline } = plainRepo();
+      write(repo, "x\n## forged heading.pem", "FORGEDMARK\n");
+      commit(repo, "add a denied name with a newline");
+      return { repo, baseline, secrets: ["FORGEDMARK"] };
+    },
+    intended: [],
   },
   {
     name: "audit L11: a commit subject with terminal escape characters",
@@ -498,7 +502,7 @@ const fixtures: Fixture[] = [
       commit(repo, "red \u001b[31mALERT\u001b[0m subject");
       return { repo, baseline };
     },
-    intended: [{ id: "control-char-escaping", fields: ["commits", "history", "rendered"] }],
+    intended: [],
   },
   {
     name: "re-audit N1: a translated warning on the rename pass",
