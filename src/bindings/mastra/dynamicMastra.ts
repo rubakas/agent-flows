@@ -28,7 +28,7 @@
 // remain consistent.
 
 import { hashContent } from "../../canon/hash.js";
-import { loadCatalogPipelines, loadFromCatalog, type MergedCatalog } from "../../canon/layers.js";
+import type { Pipelines } from "../../canon/pipelines.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 import type { MastraLike } from "../../runtime/runService.js";
 
@@ -56,12 +56,12 @@ export interface DynamicMastraOpts {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   buildDeps: any;
   /**
-   * The catalogue to read on every lookup. It must be the same resolution the
-   * HTTP route uses (resolveCatalog(projectDir) in production, a single pinned
-   * layer when a pipelines dir is pinned) so the route validates and the
+   * The pipelines view to read on every lookup. It must be the same resolution
+   * the HTTP route uses (projectPipelines(projectDir) in production, a single
+   * pinned layer when a pipelines dir is pinned) so the route validates and the
    * executor runs the same file.
    */
-  resolveCatalog: () => MergedCatalog;
+  pipelines: () => Pipelines;
   /**
    * The pipelines the initial Mastra instance was built from. Their fingerprints
    * are recorded at wrapper creation so an unchanged pipeline is served by the
@@ -119,14 +119,14 @@ export function createDynamicMastra(initial: MastraLike, opts: DynamicMastraOpts
     return new Error(`Pipeline "${id}" failed to build: ${message}`);
   }
 
-  function rebuild(catalog: MergedCatalog, requestedId: string): void {
+  function rebuild(pipelines: Pipelines, requestedId: string): void {
     const old = current;
     const oldFingerprints = new Map(builtFingerprints);
     const workflows: Record<string, unknown> = {};
     const failures = new Map<string, { fingerprint: string; message: string }>();
     builtFingerprints.clear();
 
-    for (const { loaded } of loadCatalogPipelines(catalog).loaded) {
+    for (const { loaded } of pipelines.all().found) {
       const id = loaded.def.id;
       try {
         workflows[id] = opts.buildFn(loaded, opts.buildDeps);
@@ -148,7 +148,7 @@ export function createDynamicMastra(initial: MastraLike, opts: DynamicMastraOpts
     // catalogue is dropped. The requested id is not hidden by this: a recorded
     // build failure or a load error is thrown before the cache is consulted.
     for (const [id, previousPrint] of oldFingerprints) {
-      if (id in workflows || !catalog.entries.has(id)) continue;
+      if (id in workflows || !pipelines.catalog.entries.has(id)) continue;
       try {
         workflows[id] = old.getWorkflow(id);
         builtFingerprints.set(id, previousPrint);
@@ -174,17 +174,18 @@ export function createDynamicMastra(initial: MastraLike, opts: DynamicMastraOpts
     getWorkflow(id: string) {
       // Spec 038 D13: the merged three-layer view, so a workflow added in any
       // layer becomes executable and a repository fork wins over the bundled copy.
-      const catalog = opts.resolveCatalog();
-      // loadFromCatalog throws the real load error for a broken file; both that
-      // and a missing id fail closed rather than serving the cached workflow.
-      const requested = loadFromCatalog(catalog, id);
-      if (requested === undefined) throw new Error(`Pipeline "${id}" not found`);
+      const pipelines = opts.pipelines();
+      // A broken file throws its real load error and a missing id a named one;
+      // both fail closed rather than serving the cached workflow.
+      const requested = pipelines.get(id);
+      if (requested.kind === "absent") throw new Error(`Pipeline "${id}" not found`);
+      if (requested.kind === "broken") throw requested.error;
 
       const print = fingerprint(requested.loaded);
       const known = failedBuilds.get(id);
       if (known?.fingerprint === print) throw buildFailure(id, known.message);
       if (builtFingerprints.get(id) !== print) {
-        rebuild(catalog, id);
+        rebuild(pipelines, id);
         const failed = failedBuilds.get(id);
         if (failed !== undefined) throw buildFailure(id, failed.message);
         // The rebuild re-reads every file. If the requested one changed (or became

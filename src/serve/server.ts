@@ -45,9 +45,7 @@ import { forkPipeline, resolveForkTarget } from "../canon/fork.js";
 import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import {
   layerForPipelinesDir,
-  loadCatalogPipelines,
   repoCanonRoot,
-  resolveCatalog,
   userLibraryRoot,
   writeTargetLayer,
   type CanonLayer,
@@ -2488,9 +2486,9 @@ if (process.argv[1] === __filename) {
   const portChoice = resolvePortChoice(process.argv, process.env);
   const projectDir = resolveProjectDir();
   console.log(`agent-flows serve: running steps in ${projectDir}`);
-  const startupCatalog = resolveCatalog(projectDir);
+  const startupPipelines = projectPipelines(projectDir);
   console.log(
-    `agent-flows serve: workflow layers ${startupCatalog.layers
+    `agent-flows serve: workflow layers ${startupPipelines.layers
       .map((l) => `${l.source} (${l.root})`)
       .join(", ")}`
   );
@@ -2539,7 +2537,7 @@ if (process.argv[1] === __filename) {
   // misconfigured project never silently falls back to the default gate.
   const checkCommand = readAgentFlowsConfig(projectDir);
 
-  const { loaded: startupPipelines } = loadCatalogPipelines(startupCatalog);
+  const startupLoaded = startupPipelines.all().found;
   const buildDeps = {
     registry,
     store,
@@ -2554,7 +2552,7 @@ if (process.argv[1] === __filename) {
   const workflows: Record<string, unknown> = {};
   const startupBuilt: LoadedPipeline[] = [];
   const startupFailures: { loaded: LoadedPipeline; message: string }[] = [];
-  for (const { loaded } of startupPipelines) {
+  for (const { loaded } of startupLoaded) {
     try {
       workflows[loaded.def.id] = buildPipelineWorkflow(loaded, buildDeps);
       startupBuilt.push(loaded);
@@ -2586,7 +2584,7 @@ if (process.argv[1] === __filename) {
       buildDeps,
       // The same resolution the route context uses (no pinned pipelinesDir in
       // the daemon), so the route validates and the executor runs the same file.
-      resolveCatalog: () => resolveCatalog(projectDir),
+      pipelines: () => projectPipelines(projectDir),
       initialPipelines: startupBuilt,
       initialFailures: startupFailures,
     }

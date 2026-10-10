@@ -4,7 +4,7 @@
 // import because it calls MCPServer.startStdio() at module load — and the
 // visibility filter is exactly the kind of thing that must be provable.
 
-import { loadCatalogPipelines, resolveCatalog } from "../../canon/layers.js";
+import { projectPipelines } from "../../canon/pipelines.js";
 import { resolveProjectState } from "../../runtime/projectState.js";
 import { readHidden } from "../../runtime/visibility.js";
 import type { StateEnv } from "../../runtime/projectState.js";
@@ -34,18 +34,18 @@ export function listPipelinesPayload(
   projectDir: string,
   env: StateEnv = process.env
 ): ListPipelinesPayload {
-  const catalog = loadCatalogPipelines(resolveCatalog(projectDir, env));
+  const catalog = projectPipelines(projectDir, env).all();
   const hidden = readHidden(resolveProjectState(projectDir, env).dir);
   return {
-    pipelines: catalog.loaded
+    pipelines: catalog.found
       .filter(({ loaded }) => !hidden.has(loaded.def.id))
-      .map(({ entry, loaded }) => ({
+      .map(({ file, loaded }) => ({
         id: loaded.def.id,
         description: loaded.def.description,
         inputs: [...(loaded.def.inputs ?? [])],
         optionalInputs: [...(loaded.def.optionalInputs ?? [])],
-        layer: entry.layer.source,
-        shadows: [...entry.shadows],
+        layer: file.layer.source,
+        shadows: [...file.shadows],
       })),
     errors: catalog.errors.map((e) => ({ file: e.file, error: e.error })),
   };

@@ -13,10 +13,8 @@ import { dirname, join, resolve } from "node:path";
 
 import { bundledPipelinesDir, packageRoot } from "../packageRoot.js";
 import { stateRoot } from "../runtime/projectState.js";
-import { listPipelines, loadPipeline } from "./load.js";
+import { listPipelines } from "./load.js";
 import { readRawPipeline } from "./rawPipeline.js";
-import type { LoadDeps } from "./load.js";
-import type { LoadedPipeline } from "./types.js";
 import type { StateEnv } from "../runtime/projectState.js";
 
 /** Which of the three layers a workflow came from. */
@@ -58,12 +56,6 @@ export interface MergedCatalog {
   layers: CanonLayer[];
   entries: Map<string, CatalogEntry>;
   errors: CatalogError[];
-}
-
-/** A catalogue entry together with its fully loaded (and expanded) pipeline. */
-export interface MergedPipeline {
-  entry: CatalogEntry;
-  loaded: LoadedPipeline;
 }
 
 /** True when `path` is an existing directory. A layer that is not contributes nothing. */
@@ -197,52 +189,6 @@ export function resolveCatalog(projectDir: string, env: StateEnv = process.env):
 /** Catalogue entries ordered by id, for listings. */
 export function catalogRows(catalog: MergedCatalog): CatalogEntry[] {
   return [...catalog.entries.values()].sort((a, b) => a.id.localeCompare(b.id));
-}
-
-/**
- * Loader dependencies that resolve a nested pipeline id through the merged view
- * (FR-019), so a forked parent in one layer can mount a child from another.
- */
-export function catalogDeps(catalog: MergedCatalog, deps?: LoadDeps): LoadDeps {
-  return { ...deps, resolvePath: (id: string) => catalog.entries.get(id)?.filePath };
-}
-
-/**
- * Load one id through the merged view. Returns undefined when no layer defines
- * it; a defined-but-broken pipeline throws, as `loadPipeline` does.
- */
-export function loadFromCatalog(
-  catalog: MergedCatalog,
-  id: string,
-  deps?: LoadDeps
-): MergedPipeline | undefined {
-  const entry = catalog.entries.get(id);
-  if (entry === undefined) return undefined;
-  return { entry, loaded: loadPipeline(entry.filePath, catalogDeps(catalog, deps)) };
-}
-
-/**
- * Load every id in the merged view. A pipeline that fails to load contributes an
- * error rather than aborting the rest — one malformed file must not empty a
- * listing.
- */
-export function loadCatalogPipelines(
-  catalog: MergedCatalog,
-  deps?: LoadDeps
-): { loaded: MergedPipeline[]; errors: CatalogError[] } {
-  const loaded: MergedPipeline[] = [];
-  const errors: CatalogError[] = [...catalog.errors];
-  for (const entry of catalogRows(catalog)) {
-    try {
-      loaded.push({ entry, loaded: loadPipeline(entry.filePath, catalogDeps(catalog, deps)) });
-    } catch (err) {
-      errors.push({
-        file: entry.filePath,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-  return { loaded, errors };
 }
 
 /**

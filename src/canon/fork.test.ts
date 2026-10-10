@@ -24,13 +24,13 @@ import { packageRoot } from "../packageRoot.js";
 import { assertWritableRoot, forkPipeline, resolveForkTarget } from "./fork.js";
 import {
   layerFrom,
-  loadFromCatalog,
   mergedCatalog,
   resolveLayers,
   userLibraryRoot,
   type CanonLayer,
   type LayerSource,
 } from "./layers.js";
+import { pipelinesIn } from "./pipelines.js";
 
 function tempDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(realpathSync(tmpdir()), prefix)));
@@ -163,9 +163,9 @@ describe("FR-021: fork copies one workflow and its own prompts into a writable l
         promptsDir: join(repoRoot, "prompts"),
       };
       const catalog = mergedCatalog([source, repo]);
-      const parent = loadFromCatalog(catalog, "parent");
-      assert.ok(parent, "the forked parent must load");
-      assert.equal(parent.entry.layer.source, "repo", "the fork owns the id now");
+      const parent = pipelinesIn(catalog.layers).get("parent");
+      assert.ok(parent.kind === "ok", "the forked parent must load");
+      assert.equal(parent.file.layer.source, "repo", "the fork owns the id now");
       assert.deepEqual(
         parent.loaded.def.steps.map((s) => s.id),
         ["think", "nested.start"],

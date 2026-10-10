@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { loadFromCatalog, resolveCatalog } from "../../canon/layers.js";
+import { projectPipelines } from "../../canon/pipelines.js";
 import { resolveProjectState } from "../../runtime/projectState.js";
 import { setHidden } from "../../runtime/visibility.js";
 import { listPipelinesPayload } from "./listPipelines.js";
@@ -144,8 +144,9 @@ describe("FR-026: list_pipelines is filtered by this project's visibility file",
       // The run path resolves an entry point through the merged view — the same
       // resolution POST /api/runs and run_pipeline use — which never consults
       // visibility.
-      const loaded = loadFromCatalog(resolveCatalog(projectDir, env), "child");
-      assert.ok(loaded, "a hidden workflow must still load by id");
+      const loaded = projectPipelines(projectDir, env).get("child");
+      assert.equal(loaded.kind, "ok", "a hidden workflow must still load by id");
+      assert.ok(loaded.kind === "ok");
       assert.deepEqual(
         loaded.loaded.def.steps.map((s) => s.id),
         ["start"]
@@ -166,8 +167,8 @@ describe("FR-026: list_pipelines is filtered by this project's visibility file",
       assert.ok(!listed.includes("child"), "the child is unlisted");
       assert.ok(listed.includes("parent"), "the parent is listed");
 
-      const parent = loadFromCatalog(resolveCatalog(projectDir, env), "parent");
-      assert.ok(parent);
+      const parent = projectPipelines(projectDir, env).get("parent");
+      assert.ok(parent.kind === "ok");
       assert.deepEqual(
         parent.loaded.def.steps.map((s) => s.id),
         ["nested.start"],

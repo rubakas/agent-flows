@@ -28,12 +28,7 @@ import { after, afterEach, before, beforeEach, describe, it, mock } from "node:t
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
 
-import {
-  loadCatalogPipelines,
-  resolveCatalog,
-  type CatalogEntry,
-  type MergedCatalog,
-} from "../../canon/layers.js";
+import { projectPipelines, type Pipelines } from "../../canon/pipelines.js";
 import { ModelRegistry } from "../../canon/registry.js";
 import { makeInMemoryDb } from "../../db/index.js";
 import { resolveProjectState, type ProjectState } from "../../runtime/projectState.js";
@@ -111,7 +106,7 @@ describe("createDynamicMastra — installed pipeline becomes executable without 
         mastraStorage,
         buildFn: buildPipelineWorkflow,
         buildDeps,
-        resolveCatalog: () => resolveCatalog(tmpProjectDir),
+        pipelines: () => projectPipelines(tmpProjectDir),
       }
     );
 
@@ -217,10 +212,10 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
   // built list and the build failures to the wrapper so it knows what the
   // initial instance contains. A pipeline named by `failFor` always fails to build
   // (`failBuildFor` can be changed later to make one fail only on a rebuild).
-  // `resolve` replaces the catalogue resolver the wrapper reads on every lookup.
+  // `view` replaces the pipelines view the wrapper reads on every lookup.
   function startup(
     failFor?: string,
-    resolve: () => MergedCatalog = () => resolveCatalog(projectDir)
+    view: () => Pipelines = () => projectPipelines(projectDir)
   ): ReturnType<typeof createDynamicMastra> {
     failBuildFor = failFor;
     const mastraStorage = new LibSQLStore({
@@ -245,7 +240,7 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
       if (loaded.def.id === failBuildFor) throw new Error(`boom building ${loaded.def.id}`);
       return buildPipelineWorkflow(loaded, deps);
     };
-    const { loaded: startupPipelines } = loadCatalogPipelines(resolveCatalog(projectDir));
+    const startupPipelines = projectPipelines(projectDir).all().found;
     const workflows: Record<string, ReturnType<typeof buildPipelineWorkflow>> = {};
     const initialPipelines: LoadedPipeline[] = [];
     const initialFailures: { loaded: LoadedPipeline; message: string }[] = [];
@@ -264,30 +259,30 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
         mastraStorage,
         buildFn,
         buildDeps,
-        resolveCatalog: resolve,
+        pipelines: view,
         initialPipelines,
         initialFailures,
       }
     );
   }
 
-  // The catalogue the wrapper gets, except that `onRebuildRead` fires the moment a
-  // rebuild starts iterating the entries (the "second read" of every file), after
-  // the wrapper's own check read of the requested pipeline.
-  function racyCatalog(onRebuildRead: () => void): () => MergedCatalog {
+  // The view the wrapper gets, except that `onRebuildRead` fires the moment a
+  // rebuild starts listing every pipeline (the "second read" of every file),
+  // after the wrapper's own check read of the requested pipeline.
+  function racyPipelines(onRebuildRead: () => void): () => Pipelines {
     return () => {
-      const catalog = resolveCatalog(projectDir);
+      const view = projectPipelines(projectDir);
       let fired = false;
-      class Racy extends Map<string, CatalogEntry> {
-        override values(): MapIterator<CatalogEntry> {
+      return {
+        ...view,
+        all() {
           if (!fired) {
             fired = true;
             onRebuildRead();
           }
-          return super.values();
-        }
-      }
-      return { ...catalog, entries: new Racy(catalog.entries) };
+          return view.all();
+        },
+      };
     };
   }
 
@@ -468,7 +463,7 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
       mastraStorage: undefined,
       buildFn: () => "built",
       buildDeps: {},
-      resolveCatalog: () => resolveCatalog(projectDir),
+      pipelines: () => projectPipelines(projectDir),
     });
 
     assert.equal(dyn.getWorkflow("hooked") as unknown, "rebuilt");
@@ -481,7 +476,7 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
     const broken = "id: racy\nversion: 1\nsteps: [this is: not valid";
     const dyn = startup(
       undefined,
-      racyCatalog(() => writeFileSync(pipelineFile("racy"), broken))
+      racyPipelines(() => writeFileSync(pipelineFile("racy"), broken))
     );
 
     // Edited after startup (so a rebuild is needed), then unloadable by the time
@@ -496,7 +491,7 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
     writePipeline("racy2", ["a"], "R1");
     const dyn = startup(
       undefined,
-      racyCatalog(() => writePipeline("racy2", ["a", "b", "c"], "R3"))
+      racyPipelines(() => writePipeline("racy2", ["a", "b", "c"], "R3"))
     );
 
     writePipeline("racy2", ["a", "b"], "R2");

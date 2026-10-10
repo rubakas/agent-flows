@@ -556,3 +556,191 @@ describe("the three constructors", () => {
     );
   });
 });
+
+// ── Moved from layers.test.ts: loading through the merged view ─────────────────
+//
+// These pinned `loadFromCatalog` / `loadCatalogPipelines` (FR-018, FR-019 and
+// the listing path); `get` and `all` are the same behaviour behind the new
+// interface.
+
+/** A pipeline with one llm step reading `prompts/<promptName>.md` of its own layer. */
+function writePromptPipeline(
+  layer: CanonLayer,
+  id: string,
+  promptName: string,
+  promptText: string
+): void {
+  write(layer, id, [
+    "inputs: []",
+    "steps:",
+    "  - id: write",
+    "    kind: llm",
+    "    role: worker",
+    `    prompt: prompts/${promptName}.md`,
+  ]);
+  writeFileSync(join(layer.promptsDir, `${promptName}.md`), promptText);
+}
+
+describe("prompts resolve within the owning layer (FR-018)", () => {
+  it("two layers holding a prompt file of the same name each read their own", () => {
+    const bundled = makeLayer("bundled", "package");
+    const repo = makeLayer("repo", "project/.agent-flows");
+    writePromptPipeline(bundled, "bundled-writer", "shared", "BUNDLED PROMPT BODY");
+    writePromptPipeline(repo, "repo-writer", "shared", "REPO PROMPT BODY");
+    const view = pipelinesIn([bundled, repo]);
+
+    assert.equal(
+      okOf(view.get("bundled-writer")).loaded.prompts.write,
+      "BUNDLED PROMPT BODY",
+      "a bundled pipeline must not read the repository copy of prompts/shared.md"
+    );
+    assert.equal(
+      okOf(view.get("repo-writer")).loaded.prompts.write,
+      "REPO PROMPT BODY",
+      "a repository pipeline must not read the bundled copy of prompts/shared.md"
+    );
+  });
+
+  it("a nested child's prompts come from the child's layer, not the parent's", () => {
+    const bundled = makeLayer("bundled", "package");
+    const repo = makeLayer("repo", "project/.agent-flows");
+    writePromptPipeline(bundled, "child", "shared", "BUNDLED PROMPT BODY");
+    writeFileSync(join(repo.promptsDir, "shared.md"), "REPO PROMPT BODY");
+    write(repo, "parent", mount("child"));
+
+    assert.equal(
+      okOf(pipelinesIn([bundled, repo]).get("parent")).loaded.prompts["mount.write"],
+      "BUNDLED PROMPT BODY",
+      "the mounted child's prompt must come from the child's own layer"
+    );
+  });
+});
+
+describe("nested pipelines resolve across layers (FR-019)", () => {
+  it("a repository parent mounts a bundled child and a user-library child in one run", () => {
+    const bundled = makeLayer("bundled", "package");
+    const user = makeLayer("user", "home/workflows");
+    const repo = makeLayer("repo", "project/.agent-flows");
+    write(bundled, "bundled-child", GATE);
+    write(user, "user-child", GATE);
+    write(repo, "parent", [
+      "inputs: []",
+      "steps:",
+      "  - id: from-bundled",
+      "    kind: pipeline",
+      "    pipeline: bundled-child",
+      "  - id: from-user",
+      "    kind: pipeline",
+      "    pipeline: user-child",
+      "    dependsOn: [from-bundled]",
+    ]);
+
+    const parent = okOf(pipelinesIn([bundled, user, repo]).get("parent"));
+
+    assert.deepEqual(
+      parent.loaded.def.steps.map((s) => s.id),
+      ["from-bundled.start", "from-user.start"],
+      "both mounts expand into the parent's step list"
+    );
+  });
+
+  it("a user-library parent mounts a bundled child, including as a loop body", () => {
+    const bundled = makeLayer("bundled", "package");
+    const user = makeLayer("user", "home/workflows");
+    write(bundled, "round", [
+      "inputs: []",
+      "steps:",
+      "  - id: check",
+      "    kind: check",
+      "    command: true",
+    ]);
+    write(
+      user,
+      "personal",
+      mount("round", "loop").map((l) =>
+        l === "    until: start.passed" ? "    until: check.passed" : l
+      )
+    );
+
+    const personal = okOf(pipelinesIn([bundled, user]).get("personal"));
+
+    assert.deepEqual(
+      personal.loaded.bodies?.mount.def.steps.map((s) => s.id),
+      ["check"],
+      "the loop body is the bundled child, resolved across layers"
+    );
+  });
+
+  it("a later layer's copy of a child id is the one a parent mounts", () => {
+    const bundled = makeLayer("bundled", "package");
+    const repo = makeLayer("repo", "project/.agent-flows");
+    writePromptPipeline(bundled, "child", "child", "BUNDLED CHILD PROMPT");
+    writePromptPipeline(repo, "child", "child", "FORKED CHILD PROMPT");
+    write(bundled, "parent", mount("child"));
+
+    assert.equal(
+      okOf(pipelinesIn([bundled, repo]).get("parent")).loaded.prompts["mount.write"],
+      "FORKED CHILD PROMPT",
+      "the forked child wins over the bundled one it shadows"
+    );
+  });
+
+  it("reports a cycle that only exists because a later layer shadows a child id", () => {
+    const bundled = makeLayer("bundled", "package");
+    const repo = makeLayer("repo", "project/.agent-flows");
+    write(bundled, "child", GATE);
+    write(bundled, "parent", mount("child"));
+    // The fork of `child` mounts `parent` — a cycle that does not exist in
+    // either layer on its own.
+    write(repo, "child", mount("parent"));
+
+    const lookup = pipelinesIn([bundled, repo]).get("parent");
+
+    assert.equal(lookup.kind, "broken");
+    assert.match(
+      lookup.kind === "broken" ? lookup.error.message : "",
+      /cycle detected in nested pipelines/,
+      "a cross-layer cycle must be reported, not recursed into"
+    );
+  });
+
+  it("names a mount that no layer defines", () => {
+    const repo = makeLayer("repo", "project/.agent-flows");
+    write(repo, "parent", mount("nowhere"));
+
+    const lookup = pipelinesIn([repo]).get("parent");
+
+    assert.equal(lookup.kind, "broken");
+    assert.match(
+      lookup.kind === "broken" ? lookup.error.message : "",
+      /nested pipeline "nowhere" is not defined in any workflow layer/
+    );
+  });
+});
+
+describe("all — the listing path", () => {
+  it("returns one entry per id with its layer, and a malformed file as an error", () => {
+    const bundled = makeLayer("bundled", "package");
+    const repo = makeLayer("repo", "project/.agent-flows");
+    write(bundled, "alpha", GATE);
+    writeFileSync(
+      join(repo.pipelinesDir, "alpha.yaml"),
+      "id: alpha\nversion: 1\ndescription: forked alpha\ninputs: []\nsteps:\n  - id: start\n    kind: gate\n"
+    );
+    write(bundled, "beta", GATE);
+    writeFileSync(join(repo.pipelinesDir, "broken.yaml"), "id: broken\nsteps: [{ id: x }]\n");
+
+    const { found, errors } = pipelinesIn([bundled, repo]).all();
+
+    assert.deepEqual(
+      found.map((f) => [f.file.id, f.file.layer.source]),
+      [
+        ["alpha", "repo"],
+        ["beta", "bundled"],
+      ]
+    );
+    assert.equal(found[0]?.loaded.def.description, "forked alpha");
+    assert.equal(errors.length, 1, `one broken file must be reported: ${JSON.stringify(errors)}`);
+    assert.match(errors[0].file, /broken\.yaml$/);
+  });
+});
