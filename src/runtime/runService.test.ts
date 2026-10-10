@@ -28,6 +28,12 @@ import type { ModelEntry, ProviderProfile } from "../canon/registry.js";
 import type { StepLogEvent } from "../canon/stepLogEvents.js";
 import type { LoadedPipeline, StepDef } from "../canon/types.js";
 
+// A run's step-log and artifact writes are fire-and-forget, so one can land in
+// the directory while it is being removed (ENOTEMPTY). Node retries those.
+function removeRunsDir(dir: string): void {
+  rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+}
+
 // ── Mock helpers ──────────────────────────────────────────────────────────────
 
 type WatchCallback = (event: Record<string, unknown>) => void;
@@ -1921,7 +1927,7 @@ describe("RunService.cancel — running run is aborted, not merely flagged (FR-0
       await new Promise<void>((resolve) => setTimeout(resolve, 20));
       assert.equal(service.get(runId)?.status, "cancelled");
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2124,7 +2130,7 @@ describe("RunService — invocation is recorded once and round-trips (FR-016)", 
         "the artifact must carry the invocation verbatim — FR-018"
       );
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 });
@@ -2368,7 +2374,7 @@ describe("RunService — persisted runs are listed and readable after a restart"
         "get() must fall back to the artifact for a run the registry never saw"
       );
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2394,7 +2400,7 @@ describe("RunService — persisted runs are listed and readable after a restart"
       );
       assert.equal(service.get(started.runId)?.source, "live");
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2424,7 +2430,7 @@ describe("RunService — persisted runs are listed and readable after a restart"
         "an unknown id is still unknown"
       );
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 });
@@ -2459,7 +2465,7 @@ describe("RunService — step log file and decisions", () => {
 
       await service.cancel(runId);
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2472,6 +2478,7 @@ describe("RunService — step log file and decisions", () => {
       await service.waitForSettled(runId);
 
       await service.approve(runId, true, "looks right");
+      await service.waitForSettled(runId);
 
       const decisions = eventsOf(runsDir, runId, "test-pipeline").filter(
         (e) => e.kind === "decision"
@@ -2483,7 +2490,7 @@ describe("RunService — step log file and decisions", () => {
       assert.equal(decision.kind === "decision" && decision.reason, "looks right");
       assert.equal(decision.stepId, "approve", "the line is filed under the gate step");
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2508,7 +2515,7 @@ describe("RunService — step log file and decisions", () => {
         "the file must be complete up to its last event"
       );
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2557,7 +2564,7 @@ describe("RunService — step log file and decisions", () => {
         "the file-level fallback must continue the sequence"
       );
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2576,7 +2583,7 @@ describe("RunService — step log file and decisions", () => {
       const [event] = degraded;
       assert.equal(event.kind === "judge.degraded" && event.gateStepId, "approve");
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 });
@@ -2777,7 +2784,7 @@ describe("RunService — structural steps reach the events file", () => {
         "the gate must be in the log; the llm step's builder owns its own lines"
       );
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2797,7 +2804,7 @@ describe("RunService — structural steps reach the events file", () => {
         "a step whose kind is unknown must not be logged: guessing wrong doubles every llm step"
       );
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2819,7 +2826,7 @@ describe("RunService — structural steps reach the events file", () => {
       assert.equal(terminal.length, 1, "two terminal lines would make a caller count 8 of 7 done");
       assert.equal(terminal[0].kind === "step.result" && terminal[0].status, "cancelled");
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2847,7 +2854,7 @@ describe("RunService — structural steps reach the events file", () => {
       );
       assert.equal(terminal[0].kind === "step.result" && terminal[0].status, "cancelled");
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2884,7 +2891,7 @@ describe("RunService — structural steps reach the events file", () => {
         "the body's llm step owns its own lines; the synthetic id does not"
       );
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2919,7 +2926,7 @@ describe("RunService — structural steps reach the events file", () => {
       assert.deepEqual(fromSubscribe, ["step-start", "step-start", "step-finish", "step-failed"]);
       assert.deepEqual(fromLog, fromSubscribe, "one stream, one translation, one answer");
     } finally {
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 
@@ -2959,7 +2966,7 @@ describe("RunService — structural steps reach the events file", () => {
       );
     } finally {
       console.error = realError;
-      rmSync(runsDir, { recursive: true, force: true });
+      removeRunsDir(runsDir);
     }
   });
 });
