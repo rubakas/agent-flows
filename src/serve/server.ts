@@ -51,12 +51,7 @@ import {
   type CanonLayer,
   type LayerSource,
 } from "../canon/layers.js";
-import {
-  CLI_MODEL_RE,
-  PROVIDERS_RELATIVE_PATH,
-  loadProviders,
-  parseProviders,
-} from "../canon/loadProviders.js";
+import { PROVIDERS_RELATIVE_PATH, loadProviders, parseProviders } from "../canon/loadProviders.js";
 import { pipelinesIn, projectPipelines, type Found, type Pipelines } from "../canon/pipelines.js";
 import {
   builtInProfileIds,
@@ -64,7 +59,6 @@ import {
   activeProfileIdOrUnknown,
   getProfile,
 } from "../canon/registry.js";
-import { isRunControlKey } from "../canon/runContext.js";
 import { makeDb, type DbInstance } from "../db/index.js";
 import {
   bundledPipelinesDir as defaultBundledPipelinesDir,
@@ -79,6 +73,7 @@ import {
 } from "../runtime/daemonRecord.js";
 import { decideEntryPoint } from "../runtime/entryPoint.js";
 import { ensureProjectState, type ProjectState } from "../runtime/projectState.js";
+import { startRun } from "../runtime/runStart.js";
 import {
   isSafeStepId,
   lastSeqOfFile,
@@ -88,7 +83,6 @@ import {
   stepOutputFile,
 } from "../runtime/stepLog.js";
 import { readHidden, setHidden } from "../runtime/visibility.js";
-import { resolveArtifactInputs } from "./artifactInputs.js";
 import { listDaemons, stateDirForKey } from "./daemons.js";
 import {
   countInFlight,
@@ -1684,206 +1678,18 @@ async function handleRequest(
     if (!requireRunService(runService, res)) return;
     const parsed = await requireJsonBody(req, res, BODY_LIMIT_RUN);
     if (parsed === undefined) return;
-    const { pipeline, inputs, models, provider, gateMode, artifactPath } = parsed as {
-      pipeline?: unknown;
-      inputs?: unknown;
-      models?: unknown;
-      provider?: unknown;
-      gateMode?: unknown;
-      artifactPath?: unknown;
-    };
-    if (typeof pipeline !== "string") {
-      json(res, 400, { error: 'Field "pipeline" must be a string' });
-      return;
-    }
-    if (gateMode !== undefined && gateMode !== "manual" && gateMode !== "auto") {
-      json(res, 400, { error: 'Field "gateMode" must be "manual" or "auto"' });
-      return;
-    }
-    // FR-009/S6: inputs are workflow input values, so every one of them must be
-    // a string — a nested object reaches a z.string() input and produces a run
-    // that appears to succeed on garbled data.
-    if (typeof inputs === "object" && inputs !== null && !Array.isArray(inputs)) {
-      for (const [key, value] of Object.entries(inputs as Record<string, unknown>)) {
-        if (typeof value !== "string") {
-          json(res, 400, { error: `Input "${key.slice(0, 100)}" must be a string` });
-          return;
-        }
-      }
-    }
-
-    // Resolve pipeline step defs for provenance recording (spec 029 FR-002) and
-    // to get the declared inputs list for artifact resolution (spec 029 FR-003).
-    // If the pipeline is not found (e.g. not yet written to disk), omit steps —
-    // transportPerStep will be empty rather than wrong.
-    // Run entry resolution goes through the merged view (D13): a run may name a
-    // workflow from any layer, not only the one writes target.
-    const pipelineLookup = ctx.pipelines.get(pipeline);
-    const pipelineEntry = pipelineLookup.kind === "ok" ? pipelineLookup : undefined;
-    const pipelineDef = pipelineEntry?.loaded.def;
-
-    // FR-009/S6: the per-step model override map is a flat step id → model id
-    // record. Keys must name steps of this pipeline and values must be
-    // registry-id-shaped, so a typo fails here rather than silently running the
-    // profile default, and nothing unvalidated reaches the CLI argv.
-    if (models !== undefined) {
-      // The pipeline name is caller-supplied like the keys are, so it is
-      // truncated the same way — an error message is not a place to echo an
-      // unbounded request field back.
-      const shownPipeline = pipeline.slice(0, 100);
-      if (typeof models !== "object" || models === null || Array.isArray(models)) {
-        json(res, 400, { error: 'Field "models" must be an object' });
-        return;
-      }
-      if (!pipelineDef) {
-        json(res, 400, {
-          error: `Field "models" cannot be validated: pipeline "${shownPipeline}" not found`,
-        });
-        return;
-      }
-      const stepIds = new Set(pipelineDef.steps.map((s) => s.id));
-      for (const [stepId, model] of Object.entries(models as Record<string, unknown>)) {
-        if (!stepIds.has(stepId)) {
-          json(res, 400, {
-            error: `Model override "${stepId.slice(0, 100)}" is not a step of "${shownPipeline}"`,
-          });
-          return;
-        }
-        if (typeof model !== "string" || model.length > 100 || !CLI_MODEL_RE.test(model)) {
-          json(res, 400, { error: `Model override "${stepId.slice(0, 100)}" must be a model id` });
-          return;
-        }
-      }
-    }
-
-    // The per-run provider names a profile, not a model. It is resolved here so
-    // an unknown id fails at the boundary rather than inside a step, and so the
-    // run's provenance records the profile the run will actually use.
-    let runProfile: ProviderProfile | undefined;
-    if (provider !== undefined) {
-      if (typeof provider !== "string") {
-        json(res, 400, { error: 'Field "provider" must be a string' });
-        return;
-      }
-      // The same array the workflows were built with, so validation and
-      // execution can never disagree about which profiles exist.
-      let declaredProfiles: ProviderProfile[];
-      if (ctx.providerProfiles !== undefined) {
-        declaredProfiles = ctx.providerProfiles;
-      } else {
-        try {
-          declaredProfiles = loadProviders(ctx.projectDir).profiles;
-        } catch (err) {
-          json(res, 400, {
-            error: `Field "provider" cannot be validated: ${err instanceof Error ? err.message : String(err)}`,
-          });
-          return;
-        }
-      }
-      const known = new Set([...declaredProfiles.map((p) => p.id), ...builtInProfileIds()]);
-      if (!known.has(provider)) {
-        json(res, 400, {
-          error: `Provider "${provider.slice(0, 100)}" does not name a known profile. Available: ${[...known].join(", ")}`,
-        });
-        return;
-      }
-      runProfile = getProfile(provider, declaredProfiles);
-    }
-
-    // Extract explicit inputs early so the artifact check can skip inputs that
-    // the operator already provided — those don't need to come from the artifact.
-    const explicitInputs =
-      typeof inputs === "object" && inputs !== null && !Array.isArray(inputs)
-        ? (inputs as Record<string, unknown>)
-        : {};
-
-    // `inputs` is spread straight into the workflow context, which is also where
-    // `provider` and `models` live — so an unfiltered object is a second door
-    // onto both, bypassing every check above it. Keys are refused rather than
-    // dropped: a silently discarded input is the failure mode this repo has been
-    // bitten by, and a run whose provenance names a provider it never used is
-    // worse than a 400.
-    const explicitInputKeys = Object.keys(explicitInputs);
-    const reservedKey = explicitInputKeys.find(isRunControlKey);
-    if (reservedKey !== undefined) {
-      json(res, 400, {
-        error: `Input "${reservedKey}" is reserved — pass it as the top-level "${reservedKey}" field instead`,
-      });
-      return;
-    }
-    if (explicitInputKeys.length > 0) {
-      const shownPipeline = pipeline.slice(0, 100);
-      if (!pipelineDef) {
-        json(res, 400, {
-          error: `Field "inputs" cannot be validated: pipeline "${shownPipeline}" not found`,
-        });
-        return;
-      }
-      const declared = new Set(pipelineDef.inputs ?? []);
-      const unknownKey = explicitInputKeys.find((key) => !declared.has(key));
-      if (unknownKey !== undefined) {
-        json(res, 400, {
-          error: `Input "${unknownKey.slice(0, 100)}" is not an input of "${shownPipeline}". Declared: ${[...declared].join(", ")}`,
-        });
-        return;
-      }
-    }
-
-    // ── Artifact-path input resolution (spec 029 FR-003) ──────────────────────
-    // When artifactPath is provided, inputs may be omitted; the artifact seeds
-    // the run's inputs. If both are provided, artifact-derived values take
-    // priority — the operator is being explicit about what to hand off.
-    let artifactDerivedInputs: Record<string, unknown> = {};
-    // FR-006: when chaining from a parent artifact, write the new stage's artifact
-    // into the parent run's directory so all stages in a chain accumulate there.
-    // The chain dir is the directory that contains the source artifact file.
-    let chainArtifactDir: string | undefined;
-    if (artifactPath !== undefined) {
-      const resolved = resolveArtifactInputs({
-        artifactPath,
-        projectDir: ctx.projectDir,
-        stateRoot: stateRootOf(ctx.state),
-        pipelineDef,
-        explicitInputs,
-      });
-      if (!resolved.ok) {
-        json(res, 400, { error: resolved.error });
-        return;
-      }
-      artifactDerivedInputs = resolved.inputs;
-      chainArtifactDir = resolved.chainDir;
-    }
-
-    // inputs is required when no artifactPath is provided (existing behaviour).
-    if (artifactPath === undefined) {
-      if (typeof inputs !== "object" || inputs === null || Array.isArray(inputs)) {
-        json(res, 400, { error: 'Field "inputs" must be an object' });
-        return;
-      }
-    }
-
-    // Merge explicit inputs and artifact-derived inputs; artifact takes priority
-    // when both are present (FR-003: "artifactPath takes priority").
-    const wfInput: Record<string, unknown> = {
-      ...explicitInputs,
-      ...artifactDerivedInputs,
-      ...(models !== undefined ? { models } : {}),
-      ...(runProfile !== undefined ? { provider: runProfile.id } : {}),
-    };
-
-    const result = await runService.start(pipeline, wfInput, {
-      gateMode: gateMode ?? "manual",
-      ...(pipelineEntry !== undefined ? { pipelineSteps: pipelineEntry.loaded.def.steps } : {}),
-      // Loop bodies are built like top-level steps but are absent from
-      // def.steps, so without them their llm steps would be logged twice.
-      ...(pipelineEntry?.loaded.bodies !== undefined
-        ? { pipelineBodies: pipelineEntry.loaded.bodies }
-        : {}),
-      ...(chainArtifactDir !== undefined ? { chainArtifactDir } : {}),
-      ...(typeof artifactPath === "string" ? { artifactPath } : {}),
-      ...(runProfile !== undefined ? { provider: runProfile } : {}),
+    const outcome = await startRun(parsed, {
+      runService,
+      pipelines: ctx.pipelines,
+      projectDir: ctx.projectDir,
+      stateRoot: stateRootOf(ctx.state),
+      ...(ctx.providerProfiles !== undefined ? { providerProfiles: ctx.providerProfiles } : {}),
     });
-    json(res, 200, { ...result, ...eventsPathField(runService, result.runId) });
+    if (!outcome.ok) {
+      json(res, 400, { error: outcome.error });
+      return;
+    }
+    json(res, 200, { ...outcome.result, ...eventsPathField(runService, outcome.result.runId) });
     return;
   }
 

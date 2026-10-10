@@ -128,6 +128,12 @@ describe("safePath redaction — unexpected error surfaces as 500 with <root>", 
     tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-safepath-500-")));
     tmpPipelinesDir = join(tmpRoot, "pipelines");
     mkdirSync(tmpPipelinesDir);
+    // The pipeline must exist: an unknown one is refused before the run service is
+    // reached, and this test is about an error thrown from inside it.
+    writeFileSync(
+      join(tmpPipelinesDir, "x.yaml"),
+      "id: x\nversion: 1\ndescription: x\ninputs: []\nsteps:\n  - id: ok\n    kind: gate\n    message: ok?\n"
+    );
 
     // A RunService whose workflow lookup throws synchronously with the launch
     // root embedded in the message — start() awaits this without a local

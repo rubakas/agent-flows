@@ -268,6 +268,14 @@ Each is **Proposed**; D5 applies.
   model overrides, past the route's validation. A user pipeline that already uses either
   name stops loading until it is renamed; no bundled pipeline does. Expanded nested ids are
   prefixed, so only the standalone load of a child can newly fail.
+- **Run start (shipped second).** `startRun(req, deps)` in `src/runtime/runStart.ts` owns
+  every rule that was in the `POST /api/runs` handler, in the same order and with the same
+  strings, and returns `{ ok: true; result }` or `{ ok: false; refusal: "invalid"; error }`;
+  the route parses the body, calls it and maps a refusal to a 400. A pipeline no layer
+  defines is now a refusal (`Pipeline "x" not found`) instead of a 500 from the workflow
+  lookup, and one that exists but fails to load says `fails to load: <reason>` with the layer
+  root redacted by `safePath`. A throw out of `startRun` is a bug. It still imports
+  `artifactInputs.ts` and `safePath` from `src/serve/`; moving them is cosmetic and deferred.
 - **Scope.** The lead cut FR-10 to the reserved-key rule plus a `startRun` module below the
   route. Narrowing `RunService.start` and passing the validated definition to
   `getWorkflow` are deferred: the first relocates the merge rather than removing it and
