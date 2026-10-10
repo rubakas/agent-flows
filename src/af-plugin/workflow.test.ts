@@ -11,12 +11,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 
 import { unavailableStepMarker } from "../bindings/mastra/buildSteps.js";
+import { bundledPipelines } from "../canon/pipelines.js";
+import { getProfile } from "../canon/registry.js";
+import type { LoadedPipeline } from "../canon/types.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 // Plain .mjs files outside tsconfig's program are loaded by a computed specifier and
 // described here, so no declaration file has to ship inside the plugin or scripts/.
 interface Generator {
+  STEPS: string[];
   WORKFLOW_PATH: string;
   buildWorkflow: (promptsDir?: string) => string;
 }
@@ -29,7 +33,7 @@ const generator = (await import(
 const checker = (await import(
   pathToFileURL(join(root, "plugin", "skills", "review", "scripts", "check.mjs")).href
 )) as Checker;
-const { buildWorkflow, WORKFLOW_PATH } = generator;
+const { buildWorkflow, WORKFLOW_PATH, STEPS } = generator;
 const { loadSchema } = checker;
 const committed = readFileSync(WORKFLOW_PATH, "utf8");
 const promptsDir = join(root, "plugin", "skills", "review", "references", "prompts");
@@ -429,5 +433,173 @@ describe("review-engine run", () => {
     const broken = committed.replace("{ verify: text(verify) }", "{}");
     assert.notEqual(broken, committed);
     await assert.rejects(compile(broken)(...stubs().globals(args)), /no value: verify/);
+  });
+});
+
+// The review engine is a hand-written schedule (spec 046 D5), so nothing makes it agree
+// with pipelines/code-review.yaml except this test. It reads the bundled pipeline through
+// the loader and compares everything the YAML declares that the engine also decides.
+describe("review engine vs the code-review pipeline", () => {
+  type Behaviour = "abort" | "marker" | "log" | "silent";
+
+  // D5 as data: where a null result ends the run in the YAML but the engine carries on. A
+  // reviewer that fails must not cost the other dimensions' findings (falsifiability,
+  // correctness, security become a marker); a failed synthesis still leaves the verified
+  // findings to report (log only). This list must equal what the engine does, so an
+  // override that stops differing from the YAML goes red instead of lingering.
+  const PLUGIN_DEVIATIONS: Record<string, Behaviour> = {
+    falsifiability: "marker",
+    correctness: "marker",
+    security: "marker",
+    synthesis: "log",
+  };
+  const SCHEMA_FILE = { codeReviewFindings: "findings", codeReviewDelivery: "delivery" } as const;
+  const NULL_REASON = "the step returned no output";
+  const args = { runDir: "/repo/.af-review/RUN", plan: "THE_PLAN", hasSpecs: true };
+  const run = compile(committed);
+
+  function codeReview(): LoadedPipeline["def"] {
+    const found = bundledPipelines().get("code-review");
+    assert.equal(found.kind, "ok", "the bundled code-review pipeline must load");
+    if (found.kind !== "ok") throw new Error("unreachable");
+    return structuredClone(found.loaded.def);
+  }
+
+  async function behaviourOnNull(id: string): Promise<Behaviour> {
+    const s = stubs({ [id]: () => null });
+    try {
+      await run(...s.globals(args));
+    } catch {
+      return "abort";
+    }
+    const marker = unavailableStepMarker(id, NULL_REASON);
+    if (s.calls.some((c) => c.prompt.includes(marker))) return "marker";
+    if (s.logs.some((message) => message.includes(id))) return "log";
+    return "silent";
+  }
+
+  /** Every way the engine differs from `def`, empty when they agree. */
+  async function disagreements(def: LoadedPipeline["def"]): Promise<string[]> {
+    const out: string[] = [];
+    const steps = def.steps.filter((step) => step.id !== "material");
+    const byId = new Map(steps.map((step) => [step.id, step]));
+
+    const yamlIds = steps.map((step) => step.id).sort();
+    const engineIds = [...STEPS].sort();
+    if (JSON.stringify(yamlIds) !== JSON.stringify(engineIds)) {
+      out.push(`step ids: pipeline ${yamlIds.join(",")} engine ${engineIds.join(",")}`);
+      return out;
+    }
+
+    const s = stubs();
+    await run(...s.globals(args));
+
+    const roles = getProfile("anthropic").roles;
+    for (const call of s.calls) {
+      const step = byId.get(call.opts.label)!;
+      const model = step.role === undefined ? undefined : roles[step.role];
+      if (call.opts.model !== model) {
+        out.push(`model of ${step.id}: pipeline ${model} engine ${call.opts.model}`);
+      }
+      const key = step.schema as keyof typeof SCHEMA_FILE | undefined;
+      const expected = key === undefined ? undefined : loadSchema(SCHEMA_FILE[key]);
+      const actual =
+        call.opts.schema === undefined ? undefined : JSON.parse(JSON.stringify(call.opts.schema));
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        out.push(`schema of ${step.id}: pipeline declares ${key ?? "none"}`);
+      }
+    }
+
+    const at = (event: string) => s.events.indexOf(event);
+    for (const step of steps) {
+      for (const dep of step.dependsOn ?? []) {
+        if (dep === "material") continue;
+        if (!(at(`end:${dep}`) !== -1 && at(`end:${dep}`) < at(`start:${step.id}`))) {
+          out.push(`edge ${dep} -> ${step.id}: ${step.id} starts before ${dep} has ended`);
+        }
+      }
+    }
+
+    const deviations: Record<string, Behaviour> = {};
+    for (const step of steps) {
+      const expected: Behaviour = step.required === false ? "marker" : "abort";
+      const observed = await behaviourOnNull(step.id);
+      if (observed !== expected) deviations[step.id] = observed;
+    }
+    if (JSON.stringify(deviations) !== JSON.stringify(PLUGIN_DEVIATIONS)) {
+      out.push(
+        `failure handling: engine deviates from the pipeline's required flags as ` +
+          `${JSON.stringify(deviations)}, declared ${JSON.stringify(PLUGIN_DEVIATIONS)}`
+      );
+    }
+    return out;
+  }
+
+  it("agrees with pipelines/code-review.yaml on steps, edges, models, schemas and failure handling", async () => {
+    assert.deepEqual(await disagreements(codeReview()), []);
+  });
+
+  it("declares the schemas the engine hands the agents", () => {
+    const schemas = Object.fromEntries(
+      codeReview()
+        .steps.filter((step) => step.schema !== undefined)
+        .map((step) => [step.id, step.schema])
+    );
+    assert.deepEqual(schemas, { delivery: "codeReviewDelivery", verify: "codeReviewFindings" });
+  });
+
+  describe("can fail", () => {
+    const mutate = (edit: (def: LoadedPipeline["def"]) => void) => {
+      const def = codeReview();
+      edit(def);
+      return disagreements(def);
+    };
+    const step = (def: LoadedPipeline["def"], id: string) => def.steps.find((st) => st.id === id)!;
+
+    it("a flipped role", async () => {
+      const found = await mutate((def) => {
+        step(def, "correctness").role = "reasoner";
+      });
+      assert.deepEqual(found, ["model of correctness: pipeline opus engine sonnet"]);
+    });
+
+    it("a flipped required on a step the engine degrades (a dead override)", async () => {
+      const found = await mutate((def) => {
+        step(def, "security").required = false;
+      });
+      assert.equal(found.length, 1);
+      assert.match(found[0], /^failure handling: .*declared/);
+    });
+
+    it("a flipped required on a step the engine aborts on", async () => {
+      const found = await mutate((def) => {
+        step(def, "radius").required = false;
+      });
+      assert.equal(found.length, 1);
+      assert.match(found[0], /^failure handling: /);
+    });
+
+    it("an added edge", async () => {
+      const found = await mutate((def) => {
+        step(def, "falsifiability").dependsOn = ["brief", "radius"];
+      });
+      assert.deepEqual(found, [
+        "edge radius -> falsifiability: falsifiability starts before radius has ended",
+      ]);
+    });
+
+    it("a changed schema key", async () => {
+      const found = await mutate((def) => {
+        step(def, "verify").schema = "codeReviewDelivery";
+      });
+      assert.deepEqual(found, ["schema of verify: pipeline declares codeReviewDelivery"]);
+    });
+
+    it("a step the engine does not have", async () => {
+      const found = await mutate((def) => {
+        def.steps = [...def.steps, { id: "extra", kind: "llm", role: "worker", prompt: "p.md" }];
+      });
+      assert.match(found[0], /^step ids: /);
+    });
   });
 });
