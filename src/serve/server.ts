@@ -28,7 +28,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parse, stringify } from "yaml";
+import { stringify } from "yaml";
 
 import { createDynamicMastra } from "../bindings/mastra/dynamicMastra.js";
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
@@ -46,23 +46,20 @@ import { pipelineToGraph, pipelineLevels } from "../canon/graph.js";
 import {
   layerForPipelinesDir,
   loadCatalogPipelines,
-  loadFromCatalog,
-  mergedCatalog,
   repoCanonRoot,
   resolveCatalog,
   userLibraryRoot,
   writeTargetLayer,
+  type CanonLayer,
   type LayerSource,
-  type MergedCatalog,
-  type MergedPipeline,
 } from "../canon/layers.js";
-import { listPipelines, loadPipeline } from "../canon/load.js";
 import {
   CLI_MODEL_RE,
   PROVIDERS_RELATIVE_PATH,
   loadProviders,
   parseProviders,
 } from "../canon/loadProviders.js";
+import { pipelinesIn, projectPipelines, type Found, type Pipelines } from "../canon/pipelines.js";
 import {
   builtInProfileIds,
   defaultRegistry,
@@ -241,45 +238,6 @@ function isAllowedOrigin(origin: string | undefined, port: number): boolean {
 
 // ── Pipeline helpers ───────────────────────────────────────────────────────────
 
-interface PipelineEntry {
-  filePath: string;
-  loaded: ReturnType<typeof loadPipeline>;
-}
-
-/** Scan pipelinesDir and return the first pipeline whose id matches. */
-function findPipelineById(pipelinesDir: string, id: string): PipelineEntry | undefined {
-  let files: string[];
-  try {
-    files = listPipelines(pipelinesDir);
-  } catch {
-    return undefined;
-  }
-  for (const filePath of files) {
-    try {
-      const loaded = loadPipeline(filePath);
-      if (loaded.def.id === id) return { filePath, loaded };
-    } catch {
-      // Skip files that fail to load; the listing endpoint reports them as absent.
-    }
-  }
-  return undefined;
-}
-
-/**
- * Resolve one id through the merged three-layer view (spec 038 D13).
- *
- * A pipeline that is defined but fails to load is reported as absent, matching
- * `findPipelineById`: the routes answer 404 and the broken file stays visible to
- * `agent-flows validate`.
- */
-function findMergedPipeline(catalog: MergedCatalog, id: string): MergedPipeline | undefined {
-  try {
-    return loadFromCatalog(catalog, id);
-  } catch {
-    return undefined;
-  }
-}
-
 /** One row of the catalogue listing (spec 037 FR-002, spec 038 FR-020). */
 interface PipelineRow {
   id: string;
@@ -296,166 +254,34 @@ interface PipelineRow {
 }
 
 /**
- * Every workflow the merged view resolves, as catalogue rows (FR-017, FR-020).
+ * A catalogue row from a loaded pipeline (spec 037 D3: `steps` and `inputs` come
+ * from the loaded definition so the Workflows table renders from one request).
  *
  * `path` is relative to the owning layer's own root, so a bundled row reads
  * `pipelines/x.yaml` rather than a chain of `../..` out of the project.
  */
-function mergedPipelineRows(catalog: MergedCatalog, hidden: ReadonlySet<string>): PipelineRow[] {
-  // A pipeline that fails to load contributes no row; it stays visible as an
-  // error on disk and is flagged by `agent-flows validate`.
-  return loadCatalogPipelines(catalog).loaded.map(({ entry, loaded }) => ({
-    hidden: hidden.has(loaded.def.id),
+function pipelineRow({ file, loaded }: Found): PipelineRow {
+  return {
     id: loaded.def.id,
     description: loaded.def.description,
-    path: relative(entry.layer.root, entry.filePath),
+    path: relative(file.layer.root, file.filePath),
     steps: loaded.def.steps.length,
     inputs: [...(loaded.def.inputs ?? [])],
-    layer: entry.layer.source,
-    shadows: [...entry.shadows],
+  };
+}
+
+/**
+ * Every workflow the merged view resolves, as catalogue rows (FR-017, FR-020).
+ * A pipeline that fails to load contributes no row; it stays visible as an
+ * error on disk and is flagged by `agent-flows validate`.
+ */
+function mergedPipelineRows(pipelines: Pipelines, hidden: ReadonlySet<string>): PipelineRow[] {
+  return pipelines.all().found.map((f) => ({
+    ...pipelineRow(f),
+    hidden: hidden.has(f.loaded.def.id),
+    layer: f.file.layer.source,
+    shadows: [...f.file.shadows],
   }));
-}
-
-/**
- * List every loadable pipeline in `pipelinesDir` as a catalogue row.
- *
- * `steps` and `inputs` come from the loaded definition so the Workflows table
- * can be rendered from one request (spec 037 D3).
- */
-function listPipelineRows(pipelinesDir: string, root: string): PipelineRow[] {
-  let files: string[];
-  try {
-    files = listPipelines(pipelinesDir);
-  } catch {
-    return [];
-  }
-  const rows: PipelineRow[] = [];
-  for (const filePath of files) {
-    try {
-      const loaded = loadPipeline(filePath);
-      rows.push({
-        id: loaded.def.id,
-        description: loaded.def.description,
-        path: relative(root, filePath),
-        steps: loaded.def.steps.length,
-        inputs: [...(loaded.def.inputs ?? [])],
-      });
-    } catch {
-      // Silently omit files that fail to parse; they are visible as errors
-      // on disk and will be flagged by `agent-flows canon:check`.
-    }
-  }
-  return rows;
-}
-
-/**
- * Raw step shape for dependant scanning — avoids full loadPipeline (which
- * expands nested steps in place and loses the original pipeline references).
- */
-interface RawStep {
-  kind?: string;
-  pipeline?: string;
-}
-interface RawPipeline {
-  id?: string;
-  steps?: RawStep[];
-}
-
-/**
- * Returns ids of pipelines in pipelinesDir that directly reference targetId
- * as a nested pipeline (kind: pipeline or kind: loop step).
- * Uses raw YAML parsing so that malformed files and the target file itself
- * do not prevent scanning the rest of the catalog.
- */
-function findDependants(pipelinesDir: string, targetId: string): string[] {
-  let files: string[];
-  try {
-    files = listPipelines(pipelinesDir);
-  } catch {
-    return [];
-  }
-  const dependants: string[] = [];
-  for (const filePath of files) {
-    try {
-      const raw = parse(readFileSync(filePath, "utf8")) as RawPipeline;
-      if (raw.id === targetId) continue; // skip self
-      const hasRef = (raw.steps ?? []).some(
-        (s) => (s.kind === "pipeline" || s.kind === "loop") && s.pipeline === targetId
-      );
-      if (hasRef) dependants.push(raw.id ?? filePath);
-    } catch {
-      // skip unparseable files
-    }
-  }
-  return dependants;
-}
-
-// ── Prompt files of a pipeline (spec 037 D6/FR-005) ───────────────────────────
-
-/** Where one own llm step's prompt file lives, as the on-disk pipeline declares it. */
-interface PromptTarget {
-  /** The path exactly as written in the YAML, relative to the pipeline root. */
-  rel: string;
-  /** The absolute path the loader reads it from. */
-  abs: string;
-}
-
-/**
- * The prompt file of every own llm step of a pipeline file.
- *
- * Read from the YAML on disk rather than from the definition `loadPipeline`
- * returns: expansion inlines nested pipelines and namespaces their step ids as
- * `parent.child` (`nest.ts:154`), and those prompts belong to another file
- * entirely. A document that does not parse yields an empty map, so the caller
- * answers 404 for the step instead of guessing a path out of it.
- */
-function ownPromptTargets(filePath: string): Map<string, PromptTarget> {
-  const targets = new Map<string, PromptTarget>();
-  let doc: unknown;
-  try {
-    doc = parse(readFileSync(filePath, "utf8"));
-  } catch {
-    return targets;
-  }
-  const steps = (doc as { steps?: unknown } | null)?.steps;
-  if (!Array.isArray(steps)) return targets;
-  // Same root the loader derives (load.ts:65): the pipeline file's grandparent.
-  const pipelineRoot = dirname(dirname(resolve(filePath)));
-  for (const step of steps as { id?: unknown; kind?: unknown; prompt?: unknown }[]) {
-    if (step?.kind !== "llm") continue;
-    if (typeof step.id !== "string" || typeof step.prompt !== "string") continue;
-    targets.set(step.id, { rel: step.prompt, abs: resolve(pipelineRoot, step.prompt) });
-  }
-  return targets;
-}
-
-/**
- * Whether the write route may overwrite `absPath`: an existing `.md` file whose
- * realpath sits inside the realpath of the pipeline root's `prompts/` directory.
- *
- * The loader's own containment (`load.ts:288-304`) is not sufficient for a
- * write — it accepts any path under the pipeline root, `providers.yaml`
- * included — so this is a second, narrower gate, and it is applied after
- * realpathSync so a symlink planted inside `prompts/` cannot redirect the write.
- *
- * Hard links are not detected: a second name for a file outside `prompts/` is
- * indistinguishable from the real thing here. That residual needs prior local
- * write access to the directory, which this route does not grant.
- */
-function isWritablePromptFile(absPath: string, promptsDir: string): boolean {
-  if (!absPath.endsWith(".md")) return false;
-  let realTarget: string;
-  let realDir: string;
-  try {
-    realTarget = realpathSync(absPath);
-    realDir = realpathSync(promptsDir);
-  } catch {
-    return false; // the prompt file, or the prompts directory itself, is absent
-  }
-  if (!realTarget.endsWith(".md")) return false;
-  if (!statSync(realTarget).isFile()) return false;
-  const dirWithSep = realDir.endsWith(sep) ? realDir : realDir + sep;
-  return realTarget.startsWith(dirWithSep);
 }
 
 /**
@@ -534,12 +360,12 @@ export interface ServeHandle {
 
 interface HandlerCtx {
   /**
-   * The layer a write targets. Reads go through `catalog`; this is only the
-   * directory the mutation routes create, edit and delete in (seam for D14).
+   * The layer a create targets. Reads and edits go through `pipelines`; this is
+   * only the directory the create route writes into (seam for D14).
    */
   pipelinesDir: string;
-  /** The merged three-layer view, resolved per request (spec 038 D13). */
-  catalog: MergedCatalog;
+  /** The merged three-layer view, resolved per request (spec 038 D13, spec 047 FR-12). */
+  pipelines: Pipelines;
   root: string;
   db: DbInstance;
   runService: RunService | null;
@@ -655,22 +481,22 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
     // while the daemon is running is reflected on the very next request, with no
     // restart required. When an explicit pipelinesDir was passed (test/legacy
     // path), that single directory is the only layer.
-    const catalog =
+    const pipelines =
       explicitPipelinesDir !== undefined
-        ? mergedCatalog([layerForPipelinesDir(explicitPipelinesDir)])
-        : resolveCatalog(projectDir);
-    const layerLine = catalog.layers.map((l) => `${l.source} (${l.root})`).join(", ");
+        ? pipelinesIn([layerForPipelinesDir(explicitPipelinesDir)])
+        : projectPipelines(projectDir);
+    const layerLine = pipelines.layers.map((l) => `${l.source} (${l.root})`).join(", ");
     if (layerLine !== lastLayerLine) {
       console.log(`agent-flows serve: workflow layers ${layerLine}`);
       lastLayerLine = layerLine;
     }
-    // Writes still target one directory; reads all go through `catalog`.
-    const pipelinesDir = explicitPipelinesDir ?? writeTargetLayer(catalog.layers).pipelinesDir;
+    // Create still targets one directory; reads and edits go through `pipelines`.
+    const pipelinesDir = explicitPipelinesDir ?? writeTargetLayer(pipelines.layers).pipelinesDir;
     const root = dirname(pipelinesDir);
 
     void handleRequest(req, res, {
       pipelinesDir,
-      catalog,
+      pipelines,
       root,
       db,
       runService,
@@ -1087,15 +913,32 @@ function providerView(
 
 // ── Bundled-catalog write guard ────────────────────────────────────────────────
 
-/** True when the write layer resolves to the read-only bundled catalog. */
+/** True when the create target resolves to the read-only bundled catalog. */
 function isBundledCatalog(ctx: HandlerCtx): boolean {
   return resolve(ctx.pipelinesDir) === resolve(ctx.bundledPipelinesDir);
 }
 
 /**
- * Refuses a mutation aimed at the bundled catalog with 403 and the caller's
- * message. Drains the request body first so the socket stays alive long
- * enough to write the response. Returns true when the request was refused.
+ * Drains the request body first so the socket stays alive long enough to write
+ * the response. Every refusal on a route that may carry a body goes through
+ * here, so a client that is still sending never sees a reset instead of the
+ * status.
+ */
+async function refuse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  status: number,
+  body: Record<string, unknown>,
+  bodyLimit = BODY_LIMIT_DEFAULT
+): Promise<void> {
+  await readAndDiscardBody(req, bodyLimit);
+  json(res, status, body);
+}
+
+/**
+ * Bundled mode: every layer of the view is the read-only bundled one, so no
+ * edit can possibly apply and the route is refused before any lookup. Returns
+ * true when the request was refused.
  */
 async function refuseBundled(
   req: IncomingMessage,
@@ -1103,10 +946,61 @@ async function refuseBundled(
   ctx: HandlerCtx,
   message: string
 ): Promise<boolean> {
-  if (!isBundledCatalog(ctx)) return false;
-  await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-  json(res, 403, { error: message });
+  if (!ctx.pipelines.layers.every((l) => l.source === "bundled")) return false;
+  await refuse(req, res, 403, { error: message });
   return true;
+}
+
+/**
+ * The editable file for `id`, or the refusal already written. A workflow that is
+ * absent or fails to load is a 404 (D3); one whose winning file is in the
+ * bundled layer is a 403 with `forbidden`. Drains the body on a refusal.
+ */
+async function lookupEditable(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: HandlerCtx,
+  id: string,
+  forbidden: string
+): Promise<Found | undefined> {
+  const found = ctx.pipelines.get(id);
+  if (found.kind !== "ok") {
+    // The id is echoed truncated: it is never joined into a path here, so a
+    // hostile one only has to be bounded.
+    await refuse(req, res, 404, { error: `Pipeline "${id.slice(0, 100)}" not found` });
+    return undefined;
+  }
+  if (!found.file.editable) {
+    await refuse(req, res, 403, { error: forbidden });
+    return undefined;
+  }
+  return found;
+}
+
+/**
+ * The layer a stored draft's source file belongs to, or the refusal already
+ * written: a path in no layer of this view is a 404, one in the bundled layer a
+ * 403. Drains the body on a refusal.
+ */
+async function layerOfEditableSource(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: HandlerCtx,
+  filePath: string,
+  draftId: number,
+  forbidden: string,
+  bodyLimit = BODY_LIMIT_DEFAULT
+): Promise<CanonLayer | undefined> {
+  const layer = ctx.pipelines.layerOf(filePath);
+  if (layer === undefined) {
+    await refuse(req, res, 404, { error: `Draft ${draftId} not found` }, bodyLimit);
+    return undefined;
+  }
+  if (layer.source === "bundled") {
+    await refuse(req, res, 403, { error: forbidden }, bodyLimit);
+    return undefined;
+  }
+  return layer;
 }
 
 // ── Run lookup ───────────────────────────────────────────────────────────────
@@ -1309,7 +1203,9 @@ async function handleRequest(
     if (source === "bundled") {
       // The package's own catalogue, never the merge.
       json(res, 200, {
-        pipelines: listPipelineRows(ctx.bundledPipelinesDir, dirname(ctx.bundledPipelinesDir)),
+        pipelines: pipelinesIn([layerForPipelinesDir(ctx.bundledPipelinesDir)])
+          .all()
+          .found.map(pipelineRow),
       });
       return;
     }
@@ -1319,7 +1215,7 @@ async function handleRequest(
     // management view the page's own toggle uses to bring one back; hiding
     // never refuses a run, so no run route consults this.
     const hidden = readHidden(ctx.state.dir);
-    const rows = mergedPipelineRows(ctx.catalog, hidden);
+    const rows = mergedPipelineRows(ctx.pipelines, hidden);
     const includeHidden = url.searchParams.get("include") === "hidden";
     json(res, 200, {
       pipelines: includeHidden ? rows : rows.filter((row) => row.hidden !== true),
@@ -1341,11 +1237,11 @@ async function handleRequest(
       json(res, 400, { error: 'Field "to" must be "user" or "repo"' });
       return;
     }
-    const target = resolveForkTarget(ctx.projectDir, ctx.catalog.layers, to);
+    const target = resolveForkTarget(ctx.projectDir, ctx.pipelines.layers, to);
     try {
       const report = forkPipeline({
         id,
-        catalog: ctx.catalog,
+        catalog: ctx.pipelines.catalog,
         target,
         overwrite: overwrite === true,
       });
@@ -1386,6 +1282,9 @@ async function handleRequest(
       return;
     }
     // Refuse mutations against the bundled catalog — only project copies are writable.
+    // Create is the one write that still targets a single directory (the repo
+    // canon, else bundled): a project with only a user layer can EDIT its user
+    // workflows but not create one here.
     if (isBundledCatalog(ctx)) {
       json(res, 403, { error: "Cannot create pipelines in the bundled catalog" });
       return;
@@ -1421,24 +1320,15 @@ async function handleRequest(
   const promptsMatch = RE_PIPELINE_PROMPTS.exec(pathname);
   if (method === "GET" && promptsMatch) {
     const id = decodeURIComponent(promptsMatch[1]);
-    if (isBundledCatalog(ctx)) {
-      json(res, 403, { error: "Bundled workflows are read-only" });
-      return;
-    }
-    const entry = findPipelineById(ctx.pipelinesDir, id);
-    if (!entry) {
-      // No isSafeId here (the id is never joined into a path — see the detail
-      // route), so the echo is truncated instead.
-      json(res, 404, { error: `Pipeline "${id.slice(0, 100)}" not found` });
-      return;
-    }
+    if (await refuseBundled(req, res, ctx, "Bundled workflows are read-only")) return;
+    const entry = await lookupEditable(req, res, ctx, id, "Bundled workflows are read-only");
+    if (!entry) return;
     const prompts: Record<string, { path: string; text: string; hash: string }> = {};
-    const promptsDirForRead = join(dirname(dirname(resolve(entry.filePath))), "prompts");
-    for (const [stepId, target] of ownPromptTargets(entry.filePath)) {
+    for (const [stepId, target] of entry.file.prompts) {
       // Same gate as the write route, applied before the read: a step whose
       // prompt is not an existing `.md` under `prompts/` is omitted, so a
       // declared `prompt: providers.yaml` is never read and never returned.
-      if (!isWritablePromptFile(target.abs, promptsDirForRead)) continue;
+      if (!target.writable) continue;
       let text: string;
       try {
         text = readFileSync(target.abs, "utf8");
@@ -1446,7 +1336,7 @@ async function handleRequest(
         continue; // a prompt that cannot be read is not editable
       }
       prompts[stepId] = {
-        path: relative(ctx.root, target.abs),
+        path: relative(entry.file.layer.root, target.abs),
         text,
         hash: hashContent(text),
       };
@@ -1468,16 +1358,11 @@ async function handleRequest(
     // A namespaced id belongs to a nested pipeline's file: not a step this
     // route can address, so it is absent rather than refused.
     if (!RE_OWN_STEP_ID.test(stepId)) {
-      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-      json(res, 404, { error: `Step "${stepId.slice(0, 100)}" not found` });
+      await refuse(req, res, 404, { error: `Step "${stepId.slice(0, 100)}" not found` });
       return;
     }
-    const entry = findPipelineById(ctx.pipelinesDir, id);
-    if (!entry) {
-      await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-      json(res, 404, { error: `Pipeline "${id}" not found` });
-      return;
-    }
+    const entry = await lookupEditable(req, res, ctx, id, "Bundled workflows are read-only");
+    if (!entry) return;
     const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
     if (parsed === undefined) return;
     const { text, ifMatch } = parsed;
@@ -1490,13 +1375,12 @@ async function handleRequest(
       return;
     }
     // A non-llm step has no prompt file, so it is not in the map either.
-    const target = ownPromptTargets(entry.filePath).get(stepId);
+    const target = entry.file.prompts.get(stepId);
     if (!target) {
       json(res, 404, { error: `Step "${stepId}" has no prompt file in "${id}"` });
       return;
     }
-    const promptsDir = join(dirname(dirname(resolve(entry.filePath))), "prompts");
-    if (!isWritablePromptFile(target.abs, promptsDir)) {
+    if (!target.writable) {
       json(res, 403, {
         error: `Step "${stepId}" prompt "${target.rel}" is not an existing .md file under prompts/`,
       });
@@ -1515,11 +1399,9 @@ async function handleRequest(
     // is handed to the loader in place of the file so an unknown placeholder is
     // reported instead of persisted.
     try {
-      loadPipeline(entry.filePath, {
-        readFile: (p) => (resolve(p) === target.abs ? text : readFileSync(p, "utf8")),
-      });
+      ctx.pipelines.check(entry.file.filePath, { prompts: { [stepId]: text } });
     } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, root) });
+      json(res, 422, { error: safePath((err as Error).message, entry.file.layer.root) });
       return;
     }
     // Write to a sibling temp file and rename over the target, so a crash
@@ -1543,10 +1425,10 @@ async function handleRequest(
   }
 
   // GET /api/pipelines/:id
-  // No isSafeId check here: findPipelineById scans loaded pipeline ids for an
-  // exact match and never joins `id` into a filesystem path, so an unsafe id
-  // simply fails to match and falls through to 404. Safe only because of that
-  // — a future rewrite that resolves the id into a path directly must add
+  // No isSafeId check here: the view looks `id` up in its catalogue by exact
+  // match and never joins it into a filesystem path, so an unsafe id simply
+  // fails to match and falls through to 404. Safe only because of that — a
+  // future rewrite that resolves the id into a path directly must add
   // validation before doing so.
   const pipelineDetailMatch = RE_PIPELINE_DETAIL.exec(pathname);
   if (method === "GET" && pipelineDetailMatch) {
@@ -1558,11 +1440,12 @@ async function handleRequest(
       json(res, 400, { error: "invalid source" });
       return;
     }
-    const found =
+    const found = (
       source === "bundled"
-        ? findPipelineById(ctx.bundledPipelinesDir, id)
-        : findMergedPipeline(ctx.catalog, id);
-    if (!found) {
+        ? pipelinesIn([layerForPipelinesDir(ctx.bundledPipelinesDir)])
+        : ctx.pipelines
+    ).get(id);
+    if (found.kind !== "ok") {
       json(res, 404, { error: `Pipeline "${id}" not found` });
       return;
     }
@@ -1582,52 +1465,54 @@ async function handleRequest(
     // Validate the decoded id so that percent-encoded traversal attempts are caught.
     if (!requireSafeId(id, "Pipeline", res)) return;
     // Refuse mutations against the bundled catalog.
-    if (isBundledCatalog(ctx)) {
-      json(res, 403, { error: "Cannot delete from the bundled pipeline catalog" });
+    if (await refuseBundled(req, res, ctx, "Cannot delete from the bundled pipeline catalog")) {
       return;
     }
-    const entry = findPipelineById(ctx.pipelinesDir, id);
-    if (!entry) {
-      json(res, 404, { error: `Pipeline "${id}" not found` });
-      return;
-    }
-    // Refuse if any sibling pipeline nests this one — deleting it would break their loads.
-    const dependants = findDependants(ctx.pipelinesDir, id);
-    if (dependants.length > 0) {
-      json(res, 409, {
-        error: `Cannot delete "${id}": referenced by ${dependants.join(", ")}`,
+    // The winner of the id is deleted wherever it lives, the user library
+    // included (D1); a bundled winner is refused.
+    const entry = await lookupEditable(
+      req,
+      res,
+      ctx,
+      id,
+      "Cannot delete from the bundled pipeline catalog"
+    );
+    if (!entry) return;
+    // Refuse if a winning pipeline in ANY layer nests this one — deleting it would
+    // break their loads. Unless a lower layer still defines the id (D2): the
+    // nesters then fall back to that version.
+    const nesters = ctx.pipelines.nesters(id);
+    if (nesters.length > 0 && entry.file.shadows.length === 0) {
+      await refuse(req, res, 409, {
+        error: `Cannot delete "${id}": referenced by ${nesters.join(", ")}`,
       });
       return;
     }
     await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
-    rmSync(entry.filePath);
+    rmSync(entry.file.filePath);
     json(res, 200, { ok: true, id });
     return;
   }
 
   // POST /api/pipelines/:id/drafts
   // No isSafeId check here — see the rationale on GET /api/pipelines/:id above;
-  // the same findPipelineById lookup makes an unsafe id fail as a plain 404.
+  // the same catalogue lookup makes an unsafe id fail as a plain 404.
   const openDraftMatch = RE_PIPELINE_DRAFTS.exec(pathname);
   if (method === "POST" && openDraftMatch) {
     const id = decodeURIComponent(openDraftMatch[1]);
     // Refuse mutations against the bundled catalog — a draft is the first step
     // of a write, so it is refused here and not only at save time.
-    if (
-      await refuseBundled(req, res, ctx, "Cannot open drafts against the bundled pipeline catalog")
-    )
-      return;
-    const entry = findPipelineById(ctx.pipelinesDir, id);
-    if (!entry) {
-      json(res, 404, { error: `Pipeline "${id}" not found` });
-      return;
-    }
+    const forbidden = "Cannot open drafts against the bundled pipeline catalog";
+    if (await refuseBundled(req, res, ctx, forbidden)) return;
+    const entry = await lookupEditable(req, res, ctx, id, forbidden);
+    if (!entry) return;
     // Consume the (empty) body to satisfy HTTP spec — no useful payload expected.
     await readAndDiscardBody(req, BODY_LIMIT_DEFAULT);
-    const body = readFileSync(entry.filePath, "utf8");
+    const body = readFileSync(entry.file.filePath, "utf8");
     const baseHash = hashContent(body);
-    const relPath = relative(root, entry.filePath);
-    const sourceId = indexSource(ctx.db, root, relPath, "pipeline", baseHash);
+    const layerRoot = entry.file.layer.root;
+    const relPath = relative(layerRoot, entry.file.filePath);
+    const sourceId = indexSource(ctx.db, layerRoot, relPath, "pipeline", baseHash);
     const draftId = openDraft(ctx.db, sourceId, body, baseHash);
     json(res, 200, { draftId, body, baseHash });
     return;
@@ -1638,11 +1523,10 @@ async function handleRequest(
   // Registered before PUT /api/drafts/:draftId so the /preview suffix can never
   // be captured by the draft-detail route.
   //
-  // Validation runs through loadPipeline's injected readFile — the same seam
-  // saveDraft uses — rather than a temp copy of the canon directory: a copy
-  // would silently redefine what "escapes the pipeline root" means, and the
-  // nested pipelines the loader resolves would be the copies, not the siblings
-  // that actually run.
+  // Validation runs through `pipelines.check` — the same seam saveDraft uses —
+  // rather than a temp copy of the canon directory: a copy would silently
+  // redefine what "escapes the pipeline root" means, and the nested pipelines the
+  // loader resolves would be the copies, not the files that actually run.
   const previewMatch = RE_DRAFT_PREVIEW.exec(pathname);
   if (method === "POST" && previewMatch) {
     const draftId = parseInt(previewMatch[1], 10);
@@ -1658,6 +1542,17 @@ async function handleRequest(
       json(res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
+    const filePath = join(source.root, source.relPath);
+    const layer = await layerOfEditableSource(
+      req,
+      res,
+      ctx,
+      filePath,
+      draftId,
+      "Cannot preview drafts of the bundled pipeline catalog",
+      BODY_LIMIT_PREVIEW
+    );
+    if (!layer) return;
     const parsed = await requireJsonBody(req, res, BODY_LIMIT_PREVIEW);
     if (parsed === undefined) return;
     const promptsField = parsed.prompts;
@@ -1675,34 +1570,16 @@ async function handleRequest(
         return;
       }
     }
-    const filePath = join(source.root, source.relPath);
     // The prompt paths come from the DRAFT body, not from disk: the body is
     // what the operator is validating, and it may have re-pointed a step.
-    const pipelineRoot = dirname(dirname(resolve(filePath)));
-    const overrides = new Map<string, string>([[resolve(filePath), draft.body]]);
-    let draftDoc: unknown;
+    let loaded: LoadedPipeline;
     try {
-      draftDoc = parse(draft.body);
-    } catch {
-      draftDoc = null; // malformed YAML: let the loader produce the message
-    }
-    const draftSteps = (draftDoc as { steps?: unknown } | null)?.steps;
-    if (Array.isArray(draftSteps)) {
-      for (const step of draftSteps as { id?: unknown; kind?: unknown; prompt?: unknown }[]) {
-        if (step?.kind !== "llm") continue;
-        if (typeof step.id !== "string" || typeof step.prompt !== "string") continue;
-        const text = promptTexts[step.id];
-        if (typeof text !== "string") continue;
-        overrides.set(resolve(pipelineRoot, step.prompt), text);
-      }
-    }
-    let loaded: ReturnType<typeof loadPipeline>;
-    try {
-      loaded = loadPipeline(filePath, {
-        readFile: (p) => overrides.get(resolve(p)) ?? readFileSync(p, "utf8"),
+      loaded = ctx.pipelines.check(filePath, {
+        body: draft.body,
+        prompts: promptTexts as Record<string, string>,
       });
     } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, root) });
+      json(res, 422, { error: safePath((err as Error).message, layer.root) });
       return;
     }
     // S9: prompts are deliberately absent from the response — a draft that
@@ -1723,7 +1600,7 @@ async function handleRequest(
       return;
     const draft = getDraft(ctx.db, draftId);
     if (!draft) {
-      json(res, 404, { error: `Draft ${draftId} not found` });
+      await refuse(req, res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
     const parsed = await requireJsonBody(req, res, BODY_LIMIT_DEFAULT);
@@ -1744,17 +1621,27 @@ async function handleRequest(
     const draftId = parseInt(saveDraftMatch[1], 10);
     if (await refuseBundled(req, res, ctx, "Cannot save into the bundled pipeline catalog")) return;
     const draft = getDraft(ctx.db, draftId);
-    if (!draft) {
-      json(res, 404, { error: `Draft ${draftId} not found` });
+    const source = draft ? getSource(ctx.db, draft.sourceId) : undefined;
+    if (!draft || !source) {
+      await refuse(req, res, 404, { error: `Draft ${draftId} not found` });
       return;
     }
+    const layer = await layerOfEditableSource(
+      req,
+      res,
+      ctx,
+      join(source.root, source.relPath),
+      draftId,
+      "Cannot save into the bundled pipeline catalog"
+    );
+    if (!layer) return;
     await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
     // Saving writes the YAML and nothing else. Binding A (the Claude Code
     // script under `<root>/.claude/workflows/<id>.js`) is an export produced
     // only by the CLI — `agent-flows generate claude` — because regenerating it
     // from a network-editable YAML would write an executable file at a
     // YAML-controlled path.
-    const result = saveDraft(ctx.db, draftId);
+    const result = saveDraft(ctx.db, draftId, ctx.pipelines);
     if (result.ok) {
       json(res, 200, { ok: true });
       return;
@@ -1763,11 +1650,15 @@ async function handleRequest(
       json(res, 409, { ok: false, reason: "conflict", message: result.message });
       return;
     }
+    if (result.reason === "forbidden") {
+      json(res, 403, { ok: false, reason: "forbidden", message: result.message });
+      return;
+    }
     // reason === "invalid"
     json(res, 422, {
       ok: false,
       reason: "invalid",
-      message: safePath(result.message, root),
+      message: safePath(result.message, layer.root),
     });
     return;
   }
@@ -1836,7 +1727,8 @@ async function handleRequest(
     // transportPerStep will be empty rather than wrong.
     // Run entry resolution goes through the merged view (D13): a run may name a
     // workflow from any layer, not only the one writes target.
-    const pipelineEntry = findMergedPipeline(ctx.catalog, pipeline);
+    const pipelineLookup = ctx.pipelines.get(pipeline);
+    const pipelineEntry = pipelineLookup.kind === "ok" ? pipelineLookup : undefined;
     const pipelineDef = pipelineEntry?.loaded.def;
 
     // FR-009/S6: the per-step model override map is a flat step id → model id
@@ -2524,7 +2416,7 @@ async function handleRequest(
     // FR-029: the layer that owns the id decides which pipelines directory the
     // bundle is read from — exporting a bundled workflow from a project that has
     // a canon of its own must not look for it in that canon.
-    const owner = ctx.catalog.entries.get(id);
+    const owner = ctx.pipelines.catalog.entries.get(id);
     if (owner === undefined) {
       json(res, 422, { error: `Pipeline "${id}" not found` });
       return;
@@ -2535,7 +2427,7 @@ async function handleRequest(
       const bundle = exportBundle(
         id,
         owner.layer.pipelinesDir,
-        (nestedId) => ctx.catalog.entries.get(nestedId)?.filePath
+        (nestedId) => ctx.pipelines.catalog.entries.get(nestedId)?.filePath
       );
       const yamlText = stringifyBundle(bundle);
       res.writeHead(200, {
@@ -2544,7 +2436,7 @@ async function handleRequest(
       });
       res.end(yamlText);
     } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, root) });
+      json(res, 422, { error: safePath((err as Error).message, owner.layer.root) });
     }
     return;
   }
@@ -2573,7 +2465,7 @@ async function handleRequest(
       const report = importBundle(bundle, targetRoot, doOverwrite);
       json(res, 200, { ...report, target: target === "repo" ? "repo" : "user", root: targetRoot });
     } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, root) });
+      json(res, 422, { error: safePath((err as Error).message, targetRoot) });
     }
     return;
   }

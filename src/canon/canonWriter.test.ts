@@ -28,6 +28,8 @@ import {
   openDraft,
   updateDraftBody,
 } from "./draftStore.js";
+import { layerFrom } from "./layers.js";
+import { pipelinesIn } from "./pipelines.js";
 
 const REPO_ROOT = packageRoot();
 const REAL_PIPELINE_PATH = join(REPO_ROOT, "pipelines", "spec-creation.yaml");
@@ -116,7 +118,8 @@ function setup(content: string) {
   const baseHash = hashContent(content);
   const sourceId = indexSource(db, root, relPath, "pipeline", baseHash);
   const draftId = openDraft(db, sourceId, content, baseHash);
-  return { db, root, pipelinePath: realPipelinePath, sourceId, draftId, cleanup };
+  const pipelines = pipelinesIn([layerFrom("repo", root)]);
+  return { db, root, pipelinePath: realPipelinePath, sourceId, draftId, cleanup, pipelines };
 }
 
 // ── Byte-identical round-trip (regression) ────────────────────────────────────
@@ -149,9 +152,10 @@ describe("saveDraft — comment and key order preservation", () => {
     const baseHash = hashContent(COMMENTED_PIPELINE);
     const sourceId = indexSource(db, root, relPath, "pipeline", baseHash);
     const draftId = openDraft(db, sourceId, COMMENTED_PIPELINE, baseHash);
+    const pipelines = pipelinesIn([layerFrom("repo", root)]);
 
     try {
-      const result = saveDraft(db, draftId);
+      const result = saveDraft(db, draftId, pipelines);
 
       assert.ok(result.ok, `Expected ok, got: ${JSON.stringify(result)}`);
 
@@ -174,9 +178,10 @@ describe("saveDraft — comment and key order preservation", () => {
     const baseHash = hashContent(GATE_PIPELINE);
     const sourceId = indexSource(db, root, relPath, "pipeline", baseHash);
     const draftId = openDraft(db, sourceId, GATE_PIPELINE, baseHash);
+    const pipelines = pipelinesIn([layerFrom("repo", root)]);
 
     try {
-      const result = saveDraft(db, draftId);
+      const result = saveDraft(db, draftId, pipelines);
       assert.ok(result.ok);
 
       const written = readFileSync(pipelinePath, "utf8");
@@ -196,10 +201,10 @@ describe("saveDraft — comment and key order preservation", () => {
 
 describe("saveDraft — invalid draft", () => {
   it("returns ok:false reason:invalid when loadPipeline rejects the body", () => {
-    const { db, pipelinePath, draftId, cleanup } = setup(INVALID_PIPELINE);
+    const { db, pipelines, pipelinePath, draftId, cleanup } = setup(INVALID_PIPELINE);
 
     try {
-      const result = saveDraft(db, draftId);
+      const result = saveDraft(db, draftId, pipelines);
 
       assert.equal(result.ok, false);
       if (!result.ok) {
@@ -216,10 +221,10 @@ describe("saveDraft — invalid draft", () => {
   });
 
   it("stores the validator message on the draft when invalid", () => {
-    const { db, draftId, cleanup } = setup(INVALID_PIPELINE);
+    const { db, pipelines, draftId, cleanup } = setup(INVALID_PIPELINE);
 
     try {
-      saveDraft(db, draftId);
+      saveDraft(db, draftId, pipelines);
 
       const draft = getDraft(db, draftId);
       assert.ok(draft !== undefined);
@@ -234,10 +239,10 @@ describe("saveDraft — invalid draft", () => {
   });
 
   it("draft body survives an invalid save attempt unchanged", () => {
-    const { db, draftId, cleanup } = setup(INVALID_PIPELINE);
+    const { db, pipelines, draftId, cleanup } = setup(INVALID_PIPELINE);
 
     try {
-      saveDraft(db, draftId);
+      saveDraft(db, draftId, pipelines);
 
       const draft = getDraft(db, draftId);
       assert.equal(draft?.body, INVALID_PIPELINE);
@@ -251,13 +256,13 @@ describe("saveDraft — invalid draft", () => {
 
 describe("saveDraft — conflict", () => {
   it("refuses when the file was edited on disk after the draft was opened", () => {
-    const { db, pipelinePath, draftId, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, pipelinePath, draftId, cleanup } = setup(GATE_PIPELINE);
 
     try {
       // Simulate another agent editing the file behind the draft's back
       writeFileSync(pipelinePath, GATE_PIPELINE + "# edited by someone else\n", "utf8");
 
-      const result = saveDraft(db, draftId);
+      const result = saveDraft(db, draftId, pipelines);
 
       assert.equal(result.ok, false);
       if (!result.ok) {
@@ -269,11 +274,11 @@ describe("saveDraft — conflict", () => {
   });
 
   it("leaves the draft intact after a conflict", () => {
-    const { db, pipelinePath, draftId, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, pipelinePath, draftId, cleanup } = setup(GATE_PIPELINE);
 
     try {
       writeFileSync(pipelinePath, GATE_PIPELINE + "# conflict\n", "utf8");
-      saveDraft(db, draftId);
+      saveDraft(db, draftId, pipelines);
 
       const draft = getDraft(db, draftId);
       assert.ok(draft !== undefined, "draft must still exist");
@@ -284,12 +289,12 @@ describe("saveDraft — conflict", () => {
   });
 
   it("does not overwrite the file on conflict", () => {
-    const { db, pipelinePath, draftId, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, pipelinePath, draftId, cleanup } = setup(GATE_PIPELINE);
 
     try {
       const modified = GATE_PIPELINE + "# conflict sentinel\n";
       writeFileSync(pipelinePath, modified, "utf8");
-      saveDraft(db, draftId);
+      saveDraft(db, draftId, pipelines);
 
       const onDisk = readFileSync(pipelinePath, "utf8");
       assert.equal(onDisk, modified, "file must not have been overwritten");
@@ -303,10 +308,10 @@ describe("saveDraft — conflict", () => {
 
 describe("saveDraft — the file is published atomically", () => {
   it("replaces the file by rename and leaves no temp file behind", () => {
-    const { db, draftId, pipelinePath, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, draftId, pipelinePath, cleanup } = setup(GATE_PIPELINE);
     try {
       const inodeBefore = statSync(pipelinePath).ino;
-      const result = saveDraft(db, draftId);
+      const result = saveDraft(db, draftId, pipelines);
       assert.ok(result.ok);
 
       // An in-place writeFileSync keeps the inode (O_TRUNC, exposing a zero-length
@@ -324,13 +329,81 @@ describe("saveDraft — the file is published atomically", () => {
   });
 });
 
+// ── Editability and nesting (spec 047 FR-12) ──────────────────────────────────
+
+describe("saveDraft — the view decides what may be written", () => {
+  it("refuses a draft whose file is in the bundled layer, and writes nothing", () => {
+    const { db, root, pipelinePath, draftId, cleanup } = setup(GATE_PIPELINE);
+    try {
+      const bundledView = pipelinesIn([layerFrom("bundled", root)]);
+      updateDraftBody(db, draftId, GATE_PIPELINE.replace("Test pipeline", "Edited"));
+
+      const result = saveDraft(db, draftId, bundledView);
+
+      assert.equal(result.ok, false);
+      assert.equal(!result.ok && result.reason, "forbidden");
+      assert.equal(readFileSync(pipelinePath, "utf8"), GATE_PIPELINE, "the file is untouched");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("refuses a draft whose file is in no layer of the view", () => {
+    const { db, draftId, cleanup } = setup(GATE_PIPELINE);
+    const other = makeTmpPipelineDir("elsewhere");
+    try {
+      const unrelated = pipelinesIn([layerFrom("repo", other.root)]);
+
+      const result = saveDraft(db, draftId, unrelated);
+
+      assert.equal(!result.ok && result.reason, "forbidden");
+    } finally {
+      other.cleanup();
+      cleanup();
+    }
+  });
+
+  it("validates a parent against children that live in another layer", () => {
+    const { db, root, pipelinePath, draftId, cleanup } = setup(`\
+id: test
+version: 1
+description: Parent
+inputs: []
+steps:
+  - id: mount
+    kind: pipeline
+    pipeline: child-elsewhere
+`);
+    const other = makeTmpPipelineDir("child-elsewhere");
+    try {
+      writeFileSync(
+        other.pipelinePath,
+        "id: child-elsewhere\nversion: 1\ndescription: c\ninputs: []\nsteps:\n  - id: g\n    kind: gate\n",
+        "utf8"
+      );
+      const layers = [layerFrom("bundled", other.root), layerFrom("repo", realpathSync(root))];
+
+      const withChild = saveDraft(db, draftId, pipelinesIn(layers));
+      assert.ok(withChild.ok, `a child in a lower layer resolves: ${JSON.stringify(withChild)}`);
+
+      const withoutChild = saveDraft(db, draftId, pipelinesIn([layers[1]]));
+      assert.equal(!withoutChild.ok && withoutChild.reason, "invalid");
+      assert.match(!withoutChild.ok ? withoutChild.message : "", /child-elsewhere/);
+      assert.ok(readFileSync(pipelinePath, "utf8").includes("child-elsewhere"));
+    } finally {
+      other.cleanup();
+      cleanup();
+    }
+  });
+});
+
 // ── Clean save updates stored hash ────────────────────────────────────────────
 
 describe("saveDraft — clean save", () => {
   it("succeeds and returns ok:true", () => {
-    const { db, draftId, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, draftId, cleanup } = setup(GATE_PIPELINE);
     try {
-      const result = saveDraft(db, draftId);
+      const result = saveDraft(db, draftId, pipelines);
       assert.ok(result.ok);
     } finally {
       cleanup();
@@ -338,10 +411,10 @@ describe("saveDraft — clean save", () => {
   });
 
   it("updates the draft baseHash after a successful save", () => {
-    const { db, draftId, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, draftId, cleanup } = setup(GATE_PIPELINE);
 
     try {
-      saveDraft(db, draftId);
+      saveDraft(db, draftId, pipelines);
 
       const draft = getDraft(db, draftId);
       assert.ok(draft !== undefined);
@@ -353,13 +426,13 @@ describe("saveDraft — clean save", () => {
   });
 
   it("a second save on the same draft does not produce a false conflict", () => {
-    const { db, draftId, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, draftId, cleanup } = setup(GATE_PIPELINE);
 
     try {
-      const first = saveDraft(db, draftId);
+      const first = saveDraft(db, draftId, pipelines);
       assert.ok(first.ok, "first save must succeed");
 
-      const second = saveDraft(db, draftId);
+      const second = saveDraft(db, draftId, pipelines);
       assert.ok(second.ok, "second save must not be a false conflict");
     } finally {
       cleanup();
@@ -367,10 +440,10 @@ describe("saveDraft — clean save", () => {
   });
 
   it("sets validationState to valid after a successful save", () => {
-    const { db, draftId, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, draftId, cleanup } = setup(GATE_PIPELINE);
 
     try {
-      saveDraft(db, draftId);
+      saveDraft(db, draftId, pipelines);
 
       const draft = getDraft(db, draftId);
       assert.equal(draft?.validationState, "valid");
@@ -416,11 +489,11 @@ steps:
 
 describe("saveDraftAndRegenerate — successful save", () => {
   it("writes both the YAML file and .claude/workflows/<id>.js", () => {
-    const { db, root, pipelinePath, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
+    const { db, pipelines, root, pipelinePath, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
     updateDraftBody(db, draftId, REGEN_PIPELINE_AFTER);
 
     try {
-      const result = saveDraftAndRegenerate(db, draftId);
+      const result = saveDraftAndRegenerate(db, draftId, pipelines);
 
       assert.ok(result.ok, `Expected ok, got: ${JSON.stringify(result)}`);
       if (result.ok) {
@@ -443,10 +516,10 @@ describe("saveDraftAndRegenerate — successful save", () => {
   });
 
   it("regenerated path in result matches the file that was written", () => {
-    const { db, root, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
+    const { db, pipelines, root, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
 
     try {
-      const result = saveDraftAndRegenerate(db, draftId);
+      const result = saveDraftAndRegenerate(db, draftId, pipelines);
 
       assert.ok(result.ok);
       if (result.ok) {
@@ -459,13 +532,13 @@ describe("saveDraftAndRegenerate — successful save", () => {
   });
 
   it("a second saveDraftAndRegenerate does not produce a false conflict", () => {
-    const { db, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
+    const { db, pipelines, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
 
     try {
-      const first = saveDraftAndRegenerate(db, draftId);
+      const first = saveDraftAndRegenerate(db, draftId, pipelines);
       assert.ok(first.ok, "first save must succeed");
 
-      const second = saveDraftAndRegenerate(db, draftId);
+      const second = saveDraftAndRegenerate(db, draftId, pipelines);
       assert.ok(second.ok, "second save must not be a false conflict");
     } finally {
       cleanup();
@@ -475,13 +548,13 @@ describe("saveDraftAndRegenerate — successful save", () => {
 
 describe("saveDraftAndRegenerate — failed save does not regenerate", () => {
   it("returns ok:false and regenerated:[] on conflict — no .js file written", () => {
-    const { db, root, pipelinePath, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
+    const { db, pipelines, root, pipelinePath, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
 
     try {
       // Simulate an external edit that creates a conflict
       writeFileSync(pipelinePath, REGEN_PIPELINE_BEFORE + "# edited externally\n", "utf8");
 
-      const result = saveDraftAndRegenerate(db, draftId);
+      const result = saveDraftAndRegenerate(db, draftId, pipelines);
 
       assert.equal(result.ok, false);
       if (!result.ok) {
@@ -498,11 +571,11 @@ describe("saveDraftAndRegenerate — failed save does not regenerate", () => {
   });
 
   it("returns ok:false and regenerated:[] on invalid draft — no .js file written", () => {
-    const { db, root, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
+    const { db, pipelines, root, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
     updateDraftBody(db, draftId, INVALID_PIPELINE);
 
     try {
-      const result = saveDraftAndRegenerate(db, draftId);
+      const result = saveDraftAndRegenerate(db, draftId, pipelines);
 
       assert.equal(result.ok, false);
       if (!result.ok) {
@@ -522,10 +595,10 @@ describe("saveDraftAndRegenerate — failed save does not regenerate", () => {
 describe("saveDraftAndRegenerate — a traversing pipeline id generates nothing", () => {
   it('refuses id "../../x" instead of writing a script outside .claude/workflows', () => {
     const traversing = REGEN_PIPELINE_BEFORE.replace("id: test", 'id: "../../x"');
-    const { db, root, draftId, cleanup } = setup(traversing);
+    const { db, pipelines, root, draftId, cleanup } = setup(traversing);
 
     try {
-      const result = saveDraftAndRegenerate(db, draftId);
+      const result = saveDraftAndRegenerate(db, draftId, pipelines);
 
       assert.ok(result.ok, "the YAML save itself is unaffected");
       if (result.ok) {
@@ -545,7 +618,7 @@ describe("saveDraftAndRegenerate — a traversing pipeline id generates nothing"
 
 describe("saveDraftAndRegenerate — generation failure is isolated", () => {
   it("reports ok:true with regenerationError when generation fails, YAML already written", () => {
-    const { db, root, pipelinePath, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
+    const { db, pipelines, root, pipelinePath, draftId, cleanup } = setup(REGEN_PIPELINE_BEFORE);
 
     try {
       // Block mkdirSync by placing a regular file where .claude directory would go.
@@ -553,7 +626,7 @@ describe("saveDraftAndRegenerate — generation failure is isolated", () => {
       // an existing non-directory component in the path.
       writeFileSync(join(root, ".claude"), "not-a-directory");
 
-      const result = saveDraftAndRegenerate(db, draftId);
+      const result = saveDraftAndRegenerate(db, draftId, pipelines);
 
       assert.ok(result.ok, "save must be reported as ok despite generation failure");
       if (result.ok) {
@@ -577,7 +650,7 @@ describe("saveDraftAndRegenerate — generation failure is isolated", () => {
 
 describe("undo ops replay", () => {
   it("ops added before and after a save are all present and ordered", () => {
-    const { db, sourceId, draftId, cleanup } = setup(GATE_PIPELINE);
+    const { db, pipelines, sourceId, draftId, cleanup } = setup(GATE_PIPELINE);
 
     try {
       const op1 = { type: "set", path: ["description"], value: "v1" };
@@ -587,7 +660,7 @@ describe("undo ops replay", () => {
       addDraftOp(db, draftId, 1, op1);
       addDraftOp(db, draftId, 2, op2);
 
-      saveDraft(db, draftId);
+      saveDraft(db, draftId, pipelines);
 
       addDraftOp(db, draftId, 3, op3);
 

@@ -21,9 +21,9 @@ import {
   updateSourceHash,
 } from "./draftStore.js";
 import { hashContent } from "./hash.js";
-import { loadPipeline } from "./load.js";
 import { loadProviders } from "./loadProviders.js";
 import { defaultRegistry, getActiveProfile } from "./registry.js";
+import type { Pipelines } from "./pipelines.js";
 import type { DbInstance } from "../db/index.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -34,13 +34,15 @@ const RE_SAFE_PIPELINE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/u;
 export type SaveResult =
   | { ok: true }
   | { ok: false; reason: "conflict"; message: string }
-  | { ok: false; reason: "invalid"; message: string };
+  | { ok: false; reason: "invalid"; message: string }
+  | { ok: false; reason: "forbidden"; message: string };
 
 export type SaveAndRegenerateResult =
   | { ok: true; regenerated: string[] }
   | { ok: true; regenerated: []; regenerationError: string }
   | { ok: false; reason: "conflict"; message: string; regenerated: [] }
-  | { ok: false; reason: "invalid"; message: string; regenerated: [] };
+  | { ok: false; reason: "invalid"; message: string; regenerated: [] }
+  | { ok: false; reason: "forbidden"; message: string; regenerated: [] };
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -48,10 +50,12 @@ export type SaveAndRegenerateResult =
  * Attempt to write the draft body to disk.
  *
  * The draft and its source are looked up from the database; the caller supplies
- * only the ids. On success the draft's baseHash is updated to match the new
+ * the id and the view the file belongs to. The write is refused (`forbidden`)
+ * unless the file is a pipeline file of a non-bundled layer of that view, so the
+ * rule does not rest on the route alone. On success the draft's baseHash is updated to match the new
  * file content so subsequent saves do not produce a false conflict.
  */
-export function saveDraft(db: DbInstance, draftId: number): SaveResult {
+export function saveDraft(db: DbInstance, draftId: number, pipelines: Pipelines): SaveResult {
   const draft = getDraft(db, draftId);
   if (!draft) throw new Error(`Draft ${draftId} not found`);
 
@@ -60,13 +64,24 @@ export function saveDraft(db: DbInstance, draftId: number): SaveResult {
 
   const filePath = join(source.root, source.relPath);
 
+  const layer = pipelines.layerOf(filePath);
+  if (layer === undefined || layer.source === "bundled") {
+    return {
+      ok: false,
+      reason: "forbidden",
+      message:
+        layer === undefined
+          ? `${source.relPath} is not a pipeline file of any workflow layer`
+          : "The bundled pipeline catalog is read-only",
+    };
+  }
+
   // ── Step 1: validate ──────────────────────────────────────────────────────
-  // Pass a custom readFile so loadPipeline sees the draft body for the YAML
-  // path and falls through to the real filesystem for any prompt files.
+  // The view sees the draft body in place of the YAML file and the real
+  // filesystem for everything else, and resolves nested pipelines through the
+  // merged layers.
   try {
-    loadPipeline(filePath, {
-      readFile: (p) => (p === filePath ? draft.body : readFileSync(p, "utf8")),
-    });
+    pipelines.check(filePath, { body: draft.body });
   } catch (err) {
     const message = (err as Error).message;
     setDraftValidation(db, draftId, "invalid", message);
@@ -120,8 +135,12 @@ export function saveDraft(db: DbInstance, draftId: number): SaveResult {
  * When generation fails, the result is ok:true with regenerated:[] and a
  * regenerationError message so the UI can report that the output is stale.
  */
-export function saveDraftAndRegenerate(db: DbInstance, draftId: number): SaveAndRegenerateResult {
-  const saveResult = saveDraft(db, draftId);
+export function saveDraftAndRegenerate(
+  db: DbInstance,
+  draftId: number,
+  pipelines: Pipelines
+): SaveAndRegenerateResult {
+  const saveResult = saveDraft(db, draftId, pipelines);
 
   if (!saveResult.ok) {
     return { ...saveResult, regenerated: [] };
@@ -136,7 +155,7 @@ export function saveDraftAndRegenerate(db: DbInstance, draftId: number): SaveAnd
     if (!source) throw new Error(`Source ${draft.sourceId} not found after save`);
 
     const filePath = join(source.root, source.relPath);
-    const loaded = loadPipeline(filePath);
+    const loaded = pipelines.check(filePath);
     // The id comes from the YAML and is about to become the name of an
     // executable file, so it is held to the same safe-id rule the HTTP routes
     // apply before joining anything into a path.

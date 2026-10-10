@@ -339,3 +339,206 @@ describe("spec 038 Ship 3 — fork, visibility and import routes", () => {
     );
   });
 });
+
+// ── spec 047 FR-12: one answer to "which file is this pipeline" across layers ──
+//
+// THE DEFECT these cases encode: the editor routes looked a pipeline up in the
+// write layer's directory alone and loaded it with the bare loader, which finds
+// a nested child as a sibling file. So a repository fork of a bundled workflow
+// whose children stay bundled (`build` mounts `develop`, `build-round`, `audit`)
+// answered 404 on POST /drafts and GET /prompts, a user-layer workflow could not
+// be edited at all, and DELETE only looked for nesters in the write layer.
+// server.test.ts cannot see any of it: it pins one `pipelinesDir`, where a
+// sibling and the catalogue are the same directory.
+
+describe("spec 047 FR-12 — editor routes resolve a pipeline across layers", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let projectDir: string;
+  let home: string;
+  let previousHome: string | undefined;
+
+  const url = (path: string): string => `http://127.0.0.1:${srv.port}${path}`;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "af-fr12-routes-")));
+    projectDir = join(tmpDir, "project");
+    home = join(tmpDir, "home");
+    mkdirSync(projectDir, { recursive: true });
+
+    writePipeline(join(home, "workflows", "pipelines"), "personal-parent", [
+      "id: personal-parent",
+      "version: 1",
+      "description: a personal parent mounting a team child",
+      "inputs: []",
+      "steps:",
+      "  - id: think",
+      "    kind: llm",
+      "    role: worker",
+      "    prompt: prompts/personal-think.md",
+      "  - id: nested",
+      "    kind: pipeline",
+      "    pipeline: team-child",
+      "    dependsOn: [think]",
+    ]);
+    mkdirSync(join(home, "workflows", "prompts"), { recursive: true });
+    writeFileSync(join(home, "workflows", "prompts", "personal-think.md"), "personal think\n");
+
+    writePipeline(join(projectDir, ".agent-flows", "pipelines"), "team-child", [
+      "id: team-child",
+      "version: 1",
+      "description: a team child",
+      "inputs: []",
+      "steps:",
+      "  - id: read",
+      "    kind: llm",
+      "    role: scout",
+      "    prompt: prompts/team-read.md",
+    ]);
+    mkdirSync(join(projectDir, ".agent-flows", "prompts"), { recursive: true });
+    writeFileSync(join(projectDir, ".agent-flows", "prompts", "team-read.md"), "team read\n");
+
+    previousHome = process.env.AGENT_FLOWS_HOME;
+    process.env.AGENT_FLOWS_HOME = home;
+
+    srv = await startServer({
+      state: resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }),
+      port: 0,
+      dbPath: ":memory:",
+      projectDir,
+    });
+  });
+
+  after(async () => {
+    await srv.close();
+    if (previousHome === undefined) delete process.env.AGENT_FLOWS_HOME;
+    else process.env.AGENT_FLOWS_HOME = previousHome;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function openDraft(id: string): Promise<{ draftId: number; body: string }> {
+    const res = await mutate(srv.port, "POST", `/api/pipelines/${id}/drafts`, {});
+    const text = await res.text();
+    assert.equal(res.status, 200, `opening a draft of "${id}": ${text}`);
+    return JSON.parse(text) as { draftId: number; body: string };
+  }
+
+  it("a repository fork of a bundled workflow keeps its bundled children and opens in the editor", async () => {
+    const fork = await mutate(srv.port, "POST", "/api/pipelines/build/fork", { to: "repo" });
+    assert.equal(fork.status, 200, await fork.text());
+    const forked = join(projectDir, ".agent-flows", "pipelines", "build.yaml");
+    const before = readFileSync(forked, "utf8");
+
+    const prompts = await fetch(url("/api/pipelines/build/prompts"));
+    assert.equal(prompts.status, 200, `GET prompts of the fork: ${await prompts.text()}`);
+
+    const draft = await openDraft("build");
+    assert.equal(draft.body, before);
+
+    const save = await mutate(srv.port, "POST", `/api/drafts/${draft.draftId}/save`, {});
+    assert.equal(save.status, 200, `saving an unchanged draft: ${await save.text()}`);
+    assert.equal(readFileSync(forked, "utf8"), before, "an unchanged save rewrites nothing");
+  });
+
+  it("a user-layer workflow opens in the editor: draft, prompts, preview, prompt write, save", async () => {
+    const draft = await openDraft("personal-parent");
+
+    const prompts = await fetch(url("/api/pipelines/personal-parent/prompts"));
+    const promptsText = await prompts.text();
+    assert.equal(prompts.status, 200, promptsText);
+    const map = JSON.parse(promptsText) as Record<string, { text: string; hash: string }>;
+    assert.deepEqual(Object.keys(map), ["think"], "only its own llm step, not the child's");
+    assert.equal(map.think?.text, "personal think\n");
+
+    const preview = await mutate(srv.port, "POST", `/api/drafts/${draft.draftId}/preview`, {
+      prompts: { think: "edited {{nonsense}}" },
+    });
+    assert.equal(
+      preview.status,
+      422,
+      "an unknown placeholder is reported before anything is written"
+    );
+
+    const write = await mutate(srv.port, "PUT", "/api/pipelines/personal-parent/prompts/think", {
+      text: "edited think\n",
+      ifMatch: map.think?.hash,
+    });
+    assert.equal(write.status, 200, await write.text());
+    assert.equal(
+      readFileSync(join(home, "workflows", "prompts", "personal-think.md"), "utf8"),
+      "edited think\n"
+    );
+
+    const save = await mutate(srv.port, "POST", `/api/drafts/${draft.draftId}/save`, {});
+    assert.equal(save.status, 200, await save.text());
+  });
+
+  it("an error from a user-layer workflow names no path of its own layer", async () => {
+    const draft = await openDraft("personal-parent");
+    const layerRoot = join(home, "workflows");
+    const hostile = draft.body.replace("prompts/personal-think.md", `${layerRoot}/../../x.md`);
+
+    const preview = await mutate(srv.port, "POST", `/api/drafts/${draft.draftId}/preview`, {});
+    assert.equal(preview.status, 200, "an unedited draft previews");
+    await mutate(srv.port, "PUT", `/api/drafts/${draft.draftId}`, { body: hostile });
+    const bad = await mutate(srv.port, "POST", `/api/drafts/${draft.draftId}/preview`, {});
+    const text = await bad.text();
+    assert.equal(bad.status, 422, text);
+    assert.ok(!text.includes(layerRoot), `the user layer's root must be redacted: ${text}`);
+    assert.match(text, /<root>/u);
+  });
+
+  it("a bundled workflow that no layer overrides is refused with 403 on every editor route", async () => {
+    for (const [method, path] of [
+      ["POST", "/api/pipelines/investigate/drafts"],
+      ["GET", "/api/pipelines/investigate/prompts"],
+      ["PUT", "/api/pipelines/investigate/prompts/survey"],
+      ["DELETE", "/api/pipelines/investigate"],
+    ] as const) {
+      const res =
+        method === "GET"
+          ? await fetch(url(path))
+          : await mutate(srv.port, method, path, { text: "x", ifMatch: "0".repeat(64) });
+      assert.equal(res.status, 403, `${method} ${path}: ${await res.text()}`);
+    }
+  });
+
+  it("an unknown id is 404 on the editor routes", async () => {
+    const drafts = await mutate(srv.port, "POST", "/api/pipelines/no-such/drafts", {});
+    assert.equal(drafts.status, 404);
+    const prompts = await fetch(url("/api/pipelines/no-such/prompts"));
+    assert.equal(prompts.status, 404);
+    const del = await mutate(srv.port, "DELETE", "/api/pipelines/no-such", {});
+    assert.equal(del.status, 404);
+  });
+
+  it("DELETE refuses a repository child that a user-layer workflow mounts", async () => {
+    const res = await mutate(srv.port, "DELETE", "/api/pipelines/team-child", {});
+    const text = await res.text();
+    assert.equal(res.status, 409, text);
+    assert.match(text, /personal-parent/u);
+    assert.ok(
+      existsSync(join(projectDir, ".agent-flows", "pipelines", "team-child.yaml")),
+      "the refused delete removed nothing"
+    );
+  });
+
+  it("DELETE removes a repository fork that a nester mounts when a lower layer still defines the id", async () => {
+    const fork = await mutate(srv.port, "POST", "/api/pipelines/develop/fork", { to: "repo" });
+    assert.equal(fork.status, 200, await fork.text());
+    const forked = join(projectDir, ".agent-flows", "pipelines", "develop.yaml");
+    assert.ok(existsSync(forked));
+
+    // The repo `build` fork (made above) mounts `develop`, but the bundled
+    // `develop` remains, so the nesters fall back to it.
+    const res = await mutate(srv.port, "DELETE", "/api/pipelines/develop", {});
+    assert.equal(res.status, 200, await res.text());
+    assert.ok(!existsSync(forked));
+  });
+
+  it("DELETE removes a user-layer workflow", async () => {
+    const res = await mutate(srv.port, "DELETE", "/api/pipelines/personal-parent", {});
+    assert.equal(res.status, 200, await res.text());
+    assert.ok(!existsSync(join(home, "workflows", "pipelines", "personal-parent.yaml")));
+  });
+});
