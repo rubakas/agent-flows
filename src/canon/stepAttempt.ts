@@ -195,7 +195,9 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * Attempts one llm step. Throws a `StepAttemptError`; never anything else.
+ * Attempts one llm step. A failed attempt throws a `StepAttemptError`. The one
+ * exception is `resolveStepModel` inside the failover walk, which can throw its
+ * own error unwrapped.
  *
  * 1. Refuses before any dispatch when the model cannot enforce what the step
  *    declares.

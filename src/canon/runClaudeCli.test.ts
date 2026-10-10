@@ -629,7 +629,7 @@ describe("runClaudeCli — T-6/T-7 byte-identical output (FR-001)", () => {
     const expectedText = "  Hello, world!  \nWith trailing space.  ";
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout(expectedText)] });
     const result = await runClaudeCli("hi", {}, { spawn });
-    // The result field is extracted verbatim; .trim() is applied by the caller (runLlmStep).
+    // The result field is extracted verbatim; .trim() is applied by the caller (the claude adapter).
     // This proves the parser returns exactly what the result field contains.
     assert.equal(result.stdout, expectedText);
   });

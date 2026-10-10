@@ -1,6 +1,6 @@
 // Provider adapter seam (spec 031 D1).
 //
-// `runLlmStep` dispatches to one of these instead of branching inline on
+// `attemptStep` dispatches to one of these instead of branching inline on
 // transport. Supervision is deliberately NOT a capability: every `run()` must
 // enforce the deadline or watchdog it has today, so a caller cannot construct an
 // unsupervised adapter call (FR-002).

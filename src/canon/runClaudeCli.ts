@@ -584,7 +584,7 @@ export function runClaudeCli(
         return;
       }
 
-      // Watchdog trip: reject with the trip so runLlmStep can handle retry
+      // Watchdog trip: reject with the trip so the claude adapter can handle retry
       if (watchdogTrip) {
         reject(watchdogTrip);
         return;

@@ -481,7 +481,11 @@ export function buildLlmStep(
           const cause = err.cause !== undefined ? { cause: err.cause } : undefined;
           // The workspace report belongs to a call that failed, not to an answer
           // that broke its contract.
-          if (err.kind === "failed" && step.permissions?.contents === "write" && deps.cwd) {
+          if (
+            err.kind === "failed" &&
+            step.permissions?.contents === "write" &&
+            deps.cwd !== undefined
+          ) {
             throw new Error(`${err.message}\n${workspaceDirtyMessage(deps.cwd)}`, cause);
           }
           throw new Error(err.message, cause);
