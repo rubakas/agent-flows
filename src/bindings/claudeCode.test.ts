@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { bundledPipelines } from "../canon/pipelines.js";
+import { canonSchemas } from "../canon/schemas.js";
 import { generateWorkflowScript } from "./claudeCode.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
@@ -136,6 +137,80 @@ describe("generateWorkflowScript — executing the generated script", () => {
       "synthesis prompt lost the correctness result"
     );
     assert.ok(synthesis.includes("OUT:security"), "synthesis prompt lost the security result");
+  });
+});
+
+describe("generateWorkflowScript — the emitted schema is the canon's schema", () => {
+  // A step that declares a schema key must hand the agent exactly the canon's schema
+  // for that key. node --check cannot see an emitter that is missing for a key (the
+  // script parses and throws a ReferenceError only when it runs), so run it.
+  const SCHEMA_KEYS = Object.keys(canonSchemas) as (keyof typeof canonSchemas)[];
+
+  async function schemasPassedToAgent(loaded: LoadedPipeline): Promise<Map<string, unknown>> {
+    const script = generateWorkflowScript(loaded).replace(/\bexport const meta\b/, "const meta");
+    const seen = new Map<string, unknown>();
+    const agent = async (
+      _prompt: string,
+      opts: { label: string; schema?: unknown }
+    ): Promise<string> => {
+      seen.set(opts.label, opts.schema);
+      return `OUT:${opts.label}`;
+    };
+    const parallel = async (fns: (() => Promise<unknown>)[]): Promise<unknown[]> =>
+      Promise.all(fns.map((fn) => fn()));
+    const noop = (): void => undefined;
+    const AsyncFunction = Object.getPrototypeOf(async function () {
+      /* constructor lookup only */
+    }).constructor as new (...params: string[]) => (...values: unknown[]) => Promise<unknown>;
+    await new AsyncFunction("agent", "parallel", "phase", "log", "args", script)(
+      agent,
+      parallel,
+      noop,
+      noop,
+      {}
+    );
+    return seen;
+  }
+
+  function pipelineOf(steps: LoadedPipeline["def"]["steps"]): LoadedPipeline {
+    return {
+      def: { id: "schema-exec", version: 1, description: "schema exec", inputs: [], steps },
+      prompts: Object.fromEntries(steps.map((st) => [st.id, "p"])),
+    };
+  }
+
+  for (const key of SCHEMA_KEYS) {
+    it(`a lone step declaring ${key} is passed the canon schema`, async () => {
+      const seen = await schemasPassedToAgent(
+        pipelineOf([
+          {
+            id: "only",
+            kind: "llm" as const,
+            role: "worker" as const,
+            prompt: "p.md",
+            schema: key,
+          },
+        ])
+      );
+      assert.deepEqual(seen.get("only"), canonSchemas[key]);
+    });
+  }
+
+  it("parallel steps declaring every schema key are each passed their canon schema", async () => {
+    const seen = await schemasPassedToAgent(
+      pipelineOf(
+        SCHEMA_KEYS.map((key) => ({
+          id: `s_${key}`,
+          kind: "llm" as const,
+          role: "worker" as const,
+          prompt: "p.md",
+          schema: key,
+        }))
+      )
+    );
+    for (const key of SCHEMA_KEYS) {
+      assert.deepEqual(seen.get(`s_${key}`), canonSchemas[key], `schema for ${key}`);
+    }
   });
 });
 
@@ -555,8 +630,9 @@ describe("generateWorkflowScript — schema arg", () => {
 
     assert.ok(s.includes("const r_verify ="), "verify must take the sequential path");
     assert.ok(
-      s.includes("label: 'verify'") && /label: 'verify'[^\n]*schema: CODE_REVIEW_SCHEMA/.test(s),
-      "sequential schema-gated step must emit schema: CODE_REVIEW_SCHEMA"
+      s.includes("label: 'verify'") &&
+        /label: 'verify'[^\n]*schema: SCHEMAS\.codeReviewFindings/.test(s),
+      "sequential schema-gated step must emit schema: SCHEMAS.codeReviewFindings"
     );
   });
 
@@ -588,8 +664,11 @@ describe("generateWorkflowScript — schema arg", () => {
     };
     const s = generateWorkflowScript(loaded);
 
-    assert.ok(/label: 'critic'[^\n]*schema: WEAK_SCHEMA/.test(s), "critic schema missing");
-    assert.ok(/label: 'security'[^\n]*schema: SEC_SCHEMA/.test(s), "security schema missing");
+    assert.ok(/label: 'critic'[^\n]*schema: SCHEMAS\.weaknesses/.test(s), "critic schema missing");
+    assert.ok(
+      /label: 'security'[^\n]*schema: SCHEMAS\.securityFindings/.test(s),
+      "security schema missing"
+    );
   });
 });
 

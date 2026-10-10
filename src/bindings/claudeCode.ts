@@ -7,29 +7,11 @@ import {
   type ModelRegistry,
   type ProviderProfile,
 } from "../canon/registry.js";
-import { CODE_REVIEW_FINDING, FINDING } from "../canon/schemas.js";
+import { canonSchemas } from "../canon/schemas.js";
 import type { LoadedPipeline, StepDef, StepKind } from "../canon/types.js";
 
 // Step kinds that Binding A can fully execute. All others produce a loud refusal.
 const SUPPORTED_STEP_KINDS = new Set<StepKind>(["llm", "assemble-spec"]);
-
-// Canon schema name → the JS constant name emitted into the generated script.
-// Keep in sync with canonSchemas; a missing entry would silently emit `undefined`.
-//
-// `codeReviewDelivery` has no emitter below, and that is deliberate. The only
-// step that declares it is `delivery` in code-review.yaml, and code-review is
-// Binding-A-unsupported (see the refusal in generateWorkflowScript), so the
-// branch that used to emit CODE_REVIEW_DELIVERY_SCHEMA was unreachable for every
-// pipeline we ship. The entry stays because this Record is total over
-// StepDef["schema"] and dropping it fails the typecheck — it is a placeholder,
-// not wiring. Adding a Binding-A-supported pipeline with this schema means
-// restoring the emitter here; nothing mechanical catches that today.
-const SCHEMA_CONST_BY_NAME: Record<NonNullable<StepDef["schema"]>, string> = {
-  weaknesses: "WEAK_SCHEMA",
-  securityFindings: "SEC_SCHEMA",
-  codeReviewFindings: "CODE_REVIEW_SCHEMA",
-  codeReviewDelivery: "CODE_REVIEW_DELIVERY_SCHEMA",
-};
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -60,7 +42,7 @@ function modelVar(id: string): string {
  * alone in its dependency level must be schema-gated exactly like a parallel one.
  */
 function schemaArg(step: StepDef): string {
-  return step.schema ? `, schema: ${SCHEMA_CONST_BY_NAME[step.schema]}` : "";
+  return step.schema ? `, schema: SCHEMAS.${step.schema}` : "";
 }
 
 /**
@@ -183,42 +165,19 @@ export function generateWorkflowScript(
   }
   out.push("");
 
-  // ── schema constants (emitted once, before the first parallel block) ──────
-  const usedSchemas = new Set(def.steps.map((s) => s.schema).filter(Boolean) as string[]);
+  // ── schemas (emitted once, before the first step) ─────────────────────────
+  // The canon's own schema objects, serialised. Nothing here is typed by hand, so a
+  // key added to canonSchemas is emitted without a second edit.
+  const usedSchemas = [...new Set(def.steps.map((s) => s.schema).filter(Boolean))] as NonNullable<
+    StepDef["schema"]
+  >[];
 
-  if (usedSchemas.size > 0) {
-    out.push(`const FINDING = ${JSON.stringify(FINDING, null, 2)}`);
-
-    if (usedSchemas.has("weaknesses")) {
-      out.push("const WEAK_SCHEMA = {");
-      out.push("  type: 'object',");
-      out.push("  properties: { weaknesses: { type: 'array', items: FINDING } },");
-      out.push("  required: ['weaknesses'],");
-      out.push("  additionalProperties: false,");
-      out.push("}");
+  if (usedSchemas.length > 0) {
+    out.push("const SCHEMAS = {");
+    for (const key of usedSchemas) {
+      out.push(`  ${key}: ${JSON.stringify(canonSchemas[key], null, 2).replace(/\n/g, "\n  ")},`);
     }
-
-    if (usedSchemas.has("securityFindings")) {
-      out.push("const SEC_SCHEMA = {");
-      out.push("  type: 'object',");
-      out.push("  properties: { securityFindings: { type: 'array', items: FINDING } },");
-      out.push("  required: ['securityFindings'],");
-      out.push("  additionalProperties: false,");
-      out.push("}");
-    }
-
-    if (usedSchemas.has("codeReviewFindings")) {
-      out.push(`const CODE_REVIEW_FINDING = ${JSON.stringify(CODE_REVIEW_FINDING, null, 2)}`);
-      out.push("const CODE_REVIEW_SCHEMA = {");
-      out.push("  type: 'object',");
-      out.push(
-        "  properties: { codeReviewFindings: { type: 'array', items: CODE_REVIEW_FINDING } },"
-      );
-      out.push("  required: ['codeReviewFindings'],");
-      out.push("  additionalProperties: false,");
-      out.push("}");
-    }
-
+    out.push("}");
     out.push("");
   }
 
