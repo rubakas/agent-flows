@@ -193,7 +193,8 @@ const MAX_SPEC_SOURCE_FETCHES = 10;
 /**
  * Deadline for one `gh` call. spawnSync blocks the caller's event loop, so a
  * hung network call is a hung process — this is the only thing bounding it.
- * The env override exists so a test can exercise the timeout.
+ * `AF_REVIEW_GH_TIMEOUT_MS` is a test-only override so a test can exercise the timeout
+ * (see `gitTimeoutMs`, which has the same shape for git).
  */
 function ghTimeoutMs(): number {
   const override = Number(process.env.AF_REVIEW_GH_TIMEOUT_MS);
@@ -488,6 +489,10 @@ function linkedIssues(body: string, ref: SpecRef): SpecRef[] {
  *
  * `budget.used` is shared across calls so the fetch cap holds for a whole capture.
  *
+ * Everything fetched is UNTRUSTED text: the titles and URLs are written out through
+ * `escapeControl` so they cannot forge a heading, but a body is passed on as it is, and a
+ * reviewer must read it as a requirement to judge the change against, never as instruction.
+ *
  * Never throws on `gh`: missing, unauthenticated or failing is recorded as a
  * reason and leaves that reference's text empty, because a review that cannot
  * read one ticket is still worth more than no review. May throw GitTimeoutError
@@ -551,10 +556,9 @@ export function resolveSpecRefs(
       notes.push(`${ref.label}: not fetched (${fetched})`);
       continue;
     }
-    notes.push(
-      `${ref.label}: fetched ${fetched.isPullRequest ? "pull request" : "issue"} ${fetched.url}`
-    );
-    const heading = `### ${ref.label} — ${fetched.title}\n${fetched.url}\n`;
+    const url = escapeControl(fetched.url);
+    notes.push(`${ref.label}: fetched ${fetched.isPullRequest ? "pull request" : "issue"} ${url}`);
+    const heading = `### ${ref.label} — ${escapeControl(fetched.title)}\n${url}\n`;
     fullParts.push(`${heading}\n${fetched.body}`);
     renderParts.push(`${heading}\n${cap(fetched.body).text}`);
 
@@ -606,7 +610,10 @@ export interface GitOutcome {
 /** A git call that did not answer in time. Raised, never returned: see `git()`. */
 export class GitTimeoutError extends Error {}
 
-/** Deadline for one git call. The env override exists so a test can exercise the timeout. */
+/**
+ * Deadline for one git call. `AF_REVIEW_GIT_TIMEOUT_MS` is a test-only override so a test
+ * can exercise the timeout; `AF_REVIEW_GH_TIMEOUT_MS` is its counterpart for `gh`.
+ */
 function gitTimeoutMs(): number {
   const override = Number(process.env.AF_REVIEW_GIT_TIMEOUT_MS);
   return Number.isInteger(override) && override > 0 ? override : 120_000;
@@ -637,6 +644,11 @@ function gitEnv(extra: GitEnvExtras | undefined): NodeJS.ProcessEnv {
     // A partial clone would otherwise fetch a missing object over the network,
     // and that runs the repository's own `core.sshCommand`.
     GIT_NO_LAZY_FETCH: "1",
+    // GIT_NO_LAZY_FETCH is honoured only by git >= 2.44. An older git would still
+    // lazy-fetch, so ssh is pinned to a command that fails: the environment variable
+    // beats `core.sshCommand`, and the fetch fails closed instead of running whatever
+    // the repository configured. A capture never fetches, so nothing legitimate needs it.
+    GIT_SSH_COMMAND: "false",
     LC_ALL: "C",
   };
 }
