@@ -119,7 +119,7 @@ export function createDynamicMastra(initial: MastraLike, opts: DynamicMastraOpts
     return new Error(`Pipeline "${id}" failed to build: ${message}`);
   }
 
-  function rebuild(catalog: MergedCatalog): void {
+  function rebuild(catalog: MergedCatalog, requestedId: string): void {
     const old = current;
     const oldFingerprints = new Map(builtFingerprints);
     const workflows: Record<string, unknown> = {};
@@ -132,10 +132,13 @@ export function createDynamicMastra(initial: MastraLike, opts: DynamicMastraOpts
         workflows[id] = opts.buildFn(loaded, opts.buildDeps);
         builtFingerprints.set(id, fingerprint(loaded));
       } catch (err) {
-        failures.set(id, {
-          fingerprint: fingerprint(loaded),
-          message: err instanceof Error ? err.message : String(err),
-        });
+        const message = err instanceof Error ? err.message : String(err);
+        failures.set(id, { fingerprint: fingerprint(loaded), message });
+        // The requested id's failure is thrown to the caller; a neighbour's would
+        // otherwise be silent until someone asks for it.
+        if (id !== requestedId) {
+          console.error(`agent-flows serve: pipeline "${id}" failed to build: ${message}`);
+        }
       }
     }
 
@@ -181,9 +184,15 @@ export function createDynamicMastra(initial: MastraLike, opts: DynamicMastraOpts
       const known = failedBuilds.get(id);
       if (known?.fingerprint === print) throw buildFailure(id, known.message);
       if (builtFingerprints.get(id) !== print) {
-        rebuild(catalog);
+        rebuild(catalog, id);
         const failed = failedBuilds.get(id);
         if (failed !== undefined) throw buildFailure(id, failed.message);
+        // The rebuild re-reads every file. If the requested one changed (or became
+        // unloadable and was carried forward) since the read above, the workflow
+        // returned below would not be the definition the caller validated.
+        if (builtFingerprints.get(id) !== print) {
+          throw new Error(`Pipeline "${id}" changed during rebuild`);
+        }
       }
       return current.getWorkflow(id);
     },

@@ -23,12 +23,17 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, afterEach, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
 
-import { loadCatalogPipelines, resolveCatalog } from "../../canon/layers.js";
+import {
+  loadCatalogPipelines,
+  resolveCatalog,
+  type CatalogEntry,
+  type MergedCatalog,
+} from "../../canon/layers.js";
 import { ModelRegistry } from "../../canon/registry.js";
 import { makeInMemoryDb } from "../../db/index.js";
 import { resolveProjectState, type ProjectState } from "../../runtime/projectState.js";
@@ -193,6 +198,7 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
   let mastraDir: string;
   let prompts: string[];
   let builds: string[];
+  let failBuildFor: string | undefined;
 
   function writePipeline(id: string, stepIds: string[], promptText: string): void {
     const root = join(projectDir, ".agent-flows");
@@ -209,8 +215,14 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
 
   // Mirrors the daemon: build every pipeline in the catalogue once, hand the
   // built list and the build failures to the wrapper so it knows what the
-  // initial instance contains. A pipeline named by `failFor` always fails to build.
-  function startup(failFor?: string): ReturnType<typeof createDynamicMastra> {
+  // initial instance contains. A pipeline named by `failFor` always fails to build
+  // (`failBuildFor` can be changed later to make one fail only on a rebuild).
+  // `resolve` replaces the catalogue resolver the wrapper reads on every lookup.
+  function startup(
+    failFor?: string,
+    resolve: () => MergedCatalog = () => resolveCatalog(projectDir)
+  ): ReturnType<typeof createDynamicMastra> {
+    failBuildFor = failFor;
     const mastraStorage = new LibSQLStore({
       id: "dyn-fr8-store",
       url: `file:${mastraDbPath(join(mastraDir, "ticket.sqlite"))}`,
@@ -230,7 +242,7 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
       deps: typeof buildDeps
     ) => {
       builds.push(loaded.def.id);
-      if (loaded.def.id === failFor) throw new Error(`boom building ${loaded.def.id}`);
+      if (loaded.def.id === failBuildFor) throw new Error(`boom building ${loaded.def.id}`);
       return buildPipelineWorkflow(loaded, deps);
     };
     const { loaded: startupPipelines } = loadCatalogPipelines(resolveCatalog(projectDir));
@@ -252,11 +264,31 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
         mastraStorage,
         buildFn,
         buildDeps,
-        resolveCatalog: () => resolveCatalog(projectDir),
+        resolveCatalog: resolve,
         initialPipelines,
         initialFailures,
       }
     );
+  }
+
+  // The catalogue the wrapper gets, except that `onRebuildRead` fires the moment a
+  // rebuild starts iterating the entries (the "second read" of every file), after
+  // the wrapper's own check read of the requested pipeline.
+  function racyCatalog(onRebuildRead: () => void): () => MergedCatalog {
+    return () => {
+      const catalog = resolveCatalog(projectDir);
+      let fired = false;
+      class Racy extends Map<string, CatalogEntry> {
+        override values(): MapIterator<CatalogEntry> {
+          if (!fired) {
+            fired = true;
+            onRebuildRead();
+          }
+          return super.values();
+        }
+      }
+      return { ...catalog, entries: new Racy(catalog.entries) };
+    };
   }
 
   async function runToEnd(dyn: ReturnType<typeof createDynamicMastra>, id: string) {
@@ -442,5 +474,60 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
     assert.equal(dyn.getWorkflow("hooked") as unknown, "rebuilt");
     assert.equal(unregistered, 1);
     assert.equal(shutdowns, 0);
+  });
+
+  it("refuses to serve a workflow when the requested file became unloadable during the rebuild", () => {
+    writePipeline("racy", ["a"], "R1");
+    const broken = "id: racy\nversion: 1\nsteps: [this is: not valid";
+    const dyn = startup(
+      undefined,
+      racyCatalog(() => writeFileSync(pipelineFile("racy"), broken))
+    );
+
+    // Edited after startup (so a rebuild is needed), then unloadable by the time
+    // the rebuild re-reads it: the carried-forward startup workflow must not be
+    // handed out as if it were the edited definition.
+    writePipeline("racy", ["a", "b"], "R2");
+
+    assert.throws(() => dyn.getWorkflow("racy"), /Pipeline "racy" changed during rebuild/);
+  });
+
+  it("refuses to serve a workflow when the requested file changed again during the rebuild", () => {
+    writePipeline("racy2", ["a"], "R1");
+    const dyn = startup(
+      undefined,
+      racyCatalog(() => writePipeline("racy2", ["a", "b", "c"], "R3"))
+    );
+
+    writePipeline("racy2", ["a", "b"], "R2");
+
+    assert.throws(() => dyn.getWorkflow("racy2"), /Pipeline "racy2" changed during rebuild/);
+  });
+
+  it("logs a neighbour whose build fails during a rebuild, but not the requested pipeline", () => {
+    writePipeline("target", ["a"], "T1");
+    writePipeline("neighbour", ["a"], "N1");
+    const dyn = startup();
+    const errors = mock.method(console, "error", () => undefined);
+    try {
+      failBuildFor = "neighbour";
+      writePipeline("target", ["a"], "T2");
+      assert.ok(dyn.getWorkflow("target"));
+      assert.deepEqual(
+        errors.mock.calls.map((c) => c.arguments[0]),
+        ['agent-flows serve: pipeline "neighbour" failed to build: boom building neighbour']
+      );
+
+      failBuildFor = "target";
+      errors.mock.resetCalls();
+      writePipeline("target", ["a"], "T3");
+      assert.throws(() => dyn.getWorkflow("target"), /boom building target/);
+      assert.ok(
+        !errors.mock.calls.some((c) => String(c.arguments[0]).includes('"target"')),
+        "the requested pipeline's failure is thrown, not logged"
+      );
+    } finally {
+      errors.mock.restore();
+    }
   });
 });
