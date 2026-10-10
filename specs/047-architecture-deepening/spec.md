@@ -1,11 +1,11 @@
 # 047. Deepening the architecture, and the defects found on the way
 
-| Field        | Value                                                                                  |
-| ------------ | -------------------------------------------------------------------------------------- |
-| Feature Name | Architecture deepening — eight candidates, eight defects                               |
-| Branch       | `feat/047-architecture-deepening`                                                      |
-| Status       | Phase 1 + FR-8 + FR-17 done; FR-9, FR-11, FR-12 in progress (decisions recorded below) |
-| Created      | 2026-10-10                                                                             |
+| Field        | Value                                                                                                           |
+| ------------ | --------------------------------------------------------------------------------------------------------------- |
+| Feature Name | Architecture deepening — eight candidates, eight defects                                                        |
+| Branch       | `feat/047-architecture-deepening`                                                                               |
+| Status       | Implemented 2026-10-10 (branch unpushed); browser test DEFERRED — pending operator; deferred items listed below |
+| Created      | 2026-10-10                                                                                                      |
 
 ## Origin
 
@@ -61,25 +61,25 @@ full suite.
 
 ## Functional Requirements
 
-| ID    | Requirement                                                              | Phase | Status      |
-| ----- | ------------------------------------------------------------------------ | ----- | ----------- |
-| FR-1  | Schema retry after a successful failover runs on the model that answered | 1     | Fixed       |
-| FR-2  | Binding A: a parallel level's results are reachable by later prompts     | 1     | Fixed       |
-| FR-3  | Daemon review capture cannot be blinded by repository git config         | 1     | Fixed       |
-| FR-4  | A step that declares skills never lands on a transport that ignores them | 1     | Fixed       |
-| FR-5  | The manifest route resolves a chained stage's run id                     | 1     | Fixed       |
-| FR-6  | The run progress line names the step that is actually running            | 1     | Fixed       |
-| FR-7  | Load rejects prompt placeholders the runtime never provides              | 1     | Fixed       |
-| FR-8  | An edited pipeline runs its edited definition                            | 1     | Fixed       |
-| FR-9  | Step attempt: the canon owns running a step on a model                   | 2     | In progress |
-| FR-10 | Run start: the rules for a valid run live below the HTTP route           | 4     | Proposed    |
-| FR-11 | Run store: one module owns where a run lives and what its status means   | 3     | In progress |
-| FR-12 | Pipeline by id: one way to load a pipeline across layers                 | 3     | Designed    |
-| FR-13 | Output-schema contract lives in the canon                                | 4     | Proposed    |
-| FR-14 | One review-capture module, generated into the plugin                     | 5     | Proposed    |
-| FR-15 | The page's run-view state moves out of inline script                     | 6     | Proposed    |
-| FR-16 | One generator from a canon pipeline to a Claude workflow script          | 5     | Proposed    |
-| FR-17 | Daemon `git status` callers cannot run repo-configured commands          | 1     | Fixed       |
+| ID    | Requirement                                                              | Phase | Status                                                      |
+| ----- | ------------------------------------------------------------------------ | ----- | ----------------------------------------------------------- |
+| FR-1  | Schema retry after a successful failover runs on the model that answered | 1     | Fixed                                                       |
+| FR-2  | Binding A: a parallel level's results are reachable by later prompts     | 1     | Fixed                                                       |
+| FR-3  | Daemon review capture cannot be blinded by repository git config         | 1     | Fixed                                                       |
+| FR-4  | A step that declares skills never lands on a transport that ignores them | 1     | Fixed                                                       |
+| FR-5  | The manifest route resolves a chained stage's run id                     | 1     | Fixed                                                       |
+| FR-6  | The run progress line names the step that is actually running            | 1     | Fixed                                                       |
+| FR-7  | Load rejects prompt placeholders the runtime never provides              | 1     | Fixed                                                       |
+| FR-8  | An edited pipeline runs its edited definition                            | 1     | Fixed                                                       |
+| FR-9  | Step attempt: the canon owns running a step on a model                   | 2     | Done (reduced scope)                                        |
+| FR-10 | Run start: the rules for a valid run live below the HTTP route           | 4     | Done (C1+C2; C3–C6 deferred)                                |
+| FR-11 | Run store: one module owns where a run lives and what its status means   | 3     | Done (80%)                                                  |
+| FR-12 | Pipeline by id: one way to load a pipeline across layers                 | 3     | Done                                                        |
+| FR-13 | Output-schema contract lives in the canon                                | 4     | Done (Binding A emits canon schemas; rules module deferred) |
+| FR-14 | One review-capture module, generated into the plugin                     | 5     | Done                                                        |
+| FR-15 | The page's run-view state moves out of inline script                     | 6     | Commit 1 done; run-view session deferred                    |
+| FR-16 | One generator from a canon pipeline to a Claude workflow script          | 5     | Done (pinning test; shared step table deferred)             |
+| FR-17 | Daemon `git status` callers cannot run repo-configured commands          | 1     | Fixed                                                       |
 
 ## Phase 1 — defects
 
@@ -325,6 +325,7 @@ Each is **Proposed**; D5 applies.
   nothing pins one to the other.
 - **Direction.** One capture module; the plugin's dependency-free copy is generated with a
   freshness test, as `plugin/workflows/review-engine.js` is (spec 046 FR-5).
+- **Superseded line counts:** see Decisions → FR-14 for the final sizes.
 
 ### FR-15. Run view state (Phase 6, optional)
 
@@ -375,13 +376,25 @@ Four behaviour-preserving commits: an output contract (`src/canon/outputContract
   - the HTTP and MCP disk readers can pick different files in a chain directory.
 - **Shared vocabulary:** one status vocabulary (`src/runtime/runStatus.ts`) is shared by the readers.
 - **One store:** `src/runtime/artifactStore.ts` is deepened into the run store, with no new wrapper module.
-- **Locating a run:** by its own id, scanning run directories for the artifact whose `runId` matches. There is no pointer file.
+- **Locating a run:** by its own id, scanning run directories pre-filtered by the run id's text before parsing, for the artifact whose `runId` matches. There is no pointer file.
 - **No borrowing another run's file:** a run whose own artifact is gone is not found, instead of being shown another run's data. This covers a re-run of the same pipeline overwriting the earlier one.
 - **Chained stages are listed:** the list shows one row per run, chained stages included.
 - **MCP:** `get_run` gains `source` (live / disk), and a restored run waiting at a gate is not offered for approval.
 - **`settledAt`:** the disk reader omits it for unfinished runs. What is written to disk does not change.
 - **Dropped:** a chain pointer file (it cannot express an anchor in another project, and does not name the pipeline of a crashed child), a typed artifact rewrite, an on-disk `settledAt` change, and the page changes.
 - **Accepted:** a crashed in-flight chained stage, and anchors in another project, are not resolvable after a restart.
+
+### FR-10 — the 80%: reserved keys + startRun
+
+- `src/canon/runContext.ts` holds `RUN_CONTROL_KEYS` (`models`, `provider`), used by the loader, the Mastra binding and the run starter.
+- The loader now refuses a step id or input name from that set. A step named `models` would otherwise have had its LLM output become the next steps' model choices. **User pipelines using either name stop loading;** no bundled pipeline does.
+- `src/runtime/runStart.ts` `startRun()` owns validation, the input merge and artifact chaining below the HTTP route. It keeps the same check order and byte-identical refusal strings.
+- **New refusals:** an unknown pipeline is a 400 refusal `Pipeline "x" not found` instead of a catch-all 500; a pipeline that exists but fails to load is reported as `fails to load: <redacted reason>`.
+- The dead `validateModelOverrides` was removed.
+- **Deferred:**
+  - narrowing `RunService.start` (it relocates the merge and conflicts with FR-11);
+  - `getWorkflow(id, loaded)` (it would reopen FR-8 option C);
+  - moving `artifactInputs.ts` to runtime.
 
 ### FR-12 — pipeline by id: owner decisions D1–D3
 
@@ -399,6 +412,62 @@ Also decided after review:
 - **CLIs:** they fail on catalogue errors.
 - **Redaction:** error paths are redacted relative to the file's own layer.
 - **Deferred:** removing the loader's sibling-file fallback. A lint rule routes production code through the new module instead.
+
+### FR-12 follow-ups from review and security audit
+
+- Editability is decided by real path, not by layer label. A repo or user layer whose `pipelines/` is a symlink into the installed package could otherwise delete a package file. DELETE re-checks the owner immediately before removing.
+- Every refusal drains the request body.
+- One helper redacts every layer root, the package root and the home directory in all error paths.
+- Deleting a user-library workflow shows a confirm naming the user layer and "every project on this machine".
+- An empty or missing bundled catalogue fails `validate`, `generate` and `doctor` again.
+
+### FR-13 + FR-16 — the 80%
+
+- **FR-13:** Binding A emits `JSON.stringify` of the canon's own schemas. This closes a latent `ReferenceError` (an undefined `CODE_REVIEW_DELIVERY_SCHEMA`) for user pipelines.
+- **FR-16:** one test loads `pipelines/code-review.yaml` and pins the plugin's review engine to it: steps, every dependency edge (by stub event order), models per role, and schema keys. The plugin's deliberate continue-on-failure choices (falsifiability, correctness and security degrade to a marker; synthesis logs only) are an explicit list that must equal the observed deviations. In-memory YAML mutations each turn it red.
+- `pipelines/code-review.yaml` was NOT changed to adopt the plugin's choices.
+- **Deferred:** a canon rules module, the TypeScript port of the plugin generator, a shared step-table module, and Binding A's render/onFailure rewrite. Nothing in the daemon reads Binding A output, and whether Binding A stays is spec 027's open owner decision.
+
+### FR-14 — one capture core
+
+- **The core:** `src/runtime/reviewCapture.ts` is the single capture core, and `src/runtime/reviewMaterial.ts` is now a thin daemon adapter (1287 → 307 lines).
+- **The plugin copy:** `scripts/build-af-review-capture.mjs` transpiles the core into `plugin/skills/review/scripts/lib/*.mjs`, pinned by a freshness test and a Node ≥ 18 API denylist. It accepts only named `node:` builtins. `capture.mjs` (1349 → 589 lines) keeps the CLI and run-directory duties.
+- **Plugin version 0.2.0:** Codex users must re-run `codex plugin add af@agent-flows`.
+- **Deny list (policy, lead decision; the owner may overturn):**
+  - Four credential files (`.git-credentials`, `.pypirc`, `.docker/config.json`, `.dockercfg`) are added to the shared credential list, so the review model's own Read, Grep and Edit tools are denied them too.
+  - The dotenv globs (`.env.*`, `*.env`) are withheld from the material by both captures. So dotenv example files no longer appear in daemon material, though the model can still Read them.
+- **Adopted for both callers:** control-character escaping (including spec titles and URLs), stopping after a `gh` timeout, `GIT_SSH_COMMAND=false` (so lazy fetch fails closed on git < 2.44), and attribute-free worktree snapshots (no repo-configured clean filters; needs git ≥ 2.40).
+- **Plugin-only:** `GIT_CONFIG_NOSYSTEM`, `GIT_PAGER` and `LANGUAGE`.
+- **Kept per caller:** whitespace baseline (the daemon derives one; the plugin refuses), empty diff (the plugin refuses), and the HEAD check (plugin).
+- **Testing:** one hostile-repository table runs every case through four implementations: the TypeScript core, the generated `.mjs`, the daemon adapter and the CLI.
+- **Not done:** the plugin smoke run (`/af:review` end to end) — the owner should re-run it.
+
+### FR-15 — commit 1 only
+
+- The page counts only live runs as in flight, using a pinned copy of the run-status rules with a parity test against `src/runtime/runStatus.ts`. Restored-from-disk rows don't count, don't tick, raise no approval banner, and show no gate box or Cancel.
+- A run without a `source` (older daemons in the cross-project view) still counts as live.
+- **Deferred to the owner:**
+  - moving the run-view state (snapshot, SSE, refresh, output cache) out of `ui.html` into a DOM-free module, since there is no CI browser coverage and four of the last six page fixes were there;
+  - the polling rule change.
+- Browser test request: `~/.claude/chrome-test/agent-flows/request-33abe823.md` — DEFERRED, pending operator.
+
+## Follow-ups
+
+- **Owner decisions:**
+  - the FR-14 deny-list policy;
+  - FR-12 D1 (user-layer workflows editable and deletable from the page);
+  - whether Binding A stays (spec 027).
+- **Owner actions:**
+  - re-run the `/af:review` smoke run;
+  - re-add the Codex plugin;
+  - run the browser test request.
+- **Deferred design work:** FR-10 C3/C4, FR-11's typed artifact and chain pointer, FR-13/16's shared modules, FR-15 commits 2–3, removing the loader's sibling-file fallback (FR-12; a lint rule guards production code instead).
+- **Smaller observations:**
+  - the step-journal invariant (`BUILDER_LOGGED_KINDS`);
+  - four copies of the daemon-record probe;
+  - the ticket DDL beside the Drizzle schema;
+  - `src/serve/editabilityRoutes.test.ts` exercises symlinks into the real package directory with snapshot/restore (would be safer against a package copy);
+  - `artifact.test.ts` and `capture.test.ts` "audit L12" are load-sensitive when several suites run at once.
 
 ## Tests
 
