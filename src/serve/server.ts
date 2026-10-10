@@ -64,6 +64,7 @@ import {
   activeProfileIdOrUnknown,
   getProfile,
 } from "../canon/registry.js";
+import { isRunControlKey } from "../canon/runContext.js";
 import { makeDb, type DbInstance } from "../db/index.js";
 import {
   bundledPipelinesDir as defaultBundledPipelinesDir,
@@ -281,14 +282,6 @@ function mergedPipelineRows(pipelines: Pipelines, hidden: ReadonlySet<string>): 
     shadows: [...f.file.shadows],
   }));
 }
-
-/**
- * Context keys the run itself owns. They are merged into the workflow input
- * alongside the caller's `inputs`, so an `inputs` entry of the same name would
- * override the validated top-level field and reach the step runner having passed
- * through none of its checks.
- */
-const RESERVED_CONTEXT_KEYS: ReadonlySet<string> = new Set(["provider", "models"]);
 
 /**
  * The state root this daemon writes under: `AGENT_FLOWS_HOME ?? ~/.agent-flows`.
@@ -1811,7 +1804,7 @@ async function handleRequest(
     // bitten by, and a run whose provenance names a provider it never used is
     // worse than a 400.
     const explicitInputKeys = Object.keys(explicitInputs);
-    const reservedKey = explicitInputKeys.find((key) => RESERVED_CONTEXT_KEYS.has(key));
+    const reservedKey = explicitInputKeys.find(isRunControlKey);
     if (reservedKey !== undefined) {
       json(res, 400, {
         error: `Input "${reservedKey}" is reserved — pass it as the top-level "${reservedKey}" field instead`,

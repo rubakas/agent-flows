@@ -34,7 +34,7 @@ import { makeInMemoryDb } from "../../db/index.js";
 import { upsertManifestEntry } from "../../runtime/artifactStore.js";
 import { closeRunLog, openRunLog } from "../../runtime/stepLog.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
-import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
+import { buildPipelineWorkflow } from "./build.js";
 import { mastraDbPath } from "./paths.js";
 import type { SpawnFn } from "../../canon/runClaudeCli.js";
 import type { StepRunnerDeps } from "../../canon/runStep.js";
@@ -427,34 +427,6 @@ describe("buildPipelineWorkflow — JSON retry", () => {
     } finally {
       cleanup();
     }
-  });
-});
-
-// ── schema retry preserves assembled runnerDeps (Fix 1) ──────────────────────
-
-describe("validateModelOverrides", () => {
-  const reg = new ModelRegistry([
-    { id: "sonnet", transport: "cli", cli: { bin: "claude", model: "sonnet" } },
-    { id: "haiku", transport: "cli", cli: { bin: "claude", model: "haiku" } },
-  ]);
-
-  it("returns null when all step model ids are known", () => {
-    const result = validateModelOverrides({ intake: "sonnet", enrich: "haiku" }, reg);
-    assert.equal(result, null);
-  });
-
-  it("returns an error string naming the step and the bad model id when unknown", () => {
-    const result = validateModelOverrides({ intake: "../../../../evil" }, reg);
-    assert.ok(result !== null, "should return an error");
-    assert.ok(result.includes("intake"), "error should name the step id");
-    assert.ok(result.includes("../../../../evil"), "error should name the bad id");
-    assert.ok(result.includes("sonnet") && result.includes("haiku"), "error should list valid ids");
-  });
-
-  it("returns an error for an unknown id even if another step uses a valid id", () => {
-    const result = validateModelOverrides({ intake: "sonnet", "bad-step": "unknown-model" }, reg);
-    assert.ok(result !== null);
-    assert.ok(result.includes("unknown-model"));
   });
 });
 

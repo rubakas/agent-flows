@@ -1223,6 +1223,65 @@ steps:
 // check step validation
 // ---------------------------------------------------------------------------
 
+describe("loadPipeline — run control keys are reserved", () => {
+  // `models` and `provider` ride in the run context beside the step outputs. A top-level
+  // step's output lands at ctx[step.id] un-namespaced, so a step named `models` whose
+  // output is JSON would become the next steps' per-step model overrides, past the
+  // validation the HTTP route applies to the top-level field.
+  const gate = (id: string) => `  - id: ${id}\n    kind: gate\n    message: ok?\n`;
+  const yamlOf = (inputs: string[], steps: string) =>
+    `id: test\nversion: 1\ndescription: test\ninputs: [${inputs.join(", ")}]\n` +
+    `steps:\n${steps}`;
+  const load = (yaml: string, children: Record<string, string> = {}) =>
+    loadPipeline("/fake/pipelines/test.yaml", {
+      readFile: (p) => {
+        if (p.endsWith("test.yaml")) return yaml;
+        const child = Object.entries(children).find(([id]) => p.endsWith(`${id}.yaml`));
+        return child ? child[1] : "prompt content";
+      },
+    });
+
+  for (const key of ["models", "provider"]) {
+    it(`refuses a step id "${key}"`, () => {
+      assert.throws(() => load(yamlOf(["request"], gate(key))), new RegExp(`"${key}".*reserved`));
+    });
+
+    it(`refuses an input named "${key}"`, () => {
+      assert.throws(
+        () => load(yamlOf([key], gate("s1"))),
+        new RegExp(`[Ii]nput "${key}".*reserved`)
+      );
+    });
+  }
+
+  it("loads names that merely contain a reserved key", () => {
+    const { def } = load(yamlOf(["modelsList"], gate("provider2") + gate("my_models")));
+    assert.deepEqual(
+      def.steps.map((st) => st.id),
+      ["provider2", "my_models"]
+    );
+  });
+
+  // The rule runs on every standalone load, and a nested child or loop body is loaded
+  // through loadPipeline. A reserved id in a child is therefore refused when the child is
+  // mounted. Expanded ids are prefixed ("child.models"), so only the standalone load of
+  // a child can newly fail; the parent's own expanded ids never collide.
+  it("refuses a loop body whose own step id is reserved", () => {
+    const parent = yamlOf(
+      ["request"],
+      "  - id: converge\n    kind: loop\n    pipeline: body\n    maxIterations: 2\n    until: passed\n"
+    );
+    const body = yamlOf(["request"], gate("models"));
+    assert.throws(() => load(parent, { body }), /"models".*reserved/);
+  });
+
+  it("refuses a nested pipeline whose own step id is reserved", () => {
+    const parent = yamlOf(["request"], "  - id: sub\n    kind: pipeline\n    pipeline: child\n");
+    const child = yamlOf(["request"], gate("provider"));
+    assert.throws(() => load(parent, { child }), /"provider".*reserved/);
+  });
+});
+
 describe("loadPipeline — check step validation", () => {
   function makeCheckYaml(overrides: string): string {
     return `

@@ -11,6 +11,7 @@ import { isAbsolute, join } from "node:path";
 import { createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { pipelineAncestors, pipelineLevels } from "../../canon/graph.js";
+import { RUN_CONTROL_KEYS, type RunControlKey } from "../../canon/runContext.js";
 import {
   type BuildDeps,
   type LevelBuilder,
@@ -25,27 +26,7 @@ import {
   buildReviewMaterialStep,
   ctx,
 } from "./buildSteps.js";
-import type { ModelRegistry } from "../../canon/registry.js";
 import type { LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
-
-/**
- * Validates a caller-supplied models override map against known registry ids.
- * Returns an error string if any value is unknown, or null if all are valid.
- * Only registered ids are accepted — the registry passthrough is intentionally
- * not reachable from untrusted callers (e.g. MCP input).
- */
-export function validateModelOverrides(
-  models: Record<string, string>,
-  registry: ModelRegistry
-): string | null {
-  const validIds = registry.list().map((e) => e.id);
-  for (const [stepId, modelId] of Object.entries(models)) {
-    if (!validIds.includes(modelId)) {
-      return `Step "${stepId}": unknown model id "${modelId}". Valid ids: ${validIds.join(", ")}`;
-    }
-  }
-  return null;
-}
 
 /**
  * Walks `stepId`'s dependency tree (breadth-first, preferring the order
@@ -83,7 +64,7 @@ function buildLevelsOntoBuilder(
   const levels = pipelineLevels(def.steps);
   const stepById = new Map(def.steps.map((s) => [s.id, s]));
   const ancestorMap = pipelineAncestors(def.steps);
-  const alwaysVisible = new Set([...def.inputs, "models", "provider"]);
+  const alwaysVisible = new Set([...def.inputs, ...RUN_CONTROL_KEYS]);
 
   for (let i = 0; i < levels.length; i++) {
     const level = levels[i];
@@ -177,11 +158,14 @@ export function buildPipelineWorkflow(loaded: LoadedPipeline, deps: BuildDeps): 
   for (const inp of def.inputs) {
     inputShape[inp] = optionalSet.has(inp) ? z.string().optional().default("") : z.string();
   }
-  inputShape.models = z.record(z.string(), z.string()).optional();
-  // The per-run provider travels the same way the per-step model overrides do:
-  // as workflow input, read inside each step's execute. A profile captured at
-  // build time is shared by every concurrent run on this workflow.
-  inputShape.provider = z.string().optional();
+  // The run control keys travel as workflow input and are read inside each step's
+  // execute: per-step model overrides, and the per-run provider (a profile captured
+  // at build time is shared by every concurrent run on this workflow).
+  const controlShape = {
+    models: z.record(z.string(), z.string()).optional(),
+    provider: z.string().optional(),
+  } satisfies Record<RunControlKey, z.ZodTypeAny>;
+  Object.assign(inputShape, controlShape);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let builder: any = createWorkflow({

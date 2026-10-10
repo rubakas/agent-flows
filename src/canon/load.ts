@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import { GraphError, pipelineAncestors, pipelineLevels } from "./graph.js";
 import { expandNested } from "./nest.js";
 import { extractPlaceholders } from "./render.js";
+import { RUN_CONTROL_KEYS, isRunControlKey } from "./runContext.js";
 import { canonSchemas } from "./schemas.js";
 import type { LoadedPipeline, PipelineDef, Role, StepDef } from "./types.js";
 
@@ -422,6 +423,12 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
       throw new Error(`Duplicate step id "${step.id}"`);
     }
     ids.add(step.id);
+    if (isRunControlKey(step.id)) {
+      throw new Error(
+        `Step id "${step.id}" is reserved: "${RUN_CONTROL_KEYS.join('" and "')}" carry the run's own ` +
+          `settings in the run context, and a step output stored under that name would stand in for them`
+      );
+    }
     // Migration guard: the deprecated `workspace` key was renamed to `permissions`.
     if ((step as unknown as Record<string, unknown>).workspace !== undefined) {
       throw new Error(
@@ -459,6 +466,12 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
       throw new Error(
         `Pipeline "${def.id}": input ${JSON.stringify(name)} is not a valid identifier — ` +
           `input names must match ${RE_INPUT_NAME.source}`
+      );
+    }
+    if (isRunControlKey(name)) {
+      throw new Error(
+        `Pipeline "${def.id}": input "${name}" is reserved: "${RUN_CONTROL_KEYS.join('" and "')}" ` +
+          `are set by the run itself, not declared by a pipeline`
       );
     }
   }
@@ -540,8 +553,8 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
   // at runtime: pipeline inputs plus transitive ancestor step ids.
   // Uses extractPlaceholders from render.ts so the pattern cannot diverge.
   const ancestorMap = pipelineAncestors(expanded.def.steps);
-  // `models` and `provider` ride in the run context but are dropped before
-  // rendering (ctxVars), so they are not placeholders a prompt may name.
+  // The run control keys (RUN_CONTROL_KEYS) ride in the run context but are dropped
+  // before rendering (ctxVars), so they are not placeholders a prompt may name.
   const alwaysAvailable = new Set(expanded.def.inputs);
   for (const step of expanded.def.steps) {
     const promptText = expanded.prompts[step.id];

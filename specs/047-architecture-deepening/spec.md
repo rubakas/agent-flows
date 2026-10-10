@@ -259,8 +259,19 @@ Each is **Proposed**; D5 applies.
   `buildSteps.ts:292` and `load.ts:540`. The route must pass `pipelineBodies` so llm steps
   are not logged twice (`server.ts:1994-1998`).
 - **Direction.** One run-start module under HTTP owns definition lookup, validation, input
-  merge and the definition actually executed (absorbs FR-8 if not already fixed); the route
-  maps refusals to status codes.
+  merge and the definition actually executed (FR-8 is fixed; this module does not absorb
+  it); the route maps refusals to status codes.
+- **Reserved keys (shipped first).** `RUN_CONTROL_KEYS` (`src/canon/runContext.ts`) is the
+  one list of `models` and `provider`. The loader now refuses a step id or an input name in
+  that set, including in a loop body or nested child, since a top-level step's output lands
+  at `ctx[step.id]` and a step named `models` with JSON output would become the next steps'
+  model overrides, past the route's validation. A user pipeline that already uses either
+  name stops loading until it is renamed; no bundled pipeline does. Expanded nested ids are
+  prefixed, so only the standalone load of a child can newly fail.
+- **Scope.** The lead cut FR-10 to the reserved-key rule plus a `startRun` module below the
+  route. Narrowing `RunService.start` and passing the validated definition to
+  `getWorkflow` are deferred: the first relocates the merge rather than removing it and
+  collides with FR-11's `runService.ts` edits, the second re-opens FR-8 option C.
 
 ### FR-11. Run store (Phase 3)
 

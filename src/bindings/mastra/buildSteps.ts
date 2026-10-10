@@ -16,6 +16,7 @@ import {
   resolveStepModel,
 } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
+import { isRunControlKey } from "../../canon/runContext.js";
 import { runCheckStep } from "../../canon/runStep.js";
 import { StepAttemptError, attemptStep } from "../../canon/stepAttempt.js";
 import { recordManifestSpecSource } from "../../runtime/artifactStore.js";
@@ -235,7 +236,7 @@ function resolveRunProfile(stepId: string, ctxData: Ctx, deps: BuildDeps): Provi
 function ctxVars(ctxData: Ctx): Record<string, string> {
   const vars: Record<string, string> = {};
   for (const [k, v] of Object.entries(ctxData)) {
-    if (k === "models" || k === "provider") continue;
+    if (isRunControlKey(k)) continue;
     let serialized: string;
     if (typeof v === "string") {
       serialized = v;
