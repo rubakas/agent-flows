@@ -3,6 +3,10 @@
 // export is only ever called from within server.ts's handleRequest, after
 // the Host/content-type/Origin preamble has already run.
 
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { packageRoot } from "../packageRoot.js";
+import type { Pipelines } from "../canon/pipelines.js";
 import type { RunService } from "../runtime/runService.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
@@ -27,12 +31,45 @@ export function isSafeName(name: string): boolean {
 }
 
 /**
- * Replace any occurrence of the launch root in an error message with the
- * literal string `<root>` so absolute filesystem paths never enter HTTP
- * or SSE payloads.
+ * `message` with every occurrence of each root replaced by `<root>`, longest root
+ * first so a root inside another is not left half-named. A root is also replaced
+ * in its realpath spelling, which is what an error from the filesystem carries.
  */
-export function safePath(message: string, root: string): string {
-  return message.split(root).join("<root>");
+export function redactRoots(message: string, roots: readonly string[]): string {
+  const spellings = new Set<string>();
+  for (const root of roots) {
+    if (root.length <= 1) continue; // "/" would blank every path
+    spellings.add(root);
+    try {
+      spellings.add(realpathSync(root));
+    } catch {
+      // a root that does not exist yet has only the spelling it was given
+    }
+  }
+  let out = message;
+  for (const root of [...spellings].sort((x, y) => y.length - x.length)) {
+    if (root.length > 1) out = out.split(root).join("<root>");
+  }
+  return out;
+}
+
+/**
+ * An error message made safe to put in a response: no layer root of the view, no
+ * package install directory and no home directory survives in it, whichever layer
+ * the failing file lived in. The one redaction every error path uses; a message
+ * redacted against a single root leaks the paths of the other layers.
+ */
+export function redactPaths(
+  message: string,
+  pipelines: Pipelines,
+  extraRoots: readonly string[] = []
+): string {
+  return redactRoots(message, [
+    ...extraRoots,
+    ...pipelines.layers.map((layer) => layer.root),
+    packageRoot(),
+    homedir(),
+  ]);
 }
 
 export function json(res: ServerResponse, status: number, body: unknown): void {
@@ -149,6 +186,11 @@ export async function requireJsonBody(
   return parsed.value;
 }
 
+/** The pinned 400 body for an id that fails isSafeId(); the id is echoed truncated. */
+export function unsafeIdBody(id: string, kind: string): { error: string } {
+  return { error: `${kind} id "${id.slice(0, 100)}" is invalid` };
+}
+
 /**
  * Guard for route ids taken from the URL or request body. Writes the pinned
  * 400 body naming the id kind ("Pipeline" / "Template" / "Run") and returns
@@ -156,7 +198,7 @@ export async function requireJsonBody(
  */
 export function requireSafeId(id: string, kind: string, res: ServerResponse): boolean {
   if (!isSafeId(id)) {
-    json(res, 400, { error: `${kind} id "${id}" is invalid` });
+    json(res, 400, unsafeIdBody(id, kind));
     return false;
   }
   return true;

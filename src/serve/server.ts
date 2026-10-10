@@ -103,8 +103,9 @@ import {
   requireJsonBody,
   requireRunService,
   requireSafeId,
+  unsafeIdBody,
   RequestTooLargeError,
-  safePath,
+  redactPaths,
 } from "./route-helpers.js";
 import { CONTENT_CAP, handleContentRoutes } from "./routes/content.js";
 import { stopProjectDaemon } from "./stop.js";
@@ -502,7 +503,7 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
           return;
         }
         const msg = err instanceof Error ? err.message : String(err);
-        json(res, 500, { error: safePath(msg, root) });
+        json(res, 500, { error: redactPaths(msg, pipelines, [root]) });
       }
     });
   });
@@ -921,6 +922,22 @@ async function refuse(
 }
 
 /**
+ * The 400 for an id that fails isSafeId(), on a route that may carry a body: the
+ * body is drained first, like every other refusal there. Returns true when the id
+ * was refused.
+ */
+async function refuseUnsafeId(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string,
+  kind: string
+): Promise<boolean> {
+  if (isSafeId(id)) return false;
+  await refuse(req, res, 400, unsafeIdBody(id, kind));
+  return true;
+}
+
+/**
  * Bundled mode: every layer of the view is the read-only bundled one, so no
  * edit can possibly apply and the route is refused before any lookup. Returns
  * true when the request was refused.
@@ -1232,7 +1249,7 @@ async function handleRequest(
       });
       json(res, 200, report);
     } catch (err) {
-      const message = (err as Error).message;
+      const message = redactPaths((err as Error).message, ctx.pipelines);
       json(res, message.includes("already exists") ? 409 : 422, { error: message });
     }
     return;
@@ -1338,7 +1355,7 @@ async function handleRequest(
   if (method === "PUT" && promptWriteMatch) {
     const id = decodeURIComponent(promptWriteMatch[1]);
     const stepId = decodeURIComponent(promptWriteMatch[2]);
-    if (!requireSafeId(id, "Pipeline", res)) return;
+    if (await refuseUnsafeId(req, res, id, "Pipeline")) return;
     if (await refuseBundled(req, res, ctx, "Bundled workflows are read-only")) return;
     // A namespaced id belongs to a nested pipeline's file: not a step this
     // route can address, so it is absent rather than refused.
@@ -1386,7 +1403,7 @@ async function handleRequest(
     try {
       ctx.pipelines.check(entry.file.filePath, { prompts: { [stepId]: text } });
     } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, entry.file.layer.root) });
+      json(res, 422, { error: redactPaths((err as Error).message, ctx.pipelines) });
       return;
     }
     // Write to a sibling temp file and rename over the target, so a crash
@@ -1465,7 +1482,7 @@ async function handleRequest(
   if (method === "DELETE" && pipelineDetailMatch) {
     const id = decodeURIComponent(pipelineDetailMatch[1]);
     // Validate the decoded id so that percent-encoded traversal attempts are caught.
-    if (!requireSafeId(id, "Pipeline", res)) return;
+    if (await refuseUnsafeId(req, res, id, "Pipeline")) return;
     // Refuse mutations against the bundled catalog.
     if (await refuseBundled(req, res, ctx, "Cannot delete from the bundled pipeline catalog")) {
       return;
@@ -1588,7 +1605,7 @@ async function handleRequest(
         prompts: promptTexts as Record<string, string>,
       });
     } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, layer.root) });
+      json(res, 422, { error: redactPaths((err as Error).message, ctx.pipelines) });
       return;
     }
     // S9: prompts are deliberately absent from the response — a draft that
@@ -1667,7 +1684,7 @@ async function handleRequest(
     json(res, 422, {
       ok: false,
       reason: "invalid",
-      message: safePath(result.message, layer.root),
+      message: redactPaths(result.message, ctx.pipelines),
     });
     return;
   }
@@ -2262,7 +2279,7 @@ async function handleRequest(
       });
       res.end(yamlText);
     } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, owner.layer.root) });
+      json(res, 422, { error: redactPaths((err as Error).message, ctx.pipelines) });
     }
     return;
   }
@@ -2291,7 +2308,7 @@ async function handleRequest(
       const report = importBundle(bundle, targetRoot, doOverwrite);
       json(res, 200, { ...report, target: target === "repo" ? "repo" : "user", root: targetRoot });
     } catch (err) {
-      json(res, 422, { error: safePath((err as Error).message, targetRoot) });
+      json(res, 422, { error: redactPaths((err as Error).message, ctx.pipelines, [targetRoot]) });
     }
     return;
   }

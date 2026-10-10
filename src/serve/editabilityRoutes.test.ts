@@ -24,7 +24,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
@@ -153,5 +153,71 @@ describe("a layer whose pipelines/ is a link into the package is not editable (M
       else process.env.AGENT_FLOWS_HOME = previousHome;
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+// A message that names a file must not name where on the machine it is. The create
+// target's root used to be the only one redacted, so an error about a file in
+// another layer carried the owner's home directory into the response.
+describe("an error about a file in any layer redacts every root (L1)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let previousHome: string | undefined;
+  let userFile: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "af-redact-")));
+    const projectDir = join(tmpDir, "project");
+    const home = join(tmpDir, "home");
+    const gate = (id: string) =>
+      `id: ${id}\nversion: 1\ndescription: ${id}\ninputs: []\nsteps:\n  - id: a\n    kind: gate\n`;
+    // Both layers exist, so the create target (the repository canon) is NOT the
+    // layer the failing file lives in.
+    mkdirSync(join(projectDir, ".agent-flows", "pipelines"), { recursive: true });
+    writeFileSync(join(projectDir, ".agent-flows", "pipelines", "team.yaml"), gate("team"));
+    mkdirSync(join(home, "workflows", "pipelines"), { recursive: true });
+    userFile = join(home, "workflows", "pipelines", "personal.yaml");
+    writeFileSync(userFile, gate("personal"));
+
+    previousHome = process.env.AGENT_FLOWS_HOME;
+    process.env.AGENT_FLOWS_HOME = home;
+    srv = await startServer({
+      state: resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }),
+      port: 0,
+      dbPath: ":memory:",
+      projectDir,
+    });
+  });
+  after(async () => {
+    await srv.close();
+    if (previousHome === undefined) delete process.env.AGENT_FLOWS_HOME;
+    else process.env.AGENT_FLOWS_HOME = previousHome;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("saving a draft whose user-layer file was deleted names no path on this machine", async () => {
+    const opened = await call(srv.port, "POST", "/api/pipelines/personal/drafts");
+    assert.equal(opened.status, 200, await opened.clone().text());
+    const { draftId } = (await opened.json()) as { draftId: number };
+
+    rmSync(userFile);
+    const res = await call(srv.port, "POST", `/api/drafts/${draftId}/save`);
+
+    const text = await res.text();
+    assert.ok(res.status >= 400, `a draft with no file must not save: ${res.status} ${text}`);
+    assert.ok(text.includes("<root>"), `the failing path must be shown redacted: ${text}`);
+    assert.ok(!text.includes(tmpDir), `a layer root leaked: ${text}`);
+    assert.ok(!text.includes(homedir()), `the home directory leaked: ${text}`);
+  });
+
+  // L2: a refusal on a route that may carry a body drains it first. Observable as the
+  // 413 an oversized body earns, which a refusal that answered early would not give.
+  it("refusing a bundled workflow drains an oversized body first", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/investigate`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: "x".repeat(70_000),
+    });
+    assert.equal(res.status, 413, await res.clone().text());
   });
 });

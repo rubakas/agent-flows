@@ -14,7 +14,7 @@ import { loadProviders, CLI_MODEL_RE } from "../canon/loadProviders.js";
 import { builtInProfileIds, getProfile, type ProviderProfile } from "../canon/registry.js";
 import { isRunControlKey } from "../canon/runContext.js";
 import { resolveArtifactInputs } from "../serve/artifactInputs.js";
-import { safePath } from "../serve/route-helpers.js";
+import { redactPaths } from "../serve/route-helpers.js";
 import type { RunService, StartResult } from "./runService.js";
 import type { Lookup, Pipelines } from "../canon/pipelines.js";
 
@@ -51,11 +51,11 @@ const invalid = (error: string): RunStartOutcome => ({ ok: false, refusal: "inva
 /**
  * Why a pipeline cannot be used, as a clause starting `pipeline "<name>"`. A
  * pipeline that exists but fails to load is not "not found": the loader's reason
- * is shown, with the layer's root path replaced as every route does.
+ * is shown, with every root path redacted as every route does.
  */
-function unresolvedClause(lookup: Lookup, shown: string): string {
+function unresolvedClause(lookup: Lookup, shown: string, pipelines: Pipelines): string {
   if (lookup.kind === "broken") {
-    const reason = safePath(lookup.error.message, lookup.file.layer.root);
+    const reason = redactPaths(lookup.error.message, pipelines);
     return `pipeline "${shown}" fails to load: ${reason}`;
   }
   return `pipeline "${shown}" not found`;
@@ -96,7 +96,7 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
     }
     if (!pipelineDef) {
       return invalid(
-        `Field "models" cannot be validated: ${unresolvedClause(lookup, shownPipeline)}`
+        `Field "models" cannot be validated: ${unresolvedClause(lookup, shownPipeline, deps.pipelines)}`
       );
     }
     const stepIds = new Set(pipelineDef.steps.map((s) => s.id));
@@ -162,7 +162,7 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
   if (explicitInputKeys.length > 0) {
     if (!pipelineDef) {
       return invalid(
-        `Field "inputs" cannot be validated: ${unresolvedClause(lookup, shownPipeline)}`
+        `Field "inputs" cannot be validated: ${unresolvedClause(lookup, shownPipeline, deps.pipelines)}`
       );
     }
     const declared = new Set(pipelineDef.inputs ?? []);
@@ -207,7 +207,7 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
   // the run service and came back as a 500: starting a pipeline the view cannot
   // give us is a caller error.
   if (!pipelineEntry) {
-    const clause = unresolvedClause(lookup, shownPipeline);
+    const clause = unresolvedClause(lookup, shownPipeline, deps.pipelines);
     return invalid(`P${clause.slice(1)}`);
   }
 

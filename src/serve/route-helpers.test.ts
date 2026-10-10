@@ -6,15 +6,19 @@ import {
   mkdtempSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import { layerFrom } from "../canon/layers.js";
+import { pipelinesIn } from "../canon/pipelines.js";
+import { packageRoot } from "../packageRoot.js";
 import { resolveProjectState, type ProjectState } from "../runtime/projectState.js";
 import { RunService, type MastraLike } from "../runtime/runService.js";
-import { isSafeId, isSafeName } from "./route-helpers.js";
+import { isSafeId, isSafeName, redactPaths, redactRoots } from "./route-helpers.js";
 import { startServer, type ServeHandle } from "./server.js";
 
 const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
@@ -115,11 +119,52 @@ describe("readAndDiscardBody — 413 on an oversized body (DELETE /api/pipelines
     });
     assert.equal(res.status, 413, `expected 413, got ${res.status}`);
   });
+
+  // A refusal that answered before reading the body is a refusal that can reset a
+  // client still sending. The unsafe-id 400 used to be written that way on the two
+  // routes that carry a body; it now goes through the same drain as every other
+  // refusal, which is observable as the same 413 on an oversized body.
+  it("an oversized body on DELETE with an unsafe id is drained like any other refusal", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/bad%20id`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: "x".repeat(70_000),
+    });
+    assert.equal(res.status, 413, `expected 413, got ${res.status}`);
+  });
+
+  it("an oversized body on PUT prompt with an unsafe id is drained like any other refusal", async () => {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/pipelines/bad%20id/prompts/step`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: "x".repeat(70_000),
+    });
+    assert.equal(res.status, 413, `expected 413, got ${res.status}`);
+  });
+
+  it("an unsafe id is refused with 400, and echoed at most 100 characters long", async () => {
+    const hostile = "A".repeat(5_000);
+    for (const [method, path] of [
+      ["DELETE", `/api/pipelines/${hostile}`],
+      ["PUT", `/api/pipelines/${hostile}/prompts/step`],
+      ["GET", `/api/export/${hostile}`],
+    ] as const) {
+      const res = await fetch(`http://127.0.0.1:${srv.port}${path}`, {
+        method,
+        ...(method === "GET"
+          ? {}
+          : { headers: { "content-type": "application/json" }, body: "{}" }),
+      });
+      assert.equal(res.status, 400, `${method} ${path.slice(0, 40)}`);
+      const body = (await res.json()) as { error: string };
+      assert.equal(body.error, `Pipeline id "${"A".repeat(100)}" is invalid`);
+    }
+  });
 });
 
-// ── safePath redaction: an unexpected error surfaces as 500 with paths redacted ──
+// ── path redaction: an unexpected error surfaces as 500 with paths redacted ──
 
-describe("safePath redaction — unexpected error surfaces as 500 with <root>", () => {
+describe("path redaction — unexpected error surfaces as 500 with <root>", () => {
   let srv: ServeHandle;
   let tmpRoot: string;
   let tmpPipelinesDir: string;
@@ -232,5 +277,53 @@ describe("dispatch ordering — the editor's suffix routes are not captured by t
       ["def", "graph", "levels"],
       `body must be the preview response, not a save or update one: ${JSON.stringify(body)}`
     );
+  });
+});
+
+describe("redactRoots and redactPaths — no root survives in a response", () => {
+  let tmp: string;
+  before(() => {
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-redact-")));
+  });
+  after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  it("replaces every occurrence of every root", () => {
+    assert.equal(
+      redactRoots("a /r1/x then /r2/y and /r1/z", ["/r1", "/r2"]),
+      "a <root>/x then <root>/y and <root>/z"
+    );
+  });
+
+  it("replaces the longer root first, so a root inside another is not half-named", () => {
+    assert.equal(
+      redactRoots("open /home/u/.agent-flows/x", ["/home/u", "/home/u/.agent-flows"]),
+      "open <root>/x"
+    );
+  });
+
+  it("also replaces a root's realpath spelling", () => {
+    const real = join(tmp, "real");
+    mkdirSync(real);
+    const link = join(tmp, "link");
+    symlinkSync(real, link, "dir");
+    assert.equal(redactRoots(`ENOENT '${real}/x'`, [link]), "ENOENT '<root>/x'");
+    assert.equal(redactRoots(`ENOENT '${link}/x'`, [link]), "ENOENT '<root>/x'");
+  });
+
+  it("never blanks every path by treating / as a root", () => {
+    assert.equal(redactRoots("/etc/hosts", ["/", ""]), "/etc/hosts");
+  });
+
+  it("redacts every layer root of the view, the package root and the home directory", () => {
+    const user = join(tmp, "user");
+    const repo = join(tmp, "repo");
+    const view = pipelinesIn([layerFrom("user", user), layerFrom("repo", repo)]);
+    const message = [user, repo, packageRoot(), homedir()].map((r) => `at ${r}/f`).join("; ");
+
+    const redacted = redactPaths(message, view);
+
+    for (const root of [user, repo, packageRoot(), homedir()]) {
+      assert.ok(!redacted.includes(root), `${root} survived: ${redacted}`);
+    }
   });
 });
