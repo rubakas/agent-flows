@@ -4,13 +4,14 @@
 // daemon's HTTP API rather than owning its own registry, making the comment true
 // for all three surfaces.
 
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { activeProfileIdOrUnknown, resolveStepModel } from "../canon/registry.js";
 import { UnknownStepStatusError, stepTransitionOf } from "../canon/stepTransition.js";
 import {
   writeRunArtifact,
   upsertManifestEntry,
   listPersistedRuns,
+  locateRun,
   readPersistedRun,
 } from "./artifactStore.js";
 import { runJudge } from "./gateJudge.js";
@@ -1650,7 +1651,13 @@ export class RunService {
    */
   getManifestPath(runId: string): string | undefined {
     const record = this.registry.get(runId);
-    if (!record) return undefined;
+    if (!record) {
+      // A run this daemon no longer holds — a chained stage after a restart is
+      // in its anchor's directory — is located through its artifact.
+      if (this.runsDir === undefined) return undefined;
+      const located = locateRun(this.runsDir, runId);
+      return located === undefined ? undefined : join(located.dir, "manifest.json");
+    }
     const artifactDir = this.artifactDirFor(record);
     if (!artifactDir) return undefined;
     return join(artifactDir, "manifest.json");
@@ -1718,8 +1725,8 @@ export class RunService {
 
   /**
    * Where a run's events file and step outputs live, for the routes that serve
-   * them. A run the registry no longer holds is located through its artifact
-   * path, which already passed the state-root containment check (spec 034).
+   * them. A run the registry no longer holds is located by its own id under the
+   * runs directory — a chained stage in its anchor's directory (spec 047 FR-11).
    */
   logLocation(runId: string): { dir: string; pipelineId: string } | undefined {
     const record = this.registry.get(runId);
@@ -1728,10 +1735,6 @@ export class RunService {
       return { dir: record.artifactDir, pipelineId: record.pipelineId };
     }
     if (this.runsDir === undefined) return undefined;
-    const persisted = readPersistedRun(this.runsDir, runId);
-    if (!persisted) return undefined;
-    const { artifactPath, pipelineId } = persisted;
-    if (typeof artifactPath !== "string" || typeof pipelineId !== "string") return undefined;
-    return { dir: dirname(artifactPath), pipelineId };
+    return locateRun(this.runsDir, runId);
   }
 }

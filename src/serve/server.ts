@@ -70,7 +70,7 @@ import {
   bundledPromptsDir,
   packageVersion,
 } from "../packageRoot.js";
-import { readManifest } from "../runtime/artifactStore.js";
+import { locateRun, readManifest } from "../runtime/artifactStore.js";
 import {
   removeDaemonRecordIfOwned,
   writeDaemonRecord,
@@ -2071,8 +2071,13 @@ async function handleRequest(
     let runDir = join(ctx.state.runsDir, id);
     if (!existsSync(join(runDir, "manifest.json"))) {
       // A chained stage writes into its anchor's directory, so its own id has
-      // none; the live run knows where it wrote.
-      const chained = ctx.runService?.getManifestPath(id);
+      // none; the registry knows where a live run wrote, and a run from before
+      // a restart is located by its artifact.
+      let chained = ctx.runService?.getManifestPath(id);
+      if (chained === undefined) {
+        const anchorDir = locateRun(ctx.state.runsDir, id)?.dir;
+        if (anchorDir !== undefined) chained = join(anchorDir, "manifest.json");
+      }
       if (chained === undefined || !existsSync(chained)) {
         runNotFound(res, id);
         return;

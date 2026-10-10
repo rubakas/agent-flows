@@ -1005,6 +1005,43 @@ describe("daemon down — reads degrade, writes do not", () => {
     assert.equal(out.lastPersistedStatus, "orphaned");
   });
 
+  it("reports the run's own pipeline when a chained stage shares its directory", async () => {
+    // The anchor is "investigate"; its child "build" sorts first in a directory
+    // listing, so a reader that takes the first events file reports the child's
+    // pipeline under the anchor's id.
+    rmSync(runDir, { recursive: true, force: true });
+    mkdirSync(runDir, { recursive: true });
+    const stage = (pipelineId: string, runId: string) => {
+      writeFileSync(
+        join(runDir, `${pipelineId}.events.jsonl`),
+        JSON.stringify({
+          runId,
+          pipelineId,
+          stepId: "s",
+          at: "2026-10-10T10:00:00.000Z",
+          seq: 1,
+          kind: "step.start",
+        }) + "\n"
+      );
+      writeFileSync(
+        join(runDir, `${pipelineId}.json`),
+        JSON.stringify({ runId, pipelineId, status: "succeeded" })
+      );
+    };
+    stage("investigate", RUN_ID);
+    stage("build", "run-orphan-child");
+    daemonGone();
+
+    const anchor = await getRunState(RUN_ID);
+    assert.equal(anchor.pipelineId, "investigate");
+    assert.equal(anchor.eventsPath, join(runDir, "investigate.events.jsonl"));
+
+    const child = await getRunState("run-orphan-child");
+    assert.equal(child.pipelineId, "build", "a chained child resolves through its anchor's dir");
+    assert.equal(child.eventsPath, join(runDir, "build.events.jsonl"));
+    assert.equal(child.lastPersistedStatus, "succeeded");
+  });
+
   it("refuses a run id that is a path rather than a run id", async () => {
     daemonGone();
     // The fallback fires whenever the daemon is retired — routinely — so an

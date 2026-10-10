@@ -7,7 +7,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { isSafeRunId } from "../../runtime/artifactStore.js";
+import { isSafeRunId, locateRun } from "../../runtime/artifactStore.js";
 import { resolveProjectState } from "../../runtime/projectState.js";
 import { hasStopped, runPhase } from "../../runtime/runStatus.js";
 import { readRunLog, runLogFile } from "../../runtime/stepLog.js";
@@ -578,19 +578,22 @@ function readRunFromDisk(runId: string): DiskRun {
     );
   }
   const { runsDir } = resolveProjectState(resolveProjectDir());
-  const dir = join(runsDir, runId);
-  if (!existsSync(dir)) {
+  // By the run's own id: a chained stage has no directory of its own, and its
+  // anchor's directory holds the events file of every stage, so "the first
+  // events file in the directory" may be a different run's.
+  const located = locateRun(runsDir, runId);
+  const dir = located?.dir ?? join(runsDir, runId);
+  if (located === undefined && !existsSync(dir)) {
     throw new Error(
       `agent-flows MCP: the daemon is unreachable and run "${runId}" has no directory ` +
         `under ${runsDir}, so there is nothing to report. Check the run id.`
     );
   }
   const entries = readdirSync(dir);
-  const events = entries.find((name) => name.endsWith(".events.jsonl"));
+  // The pipeline id may come from the artifact's own body, which is not ours to
+  // trust in a path join.
   const pipelineId =
-    events !== undefined
-      ? events.slice(0, -".events.jsonl".length)
-      : entries.find((name) => name.endsWith(".json") && name !== "manifest.json")?.slice(0, -5);
+    located !== undefined && isSafeRunId(located.pipelineId) ? located.pipelineId : undefined;
   const lastWriteMs = lastWriteOf(dir, entries);
   return {
     dir,

@@ -1261,10 +1261,136 @@ describe("listPersistedRuns / readPersistedRun — runs survive the daemon", () 
         "test",
         "the directory's own run must win over a later stage that shares its directory"
       );
-      assert.equal(listPersistedRuns(runsDir).length, 1, "one directory is one listed run");
+      // Deliberately changed by spec 047 FR-11: a chained stage is a run in its own
+      // right (it has its own id), so the list carries one row per run, not one per
+      // directory. Counting directories hid every chained stage after a restart.
+      assert.deepEqual(
+        listPersistedRuns(runsDir)
+          .map((r) => r.runId)
+          .sort(),
+        ["run-anchor", "run-stage-2"],
+        "a directory holding two runs lists two runs, each under its own id"
+      );
     } finally {
       rmSync(runsDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Spec 047 FR-11: a run is found by its own id ─────────────────────────────
+
+describe("spec 047 FR-11: locating a run by its own id after a restart", () => {
+  /** A service with an empty registry over the same runs dir — the daemon after a restart. */
+  function restarted(runsDir: string): RunService {
+    return new RunService(
+      makeMastra(makeMockRun("unused", successResult())),
+      undefined,
+      runsDir,
+      stubProfile
+    );
+  }
+
+  it("finds a chained child by its own id, in its anchor's directory", async () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const anchorId = "run-locate-anchor";
+    const childId = "run-locate-child";
+    const chainDir = join(runsDir, anchorId);
+
+    const first = new RunService(
+      makeMastra(makeMockRun(anchorId, successResult())),
+      undefined,
+      runsDir,
+      stubProfile
+    );
+    await first.start("investigate", {});
+    await flushAsync();
+    const second = new RunService(
+      makeMastra(makeMockRun(childId, successResult())),
+      undefined,
+      runsDir,
+      stubProfile
+    );
+    await second.start("spec-creation", {}, { chainArtifactDir: chainDir });
+    await flushAsync();
+
+    const fresh = restarted(runsDir);
+
+    const child = fresh.get(childId);
+    assert.equal(child?.runId, childId);
+    assert.equal(child?.pipelineId, "spec-creation", "the child's own state, not its anchor's");
+    assert.equal(child?.source, "disk");
+    assert.equal(fresh.get(anchorId)?.pipelineId, "investigate", "the anchor keeps its own");
+
+    const listed = fresh.list().map((r) => r.runId);
+    assert.ok(listed.includes(childId), "a chained child is a listed run");
+    assert.ok(listed.includes(anchorId));
+
+    assert.deepEqual(fresh.logLocation(childId), { dir: chainDir, pipelineId: "spec-creation" });
+    assert.equal(fresh.getManifestPath(childId), join(chainDir, "manifest.json"));
+  });
+
+  it("does not find a run whose artifact a same-pipeline re-run overwrote", async () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const firstId = "run-overwritten";
+    const secondId = "run-overwriter";
+    const dir = join(runsDir, firstId);
+
+    const first = new RunService(
+      makeMastra(makeMockRun(firstId, successResult())),
+      undefined,
+      runsDir,
+      stubProfile
+    );
+    await first.start("investigate", {});
+    await flushAsync();
+    const second = new RunService(
+      makeMastra(makeMockRun(secondId, successResult())),
+      undefined,
+      runsDir,
+      stubProfile
+    );
+    // Same pipeline into the same directory: investigate.json now describes the second run.
+    await second.start("investigate", {}, { chainArtifactDir: dir });
+    await flushAsync();
+
+    assert.equal(
+      readPersistedRun(runsDir, firstId),
+      undefined,
+      "the overwritten run is gone; the file in its directory belongs to another run"
+    );
+    assert.equal(readPersistedRun(runsDir, secondId)?.runId, secondId);
+    assert.deepEqual(
+      listPersistedRuns(runsDir).map((r) => r.runId),
+      [secondId],
+      "the list must not show the overwritten run under the survivor's state"
+    );
+    assert.equal(restarted(runsDir).get(firstId), undefined);
+  });
+
+  it("omits settledAt on read for a run persisted at a gate or mid-flight", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const dir = join(runsDir, "run-gated");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "investigate.json"),
+      JSON.stringify({
+        runId: "run-gated",
+        pipelineId: "investigate",
+        status: "awaiting_approval",
+        provenance: {
+          pipelineId: "investigate",
+          profileId: "p",
+          transportPerStep: {},
+          startedAt: "2026-10-10T10:00:00.000Z",
+          settledAt: "2026-10-10T10:05:00.000Z",
+        },
+      })
+    );
+
+    const row = listPersistedRuns(runsDir).find((r) => r.runId === "run-gated");
+    assert.equal(row?.status, "awaiting_approval");
+    assert.equal("settledAt" in (row ?? {}), false, "a suspended run has not settled");
+    assert.equal("settledAt" in (readPersistedRun(runsDir, "run-gated") ?? {}), false);
   });
 });
 

@@ -4400,6 +4400,50 @@ describe("FR-006: GET /api/runs/:id/manifest — disk fallback, no live run requ
     assert.equal(body.stages[0].stageId, "spec-creation");
   });
 
+  it("serves the anchor's manifest for a chained stage the registry has never seen", async () => {
+    // Spec 047 FR-11: after a restart nothing in memory says where the child
+    // wrote, but its artifact names its own run id.
+    const anchorId = "ae3eff75-dead-beef-cafe-000000000002";
+    const childId = "ae3eff75-dead-beef-cafe-000000000003";
+    const runDir = join(state.runsDir, anchorId);
+    mkdirSync(runDir, { recursive: true });
+    for (const [pipelineId, runId] of [
+      ["investigate", anchorId],
+      ["spec-creation", childId],
+    ]) {
+      writeFileSync(
+        join(runDir, `${pipelineId}.json`),
+        JSON.stringify({ runId, pipelineId, status: "succeeded" }),
+        "utf8"
+      );
+    }
+    writeFileSync(
+      join(runDir, "manifest.json"),
+      JSON.stringify({
+        runId: anchorId,
+        startedAt: "2026-09-07T00:00:00.000Z",
+        status: "completed",
+        stages: [
+          {
+            stageId: "investigate",
+            artifactPath: join(runDir, "investigate.json"),
+            profileId: "anthropic",
+            status: "succeeded",
+            settledAt: "2026-09-07T00:01:00.000Z",
+          },
+        ],
+      }),
+      "utf8"
+    );
+
+    const res = await fetch(
+      `http://127.0.0.1:${srv.port}/api/runs/${encodeURIComponent(childId)}/manifest`
+    );
+    assert.equal(res.status, 200, `expected 200; body: ${await res.clone().text()}`);
+    const body = (await res.json()) as { runId: string };
+    assert.equal(body.runId, anchorId, "the manifest is the anchor's");
+  });
+
   it("returns 404 when no run directory exists on disk for the id", async () => {
     const res = await fetch(`http://127.0.0.1:${srv.port}/api/runs/no-such-run-abcdef123/manifest`);
     assert.equal(res.status, 404);

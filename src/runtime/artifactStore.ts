@@ -9,6 +9,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
+import { runPhase } from "./runStatus.js";
 import { runSubject } from "./runSubject.js";
 
 // ── Provenance types ──────────────────────────────────────────────────────────
@@ -417,21 +418,25 @@ export function isSafeRunId(runId: string): boolean {
   );
 }
 
+/** One parsed artifact file in a run directory. */
+interface ArtifactFile {
+  artifact: Record<string, unknown>;
+  path: string;
+}
+
+/** What a run directory holds: the artifacts that parsed, and the first that did not. */
+interface RunDirScan {
+  artifacts: ArtifactFile[];
+  failure?: { error: string; path: string };
+}
+
 /**
- * Pick the artifact file describing a run inside its directory.
- *
- * A chained run writes every stage's artifact into the anchor run's directory
- * (spec 029 FR-006), so the directory can hold several. The one whose own
- * `runId` matches the directory wins; otherwise the latest-settling artifact
- * is used, which is the stage the directory most recently describes.
+ * Parse every artifact file in a run directory (the `*.json` files that are not
+ * the manifest). A chained run writes every stage's artifact into its anchor's
+ * directory (spec 029 FR-006), so one directory can hold several runs.
+ * Undefined when the directory cannot be read.
  */
-function pickArtifact(
-  runDir: string,
-  runId: string
-):
-  | { artifact: Record<string, unknown>; path: string }
-  | { error: string; path: string }
-  | undefined {
+function scanRunDir(runDir: string): RunDirScan | undefined {
   let entries: string[];
   try {
     entries = readdirSync(runDir);
@@ -439,10 +444,9 @@ function pickArtifact(
     return undefined;
   }
 
-  const candidates: { artifact: Record<string, unknown>; path: string }[] = [];
-  let failure: { error: string; path: string } | undefined;
-
-  for (const entry of entries) {
+  const artifacts: ArtifactFile[] = [];
+  let failure: RunDirScan["failure"];
+  for (const entry of entries.sort()) {
     if (!entry.endsWith(".json") || entry === "manifest.json") continue;
     const path = join(runDir, entry);
     try {
@@ -451,22 +455,128 @@ function pickArtifact(
         failure ??= { error: "artifact is not a JSON object", path };
         continue;
       }
-      candidates.push({ artifact: parsed as Record<string, unknown>, path });
+      artifacts.push({ artifact: parsed as Record<string, unknown>, path });
     } catch (err) {
       // FR-012: remember the failure. A run whose artifact will not parse must
       // be reported as unreadable, not quietly omitted from the list.
       failure ??= { error: err instanceof Error ? err.message : String(err), path };
     }
   }
+  return failure === undefined ? { artifacts } : { artifacts, failure };
+}
 
-  if (candidates.length === 0) return failure;
+/**
+ * Whose artifact this is. The artifact's own `runId`; an artifact with none
+ * (written before the field existed) belongs to the directory it sits in.
+ */
+function ownerOf(artifact: Record<string, unknown>, dirName: string): string {
+  return typeof artifact.runId === "string" ? artifact.runId : dirName;
+}
 
-  const own = candidates.find((c) => c.artifact.runId === runId);
-  if (own) return own;
+/** The pipeline an artifact file is named for: `<pipelineId>.json`. */
+function stemOf(path: string): string {
+  return basename(path, ".json");
+}
 
-  return candidates.sort((a, b) => settledAtOf(a.artifact).localeCompare(settledAtOf(b.artifact)))[
-    candidates.length - 1
-  ];
+/** Where a run was found, and what describes it there. */
+type RunMatch =
+  | { kind: "artifact"; dir: string; path: string; artifact: Record<string, unknown> }
+  | { kind: "unreadable"; dir: string; path: string; error: string }
+  | { kind: "events"; dir: string; pipelineId: string };
+
+const EVENTS_SUFFIX = ".events.jsonl";
+
+/**
+ * A run in its own directory: the artifact that names it, else the one broken
+ * artifact that might, else — for a run that has not written an artifact yet —
+ * its events file.
+ *
+ * An events file whose pipeline already has an artifact belonging to a
+ * DIFFERENT run is that run's, not this one's.
+ */
+function findInOwnDir(runsDir: string, runId: string): RunMatch | undefined {
+  const dir = join(runsDir, runId);
+  const scan = scanRunDir(dir);
+  if (scan === undefined) return undefined;
+
+  const own = scan.artifacts.find((c) => ownerOf(c.artifact, runId) === runId);
+  if (own) return { kind: "artifact", dir, ...own };
+  if (scan.failure) return { kind: "unreadable", dir, ...scan.failure };
+
+  const claimed = new Set(scan.artifacts.map((c) => stemOf(c.path)));
+  const events = readdirSync(dir)
+    .filter((name) => name.endsWith(EVENTS_SUFFIX))
+    .map((name) => name.slice(0, -EVENTS_SUFFIX.length))
+    .filter((pipelineId) => !claimed.has(pipelineId))
+    .sort()[0];
+  return events === undefined ? undefined : { kind: "events", dir, pipelineId: events };
+}
+
+/**
+ * A chained run in some other run's directory: the artifact anywhere under
+ * runsDir whose own `runId` is this one's.
+ *
+ * Cost: one readdir of runsDir plus a read-and-parse of every artifact in every
+ * run directory. It runs only when the run's own directory does not describe it
+ * — a chained child after a restart, or an id nobody has heard of — never on
+ * the way to a run that is where its id says it is.
+ *
+ * Not resolvable: a stage chained into a directory outside runsDir (a
+ * cross-project anchor), which this project's state does not contain.
+ */
+function findByScan(runsDir: string, runId: string): RunMatch | undefined {
+  let dirEntries: string[];
+  try {
+    dirEntries = readdirSync(runsDir);
+  } catch {
+    return undefined;
+  }
+  for (const name of dirEntries) {
+    if (name === runId || !isSafeRunId(name)) continue;
+    const dir = join(runsDir, name);
+    const scan = scanRunDir(dir);
+    const found = scan?.artifacts.find((c) => c.artifact.runId === runId);
+    if (found) return { kind: "artifact", dir, ...found };
+  }
+  return undefined;
+}
+
+/**
+ * Find the run `runId` under runsDir. The artifact whose own runId matches is
+ * the run; there is no fallback to "the latest one in the directory", because
+ * that artifact may be another run's, or may have overwritten this one's.
+ */
+function findRun(runsDir: string, runId: string): RunMatch | undefined {
+  if (!isSafeRunId(runId)) return undefined;
+  return findInOwnDir(runsDir, runId) ?? findByScan(runsDir, runId);
+}
+
+/** Where a run's files live. */
+export interface RunLocation {
+  /** The directory holding the run's artifact, events file and manifest. */
+  dir: string;
+  /**
+   * The run's pipeline, as its artifact declares it (the file's own name when it
+   * declares none; the events file's name for a run with no artifact yet). The
+   * artifact is untrusted input, so a caller joining this into a path must
+   * validate it first.
+   */
+  pipelineId: string;
+}
+
+/**
+ * Locate a run by its own id (spec 047 FR-11). A chained stage lives in its
+ * anchor's directory, so the id is not always a directory name.
+ */
+export function locateRun(runsDir: string, runId: string): RunLocation | undefined {
+  const match = findRun(runsDir, runId);
+  if (match === undefined) return undefined;
+  if (match.kind === "events") return { dir: match.dir, pipelineId: match.pipelineId };
+  const declared = match.kind === "artifact" ? match.artifact.pipelineId : undefined;
+  return {
+    dir: match.dir,
+    pipelineId: typeof declared === "string" ? declared : stemOf(match.path),
+  };
 }
 
 function provenanceOf(artifact: Record<string, unknown>): Record<string, unknown> {
@@ -509,6 +619,19 @@ function subjectOf(artifact: unknown): { subject?: string } {
   return subject === undefined ? {} : { subject };
 }
 
+/**
+ * `settledAt` as the reader reports it: only for a run that has settled. The
+ * artifact's provenance records the last write, which for a run suspended at a
+ * gate is the suspension, so reading it back as "settled" contradicts the list's
+ * own contract.
+ */
+function reportedSettledAt(artifact: Record<string, unknown>): { settledAt?: string } {
+  const settledAt = settledAtOf(artifact);
+  if (settledAt === "") return {};
+  const status = typeof artifact.status === "string" ? artifact.status : "unreadable";
+  return runPhase({ status, source: "disk" }) === "terminal" ? { settledAt } : {};
+}
+
 export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
   let dirEntries: string[];
   try {
@@ -518,43 +641,47 @@ export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
   }
 
   const summaries: PersistedRunSummary[] = [];
-  for (const runId of dirEntries) {
-    if (!isSafeRunId(runId)) continue;
-    const runDir = join(runsDir, runId);
+  for (const dirName of dirEntries) {
+    if (!isSafeRunId(dirName)) continue;
+    const runDir = join(runsDir, dirName);
     try {
       if (!statSync(runDir).isDirectory()) continue;
     } catch {
       continue;
     }
 
-    const picked = pickArtifact(runDir, runId);
-    if (picked === undefined) continue;
-    if ("error" in picked) {
+    const scan = scanRunDir(runDir);
+    if (scan === undefined) continue;
+    if (scan.artifacts.length === 0) {
+      if (scan.failure === undefined) continue;
       summaries.push({
-        runId,
+        runId: dirName,
         pipelineId: "unknown",
         status: "unreadable",
         createdAt: startedAtOf({}, runDir),
         source: "disk",
-        error: picked.error,
-        path: picked.path,
+        error: scan.failure.error,
+        path: scan.failure.path,
       });
       continue;
     }
 
-    const { artifact } = picked;
-    const pipelineId = provenanceOf(artifact).pipelineId ?? artifact.pipelineId;
-    summaries.push({
-      runId,
-      pipelineId: typeof pipelineId === "string" ? pipelineId : "unknown",
-      status: typeof artifact.status === "string" ? artifact.status : "unreadable",
-      createdAt: startedAtOf(artifact, runDir),
-      ...(settledAtOf(artifact) !== "" ? { settledAt: settledAtOf(artifact) } : {}),
-      // A restored run names its subject the same way a live one does: the
-      // artifact is a serialised GetResult, so the invocation is right there.
-      ...subjectOf(artifact),
-      source: "disk",
-    });
+    // One row per run: a directory holds its anchor's artifact and the artifact
+    // of every stage chained into it, each under its own id.
+    for (const { artifact } of scan.artifacts) {
+      const pipelineId = provenanceOf(artifact).pipelineId ?? artifact.pipelineId;
+      summaries.push({
+        runId: ownerOf(artifact, dirName),
+        pipelineId: typeof pipelineId === "string" ? pipelineId : "unknown",
+        status: typeof artifact.status === "string" ? artifact.status : "unreadable",
+        createdAt: startedAtOf(artifact, runDir),
+        ...reportedSettledAt(artifact),
+        // A restored run names its subject the same way a live one does: the
+        // artifact is a serialised GetResult, so the invocation is right there.
+        ...subjectOf(artifact),
+        source: "disk",
+      });
+    }
   }
   return summaries;
 }
@@ -562,38 +689,37 @@ export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
 /**
  * Rebuild one run's full state from its artifact (FR-010).
  *
- * Returns undefined when the run has no directory — the caller answers 404.
- * The artifact already holds exactly what GET /api/runs/:id returned when the
- * run settled (it is a serialised GetResult plus provenance), so the fields are
- * passed through rather than re-derived; `provenance` is kept so a reader can
- * still see which profile produced it.
+ * Returns undefined when no artifact names this run — the caller answers 404.
+ * A chained stage is found in its anchor's directory. The artifact already
+ * holds exactly what GET /api/runs/:id returned when the run settled (it is a
+ * serialised GetResult plus provenance), so the fields are passed through
+ * rather than re-derived; `provenance` is kept so a reader can still see which
+ * profile produced it.
  */
 export function readPersistedRun(runsDir: string, runId: string): PersistedRun | undefined {
-  if (!isSafeRunId(runId)) return undefined;
-  const runDir = join(runsDir, runId);
-  const picked = pickArtifact(runDir, runId);
-  if (picked === undefined) return undefined;
-  if ("error" in picked) {
+  const match = findRun(runsDir, runId);
+  if (match === undefined || match.kind === "events") return undefined;
+  if (match.kind === "unreadable") {
     return {
       runId,
       status: "unreadable",
       source: "disk",
-      error: picked.error,
-      path: picked.path,
+      error: match.error,
+      path: match.path,
       steps: {},
       gateDecisions: [],
     };
   }
 
-  const { artifact, path } = picked;
+  const { artifact, path, dir } = match;
   return {
     ...artifact,
     runId,
     status: typeof artifact.status === "string" ? artifact.status : "unreadable",
     steps: typeof artifact.steps === "object" && artifact.steps !== null ? artifact.steps : {},
     gateDecisions: Array.isArray(artifact.gateDecisions) ? artifact.gateDecisions : [],
-    createdAt: startedAtOf(artifact, runDir),
-    ...(settledAtOf(artifact) !== "" ? { settledAt: settledAtOf(artifact) } : {}),
+    createdAt: startedAtOf(artifact, dir),
+    ...reportedSettledAt(artifact),
     artifactPath: path,
     source: "disk",
   };
