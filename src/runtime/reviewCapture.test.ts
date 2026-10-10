@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -14,6 +14,8 @@ import {
   GitTimeoutError,
   captureGit,
   digestBodies,
+  fetchSpecRef,
+  ghRunnerFor,
   git,
   renderMaterial,
   resolveSpecRefs,
@@ -201,5 +203,52 @@ describe("control characters in what git prints", () => {
     if (!capture.available) return;
     assert.ok(capture.bodies.commits.includes("tab\tin the subject"));
     assert.match(capture.bodies.diff, /\+body/u);
+  });
+});
+
+describe("a gh call that times out", () => {
+  const ref = { owner: "o", repo: "r", number: "5", kind: "unknown", label: "o/r#5" } as const;
+
+  it("is not followed by `gh issue view`: a hung network does not answer a second question", () => {
+    const calls: string[][] = [];
+    const outcome = fetchSpecRef((args) => {
+      calls.push([...args]);
+      return { ok: false, stdout: "", reason: "gh timed out", timedOut: true };
+    }, ref);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], "pr");
+    assert.equal(outcome, "gh pr view timed out");
+  });
+
+  it("still falls back to `gh issue view` when `gh pr view` merely failed", () => {
+    const calls: string[][] = [];
+    fetchSpecRef((args) => {
+      calls.push([...args]);
+      return { ok: false, stdout: "", reason: "not found" };
+    }, ref);
+    assert.deepEqual(
+      calls.map((call) => call[0]),
+      ["pr", "issue"]
+    );
+  });
+
+  it("is reported by the default runner as timedOut", () => {
+    const bin = mkdtempSync(join(tmpdir(), "af-capture-core-gh-"));
+    cleanups.push(() => rmSync(bin, { recursive: true, force: true }));
+    writeFileSync(join(bin, "gh"), "#!/bin/sh\nexec sleep 5\n");
+    chmodSync(join(bin, "gh"), 0o755);
+    const previousPath = process.env.PATH;
+    const previousTimeout = process.env.AF_REVIEW_GH_TIMEOUT_MS;
+    process.env.PATH = `${bin}:${previousPath ?? ""}`;
+    process.env.AF_REVIEW_GH_TIMEOUT_MS = "200";
+    try {
+      const outcome = ghRunnerFor(bin)(["pr", "view", "1"]);
+      assert.equal(outcome.ok, false);
+      assert.equal(outcome.timedOut, true);
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousTimeout === undefined) delete process.env.AF_REVIEW_GH_TIMEOUT_MS;
+      else process.env.AF_REVIEW_GH_TIMEOUT_MS = previousTimeout;
+    }
   });
 });

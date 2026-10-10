@@ -682,8 +682,6 @@ describe("daemon and plugin spec-source resolution, on the same references", () 
     name: string;
     value: string;
     gh: (calls: string[][]) => Gh;
-    /** Differences that are declared; none means the two agree on everything. */
-    differs?: { reason: string; fields: string[] };
   }
 
   const answer =
@@ -749,11 +747,6 @@ describe("daemon and plugin spec-source resolution, on the same references", () 
         calls.push([...args]);
         return { ok: false, stdout: "", reason: "gh timed out", timedOut: true };
       },
-      differs: {
-        reason:
-          "the plugin stops after `gh pr view` times out; the daemon then asks `gh issue view` too",
-        fields: ["calls", "notes"],
-      },
     },
   ];
 
@@ -770,7 +763,7 @@ describe("daemon and plugin spec-source resolution, on the same references", () 
       const actual = ["calls", "literal", "full", "notes", "text"].filter(
         (field) => JSON.stringify(left[field]) !== JSON.stringify(right[field])
       );
-      assert.deepEqual(actual, spec.differs?.fields ?? []);
+      assert.deepEqual(actual, []);
     });
   }
 });

@@ -193,8 +193,12 @@ const MAX_SPEC_SOURCE_FETCHES = 10;
 /**
  * Deadline for one `gh` call. spawnSync blocks the caller's event loop, so a
  * hung network call is a hung process — this is the only thing bounding it.
+ * The env override exists so a test can exercise the timeout.
  */
-const GH_TIMEOUT_MS = 20_000;
+function ghTimeoutMs(): number {
+  const override = Number(process.env.AF_REVIEW_GH_TIMEOUT_MS);
+  return Number.isInteger(override) && override > 0 ? override : 20_000;
+}
 
 /**
  * One path segment of a GitHub reference: an owner or a repository name.
@@ -237,6 +241,8 @@ export interface GhOutcome {
   ok: boolean;
   stdout: string;
   reason: string;
+  /** True when the call was killed at its deadline rather than failing by itself. */
+  timedOut?: boolean;
 }
 
 /**
@@ -295,10 +301,16 @@ export function ghRunnerFor(projectDir: string): GhRunner {
         cwd: projectDir,
         encoding: "utf8",
         maxBuffer: GIT_MAX_BUFFER,
-        timeout: GH_TIMEOUT_MS,
+        timeout: ghTimeoutMs(),
       });
       if (result.error !== null && result.error !== undefined) {
-        return { ok: false, stdout: "", reason: result.error.message };
+        const timedOut = (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
+        return {
+          ok: false,
+          stdout: "",
+          reason: result.error.message,
+          ...(timedOut ? { timedOut } : {}),
+        };
       }
       if (result.status !== 0) {
         const stderr = (result.stderr ?? "").trim().split("\n")[0] ?? "";
@@ -421,6 +433,14 @@ export function fetchSpecRef(gh: GhRunner, ref: SpecRef): FetchedRef | string {
   for (const tool of tools) {
     const outcome = gh([tool, "view", ref.number, "--repo", repoArg, "--json", "title,body,url"]);
     if (!outcome.ok) {
+      // A hung network does not get better by asking the same service a second
+      // question: record the timeout and stop. This bounds one reference at one
+      // deadline, not the capture: N references can still wait N deadlines
+      // (MAX_SPEC_SOURCE_FETCHES of them), each blocking the caller's event loop.
+      if (outcome.timedOut === true) {
+        reason = `gh ${tool} view timed out`;
+        break;
+      }
       reason = outcome.reason;
       continue;
     }
