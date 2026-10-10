@@ -84,6 +84,32 @@ export default tseslint.config(
     },
   },
 
+  // ── One way to load a pipeline (spec 047 FR-12) ───────────────────────────
+  // `loadPipeline` takes a bare file path and, without a resolver, finds a nested
+  // child as a sibling of its parent — which is wrong for a fork whose children
+  // live in another layer. Production code loads through src/canon/pipelines.ts,
+  // which resolves nesting through the merged view. Tests may use the loader
+  // directly to pin its own behaviour.
+  {
+    files: ["src/**/*.ts"],
+    ignores: ["src/**/*.test.ts", "src/canon/pipelines.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/load.js", "./load.js"],
+              importNames: ["loadPipeline"],
+              message:
+                "Load pipelines through src/canon/pipelines.ts (projectPipelines, bundledPipelines, pipelinesIn): loadPipeline alone resolves a nested child as a sibling file.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // ── Test-file overrides ───────────────────────────────────────────────────
   {
     files: ["**/*.test.ts"],
