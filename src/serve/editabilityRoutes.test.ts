@@ -28,6 +28,10 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import { eq } from "drizzle-orm";
+import { canonSource } from "../db/schema.js";
+import { makeDb, type DbInstance } from "../db/index.js";
+import { getDraft } from "../canon/draftStore.js";
 import { packageRoot } from "../packageRoot.js";
 import { resolveProjectState } from "../runtime/projectState.js";
 import { startServer, type ServeHandle } from "./server.js";
@@ -219,5 +223,88 @@ describe("an error about a file in any layer redacts every root (L1)", () => {
       body: "x".repeat(70_000),
     });
     assert.equal(res.status, 413, await res.clone().text());
+  });
+});
+
+// A draft stores which file it edits; preview and save re-check that file against the
+// layers, because the stored row is data the route did not just validate. In a
+// project with more than one layer the row can name a file the draft was never
+// opened on (W1): one in the bundled layer is refused, one in no layer is not found.
+describe("preview and save re-check the file a stored draft names (W1)", () => {
+  let srv: ServeHandle;
+  let tmpDir: string;
+  let previousHome: string | undefined;
+  let db: DbInstance;
+  let outside: string;
+
+  before(async () => {
+    tmpDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "af-guard-")));
+    const projectDir = join(tmpDir, "project");
+    const home = join(tmpDir, "home");
+    mkdirSync(join(projectDir, ".agent-flows", "pipelines"), { recursive: true });
+    writeFileSync(
+      join(projectDir, ".agent-flows", "pipelines", "team.yaml"),
+      "id: team\nversion: 1\ndescription: team\ninputs: []\nsteps:\n  - id: a\n    kind: gate\n"
+    );
+    // A real pipeline file that no layer of this project contains.
+    outside = join(tmpDir, "outside");
+    mkdirSync(outside);
+    writeFileSync(
+      join(outside, "stray.yaml"),
+      "id: stray\nversion: 1\ndescription: stray\ninputs: []\nsteps:\n  - id: a\n    kind: gate\n"
+    );
+
+    const dbPath = join(tmpDir, "drafts.sqlite");
+    previousHome = process.env.AGENT_FLOWS_HOME;
+    process.env.AGENT_FLOWS_HOME = home;
+    srv = await startServer({
+      state: resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }),
+      port: 0,
+      dbPath,
+      projectDir,
+    });
+    db = makeDb(dbPath);
+  });
+  after(async () => {
+    await srv.close();
+    if (previousHome === undefined) delete process.env.AGENT_FLOWS_HOME;
+    else process.env.AGENT_FLOWS_HOME = previousHome;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Opens a draft on the repository file `team`, then points its stored source at `root`/`relPath`. */
+  async function draftNaming(root: string, relPath: string): Promise<number> {
+    const opened = await call(srv.port, "POST", "/api/pipelines/team/drafts");
+    assert.equal(opened.status, 200, await opened.clone().text());
+    const { draftId } = (await opened.json()) as { draftId: number };
+    const sourceId = getDraft(db, draftId)?.sourceId;
+    assert.ok(sourceId !== undefined);
+    db.update(canonSource).set({ root, relPath }).where(eq(canonSource.id, sourceId)).run();
+    return draftId;
+  }
+
+  it("a draft that still names its repository file previews", async () => {
+    const draftId = await draftNaming(
+      join(realpathSync(tmpDir), "project", ".agent-flows"),
+      join("pipelines", "team.yaml")
+    );
+    const res = await call(srv.port, "POST", `/api/drafts/${draftId}/preview`, {});
+    assert.equal(res.status, 200, await res.clone().text());
+  });
+
+  it("a draft re-pointed at a bundled file is refused with 403 by preview and save", async () => {
+    const draftId = await draftNaming(packageRoot(), join("pipelines", "ship.yaml"));
+    const preview = await call(srv.port, "POST", `/api/drafts/${draftId}/preview`, {});
+    assert.equal(preview.status, 403, await preview.clone().text());
+    const save = await call(srv.port, "POST", `/api/drafts/${draftId}/save`);
+    assert.equal(save.status, 403, await save.clone().text());
+  });
+
+  it("a draft re-pointed at a file in no layer is a 404 for preview and save", async () => {
+    const draftId = await draftNaming(outside, "stray.yaml");
+    const preview = await call(srv.port, "POST", `/api/drafts/${draftId}/preview`, {});
+    assert.equal(preview.status, 404, await preview.clone().text());
+    const save = await call(srv.port, "POST", `/api/drafts/${draftId}/save`);
+    assert.equal(save.status, 404, await save.clone().text());
   });
 });
