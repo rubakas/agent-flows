@@ -1,10 +1,10 @@
-import { bundledPipelines } from "./pipelines.js";
+import { loadBundledCatalogue } from "./pipelines.js";
 import { renderPortabilityMatrix } from "./portability.js";
 import { MATRIX_PROFILE_IDS, defaultRegistry, getProfile } from "./registry.js";
 
 // Every error the catalogue reports is fatal: a file that does not parse, has no
-// id, collides with another file's id or fails to load.
-const { found, errors } = bundledPipelines().all();
+// id, collides with another file's id or fails to load, or no file at all.
+const { found, errors } = loadBundledCatalogue();
 const loaded = found.map((f) => f.loaded);
 
 for (const { loaded: pipeline } of found) {

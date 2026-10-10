@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { layerFrom, type CanonLayer } from "./layers.js";
 import {
   bundledPipelines,
+  loadBundledCatalogue,
   PipelinePathError,
   pipelinesIn,
   projectPipelines,
@@ -848,5 +849,48 @@ describe("editable and layerOf — decided on realpaths", () => {
     assert.equal(view.canWritePrompt(join(repo.promptsDir, "own.md"), repo), true);
     assert.equal(view.canWritePrompt(join(repo.promptsDir, "link.md"), repo), false);
     assert.equal(view.canWritePrompt(join(bundled.promptsDir, "shared.md"), bundled), false);
+  });
+});
+
+describe("loadBundledCatalogue — an empty catalogue is an error, not a success", () => {
+  it("reports a bundled pipelines/ with nothing in it, naming the directory", () => {
+    const bundled = makeLayer("bundled", "package");
+
+    const { found, errors } = loadBundledCatalogue(pipelinesIn([bundled]));
+
+    assert.deepEqual(found, []);
+    assert.deepEqual(errors, [
+      { file: bundled.pipelinesDir, error: "bundled catalogue is empty or missing" },
+    ]);
+  });
+
+  it("reports a bundled pipelines/ that does not exist", () => {
+    const bundled = layerFrom("bundled", join(dir, "nowhere"));
+
+    const { errors } = loadBundledCatalogue(pipelinesIn([bundled]));
+
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].error, "bundled catalogue is empty or missing");
+  });
+
+  it("passes a populated catalogue through, and a broken file stays its own error", () => {
+    const bundled = makeLayer("bundled", "package");
+    write(bundled, "fine", GATE);
+    writeFileSync(join(bundled.pipelinesDir, "broken.yaml"), "id: broken\nsteps: [{ id: x }]\n");
+
+    const { found, errors } = loadBundledCatalogue(pipelinesIn([bundled]));
+
+    assert.deepEqual(
+      found.map((f) => f.file.id),
+      ["fine"]
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].file, /broken\.yaml$/);
+  });
+
+  it("the package's own catalogue is not empty", () => {
+    const { found, errors } = loadBundledCatalogue();
+    assert.deepEqual(errors, []);
+    assert.ok(found.length > 0);
   });
 });

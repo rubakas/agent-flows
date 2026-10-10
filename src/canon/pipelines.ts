@@ -157,6 +157,24 @@ export function bundledPipelines(): Pipelines {
   return pipelinesIn([layerFrom("bundled", packageRoot())]);
 }
 
+/**
+ * Every bundled pipeline that loads, and everything that did not, for the callers
+ * that need the package's catalogue to be there (validate, generate, doctor).
+ *
+ * A bundled `pipelines/` that is empty or missing makes `all()` return neither
+ * pipelines nor errors, which reads as success. For these callers it is a broken
+ * package, so it is reported as an error. `view` is a seam for the test.
+ */
+export function loadBundledCatalogue(view: Pipelines = bundledPipelines()): {
+  found: Found[];
+  errors: CatalogError[];
+} {
+  const all = view.all();
+  if (all.found.length > 0 || all.errors.length > 0) return all;
+  const where = view.layers.map((layer) => layer.pipelinesDir).join(", ");
+  return { found: [], errors: [{ file: where, error: "bundled catalogue is empty or missing" }] };
+}
+
 function viewOf(catalog: MergedCatalog): Pipelines {
   const resolvePath = (id: string): string | undefined => catalog.entries.get(id)?.filePath;
   const rows = (): CatalogEntry[] =>

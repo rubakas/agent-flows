@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveProjectDir } from "./bindings/mastra/projectDir.js";
 import { loadProviders } from "./canon/loadProviders.js";
-import { bundledPipelines } from "./canon/pipelines.js";
+import { loadBundledCatalogue } from "./canon/pipelines.js";
 import { defaultRegistry, getActiveProfile } from "./canon/registry.js";
 import {
   harnessReach,
@@ -479,11 +479,13 @@ function checkCanon(probes: DoctorProbes): CheckResult[] {
       detail: `${canon.loaded.length} pipeline(s) loaded: ${canon.loaded.join(", ")}`,
     });
   } else if (canon.failed.length === 0 && canon.loaded.length === 0) {
+    // The check is required and its canon is the package's own: nothing to load is a
+    // broken install, not an empty project.
     results.push({
       name: "Canon (pipelines)",
-      status: "warn",
-      detail: "no pipeline files found in pipelines/",
-      hint: "add at least one .yaml file to pipelines/",
+      status: "fail",
+      detail: "no pipeline files found in the bundled pipelines/",
+      hint: "reinstall agent-flows: its pipelines/ directory is empty or missing",
     });
   } else {
     for (const { file, error } of canon.failed) {
@@ -595,7 +597,7 @@ export function defaultProbes(): DoctorProbes {
     },
 
     loadCanon: () => {
-      const { found, errors } = bundledPipelines().all();
+      const { found, errors } = loadBundledCatalogue();
       return { loaded: found.map((f) => f.file.id), failed: errors };
     },
 

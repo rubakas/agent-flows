@@ -12,7 +12,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadProviders } from "../canon/loadProviders.js";
-import { bundledPipelines } from "../canon/pipelines.js";
+import { loadBundledCatalogue } from "../canon/pipelines.js";
 import { defaultRegistry, getActiveProfile } from "../canon/registry.js";
 import { generateWorkflowScript } from "./claudeCode.js";
 import { resolveProjectDir } from "./mastra/projectDir.js";
@@ -35,7 +35,7 @@ function main(args: string[]): void {
   // and every project override read belongs to the project directory.
   // A catalogue error is fatal and nothing is written: a script set generated
   // from a partly unloadable catalogue would look complete.
-  const { found, errors } = bundledPipelines().all();
+  const { found, errors } = loadBundledCatalogue();
   if (errors.length > 0) {
     for (const { file, error } of errors) console.error(`ERROR: ${file}: ${error}`);
     process.exit(1);

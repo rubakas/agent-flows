@@ -378,13 +378,14 @@ describe("runDoctor", () => {
     assert.ok(check.detail.includes("Duplicate step id"), `detail: ${check.detail}`);
   });
 
-  it("canon no pipelines found → warn", async () => {
+  it("canon no pipelines found → fail: the check is required and the canon is the package's", async () => {
     const results = await runDoctor(
       makeOkProbes({ loadCanon: () => ({ loaded: [], failed: [] }) })
     );
     const check = results.find((r) => r.name === "Canon (pipelines)");
     assert.ok(check, "Canon check missing");
-    assert.equal(check.status, "warn");
+    assert.equal(check.status, "fail");
+    assert.match(check.hint ?? "", /reinstall/);
   });
 });
 
