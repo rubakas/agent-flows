@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -250,5 +250,91 @@ describe("a gh call that times out", () => {
       if (previousTimeout === undefined) delete process.env.AF_REVIEW_GH_TIMEOUT_MS;
       else process.env.AF_REVIEW_GH_TIMEOUT_MS = previousTimeout;
     }
+  });
+});
+
+describe("environment a caller adds to git", () => {
+  // The plugin drops the system git config, the pager and the locale; the daemon must
+  // not, because the system config often carries `safe.directory` and dropping it can
+  // make a daemon capture fail as "dubious ownership". So the core takes the extras
+  // from its caller instead of choosing them.
+  const EXTRAS = { GIT_CONFIG_NOSYSTEM: "1", GIT_PAGER: "cat", LANGUAGE: "C" };
+
+  /** Runs `fn` with a `git` on PATH that logs the variables it was given, then runs the real one. */
+  function withEnvLoggingGit(fn: () => void): string[] {
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const bin = mkdtempSync(join(tmpdir(), "af-capture-core-env-"));
+    cleanups.push(() => rmSync(bin, { recursive: true, force: true }));
+    const log = join(bin, "log");
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\nprintf '%s|%s|%s|%s\\n' "\${GIT_CONFIG_NOSYSTEM-unset}" "\${GIT_PAGER-unset}" "\${LANGUAGE-unset}" "\${GIT_TERMINAL_PROMPT-unset}" >> '${log}'\nexec '${realGit}' "$@"\n`
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    const previous = {
+      PATH: process.env.PATH,
+      GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+      GIT_PAGER: process.env.GIT_PAGER,
+      LANGUAGE: process.env.LANGUAGE,
+    };
+    delete process.env.GIT_CONFIG_NOSYSTEM;
+    delete process.env.GIT_PAGER;
+    delete process.env.LANGUAGE;
+    process.env.PATH = `${bin}:${previous.PATH ?? ""}`;
+    try {
+      fn();
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    try {
+      return readFileSync(log, "utf8").trim().split("\n");
+    } catch {
+      return [];
+    }
+  }
+
+  it("adds nothing by default", () => {
+    const { repo, base } = twoCommitRepo();
+    const lines = withEnvLoggingGit(() => {
+      captureGit({ projectDir: repo, baseline: base });
+    });
+    assert.ok(lines.length > 0, "the logging git never ran");
+    for (const line of lines) assert.equal(line, "unset|unset|unset|0");
+  });
+
+  it("reaches every git call of a capture", () => {
+    const { repo, base } = twoCommitRepo();
+    const lines = withEnvLoggingGit(() => {
+      captureGit({ projectDir: repo, baseline: base, env: EXTRAS });
+    });
+    assert.ok(lines.length > 0, "the logging git never ran");
+    for (const line of lines) assert.equal(line, "1|cat|C|0");
+  });
+
+  it("reaches a git call made directly, and the one that reads the origin remote", () => {
+    const { repo } = twoCommitRepo();
+    const lines = withEnvLoggingGit(() => {
+      git(repo, ["rev-parse", "HEAD"], EXTRAS);
+      resolveSpecRefs(
+        repo,
+        "#7",
+        () => ({ ok: false, stdout: "", reason: "unused" }),
+        undefined,
+        EXTRAS
+      );
+    });
+    assert.equal(lines.length, 2);
+    for (const line of lines) assert.equal(line, "1|cat|C|0");
+  });
+
+  it("cannot unpin what the core pins", () => {
+    const { repo } = twoCommitRepo();
+    const lines = withEnvLoggingGit(() => {
+      git(repo, ["rev-parse", "HEAD"], { GIT_TERMINAL_PROMPT: "1" });
+    });
+    assert.deepEqual(lines, ["unset|unset|unset|0"]);
   });
 });

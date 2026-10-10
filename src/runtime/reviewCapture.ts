@@ -403,9 +403,10 @@ export function parseSpecRef(
 
 /** The owner/repo a bare `#123` means: this repository's github.com origin. May throw GitTimeoutError. */
 export function originNameWithOwner(
-  projectDir: string
+  projectDir: string,
+  env?: GitEnvExtras
 ): { owner: string; repo: string } | undefined {
-  const remote = git(projectDir, ["remote", "get-url", "origin"]);
+  const remote = git(projectDir, ["remote", "get-url", "origin"], env);
   if (!remote.ok) return undefined;
   const match = RE_ORIGIN_NWO.exec(remote.stdout.trim());
   if (match === null) return undefined;
@@ -496,7 +497,8 @@ export function resolveSpecRefs(
   projectDir: string,
   value: string,
   gh: GhRunner,
-  budget: { used: number } = { used: 0 }
+  budget: { used: number } = { used: 0 },
+  env?: GitEnvExtras
 ): SpecSourceResolution {
   const tokens = value.split(/[\s,]+/u).filter((token) => token.length > 0);
 
@@ -507,7 +509,7 @@ export function resolveSpecRefs(
   let fallbackResolved = false;
   const originFallback = (): { owner: string; repo: string } | undefined => {
     if (!fallbackResolved) {
-      fallback = originNameWithOwner(projectDir);
+      fallback = originNameWithOwner(projectDir, env);
       fallbackResolved = true;
     }
     return fallback;
@@ -611,14 +613,25 @@ function gitTimeoutMs(): number {
 }
 
 /**
+ * Variables a caller adds to git's environment on top of the caller's own. The
+ * plugin drops the system git config, the pager and the locale this way; the
+ * daemon adds nothing, because the system config often carries `safe.directory`
+ * and dropping it can make a daemon capture fail as "dubious ownership".
+ */
+export type GitEnvExtras = Readonly<Record<string, string>>;
+
+/**
  * Git's environment: the caller's own, with messages pinned so they do not
  * depend on the user's locale, no optional locks (a read-only capture must not
  * contend with the user's own git) and no prompts. Built per call so a caller
  * that pins HOME or GIT_* after import is honoured.
  */
-function gitEnv(): NodeJS.ProcessEnv {
+function gitEnv(extra: GitEnvExtras | undefined): NodeJS.ProcessEnv {
   return {
     ...process.env,
+    // The caller's additions go UNDER the pins below: an extra can add a variable,
+    // never unpin one of ours.
+    ...extra,
     GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
     // A partial clone would otherwise fetch a missing object over the network,
@@ -660,7 +673,7 @@ export const NO_DRIVERS: readonly string[] = ["--no-ext-diff", "--no-textconv", 
  * different baseline, an "unavailable" history section), i.e. a partial
  * material presented as a complete one.
  */
-export function git(projectDir: string, args: readonly string[]): GitOutcome {
+export function git(projectDir: string, args: readonly string[], env?: GitEnvExtras): GitOutcome {
   const timeout = gitTimeoutMs();
   let result: SpawnSyncReturns<string>;
   try {
@@ -669,7 +682,7 @@ export function git(projectDir: string, args: readonly string[]): GitOutcome {
       encoding: "utf8",
       maxBuffer: GIT_MAX_BUFFER,
       timeout,
-      env: gitEnv(),
+      env: gitEnv(env),
     });
   } catch (err) {
     return {
@@ -735,8 +748,8 @@ function baselineOmitted(baseline: unknown): boolean {
  * baseline is: git prints this, but it is fed straight back to git as an
  * argument, and a ref name is not obliged to be harmless.
  */
-function defaultBranchRef(projectDir: string): string | undefined {
-  const ref = git(projectDir, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+function defaultBranchRef(projectDir: string, env?: GitEnvExtras): string | undefined {
+  const ref = git(projectDir, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], env);
   if (!ref.ok) return undefined;
   const name = ref.stdout.trim();
   if (name === "" || name.startsWith("-") || !RE_REVISION.test(name)) return undefined;
@@ -756,15 +769,18 @@ function defaultBranchRef(projectDir: string): string | undefined {
  *
  * Returns the reason instead when neither rule produces a commit.
  */
-export function deriveBaseline(projectDir: string): { rev: string; rule: BaselineRule } | string {
-  const head = resolveCommit(projectDir, "HEAD");
-  const branch = defaultBranchRef(projectDir);
+export function deriveBaseline(
+  projectDir: string,
+  env?: GitEnvExtras
+): { rev: string; rule: BaselineRule } | string {
+  const head = resolveCommit(projectDir, "HEAD", env);
+  const branch = defaultBranchRef(projectDir, env);
   if (branch !== undefined) {
-    const mergeBase = git(projectDir, ["merge-base", "HEAD", branch]);
+    const mergeBase = git(projectDir, ["merge-base", "HEAD", branch], env);
     const oid = mergeBase.ok ? mergeBase.stdout.trim() : "";
     if (RE_OID.test(oid) && oid !== head) return { rev: oid, rule: "merge-base" };
   }
-  const previous = resolveCommit(projectDir, "HEAD~1");
+  const previous = resolveCommit(projectDir, "HEAD~1", env);
   if (previous !== undefined) return { rev: previous, rule: "previous-commit" };
   return (
     "no baseline was supplied and none could be derived: this repository has no " +
@@ -797,8 +813,12 @@ export function cap(text: string): { text: string; truncated: boolean } {
  * is metadata only — no file content — and requires an alternates file to be
  * present already.
  */
-export function resolveCommit(projectDir: string, rev: string): string | undefined {
-  const parsed = git(projectDir, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`]);
+export function resolveCommit(
+  projectDir: string,
+  rev: string,
+  env?: GitEnvExtras
+): string | undefined {
+  const parsed = git(projectDir, ["rev-parse", "--verify", "--quiet", `${rev}^{commit}`], env);
   if (!parsed.ok) return undefined;
   const oid = parsed.stdout.trim();
   return RE_OID.test(oid) ? oid : undefined;
@@ -808,7 +828,8 @@ export function resolveCommit(projectDir: string, rev: string): string | undefin
 function probeCommits(
   projectDir: string,
   commitLog: string,
-  extraCommits: readonly string[] | undefined
+  extraCommits: readonly string[] | undefined,
+  env: GitEnvExtras | undefined
 ): string[] {
   const shas: string[] = [];
   for (const line of commitLog.split("\n")) {
@@ -828,7 +849,7 @@ function probeCommits(
     // later deleted is still reachable by its blob name. Peel to a commit and
     // skip anything that will not peel, the same check the baseline passes.
     // What gets probed is the RESOLVED name, not `sha` — see resolveCommit.
-    const resolved = resolveCommit(projectDir, sha);
+    const resolved = resolveCommit(projectDir, sha, env);
     if (resolved === undefined) continue;
     shas.push(resolved);
   }
@@ -863,18 +884,14 @@ function probeCommits(
 function renameCounterparts(
   projectDir: string,
   oid: string,
-  denied: ReadonlySet<string>
+  denied: ReadonlySet<string>,
+  env: GitEnvExtras | undefined
 ): { paths: string[]; incomplete: boolean } {
-  const pairs = git(projectDir, [
-    "diff",
-    ...NO_DRIVERS,
-    "--name-status",
-    "-M",
-    "-z",
-    `${oid}...HEAD`,
-    "--",
-    ":/",
-  ]);
+  const pairs = git(
+    projectDir,
+    ["diff", ...NO_DRIVERS, "--name-status", "-M", "-z", `${oid}...HEAD`, "--", ":/"],
+    env
+  );
   // Past diff.renameLimit git prints a warning and SKIPS inexact rename detection,
   // so a denied file renamed with one line changed arrives as a plain add. A pass
   // that failed or was skipped cannot vouch for the pairs it did not find. ANY
@@ -915,6 +932,8 @@ export interface CaptureRequest {
    * entry point carries them; the plugin's capture script cannot reach this.
    */
   extraCommits?: readonly string[];
+  /** Variables added to the environment of every git call of the capture. */
+  env?: GitEnvExtras;
 }
 
 /** The git half of a review capture. */
@@ -967,7 +986,8 @@ export function captureGit(request: CaptureRequest): GitCapture {
 }
 
 function captureGitUnguarded(request: CaptureRequest): GitCapture {
-  const { projectDir, baseline, extraCommits } = request;
+  const { projectDir, baseline, extraCommits, env } = request;
+  const run = (args: readonly string[]): GitOutcome => git(projectDir, args, env);
 
   // A caller who named a baseline gets that baseline, validated exactly as
   // before; a caller who named none gets one derived here rather than a refusal.
@@ -976,7 +996,7 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
   let rev: string;
   let baselineRule: BaselineRule;
   if (baselineOmitted(baseline)) {
-    const derived = deriveBaseline(projectDir);
+    const derived = deriveBaseline(projectDir, env);
     if (typeof derived === "string") return { available: false, reason: derived };
     rev = derived.rev;
     baselineRule = derived.rule;
@@ -990,7 +1010,7 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
   // The pattern says the value is shaped like a revision; only git can say it
   // names one. Both checks run before any capturing command is issued. Every
   // command below is given the RESOLVED name, never `rev` itself.
-  const oid = resolveCommit(projectDir, rev);
+  const oid = resolveCommit(projectDir, rev, env);
   if (oid === undefined) {
     return {
       available: false,
@@ -1001,7 +1021,7 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
   // The deny list as the POSITIVE pathspec: the names of the changed paths the
   // capture is withholding. Names only — no content is read. This runs first
   // because the rename pass below needs to know which paths are denied.
-  const excluded = git(projectDir, [
+  const excluded = run([
     "diff",
     ...NO_DRIVERS,
     "--name-only",
@@ -1029,7 +1049,7 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
   const pairs =
     denied.length === 0
       ? { paths: [], incomplete: false }
-      : renameCounterparts(projectDir, oid, deniedSet);
+      : renameCounterparts(projectDir, oid, deniedSet, env);
   if (pairs.incomplete) {
     return {
       available: false,
@@ -1046,20 +1066,13 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
 
   // `--text` so a `* -diff` or `* binary` in .gitattributes cannot blank the patch
   // the reviewer is shown; the exclusions above are what keep secrets out of it.
-  const diff = git(projectDir, [
-    "diff",
-    ...NO_DRIVERS,
-    "--text",
-    `${oid}...HEAD`,
-    "--",
-    ...safePathspecs,
-  ]);
+  const diff = run(["diff", ...NO_DRIVERS, "--text", `${oid}...HEAD`, "--", ...safePathspecs]);
   if (!diff.ok) return { available: false, reason: `git diff failed: ${diff.reason}` };
 
-  const commits = git(projectDir, ["log", ...NO_DRIVERS, "--format=%H %s", `${oid}..HEAD`, "--"]);
+  const commits = run(["log", ...NO_DRIVERS, "--format=%H %s", `${oid}..HEAD`, "--"]);
   if (!commits.ok) return { available: false, reason: `git log failed: ${commits.reason}` };
 
-  const changed = git(projectDir, [
+  const changed = run([
     "diff",
     ...NO_DRIVERS,
     "--name-only",
@@ -1084,7 +1097,7 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
   // so a file literally named like an option is still read as a path.
   const historyParts: string[] = [];
   if (changedPaths.length > 0) {
-    const fileHistory = git(projectDir, [
+    const fileHistory = run([
       "log",
       ...NO_DRIVERS,
       "--all",
@@ -1104,8 +1117,8 @@ function captureGitUnguarded(request: CaptureRequest): GitCapture {
         : `# add/delete history unavailable: ${fileHistory.reason}`
     );
   }
-  for (const sha of probeCommits(projectDir, commits.stdout, extraCommits)) {
-    const stat = git(projectDir, [
+  for (const sha of probeCommits(projectDir, commits.stdout, extraCommits, env)) {
+    const stat = run([
       "show",
       ...NO_DRIVERS,
       "--stat",
