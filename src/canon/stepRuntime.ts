@@ -111,7 +111,7 @@ export interface StepRunnerDeps {
   /**
    * Per-step cost cap for claude-transport llm steps (FR-007). Passed as
    * --max-budget-usd to the CLI. No default; absent → flag is not emitted.
-   * Overrides any pipeline-level defaultMaxBudgetUsd (resolved in buildSteps.ts).
+   * Overrides any pipeline-level defaultMaxBudgetUsd (resolved by effectiveBudget in portability.ts).
    * Rejected at runtime on api/codex transports.
    */
   maxBudgetUsd?: number;
@@ -168,7 +168,8 @@ export interface StepRunnerDeps {
    * - "write": adds Edit and Write (`--tools Read,Glob,Grep,Edit,Write`). Bash is never
    *   granted in either mode.
    *
-   * Not supported for api transport or codex (both will throw at runtime).
+   * Not supported for the api transport (it throws at runtime). Codex serves "read" inside
+   * its confined sandbox (`codexConfinement`, adapters/codex.ts) and refuses "write".
    */
   contentsAccess?: "read" | "write";
   /**
@@ -185,7 +186,7 @@ export interface StepRunnerDeps {
    * check step's shell command may receive. Corresponds to `StepDef.env`.
    *
    * Any variable not in `CHECK_ENV_ALLOWLIST` and not listed here is stripped before
-   * `/bin/sh -c` is invoked. Only meaningful in `runCheckStep`; ignored by `runLlmStep`.
+   * `/bin/sh -c` is invoked. Only meaningful in `runCheckStep`; ignored by the llm adapters.
    */
   envAllowlist?: string[];
 }

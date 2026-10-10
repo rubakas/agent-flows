@@ -1,10 +1,8 @@
-// Provider-agnostic step executor for Binding B.
+// Check-step executor for Binding B, plus the executor vocabulary re-exported for its importers.
 
 import { spawn as defaultSpawn } from "node:child_process";
-import { DEFAULT_ADAPTER_CONFIG, adapterFor } from "./adapters/index.js";
 import { emitStepEvent } from "./stepLogEvents.js";
 import { DEFAULT_STEP_TIMEOUT_MS, createDeadline } from "./stepRuntime.js";
-import type { ModelEntry } from "./registry.js";
 import type { DeadlineHandle, StepRunnerDeps } from "./stepRuntime.js";
 
 // Re-exported so existing importers keep a single entry point for the executor's
@@ -339,20 +337,4 @@ export async function runCheckStep(
       }
     }
   });
-}
-
-// ── Main export ───────────────────────────────────────────────────────────────
-
-/**
- * Executes one llm step by dispatching to the adapter for its transport (FR-001).
- * Supervision — the deadline, the StepTimeoutError mapping, the claude watchdog
- * and its reformulation retry — lives inside each adapter's run(), so no caller
- * can construct an unsupervised call (FR-002).
- */
-export function runLlmStep(
-  entry: ModelEntry,
-  prompt: string,
-  deps: StepRunnerDeps = {}
-): Promise<string> {
-  return adapterFor(entry).run(prompt, entry, deps, DEFAULT_ADAPTER_CONFIG);
 }

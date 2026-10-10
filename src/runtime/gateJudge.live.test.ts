@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { defaultRegistry, getActiveProfile } from "../canon/registry.js";
-import { runLlmStep } from "../canon/runStep.js";
+import { defaultDispatch } from "../canon/stepAttempt.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -131,7 +131,7 @@ describe("FR-010 — live gate judge probe: fixture with missing test plan must 
       const prompt = buildProbePrompt();
       let raw: string;
       try {
-        raw = await runLlmStep(entry, prompt, {});
+        raw = await defaultDispatch(entry, prompt, {});
       } catch (err: unknown) {
         // Transport error — CI/no-credentials environment; skip rather than fail.
         const msg = err instanceof Error ? err.message : String(err);

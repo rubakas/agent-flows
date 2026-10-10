@@ -18,8 +18,8 @@ import {
   WATCHDOG_DIGEST_CLOSE,
   CHECK_OUTPUT_CAP,
   runCheckStep,
-  runLlmStep,
 } from "./runStep.js";
+import { defaultDispatch } from "./stepAttempt.js";
 import {
   makeFakeChild,
   makeFakeSpawn,
@@ -33,7 +33,7 @@ import type { StepLogEventInput } from "./stepLogEvents.js";
 
 // ── claude CLI ────────────────────────────────────────────────────────────────
 
-describe("runLlmStep — claude CLI", () => {
+describe("defaultDispatch — claude CLI", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -44,7 +44,7 @@ describe("runLlmStep — claude CLI", () => {
     const { spawn, capturedArgs } = makeFakeSpawn({
       stdoutChunks: [makeStreamJsonStdout("answer")],
     });
-    await runLlmStep(entry, "hello", { spawn });
+    await defaultDispatch(entry, "hello", { spawn });
     assert.ok(capturedArgs[0].includes("--model"), "should pass --model");
     assert.ok(capturedArgs[0].includes("haiku"), "should pass model name");
     assert.ok(capturedArgs[0].includes("--output-format"), "should pass --output-format");
@@ -58,13 +58,13 @@ describe("runLlmStep — claude CLI", () => {
 
   it("returns trimmed result text from stream-json result event", async () => {
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("  PONG  ")] });
-    const result = await runLlmStep(entry, "say PONG", { spawn });
+    const result = await defaultDispatch(entry, "say PONG", { spawn });
     assert.equal(result, "PONG");
   });
 
   it("rejects on non-zero exit", async () => {
     const { spawn } = makeFakeSpawn({ stderrChunks: ["err"], exitCode: 1 });
-    await assert.rejects(runLlmStep(entry, "hi", { spawn }), /code 1/);
+    await assert.rejects(defaultDispatch(entry, "hi", { spawn }), /code 1/);
   });
 });
 
@@ -83,7 +83,7 @@ function makeCodexJsonlOutput(text: string): string {
   ].join("\n");
 }
 
-describe("runLlmStep — codex CLI", () => {
+describe("defaultDispatch — codex CLI", () => {
   const entry: ModelEntry = {
     id: "codex-test",
     transport: "cli",
@@ -94,7 +94,7 @@ describe("runLlmStep — codex CLI", () => {
     const { spawn, capturedArgs } = makeFakeSpawn({
       stdoutChunks: [makeCodexJsonlOutput("OK")],
     });
-    await runLlmStep(entry, "hello", { spawn });
+    await defaultDispatch(entry, "hello", { spawn });
     assert.ok(capturedArgs[0].includes("exec"), "should have exec subcommand");
     assert.ok(capturedArgs[0].includes("--ephemeral"), "should pass --ephemeral");
     assert.ok(capturedArgs[0].includes("--json"), "should pass --json");
@@ -109,7 +109,7 @@ describe("runLlmStep — codex CLI", () => {
     const { spawn } = makeFakeSpawn({
       stdoutChunks: [makeCodexJsonlOutput("Hello from codex")],
     });
-    const result = await runLlmStep(entry, "hello", { spawn });
+    const result = await defaultDispatch(entry, "hello", { spawn });
     assert.equal(result, "Hello from codex");
   });
 
@@ -119,13 +119,13 @@ describe("runLlmStep — codex CLI", () => {
       JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "last" } }),
     ].join("\n");
     const { spawn } = makeFakeSpawn({ stdoutChunks: [output] });
-    const result = await runLlmStep(entry, "hi", { spawn });
+    const result = await defaultDispatch(entry, "hi", { spawn });
     assert.equal(result, "last");
   });
 
   it("rejects when no agent_message found in output", async () => {
     const { spawn } = makeFakeSpawn({ stdoutChunks: ['not json\n{"type":"turn.started"}'] });
-    await assert.rejects(runLlmStep(entry, "hi", { spawn }), /agent_message/);
+    await assert.rejects(defaultDispatch(entry, "hi", { spawn }), /agent_message/);
   });
 });
 
@@ -148,7 +148,7 @@ function makeFakeFetch(opts: {
   };
 }
 
-describe("runLlmStep — API transport", () => {
+describe("defaultDispatch — API transport", () => {
   const entry: ModelEntry = {
     id: "ollama-qwen",
     transport: "api",
@@ -162,7 +162,7 @@ describe("runLlmStep — API transport", () => {
         captured = { url, body: JSON.parse(init.body as string) };
       },
     });
-    await runLlmStep(entry, "hello", { fetchFn });
+    await defaultDispatch(entry, "hello", { fetchFn });
     assert.ok(captured !== null, "captureRequest callback should have been called");
     // TypeScript doesn't narrow `let` vars assigned in callbacks; cast explicitly.
     // The body type change (unknown → Record) makes this more than a null assertion.
@@ -176,7 +176,7 @@ describe("runLlmStep — API transport", () => {
     const fetchFn = makeFakeFetch({
       body: { choices: [{ message: { content: "qwen says hi" } }] },
     });
-    const result = await runLlmStep(entry, "hi", { fetchFn });
+    const result = await defaultDispatch(entry, "hi", { fetchFn });
     assert.equal(result, "qwen says hi");
   });
 
@@ -187,7 +187,7 @@ describe("runLlmStep — API transport", () => {
         headers = init.headers as Record<string, string>;
       },
     });
-    await runLlmStep(entry, "hi", { fetchFn, env: {} });
+    await defaultDispatch(entry, "hi", { fetchFn, env: {} });
     assert.equal(headers.Authorization, undefined);
   });
 
@@ -207,7 +207,7 @@ describe("runLlmStep — API transport", () => {
         headers = init.headers as Record<string, string>;
       },
     });
-    await runLlmStep(entryWithKey, "hi", {
+    await defaultDispatch(entryWithKey, "hi", {
       fetchFn,
       env: { LITELLM_VIRTUAL_KEY: "vk-secret" },
     });
@@ -230,18 +230,21 @@ describe("runLlmStep — API transport", () => {
         headers = init.headers as Record<string, string>;
       },
     });
-    await runLlmStep(entryWithKey, "hi", { fetchFn, env: {} });
+    await defaultDispatch(entryWithKey, "hi", { fetchFn, env: {} });
     assert.equal(headers.Authorization, undefined);
   });
 
   it("rejects on non-200 response", async () => {
     const fetchFn = makeFakeFetch({ status: 500, body: { error: "internal" } });
-    await assert.rejects(runLlmStep(entry, "hi", { fetchFn }), /500/);
+    await assert.rejects(defaultDispatch(entry, "hi", { fetchFn }), /500/);
   });
 
   it("rejects when choices[0].message.content is missing", async () => {
     const fetchFn = makeFakeFetch({ body: { choices: [] } });
-    await assert.rejects(runLlmStep(entry, "hi", { fetchFn }), /choices\[0\]\.message\.content/);
+    await assert.rejects(
+      defaultDispatch(entry, "hi", { fetchFn }),
+      /choices\[0\]\.message\.content/
+    );
   });
 });
 
@@ -276,7 +279,7 @@ function makeHangingSpawn(): { spawn: SpawnFn; killCalls: string[] } {
   return { spawn, killCalls };
 }
 
-describe("runLlmStep — deadline enforcement", () => {
+describe("defaultDispatch — deadline enforcement", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -285,17 +288,20 @@ describe("runLlmStep — deadline enforcement", () => {
 
   it("aborts a hung step and surfaces StepTimeoutError", async () => {
     const { spawn, killCalls } = makeHangingSpawn();
-    await assert.rejects(runLlmStep(entry, "hang", { spawn, timeoutMs: 50 }), (err: unknown) => {
-      assert.ok(err instanceof StepTimeoutError, `expected StepTimeoutError, got ${String(err)}`);
-      assert.ok(err.message.includes("50"), "error message should include the timeout value");
-      return true;
-    });
+    await assert.rejects(
+      defaultDispatch(entry, "hang", { spawn, timeoutMs: 50 }),
+      (err: unknown) => {
+        assert.ok(err instanceof StepTimeoutError, `expected StepTimeoutError, got ${String(err)}`);
+        assert.ok(err.message.includes("50"), "error message should include the timeout value");
+        return true;
+      }
+    );
     assert.ok(killCalls.length > 0, "child should have been killed when deadline fired");
   });
 
   it("resolves normally when step finishes before the deadline", async () => {
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("done")] });
-    const result = await runLlmStep(entry, "ping", { spawn, timeoutMs: 5000 });
+    const result = await defaultDispatch(entry, "ping", { spawn, timeoutMs: 5000 });
     assert.equal(result, "done");
   });
 
@@ -303,7 +309,7 @@ describe("runLlmStep — deadline enforcement", () => {
     // step timeoutMs: 50ms fires before defaultTimeoutMs: 10000ms
     const { spawn } = makeHangingSpawn();
     await assert.rejects(
-      runLlmStep(entry, "hang", { spawn, timeoutMs: 50, defaultTimeoutMs: 10_000 }),
+      defaultDispatch(entry, "hang", { spawn, timeoutMs: 50, defaultTimeoutMs: 10_000 }),
       (err: unknown) => {
         assert.ok(err instanceof StepTimeoutError);
         assert.equal(err.timeoutMs, 50, "should use step-level timeout, not the pipeline default");
@@ -315,7 +321,7 @@ describe("runLlmStep — deadline enforcement", () => {
   it("uses defaultTimeoutMs when timeoutMs is not set", async () => {
     const { spawn } = makeHangingSpawn();
     await assert.rejects(
-      runLlmStep(entry, "hang", { spawn, defaultTimeoutMs: 50 }),
+      defaultDispatch(entry, "hang", { spawn, defaultTimeoutMs: 50 }),
       (err: unknown) => {
         assert.ok(err instanceof StepTimeoutError);
         assert.equal(err.timeoutMs, 50);
@@ -329,7 +335,7 @@ describe("runLlmStep — deadline enforcement", () => {
     // The step completes immediately (fast spawn). The test suite exits promptly,
     // proving the timer was removed by clearTimeout in the finally block.
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("quick")] });
-    const result = await runLlmStep(entry, "hi", { spawn, timeoutMs: 300_000 });
+    const result = await defaultDispatch(entry, "hi", { spawn, timeoutMs: 300_000 });
     assert.equal(result, "quick");
     // If clearTimeout were not called, the 300-second timer would hold the process
     // alive. The test suite completing promptly proves it was cleared.
@@ -346,7 +352,7 @@ describe("runLlmStep — deadline enforcement", () => {
     );
     const { spawn } = makeHangingSpawn();
     await assert.rejects(
-      runLlmStep(entry, "hang", { spawn, _builtInTimeoutMs: 50 }),
+      defaultDispatch(entry, "hang", { spawn, _builtInTimeoutMs: 50 }),
       (err: unknown) => {
         assert.ok(
           err instanceof StepTimeoutError,
@@ -365,14 +371,14 @@ describe("runLlmStep — deadline enforcement", () => {
     // api it is clamped back to the built-in fallback (withDeadline), because
     // there it would mean no supervision at all.
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("done")] });
-    const result = await runLlmStep(entry, "hi", { spawn, timeoutMs: 0 });
+    const result = await defaultDispatch(entry, "hi", { spawn, timeoutMs: 0 });
     assert.equal(result, "done", "step with timeoutMs:0 must complete without being aborted");
   });
 });
 
 // ── FR-008: claude transport has no built-in deadline ────────────────────────
 
-describe("runLlmStep — FR-008 timeout matrix", () => {
+describe("defaultDispatch — FR-008 timeout matrix", () => {
   const claudeEntry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -387,7 +393,7 @@ describe("runLlmStep — FR-008 timeout matrix", () => {
   it("claude step with explicit timeoutMs: 50 still fires StepTimeoutError", async () => {
     const { spawn } = makeHangingSpawn();
     await assert.rejects(
-      runLlmStep(claudeEntry, "hang", { spawn, timeoutMs: 50 }),
+      defaultDispatch(claudeEntry, "hang", { spawn, timeoutMs: 50 }),
       (err: unknown) => {
         assert.ok(err instanceof StepTimeoutError);
         assert.equal(err.timeoutMs, 50);
@@ -398,7 +404,7 @@ describe("runLlmStep — FR-008 timeout matrix", () => {
 
   it("claude step with no timeout fields: fast step resolves (no built-in deadline)", async () => {
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("done")] });
-    const result = await runLlmStep(claudeEntry, "hi", { spawn });
+    const result = await defaultDispatch(claudeEntry, "hi", { spawn });
     assert.equal(result, "done");
   });
 
@@ -415,7 +421,7 @@ describe("runLlmStep — FR-008 timeout matrix", () => {
         sig?.addEventListener("abort", abort, { once: true });
       });
     await assert.rejects(
-      runLlmStep(apiEntry, "hang", { fetchFn, _builtInTimeoutMs: 50 }),
+      defaultDispatch(apiEntry, "hang", { fetchFn, _builtInTimeoutMs: 50 }),
       (err: unknown) => {
         assert.ok(err instanceof StepTimeoutError, `expected StepTimeoutError, got ${String(err)}`);
         return true;
@@ -426,7 +432,7 @@ describe("runLlmStep — FR-008 timeout matrix", () => {
 
 // ── Watchdog: retry and failure (FR-005, FR-006) ──────────────────────────────
 
-describe("runLlmStep — watchdog retry (FR-005/FR-006)", () => {
+describe("defaultDispatch — watchdog retry (FR-005/FR-006)", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -437,7 +443,7 @@ describe("runLlmStep — watchdog retry (FR-005/FR-006)", () => {
     // Build a fake attempt-1 stream with 4 identical Read tool_use blocks
     // followed by a result event. The loop detector trips on the 4th pair,
     // kills the child, and runClaudeCli rejects with WatchdogTrip.
-    // Then runLlmStep retries with attempt 2 which returns clean output.
+    // Then defaultDispatch retries with attempt 2 which returns clean output.
     const assistantWithLoopEvent = JSON.stringify({
       type: "assistant",
       message: {
@@ -494,7 +500,7 @@ describe("runLlmStep — watchdog retry (FR-005/FR-006)", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    const result = await runLlmStep(entry, "do something", { spawn, _stallSilenceMs: 30_000 });
+    const result = await defaultDispatch(entry, "do something", { spawn, _stallSilenceMs: 30_000 });
     assert.equal(result, "attempt 2 clean result");
     assert.equal(callCount, 2, "must have made exactly 2 spawn calls");
   });
@@ -539,7 +545,7 @@ describe("runLlmStep — watchdog retry (FR-005/FR-006)", () => {
     }) as unknown as SpawnFn;
 
     await assert.rejects(
-      runLlmStep(entry, "stuck", { spawn, _stallSilenceMs: 30_000 }),
+      defaultDispatch(entry, "stuck", { spawn, _stallSilenceMs: 30_000 }),
       (err: unknown) => {
         assert.ok(
           err instanceof StepWatchdogError,
@@ -603,7 +609,7 @@ describe("runLlmStep — watchdog retry (FR-005/FR-006)", () => {
     }) as unknown as SpawnFn;
 
     await assert.rejects(
-      runLlmStep(entry, "blocked task", { spawn, _stallSilenceMs: 30_000 }),
+      defaultDispatch(entry, "blocked task", { spawn, _stallSilenceMs: 30_000 }),
       (err: unknown) => {
         assert.ok(
           err instanceof StepWatchdogError,
@@ -674,7 +680,7 @@ describe("runLlmStep — watchdog retry (FR-005/FR-006)", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    const result = await runLlmStep(entry, "my original prompt", {
+    const result = await defaultDispatch(entry, "my original prompt", {
       spawn,
       _stallSilenceMs: 30_000,
     });
@@ -700,9 +706,9 @@ describe("runLlmStep — watchdog retry (FR-005/FR-006)", () => {
   });
 });
 
-// ── FR-007: budget wiring in runLlmStep ──────────────────────────────────────
+// ── FR-007: budget wiring in defaultDispatch ──────────────────────────────────────
 
-describe("runLlmStep — FR-007 budget wiring", () => {
+describe("defaultDispatch — FR-007 budget wiring", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -713,7 +719,7 @@ describe("runLlmStep — FR-007 budget wiring", () => {
     const { spawn, capturedArgs } = makeFakeSpawn({
       stdoutChunks: [makeStreamJsonStdout("ok")],
     });
-    await runLlmStep(entry, "hi", { spawn, maxBudgetUsd: 2 });
+    await defaultDispatch(entry, "hi", { spawn, maxBudgetUsd: 2 });
     const budgetIdx = capturedArgs[0].indexOf("--max-budget-usd");
     assert.ok(budgetIdx !== -1, "--max-budget-usd must be in argv");
     assert.equal(capturedArgs[0][budgetIdx + 1], "2");
@@ -723,7 +729,7 @@ describe("runLlmStep — FR-007 budget wiring", () => {
     const { spawn, capturedArgs } = makeFakeSpawn({
       stdoutChunks: [makeStreamJsonStdout("ok")],
     });
-    await runLlmStep(entry, "hi", { spawn });
+    await defaultDispatch(entry, "hi", { spawn });
     assert.ok(!capturedArgs[0].includes("--max-budget-usd"), "flag must be absent");
   });
 
@@ -732,7 +738,7 @@ describe("runLlmStep — FR-007 budget wiring", () => {
       stdoutChunks: [makeStreamJsonStdout("ok")],
     });
     const schema = { type: "object", required: ["weaknesses"] };
-    await runLlmStep(entry, "hi", { spawn, outputJsonSchema: schema });
+    await defaultDispatch(entry, "hi", { spawn, outputJsonSchema: schema });
     const idx = capturedArgs[0].indexOf("--json-schema");
     assert.ok(idx !== -1, "--json-schema must be in argv");
     assert.equal(capturedArgs[0][idx + 1], JSON.stringify(schema));
@@ -752,7 +758,7 @@ describe("runLlmStep — FR-007 budget wiring", () => {
         text: async () => "{}",
       }) as Response;
     assert.equal(
-      await runLlmStep(apiEntry, "hi", { fetchFn, outputJsonSchema: { type: "object" } }),
+      await defaultDispatch(apiEntry, "hi", { fetchFn, outputJsonSchema: { type: "object" } }),
       "ok",
       "a claude-only structured-output flag must not fail an api step"
     );
@@ -772,12 +778,12 @@ describe("runLlmStep — FR-007 budget wiring", () => {
         text: async () => "{}",
       }) as Response;
     await assert.rejects(
-      runLlmStep(apiEntry, "hi", { fetchFn, maxBudgetUsd: 1 }),
+      defaultDispatch(apiEntry, "hi", { fetchFn, maxBudgetUsd: 1 }),
       /maxBudgetUsd.*not supported.*api/i
     );
   });
 
-  it("StepBudgetExceededError propagates from runClaudeCli to runLlmStep caller", async () => {
+  it("StepBudgetExceededError propagates from runClaudeCli to defaultDispatch caller", async () => {
     const budgetLine = JSON.stringify({
       type: "result",
       subtype: "error_max_budget_usd",
@@ -788,15 +794,18 @@ describe("runLlmStep — FR-007 budget wiring", () => {
     });
     const stdout = JSON.stringify({ type: "system", subtype: "init" }) + "\n" + budgetLine + "\n";
     const { spawn } = makeFakeSpawn({ stdoutChunks: [stdout] });
-    await assert.rejects(runLlmStep(entry, "hi", { spawn, maxBudgetUsd: 2 }), (err: unknown) => {
-      assert.ok(
-        err instanceof StepBudgetExceededError,
-        `expected StepBudgetExceededError, got ${String(err)}`
-      );
-      assert.equal(err.limitUsd, 2);
-      assert.equal(err.estimatedUsd, 3.0);
-      return true;
-    });
+    await assert.rejects(
+      defaultDispatch(entry, "hi", { spawn, maxBudgetUsd: 2 }),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof StepBudgetExceededError,
+          `expected StepBudgetExceededError, got ${String(err)}`
+        );
+        assert.equal(err.limitUsd, 2);
+        assert.equal(err.estimatedUsd, 3.0);
+        return true;
+      }
+    );
   });
 });
 
@@ -806,7 +815,7 @@ describe("runLlmStep — FR-007 budget wiring", () => {
 // (always exists, and deliberately not a git work tree — see the sanitizer test).
 const repoRoot = dirname(packageRoot());
 
-describe('runLlmStep — workspace: "read"', () => {
+describe('defaultDispatch — workspace: "read"', () => {
   it('claude: spawns with --restricted --strict-mcp-config --tools Read,Glob,Grep --allowedTools Read,Glob,Grep and cwd=workspaceDir when contentsAccess is "read"', async () => {
     const entry: ModelEntry = {
       id: "haiku",
@@ -822,7 +831,7 @@ describe('runLlmStep — workspace: "read"', () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "analyze repo", {
+    await defaultDispatch(entry, "analyze repo", {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
@@ -862,7 +871,7 @@ describe('runLlmStep — workspace: "read"', () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "edit file", {
+    await defaultDispatch(entry, "edit file", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -905,7 +914,7 @@ describe('runLlmStep — workspace: "read"', () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "read something", {
+    await defaultDispatch(entry, "read something", {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
@@ -935,7 +944,7 @@ describe('runLlmStep — workspace: "read"', () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "write something", {
+    await defaultDispatch(entry, "write something", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -974,7 +983,7 @@ describe('runLlmStep — workspace: "read"', () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "hello", { spawn });
+    await defaultDispatch(entry, "hello", { spawn });
 
     assert.ok(
       capturedArgs.includes("--restricted"),
@@ -1015,7 +1024,7 @@ describe('runLlmStep — workspace: "read"', () => {
     // The sanitizer shells out to `git ls-files`, so this needs the real repo —
     // `repoRoot` above is its parent and is not a git work tree.
     const gitRoot = packageRoot();
-    const result = await runLlmStep(entry, "analyze", {
+    const result = await defaultDispatch(entry, "analyze", {
       spawn,
       contentsAccess: "read",
       workspaceDir: gitRoot,
@@ -1039,7 +1048,7 @@ describe('runLlmStep — workspace: "read"', () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "hello", { spawn });
+    await defaultDispatch(entry, "hello", { spawn });
 
     // A text-only step must not be able to read the disk either, so it gets an
     // empty grant rather than the daemon's working directory.
@@ -1057,7 +1066,7 @@ describe('runLlmStep — workspace: "read"', () => {
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeCodexJsonlOutput("irrelevant")] });
 
     await assert.rejects(
-      runLlmStep(entry, "hi", { spawn, contentsAccess: "write", workspaceDir: repoRoot }),
+      defaultDispatch(entry, "hi", { spawn, contentsAccess: "write", workspaceDir: repoRoot }),
       /codex.*write|write.*codex/i
     );
   });
@@ -1070,7 +1079,7 @@ describe('runLlmStep — workspace: "read"', () => {
     };
 
     await assert.rejects(
-      runLlmStep(entry, "hi", { contentsAccess: "read", workspaceDir: repoRoot }),
+      defaultDispatch(entry, "hi", { contentsAccess: "read", workspaceDir: repoRoot }),
       /api.*permissions|permissions.*api/i
     );
   });
@@ -1083,7 +1092,7 @@ describe('runLlmStep — workspace: "read"', () => {
     };
 
     await assert.rejects(
-      runLlmStep(entry, "hi", { contentsAccess: "write", workspaceDir: repoRoot }),
+      defaultDispatch(entry, "hi", { contentsAccess: "write", workspaceDir: repoRoot }),
       /api.*permissions|permissions.*api/i
     );
   });
@@ -1097,7 +1106,7 @@ describe('runLlmStep — workspace: "read"', () => {
     const { spawn } = makeFakeSpawn({ stdoutChunks: [makeStreamJsonStdout("irrelevant")] });
 
     await assert.rejects(
-      runLlmStep(entry, "hi", {
+      defaultDispatch(entry, "hi", {
         spawn,
         contentsAccess: "read",
         workspaceDir: "/definitely/does/not/exist/agent-flows-test-9482",
@@ -1109,7 +1118,7 @@ describe('runLlmStep — workspace: "read"', () => {
 
 // ── codex key scrubbing (Fix 3) ───────────────────────────────────────────────
 
-describe("runLlmStep — codex key isolation", () => {
+describe("defaultDispatch — codex key isolation", () => {
   it("codex: SCRUBBED_KEYS are absent from the env passed to spawn", async () => {
     const codexEntry: ModelEntry = {
       id: "codex-scrub-test",
@@ -1123,7 +1132,7 @@ describe("runLlmStep — codex key isolation", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(codexEntry, "hello", {
+    await defaultDispatch(codexEntry, "hello", {
       spawn,
       env: {
         PATH: "/usr/bin",
@@ -1147,7 +1156,7 @@ describe("runLlmStep — codex key isolation", () => {
 
 // ── skills declaration ────────────────────────────────────────────────────────
 
-describe("runLlmStep — skills", () => {
+describe("defaultDispatch — skills", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -1164,7 +1173,7 @@ describe("runLlmStep — skills", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "hello", { spawn });
+    await defaultDispatch(entry, "hello", { spawn });
 
     assert.ok(!capturedArgs.includes("--plugin-dir"), "must not add --plugin-dir without skills");
     assert.ok(
@@ -1187,7 +1196,7 @@ describe("runLlmStep — skills", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "use git", {
+    await defaultDispatch(entry, "use git", {
       spawn,
       skills: ["git", "chrome-test"],
       env: { HOME: "/home/user" },
@@ -1226,7 +1235,7 @@ describe("runLlmStep — skills", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "read and use skill", {
+    await defaultDispatch(entry, "read and use skill", {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
@@ -1257,7 +1266,7 @@ describe("runLlmStep — skills", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "write and use skill", {
+    await defaultDispatch(entry, "write and use skill", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -1288,7 +1297,7 @@ describe("runLlmStep — skills", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "use skill", {
+    await defaultDispatch(entry, "use skill", {
       spawn,
       skills: ["git"],
       env: { HOME: "/home/user", AGENT_FLOWS_SKILLS_DIR: "/opt/project/.claude" },
@@ -1306,7 +1315,7 @@ describe("runLlmStep — skills", () => {
 
 // ── credential deny list ──────────────────────────────────────────────────────
 
-describe("runLlmStep — credential deny list", () => {
+describe("defaultDispatch — credential deny list", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -1323,7 +1332,7 @@ describe("runLlmStep — credential deny list", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "analyze", {
+    await defaultDispatch(entry, "analyze", {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
@@ -1366,7 +1375,7 @@ describe("runLlmStep — credential deny list", () => {
     // env without HOME: operatorDenyRules() finds no user settings file, so this
     // asserts on agent-flows' own deny construction rather than on whatever
     // permissions.deny the machine running the suite happens to have configured.
-    await runLlmStep(entry, "analyze", { spawn, env: {} });
+    await defaultDispatch(entry, "analyze", { spawn, env: {} });
 
     const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
     assert.ok(disallowedIdx !== -1, "a step with no workspace must still emit --disallowedTools");
@@ -1397,7 +1406,7 @@ describe("runLlmStep — credential deny list", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "edit file", {
+    await defaultDispatch(entry, "edit file", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -1435,7 +1444,7 @@ describe("runLlmStep — credential deny list", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "analyze", {
+    await defaultDispatch(entry, "analyze", {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
@@ -1459,7 +1468,7 @@ describe("runLlmStep — credential deny list", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "edit file", {
+    await defaultDispatch(entry, "edit file", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -1489,7 +1498,7 @@ describe("runLlmStep — credential deny list", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "analyze", {
+    await defaultDispatch(entry, "analyze", {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
@@ -1522,7 +1531,7 @@ describe("runLlmStep — credential deny list", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "edit files", {
+    await defaultDispatch(entry, "edit files", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -1567,7 +1576,7 @@ describe("runLlmStep — credential deny list", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "edit files", {
+    await defaultDispatch(entry, "edit files", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -1608,7 +1617,7 @@ describe("runLlmStep — credential deny list", () => {
 
     // env without HOME so the operator's own settings deny rules (which may contain
     // Edit(...) entries) cannot influence the Edit-absence assertion below.
-    await runLlmStep(entry, "hello", { spawn, env: {} });
+    await defaultDispatch(entry, "hello", { spawn, env: {} });
 
     assert.ok(
       capturedArgs.includes("--disallowedTools"),
@@ -1869,7 +1878,7 @@ describe("runCheckStep — environment allowlist", () => {
 
 // ── per-step deny patterns ────────────────────────────────────────────────────
 
-describe("runLlmStep — per-step deny patterns", () => {
+describe("defaultDispatch — per-step deny patterns", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -1885,7 +1894,7 @@ describe("runLlmStep — per-step deny patterns", () => {
       if (idx !== -1) disallowed = args[idx + 1];
       return child;
     }) as unknown as SpawnFn;
-    await runLlmStep(entry, "test", {
+    await defaultDispatch(entry, "test", {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
@@ -1975,7 +1984,7 @@ describe("runLlmStep — per-step deny patterns", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "test", {
+    await defaultDispatch(entry, "test", {
       spawn,
       contentsAccess: "read",
       workspaceDir: repoRoot,
@@ -2003,7 +2012,7 @@ describe("runLlmStep — per-step deny patterns", () => {
 // permitted to do — its permissions, its model, its deny entries. Edit-only by
 // design: steps must still be able to read pipeline definitions to reason about
 // the system.
-describe("runLlmStep — pipeline definitions are edit-denied", () => {
+describe("defaultDispatch — pipeline definitions are edit-denied", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -2018,7 +2027,7 @@ describe("runLlmStep — pipeline definitions are edit-denied", () => {
       return child;
     }) as unknown as SpawnFn;
 
-    await runLlmStep(entry, "edit", {
+    await defaultDispatch(entry, "edit", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -2053,7 +2062,7 @@ describe("runLlmStep — pipeline definitions are edit-denied", () => {
 // effective tool set — i.e., always for claude CLI steps.
 //
 // This test MUST FAIL before the runStep.ts no-workspace credential-deny fix.
-describe("runLlmStep — credential Read denials emitted for no-permissions steps", () => {
+describe("defaultDispatch — credential Read denials emitted for no-permissions steps", () => {
   it("no-permissions step includes credential Read denials in --disallowedTools", async () => {
     const entry: ModelEntry = {
       id: "haiku",
@@ -2069,7 +2078,7 @@ describe("runLlmStep — credential Read denials emitted for no-permissions step
 
     // env without HOME: the operator's own settings deny rules are appended to the
     // same list and would otherwise decide the Edit-absence assertions below.
-    await runLlmStep(entry, "hello", { spawn, env: {} }); // no contentsAccess
+    await defaultDispatch(entry, "hello", { spawn, env: {} }); // no contentsAccess
 
     const disallowedIdx = capturedArgs.indexOf("--disallowedTools");
     assert.ok(
@@ -2263,7 +2272,7 @@ describe("deny-list content snapshot", () => {
 
     // env without HOME: operator deny rules are appended to the same list and would
     // otherwise make this count depend on the machine's user settings.
-    await runLlmStep(entry, "edit file", {
+    await defaultDispatch(entry, "edit file", {
       spawn,
       contentsAccess: "write",
       workspaceDir: repoRoot,
@@ -2449,7 +2458,7 @@ describe("credential deny-list coverage", () => {
 // honouring settings `allow` would widen the grant, and honouring the target repo's
 // settings would let the artifact under review hide its own code from the reviewer
 // (Grep/Glob denials fail silently — finding F8).
-describe("runLlmStep — operator settings deny rules", () => {
+describe("defaultDispatch — operator settings deny rules", () => {
   const entry: ModelEntry = {
     id: "haiku",
     transport: "cli",
@@ -2472,7 +2481,7 @@ describe("runLlmStep — operator settings deny rules", () => {
       capturedArgs = args;
       return child;
     }) as unknown as SpawnFn;
-    await runLlmStep(entry, "test", { spawn, ...deps });
+    await defaultDispatch(entry, "test", { spawn, ...deps });
     return capturedArgs;
   }
 

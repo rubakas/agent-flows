@@ -38,7 +38,8 @@ import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow } from "./build.js";
 import { createDynamicMastra } from "./dynamicMastra.js";
 import { mastraDbPath } from "./paths.js";
-import type { StepRunnerDeps, runLlmStep } from "../../canon/runStep.js";
+import type { StepRunnerDeps } from "../../canon/runStep.js";
+import type { Dispatch } from "../../canon/stepAttempt.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 
 const TEST_STATE_HOME = join(tmpdir(), `agent-flows-test-state-${process.pid}`);
@@ -214,7 +215,7 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
       id: "dyn-fr8-store",
       url: `file:${mastraDbPath(join(mastraDir, "ticket.sqlite"))}`,
     });
-    const runner: typeof runLlmStep = (_entry, prompt: string, _deps?: StepRunnerDeps) => {
+    const runner: Dispatch = (_entry, prompt: string, _deps?: StepRunnerDeps) => {
       prompts.push(prompt);
       return Promise.resolve("ok");
     };

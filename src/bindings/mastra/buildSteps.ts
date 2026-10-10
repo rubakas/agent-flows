@@ -16,7 +16,7 @@ import {
   resolveStepModel,
 } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
-import { runCheckStep, type runLlmStep } from "../../canon/runStep.js";
+import { runCheckStep } from "../../canon/runStep.js";
 import { StepAttemptError, attemptStep } from "../../canon/stepAttempt.js";
 import { recordManifestSpecSource } from "../../runtime/artifactStore.js";
 import { projectGitStatus } from "../../runtime/projectGitStatus.js";
@@ -32,7 +32,7 @@ import {
 } from "../../runtime/stepLog.js";
 import type { ModelEntry, ModelRegistry, ProviderProfile } from "../../canon/registry.js";
 import type { CheckResult, StepRunnerDeps } from "../../canon/runStep.js";
-import type { AttemptResult } from "../../canon/stepAttempt.js";
+import type { AttemptResult, Dispatch } from "../../canon/stepAttempt.js";
 import type { StepLogEventInput } from "../../canon/stepLogEvents.js";
 import type { HardenedSpec, LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
@@ -103,7 +103,7 @@ export interface BuildDeps {
    * loaded at startup is unknown at execute time.
    */
   providerProfiles?: ProviderProfile[];
-  runner?: typeof runLlmStep;
+  runner?: Dispatch;
   /**
    * Runner deps shared by every step of the built workflow. Build-time and
    * therefore shared by every concurrent run on that workflow, so it must never

@@ -13,9 +13,9 @@ import {
   CREDENTIAL_DENY_PATTERNS,
   StepTimeoutError,
   TransportFailureError,
-  runLlmStep,
 } from "../../canon/runStep.js";
 import { WEAK_SCHEMA } from "../../canon/schemas.js";
+import { defaultDispatch } from "../../canon/stepAttempt.js";
 import { makeFakeChild, makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
 import { packageRoot } from "../../packageRoot.js";
 import {
@@ -41,6 +41,7 @@ import {
 } from "./buildSteps.js";
 import type { ModelEntry } from "../../canon/registry.js";
 import type { SpawnFn } from "../../canon/runClaudeCli.js";
+import type { Dispatch } from "../../canon/stepAttempt.js";
 import type { StepLogEvent } from "../../canon/stepLogEvents.js";
 import type { StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
@@ -276,7 +277,7 @@ describe("buildCheckStep — {{checkCommand}} substitution (FR-003/FR-004)", () 
 describe("buildLlmStep — step id in error message (FR-007)", () => {
   it("non-write step timeout surfaces as Step '<id>': StepTimeoutError without workspace suffix", async () => {
     // FR-007 applies to every step; FR-008 (workspace state) only applies to write steps.
-    const throwingRunner: typeof runLlmStep = async () => {
+    const throwingRunner: Dispatch = async () => {
       throw new StepTimeoutError(600_000);
     };
     const step: StepDef = {
@@ -329,7 +330,7 @@ describe("buildLlmStep — dirty workspace report on write step failure (FR-007/
       });
 
       const partialContent = "// partial write from step\n";
-      const throwingRunner: typeof runLlmStep = async () => {
+      const throwingRunner: Dispatch = async () => {
         // Simulate a partial write followed by a timeout.
         writeFileSync(modifiedFile, partialContent);
         throw new StepTimeoutError(600_000);
@@ -398,7 +399,7 @@ describe("buildLlmStep — dirty workspace report on write step failure (FR-007/
   it("write step failure in a non-git directory appends the documented not-a-git-repository message", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "spec023-nogit-"));
     try {
-      const throwingRunner: typeof runLlmStep = async () => {
+      const throwingRunner: Dispatch = async () => {
         throw new StepTimeoutError(100);
       };
       const step: StepDef = {
@@ -454,7 +455,7 @@ describe("buildLlmStep — workspace report on write step schema-retry failure (
 
       let callCount = 0;
       // First call returns invalid JSON (triggers retry). Second call (retry) throws.
-      const schemaRetryRunner: typeof runLlmStep = async () => {
+      const schemaRetryRunner: Dispatch = async () => {
         callCount += 1;
         if (callCount === 1) return "not-json";
         throw new StepTimeoutError(600_000);
@@ -535,8 +536,8 @@ describe("buildLlmStep — permissions.contents none", () => {
 
     // Forward the runnerDeps the binding built into the real runner, so the
     // assertion lands on the CLI invocation, not on an intermediate shape.
-    const runner: typeof runLlmStep = async (_entry, prompt, runnerDeps) =>
-      runLlmStep(entry, prompt, { ...runnerDeps, spawn });
+    const runner: Dispatch = async (_entry, prompt, runnerDeps) =>
+      defaultDispatch(entry, prompt, { ...runnerDeps, spawn });
 
     const deps = { registry: NOOP_REGISTRY, store: NOOP_STORE, runner };
     const llmStep = buildLlmStep(step, { "review.synthesis": "synthesis prompt" }, deps, undefined);
@@ -580,7 +581,7 @@ describe("buildLlmStep — refuses an unportable step before the runner is calle
     };
 
     let runnerCalls = 0;
-    const runner: typeof runLlmStep = async () => {
+    const runner: Dispatch = async () => {
       runnerCalls += 1;
       return "never";
     };
@@ -619,7 +620,7 @@ describe("buildLlmStep — refuses an unportable step before the runner is calle
         required: false,
       };
       let runnerCalls = 0;
-      const runner: typeof runLlmStep = async () => {
+      const runner: Dispatch = async () => {
         runnerCalls += 1;
         return "never";
       };
@@ -662,11 +663,11 @@ describe("buildLlmStep — per-run abortSignal (FR-013)", () => {
   // Records the signal each call received so a test can abort afterwards and
   // observe whether the runner would have been interrupted.
   function makeSignalRecordingRunner(): {
-    runner: typeof runLlmStep;
+    runner: Dispatch;
     signals: (AbortSignal | undefined)[];
   } {
     const signals: (AbortSignal | undefined)[] = [];
-    const runner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+    const runner: Dispatch = async (_entry, _prompt, deps) => {
       signals.push(deps?.signal);
       return "ok";
     };
@@ -731,7 +732,7 @@ describe("buildLlmStep — per-run abortSignal (FR-013)", () => {
 
   it("an already-aborted run throws before the runner is called", async () => {
     let runnerCalls = 0;
-    const runner: typeof runLlmStep = async () => {
+    const runner: Dispatch = async () => {
       runnerCalls += 1;
       return "never";
     };
@@ -888,7 +889,7 @@ describe("step builders — one step.start and exactly one terminal step.result"
     const runId = "log-success";
     const log = openTempRunLog(runId);
     try {
-      const runner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+      const runner: Dispatch = async (_entry, _prompt, deps) => {
         deps?.onEvent?.({ kind: "message", role: "assistant", text: "the answer" });
         deps?.onEvent?.({ kind: "usage", costUsd: 0.02, turns: 2 });
         return "the answer";
@@ -932,7 +933,7 @@ describe("step builders — one step.start and exactly one terminal step.result"
     const runId = "log-failure";
     const log = openTempRunLog(runId);
     try {
-      const runner: typeof runLlmStep = async () => {
+      const runner: Dispatch = async () => {
         throw new Error("transport exploded");
       };
       const llmStep = buildLlmStep(
@@ -963,7 +964,7 @@ describe("step builders — one step.start and exactly one terminal step.result"
     const log = openTempRunLog(runId);
     try {
       const controller = new AbortController();
-      const runner: typeof runLlmStep = async () => {
+      const runner: Dispatch = async () => {
         // What a cancelled run looks like from inside: the signal fires, then the
         // transport rejects.
         controller.abort();
@@ -1150,7 +1151,7 @@ describe("a capped check output stays disclosed once it reaches a prompt", () =>
 
     const llmDef: StepDef = { id: "reader", kind: "llm", prompt: "prompts/reader.md" };
     let rendered = "";
-    const runner: typeof runLlmStep = async (_entry, prompt) => {
+    const runner: Dispatch = async (_entry, prompt) => {
       rendered = prompt;
       return "ok";
     };
@@ -1186,9 +1187,9 @@ describe("buildLlmStep — per-run provider", () => {
   const prompts = { "investigate.survey": "survey prompt" };
 
   /** Records the ModelEntry id each call resolved to. */
-  function makeEntryRecordingRunner(): { runner: typeof runLlmStep; entries: string[] } {
+  function makeEntryRecordingRunner(): { runner: Dispatch; entries: string[] } {
     const entries: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
+    const runner: Dispatch = async (entry) => {
       entries.push(entry.id);
       return "ok";
     };
@@ -1340,7 +1341,7 @@ describe("buildLlmStep — provider failover", () => {
   }
 
   function makeDeps(
-    runner: typeof runLlmStep,
+    runner: Dispatch,
     profile: { id: string; roles: Record<string, string>; fallback?: string[] },
     profiles = [PRIMARY, SECONDARY, TEXT_ONLY]
   ) {
@@ -1359,7 +1360,7 @@ describe("buildLlmStep — provider failover", () => {
   it("an AbortError is not failed over, even with the run signal still live", async () => {
     const seen: string[] = [];
     const controller = new AbortController();
-    const runner: typeof runLlmStep = async (entry) => {
+    const runner: Dispatch = async (entry) => {
       seen.push(entry.id);
       throw new DOMException("Claude CLI aborted", "AbortError");
     };
@@ -1380,7 +1381,7 @@ describe("buildLlmStep — provider failover", () => {
   it("a cancelled run is not failed over, even when the failure is a transport failure", async () => {
     const seen: string[] = [];
     const controller = new AbortController();
-    const runner: typeof runLlmStep = async (entry) => {
+    const runner: Dispatch = async (entry) => {
       seen.push(entry.id);
       controller.abort();
       // Failover-worthy on its own — only the cancelled run stops it.
@@ -1401,7 +1402,7 @@ describe("buildLlmStep — provider failover", () => {
 
   it("an explicit per-run model override is never failed over", async () => {
     const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
+    const runner: Dispatch = async (entry) => {
       seen.push(entry.id);
       throw transportFailure();
     };
@@ -1424,7 +1425,7 @@ describe("buildLlmStep — provider failover", () => {
   it("the step's declared deadline bounds the STEP, not each attempt", async () => {
     const timeouts: (number | undefined)[] = [];
     const declaredMs = 5_000;
-    const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
+    const runner: Dispatch = async (entry, _prompt, deps) => {
       timeouts.push(deps!.timeoutMs);
       if (entry.id === "m1") {
         await new Promise((resolve) => setTimeout(resolve, 25));
@@ -1446,7 +1447,7 @@ describe("buildLlmStep — provider failover", () => {
 
   it("the step's declared budget bounds the STEP, not each attempt", async () => {
     const budgets: (number | undefined)[] = [];
-    const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
+    const runner: Dispatch = async (entry, _prompt, deps) => {
       budgets.push(deps!.maxBudgetUsd);
       if (entry.id === "m1") {
         deps!.onEvent?.({ kind: "usage", costUsd: 0.75 });
@@ -1468,7 +1469,7 @@ describe("buildLlmStep — provider failover", () => {
     const dir = mkdtempSync(join(tmpdir(), "af-steplog-provenance-"));
     openRunLog(runId, { dir, pipelineId: "test-pipeline" });
     try {
-      const runner: typeof runLlmStep = async (entry) => {
+      const runner: Dispatch = async (entry) => {
         if (entry.id === "m1") throw transportFailure();
         return "ok";
       };
@@ -1521,7 +1522,7 @@ describe("buildLlmStep — provider failover", () => {
     const dir = mkdtempSync(join(tmpdir(), "af-steplog-failover-"));
     openRunLog(runId, { dir, pipelineId: "test-pipeline" });
     try {
-      const runner: typeof runLlmStep = async (entry) => {
+      const runner: Dispatch = async (entry) => {
         if (entry.id === "m1") throw transportFailure();
         return "ok";
       };
@@ -1552,7 +1553,7 @@ describe("buildLlmStep — provider failover", () => {
     openRunLog(runId, { dir, pipelineId: "test-pipeline" });
     try {
       let m2Calls = 0;
-      const runner: typeof runLlmStep = async (entry) => {
+      const runner: Dispatch = async (entry) => {
         if (entry.id === "m1") throw transportFailure();
         m2Calls += 1;
         if (m2Calls === 1) return "not json";
@@ -1586,7 +1587,7 @@ describe("buildLlmStep — provider failover", () => {
 
   it("a budget the step inherits from the pipeline bounds the step across a failover", async () => {
     const budgets: (number | undefined)[] = [];
-    const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
+    const runner: Dispatch = async (entry, _prompt, deps) => {
       budgets.push(deps!.maxBudgetUsd);
       if (entry.id === "m1") {
         deps!.onEvent?.({ kind: "usage", costUsd: 0.75 });
@@ -1620,7 +1621,7 @@ describe("buildLlmStep — schema-gated output is validated against the canon sc
     schema: "weaknesses",
   };
 
-  function runStep(runner: typeof runLlmStep): Promise<Record<string, unknown>> {
+  function runStep(runner: Dispatch): Promise<Record<string, unknown>> {
     const llmStep = buildLlmStep(
       step,
       { critic: "critic prompt" },
@@ -1632,7 +1633,7 @@ describe("buildLlmStep — schema-gated output is validated against the canon sc
 
   it("fails the step when the retry violates the schema too", async () => {
     let call = 0;
-    const runner: typeof runLlmStep = async () => {
+    const runner: Dispatch = async () => {
       call += 1;
       return BAD_SEVERITY;
     };
@@ -1711,7 +1712,7 @@ describe("buildReviewMaterialStep", () => {
 
       // A downstream llm step reaches it as {{material}}.
       let rendered = "";
-      const runner: typeof runLlmStep = async (_entry, prompt) => {
+      const runner: Dispatch = async (_entry, prompt) => {
         rendered = prompt;
         return "ok";
       };
@@ -1787,7 +1788,7 @@ describe("buildLlmStep — required: false is an optional dimension", () => {
     prompt: "prompts/code-review-delivery.md",
     required: false,
   };
-  const failingRunner: typeof runLlmStep = async () => {
+  const failingRunner: Dispatch = async () => {
     throw new Error("schema validation failed after retry");
   };
 
@@ -1841,7 +1842,7 @@ describe("buildLlmStep — required: false is an optional dimension", () => {
 
   it("a cancelled optional step still throws — cancellation is never optional", async () => {
     const controller = new AbortController();
-    const cancellingRunner: typeof runLlmStep = async () => {
+    const cancellingRunner: Dispatch = async () => {
       controller.abort();
       throw new Error("aborted");
     };
@@ -1901,7 +1902,7 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
     };
   }
 
-  function runStep(runner: typeof runLlmStep, runId?: string): Promise<Record<string, unknown>> {
+  function runStep(runner: Dispatch, runId?: string): Promise<Record<string, unknown>> {
     const llmStep = buildLlmStep(
       step,
       { critic: "critic prompt" },
@@ -1916,9 +1917,9 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
   }
 
   /** Answers `text` once and counts how many times the model was asked. */
-  function constantRunner(text: string): { runner: typeof runLlmStep; calls: () => number } {
+  function constantRunner(text: string): { runner: Dispatch; calls: () => number } {
     let calls = 0;
-    const runner: typeof runLlmStep = async () => {
+    const runner: Dispatch = async () => {
       calls += 1;
       return text;
     };
@@ -1942,7 +1943,7 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
     const log = openTempRunLog(runId);
     try {
       let calls = 0;
-      const runner: typeof runLlmStep = async () => {
+      const runner: Dispatch = async () => {
         calls += 1;
         return calls === 1
           ? "I could not complete this task."
@@ -1969,7 +1970,7 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
     const log = openTempRunLog(runId);
     try {
       let calls = 0;
-      const runner: typeof runLlmStep = async () => {
+      const runner: Dispatch = async () => {
         calls += 1;
         return calls === 1 ? "first narration, no JSON" : "second narration, still no JSON";
       };
@@ -1987,7 +1988,7 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
 
   it("hands the canon schema to the runner for the transports that enforce it", async () => {
     let captured: unknown;
-    const runner: typeof runLlmStep = async (_entry, _prompt, deps) => {
+    const runner: Dispatch = async (_entry, _prompt, deps) => {
       captured = deps?.outputJsonSchema;
       return '{"weaknesses":[]}';
     };

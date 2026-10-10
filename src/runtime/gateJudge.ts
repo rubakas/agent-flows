@@ -4,11 +4,12 @@
 // and calls in here for the judging itself.
 
 import { getActiveProfile } from "../canon/registry.js";
-import { runLlmStep } from "../canon/runStep.js";
+import { defaultDispatch } from "../canon/stepAttempt.js";
 import { buildGateMaterial } from "./gateMaterial.js";
 import type { GatePayload } from "./gateMaterial.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepRunnerDeps } from "../canon/runStep.js";
+import type { Dispatch } from "../canon/stepAttempt.js";
 
 // ── Judge deps (injectable for testing) ───────────────────────────────────────
 
@@ -18,10 +19,10 @@ import type { StepRunnerDeps } from "../canon/runStep.js";
  */
 export interface JudgeDeps {
   /**
-   * LLM runner. Defaults to the canon's `runLlmStep` when not provided.
+   * LLM runner. Defaults to the canon's `defaultDispatch` when not provided.
    * Tests inject a stub that returns a fixture verdict without calling a real model.
    */
-  runner?: typeof runLlmStep;
+  runner?: Dispatch;
   /** Registry for resolving the reasoner model. */
   registry: ModelRegistry;
   /** Active provider profile. Defaults to `getActiveProfile()` when absent. */
@@ -138,7 +139,7 @@ export async function runJudge(
     ? {} // api transport: no workspace access (FR-004, Context §7)
     : { contentsAccess: "read" as const, workspaceDir: projectDir };
 
-  const actualRunner = runner ?? runLlmStep;
+  const actualRunner = runner ?? defaultDispatch;
 
   let lastParseError: string | undefined;
   // One retry on parse failure; second malformed verdict → judge failure (FR-005).

@@ -9,11 +9,12 @@
 // resolves the run.
 
 import { getActiveProfile } from "../canon/registry.js";
-import { runLlmStep } from "../canon/runStep.js";
+import { defaultDispatch } from "../canon/stepAttempt.js";
 import { buildGateMaterial } from "./gateMaterial.js";
+import type { GatePayload } from "./gateMaterial.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepRunnerDeps } from "../canon/runStep.js";
-import type { GatePayload } from "./gateMaterial.js";
+import type { Dispatch } from "../canon/stepAttempt.js";
 
 /**
  * What the summary needs. Separate from JudgeDeps because the daemon has one
@@ -22,8 +23,8 @@ import type { GatePayload } from "./gateMaterial.js";
  * ever sees a gate in.
  */
 export interface GateSummaryDeps {
-  /** LLM runner. Defaults to the canon's `runLlmStep`; tests inject a stub. */
-  runner?: typeof runLlmStep;
+  /** LLM runner. Defaults to the canon's `defaultDispatch`; tests inject a stub. */
+  runner?: Dispatch;
   /** Registry for resolving the scout model. */
   registry: ModelRegistry;
   /** Provider profile, when the run does not name its own. */
@@ -148,7 +149,7 @@ export async function runGateSummary(
 
   let raw: string;
   try {
-    raw = await (deps.runner ?? runLlmStep)(entry, prompt, runnerDeps);
+    raw = await (deps.runner ?? defaultDispatch)(entry, prompt, runnerDeps);
   } catch (err: unknown) {
     return {
       error: `Summary transport error: ${err instanceof Error ? err.message : String(err)}`,

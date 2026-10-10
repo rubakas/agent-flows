@@ -17,7 +17,7 @@ import { makeInMemoryDb } from "../../db/index.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow } from "./build.js";
 import { resolveProjectDir } from "./projectDir.js";
-import type { runLlmStep } from "../../canon/runStep.js";
+import type { Dispatch } from "../../canon/stepAttempt.js";
 
 // ── resolveProjectDir ─────────────────────────────────────────────────────────
 
@@ -78,7 +78,7 @@ describe("resolveProjectDir → buildPipelineWorkflow forwards cwd to the runner
     const registry = new ModelRegistry([]);
 
     const seen: { dir?: string }[] = [];
-    const capturingRunner: typeof runLlmStep = async (_entry, _prompt, runnerDeps) => {
+    const capturingRunner: Dispatch = async (_entry, _prompt, runnerDeps) => {
       seen.push({ dir: runnerDeps?.workspaceDir });
       return "ok";
     };

@@ -37,7 +37,8 @@ import { DrizzleTicketStore } from "../../store/sqlite.js";
 import { buildPipelineWorkflow, validateModelOverrides } from "./build.js";
 import { mastraDbPath } from "./paths.js";
 import type { SpawnFn } from "../../canon/runClaudeCli.js";
-import type { StepRunnerDeps, runLlmStep } from "../../canon/runStep.js";
+import type { StepRunnerDeps } from "../../canon/runStep.js";
+import type { Dispatch } from "../../canon/stepAttempt.js";
 import type { LoadedPipeline } from "../../canon/types.js";
 
 // ── Test pipeline fixture ─────────────────────────────────────────────────────
@@ -91,7 +92,7 @@ const CANNED_PIPELINE: LoadedPipeline = {
 // ── Fake runner ───────────────────────────────────────────────────────────────
 
 // Returns canned responses keyed by entry.id (= step.id with passthrough registry).
-function makeFakeRunner(responses: Record<string, string>): typeof runLlmStep {
+function makeFakeRunner(responses: Record<string, string>): Dispatch {
   return async (entry, _prompt) => {
     const resp = responses[entry.id];
     if (resp === undefined) throw new Error(`fake runner: no canned response for "${entry.id}"`);
@@ -231,7 +232,7 @@ describe("buildPipelineWorkflow — rejected gate", () => {
 describe("buildPipelineWorkflow — models override", () => {
   it("routes step to overridden model from registry", async () => {
     const capturedEntries: string[] = [];
-    const trackingRunner: typeof runLlmStep = async (entry, _prompt) => {
+    const trackingRunner: Dispatch = async (entry, _prompt) => {
       capturedEntries.push(entry.id);
       return CANNED_RESPONSES[entry.id] ?? INTAKE_MD;
     };
@@ -292,7 +293,7 @@ describe("buildPipelineWorkflow — per-run provider (spec 039)", () => {
 
   it("the provider named in the run input decides which model the step uses", async () => {
     const capturedEntries: string[] = [];
-    const trackingRunner: typeof runLlmStep = async (entry) => {
+    const trackingRunner: Dispatch = async (entry) => {
       capturedEntries.push(entry.id);
       return "done";
     };
@@ -331,7 +332,7 @@ describe("buildPipelineWorkflow — per-run provider (spec 039)", () => {
 
 describe("buildPipelineWorkflow — schema validation", () => {
   it("fails step when output missing required schema key", async () => {
-    const badRunner: typeof runLlmStep = async (entry) => {
+    const badRunner: Dispatch = async (entry) => {
       if (entry.id === "critic") return '{"wrong_key": []}'; // missing "weaknesses"
       return CANNED_RESPONSES[entry.id] ?? INTAKE_MD;
     };
@@ -359,7 +360,7 @@ describe("buildPipelineWorkflow — schema validation", () => {
 describe("buildPipelineWorkflow — JSON retry", () => {
   it("succeeds when first call returns non-JSON but retry returns valid JSON", async () => {
     const callCounts: Record<string, number> = {};
-    const retryRunner: typeof runLlmStep = async (entry, _prompt) => {
+    const retryRunner: Dispatch = async (entry, _prompt) => {
       callCounts[entry.id] = (callCounts[entry.id] ?? 0) + 1;
       if (entry.id === "critic" && callCounts.critic === 1) {
         // First attempt: return markdown prose (not JSON)
@@ -400,7 +401,7 @@ describe("buildPipelineWorkflow — JSON retry", () => {
 
   it("fails step when both attempts return non-JSON", async () => {
     const callCounts: Record<string, number> = {};
-    const alwaysBadRunner: typeof runLlmStep = async (entry, _prompt) => {
+    const alwaysBadRunner: Dispatch = async (entry, _prompt) => {
       callCounts[entry.id] = (callCounts[entry.id] ?? 0) + 1;
       if (entry.id === "critic") {
         return "I cannot produce JSON output for this critique.";
@@ -466,7 +467,7 @@ describe("validateModelOverrides", () => {
 // but nothing crossed all three in one artifact, so the seams were unguarded. The
 // `hasContentsAccess` gate in buildSteps.ts is one such seam: a step's declared
 // deny evaporates there with every individual test still green. This test runs the
-// real runLlmStep against a fake spawn and reads the argv the CLI would receive.
+// real defaultDispatch against a fake spawn and reads the argv the CLI would receive.
 
 describe("permissions.deny end to end — a glob declared in YAML reaches --disallowedTools", () => {
   /** Writes a one-step pipeline plus its prompt in the layout loadPipeline expects. */
@@ -501,7 +502,7 @@ describe("permissions.deny end to end — a glob declared in YAML reaches --disa
     return { yamlPath: join(root, "pipelines", "deny-e2e.yaml"), root };
   }
 
-  /** Runs the fixture through the real runLlmStep and returns the captured argv. */
+  /** Runs the fixture through the real defaultDispatch and returns the captured argv. */
   async function captureArgv(deny: string[], suffix: string): Promise<string[]> {
     const { yamlPath, root } = writePipelineFixture(deny);
     const pipeline = loadPipeline(yamlPath);
@@ -724,7 +725,7 @@ describe("buildPipelineWorkflow — diamond dependsOn pipeline", () => {
 describe("buildPipelineWorkflow — FR-005 context scoping", () => {
   it("step sees ancestor output but not non-ancestor output in rendered prompt", async () => {
     const capturedPrompts: Record<string, string> = {};
-    const capturingRunner: typeof runLlmStep = async (entry, prompt) => {
+    const capturingRunner: Dispatch = async (entry, prompt) => {
       capturedPrompts[entry.id] = prompt;
       const resp = DEPENDS_ON_RESPONSES[entry.id];
       if (resp === undefined) throw new Error(`no canned response for "${entry.id}"`);
@@ -778,7 +779,7 @@ describe("buildPipelineWorkflow — FR-005 context scoping", () => {
 describe("buildPipelineWorkflow — per-step timeout wiring", () => {
   it("passes step.timeoutMs and pipeline.defaultTimeoutMs to the runner for precedence resolution", async () => {
     const capturedDeps: Record<string, StepRunnerDeps> = {};
-    const trackingRunner: typeof runLlmStep = async (entry, _prompt, deps) => {
+    const trackingRunner: Dispatch = async (entry, _prompt, deps) => {
       capturedDeps[entry.id] = { ...(deps ?? {}) };
       return "output";
     };
@@ -827,7 +828,7 @@ describe("buildPipelineWorkflow — per-step timeout wiring", () => {
       await run.start({ inputData: { request: "test" } });
 
       // Step with step-level timeout: both timeoutMs and defaultTimeoutMs should be present.
-      // runLlmStep resolves the effective timeout as timeoutMs ?? defaultTimeoutMs = 1000.
+      // defaultDispatch resolves the effective timeout as timeoutMs ?? defaultTimeoutMs = 1000.
       assert.equal(
         capturedDeps["with-step-timeout"]?.timeoutMs,
         1000,
@@ -915,7 +916,7 @@ const LOOP_PIPELINE: LoadedPipeline = {
 describe("buildPipelineWorkflow — loop converges before maxIterations", () => {
   it("runs the expected number of iterations and records converged=true", async () => {
     const callCounts: Record<string, number> = {};
-    const runner: typeof runLlmStep = async (entry, _prompt) => {
+    const runner: Dispatch = async (entry, _prompt) => {
       callCounts[entry.id] = (callCounts[entry.id] ?? 0) + 1;
       // "eval" returns truthy on the 2nd call so the loop converges at iteration 2.
       if (entry.id === "eval") return callCounts.eval >= 2 ? "done" : "";
@@ -948,7 +949,7 @@ describe("buildPipelineWorkflow — loop converges before maxIterations", () => 
 
 describe("buildPipelineWorkflow — loop exhausts maxIterations without converging", () => {
   it("stops at maxIterations without throwing and records converged=false", async () => {
-    const runner: typeof runLlmStep = async (_entry, _prompt) => "";
+    const runner: Dispatch = async (_entry, _prompt) => "";
 
     const { storage, store, cleanup } = makeTestFixture("loop-exhaust");
     try {
@@ -981,7 +982,7 @@ describe("buildPipelineWorkflow — loop run independence (regression: no closur
     let phase = 1;
     let run1EvalCount = 0;
 
-    const runner: typeof runLlmStep = async (entry, _prompt) => {
+    const runner: Dispatch = async (entry, _prompt) => {
       if (entry.id !== "eval") return "";
       if (phase === 1) {
         run1EvalCount += 1;
@@ -1966,7 +1967,7 @@ describe("buildPipelineWorkflow — convergence signal: {{checkCommand}} vs hard
     // POSIX syntax error and exits non-zero — so the loop would never converge
     // even though we passed checkCommand: "exit 0". This assertion goes red
     // when the substitution is absent, proving the feature exists.
-    const noopRunner: typeof runLlmStep = async () => "";
+    const noopRunner: Dispatch = async () => "";
     const { storage, store, cleanup } = makeTestFixture("check-cmd-pass");
     try {
       const wf = buildPipelineWorkflow(LOOP_CHECK_CMD_PIPELINE, {
@@ -2000,7 +2001,7 @@ describe("buildPipelineWorkflow — convergence signal: {{checkCommand}} vs hard
     // Note this alone is not a sufficient falsifier — an unsubstituted
     // "{{checkCommand}}" also exits non-zero. The "exit 0" case above is the
     // real guard; this case confirms the inversion is bidirectional.
-    const noopRunner: typeof runLlmStep = async () => "";
+    const noopRunner: Dispatch = async () => "";
     const { storage, store, cleanup } = makeTestFixture("check-cmd-fail");
     try {
       const wf = buildPipelineWorkflow(LOOP_CHECK_CMD_PIPELINE, {
@@ -2033,7 +2034,7 @@ describe("buildPipelineWorkflow — convergence signal: {{checkCommand}} vs hard
     // With a hardcoded 'exit 0' the test step always passes — just as pnpm test
     // passed on code with typecheck errors before this spec. The loop converges
     // immediately, proving the old gate could not fail for the right reason.
-    const noopRunner: typeof runLlmStep = async () => "";
+    const noopRunner: Dispatch = async () => "";
     const { storage, store, cleanup } = makeTestFixture("old-wiring-pass");
     try {
       const wf = buildPipelineWorkflow(LOOP_OLD_WIRING_PIPELINE, {

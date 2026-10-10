@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { packageRoot } from "../../packageRoot.js";
 import { loadPipeline } from "../load.js";
 import { defaultRegistry, getProfile, resolveStepModel } from "../registry.js";
-import { runLlmStep } from "../runStep.js";
+import { defaultDispatch } from "../stepAttempt.js";
 import { makeStreamJsonStdout } from "../testing/fakeSpawn.js";
 import { makeFakeChild } from "../testing/fakeSpawn.js";
 import type { SpawnFn } from "../runClaudeCli.js";
@@ -76,7 +76,7 @@ async function captureVerifyStepInvocation(): Promise<CapturedInvocation> {
   }) as unknown as SpawnFn;
 
   try {
-    await runLlmStep(entry, "GOLDEN PROMPT", {
+    await defaultDispatch(entry, "GOLDEN PROMPT", {
       spawn,
       env: { HOME: home },
       contentsAccess: "read",
