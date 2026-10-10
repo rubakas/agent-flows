@@ -435,8 +435,14 @@ interface RunDirScan {
  * the manifest). A chained run writes every stage's artifact into its anchor's
  * directory (spec 029 FR-006), so one directory can hold several runs.
  * Undefined when the directory cannot be read.
+ *
+ * With `mentioning`, a file whose text does not contain that string is skipped
+ * before it is parsed: an artifact carries step results and can be large, and a
+ * caller that is looking for one run id has no use for a file that cannot name
+ * it. The text is only a pre-filter — a file that does contain the string is
+ * still parsed and judged by its fields.
  */
-function scanRunDir(runDir: string): RunDirScan | undefined {
+function scanRunDir(runDir: string, mentioning?: string): RunDirScan | undefined {
   let entries: string[];
   try {
     entries = readdirSync(runDir);
@@ -450,7 +456,9 @@ function scanRunDir(runDir: string): RunDirScan | undefined {
     if (!entry.endsWith(".json") || entry === "manifest.json") continue;
     const path = join(runDir, entry);
     try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      const raw = readFileSync(path, "utf8");
+      if (mentioning !== undefined && !raw.includes(mentioning)) continue;
+      const parsed = JSON.parse(raw) as unknown;
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
         failure ??= { error: "artifact is not a JSON object", path };
         continue;
@@ -516,8 +524,8 @@ function findInOwnDir(runsDir: string, runId: string): RunMatch | undefined {
  * A chained run in some other run's directory: the artifact anywhere under
  * runsDir whose own `runId` is this one's.
  *
- * Cost: one readdir of runsDir plus a read-and-parse of every artifact in every
- * run directory. It runs only when the run's own directory does not describe it
+ * Cost: one readdir of runsDir plus a read of every artifact in every run
+ * directory; only a file whose text contains the run id is parsed. It runs only when the run's own directory does not describe it
  * — a chained child after a restart, or an id nobody has heard of — never on
  * the way to a run that is where its id says it is.
  *
@@ -531,10 +539,12 @@ function findByScan(runsDir: string, runId: string): RunMatch | undefined {
   } catch {
     return undefined;
   }
+  // As the artifact's JSON spells it: an id with a quote in it is escaped there.
+  const spelled = JSON.stringify(runId).slice(1, -1);
   for (const name of dirEntries) {
     if (name === runId || !isSafeRunId(name)) continue;
     const dir = join(runsDir, name);
-    const scan = scanRunDir(dir);
+    const scan = scanRunDir(dir, spelled);
     const found = scan?.artifacts.find((c) => c.artifact.runId === runId);
     if (found) return { kind: "artifact", dir, ...found };
   }

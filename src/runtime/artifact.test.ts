@@ -23,6 +23,7 @@ import type { ManifestStage, RunManifest, StepProvenance } from "./artifactStore
 import {
   deriveChainStatus,
   listPersistedRuns,
+  locateRun,
   readManifest,
   readPersistedRun,
   upsertManifestEntry,
@@ -1365,6 +1366,58 @@ describe("spec 047 FR-11: locating a run by its own id after a restart", () => {
       "the list must not show the overwritten run under the survivor's state"
     );
     assert.equal(restarted(runsDir).get(firstId), undefined);
+  });
+
+  describe("the scan reads text before it parses (pre-filter)", () => {
+    function writeArtifact(runsDir: string, dirName: string, file: string, body: object): void {
+      const dir = join(runsDir, dirName);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, file), JSON.stringify(body), "utf8");
+    }
+
+    it("does not attribute a run to a file that merely mentions its id", () => {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      // Another run's step output happens to quote the id; the parsed `runId` still decides.
+      writeArtifact(runsDir, "run-holder", "investigate.json", {
+        runId: "run-holder",
+        pipelineId: "investigate",
+        status: "succeeded",
+        steps: { read: { status: "succeeded", outputExcerpt: "see run-mentioned for details" } },
+      });
+
+      assert.equal(readPersistedRun(runsDir, "run-mentioned"), undefined);
+      assert.equal(locateRun(runsDir, "run-mentioned"), undefined);
+    });
+
+    it("still finds a chained child whose id the JSON escapes", () => {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      const childId = 'run-"quoted"';
+      writeArtifact(runsDir, "run-host", "investigate.json", {
+        runId: "run-host",
+        pipelineId: "investigate",
+        status: "succeeded",
+      });
+      writeArtifact(runsDir, "run-host", "build.json", {
+        runId: childId,
+        pipelineId: "build",
+        status: "succeeded",
+      });
+
+      assert.equal(readPersistedRun(runsDir, childId)?.pipelineId, "build");
+      assert.deepEqual(locateRun(runsDir, childId), {
+        dir: join(runsDir, "run-host"),
+        pipelineId: "build",
+      });
+    });
+
+    it("reports nothing for a file it cannot parse, which could not have named the run anyway", () => {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      const dir = join(runsDir, "run-broken");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "investigate.json"), "{ not json", "utf8");
+
+      assert.equal(readPersistedRun(runsDir, "run-elsewhere"), undefined);
+    });
   });
 
   it("omits settledAt on read for a run persisted at a gate or mid-flight", () => {

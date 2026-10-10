@@ -4339,7 +4339,9 @@ describe("FR-006: GET /api/runs/:id/manifest — disk fallback, no live run requ
       projectDir,
       state,
       runService: new RunService(
-        makeMastra(makeMockRun("unrelated-run", successResult(), successResult()))
+        makeMastra(makeMockRun("unrelated-run", successResult(), successResult())),
+        undefined,
+        state.runsDir
       ),
     });
   });
