@@ -25,15 +25,23 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 export const OUT_DIR = join(root, "plugin", "skills", "review", "scripts", "lib");
 
 /**
- * The modules that travel into the plugin, in dependency order. `rewrites` lists the
- * exact import specifiers a module may contain besides `node:*`, each with what it
- * becomes. Anything else is an error: the plugin has no other module to import.
+ * The modules that travel into the plugin, in dependency order. `builtins` names the
+ * Node builtins a module may import, each spelled out: adding a capability is an edit
+ * here, so `node:sqlite` or `node:net` appearing in the core is refused rather than
+ * shipped. `rewrites` lists the exact relative specifiers it may contain, each with what
+ * it becomes. Anything else is an error: the plugin has no other module to import.
  */
 export const MODULES = [
-  { source: "src/canon/credentialPatterns.ts", out: "credentialPatterns.mjs", rewrites: {} },
+  {
+    source: "src/canon/credentialPatterns.ts",
+    out: "credentialPatterns.mjs",
+    builtins: [],
+    rewrites: {},
+  },
   {
     source: "src/runtime/reviewCapture.ts",
     out: "reviewCapture.mjs",
+    builtins: ["node:child_process"],
     rewrites: { "../canon/credentialPatterns.js": "./credentialPatterns.mjs" },
   },
 ];
@@ -91,12 +99,12 @@ export function buildModule(module) {
     code = code.replace(quoted, `"${to}"`);
   }
 
-  const allowed = new Set(Object.values(module.rewrites));
+  const allowed = new Set([...module.builtins, ...Object.values(module.rewrites)]);
   for (const specifier of specifiersIn(code)) {
-    if (specifier.startsWith("node:") || allowed.has(specifier)) continue;
+    if (allowed.has(specifier)) continue;
     throw new Error(
       `${module.source} imports ${JSON.stringify(specifier)}, which the plugin cannot resolve: ` +
-        "the capture core may import only node:* and the generated modules"
+        "the capture core may import only the builtins MODULES names and the generated modules"
     );
   }
   return header(module.source) + "\n" + code;
