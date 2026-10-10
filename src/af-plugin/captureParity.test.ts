@@ -172,6 +172,8 @@ interface Built {
   baseline?: string;
   /** Strings that must reach neither capture's output. */
   secrets?: string[];
+  /** The subset of `secrets` the daemon capture still carries: a declared gap. */
+  daemonLeaks?: string[];
   /** Environment for the duration of both captures. */
   env?: Record<string, string>;
   /** Files that must not exist after both captures ran. */
@@ -278,8 +280,8 @@ function differingFields(daemon: View, pluginSide: View): Field[] {
 const INTENDED: Record<string, { reason: string; closedBy?: string }> = {
   "deny-list-gap": {
     reason:
-      "the plugin withholds the dotenv globs and four more credential files " +
-      "(.git-credentials, .pypirc, .docker/config.json, .dockercfg) that the daemon's list lacks",
+      "the plugin withholds the dotenv globs (.env.*, *.env) that the daemon's list lacks; " +
+      "the model's own Read can still open an example file, so they are capture-only",
     closedBy: "fix(runtime): withhold the dotenv globs in the daemon capture",
   },
   "control-char-escaping": {
@@ -429,7 +431,9 @@ const fixtures: Fixture[] = [
         ".docker/config.json",
         ".dockercfg",
       ]);
-      return { repo, baseline, secrets };
+      // The dotenv globs are the plugin's alone; the four files after them are in
+      // both lists.
+      return { repo, baseline, secrets, daemonLeaks: secrets.slice(0, 3) };
     },
     intended: [
       { id: "deny-list-gap", fields: ["withheld", "diff", "changedFiles", "history", "rendered"] },
@@ -654,16 +658,16 @@ describe("daemon and plugin capture, on the same hostile repositories", () => {
       for (const marker of built.markers ?? []) {
         assert.equal(existsSync(marker), false, `a repository-configured command ran: ${marker}`);
       }
-      const leaksOnDaemon = fixture.intended.some(({ id }) => id === "deny-list-gap");
       for (const secret of built.secrets ?? []) {
         assert.ok(
           !JSON.stringify(pluginSide).includes(secret),
           `the plugin capture carries ${secret}`
         );
+        const declaredLeak = (built.daemonLeaks ?? []).includes(secret);
         assert.equal(
           JSON.stringify(daemon).includes(secret),
-          leaksOnDaemon,
-          leaksOnDaemon
+          declaredLeak,
+          declaredLeak
             ? `the deny-list gap is declared but the daemon no longer carries ${secret}`
             : `the daemon capture carries ${secret}`
         );

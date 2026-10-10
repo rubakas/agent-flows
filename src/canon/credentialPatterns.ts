@@ -80,6 +80,13 @@ export const CREDENTIAL_DENY_PATTERNS: readonly string[] = [
   "**/.pgpass",
   "**/.htpasswd",
   "**/htpasswd",
+  // Git's credential store, PyPI's upload tokens, Docker's registry auth and
+  // its legacy spelling. The review capture withheld these from a diff before
+  // a step's own Read and Grep did.
+  "**/.git-credentials",
+  "**/.pypirc",
+  "**/.docker/config.json",
+  "**/.dockercfg",
 
   // Cloud provider and cluster credentials. Directory-scoped where the secret
   // is not in a predictably named file: the aws SSO cache lives under

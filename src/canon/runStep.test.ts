@@ -2124,7 +2124,7 @@ describe("defaultDispatch — credential Read denials emitted for no-permissions
 // references to the constants.
 
 describe("deny-list content snapshot", () => {
-  it("CREDENTIAL_DENY_PATTERNS exactly equals the 92-entry snapshot", () => {
+  it("CREDENTIAL_DENY_PATTERNS exactly equals the 96-entry snapshot", () => {
     const expected: readonly string[] = [
       // Environment files (13)
       "**/.env",
@@ -2169,13 +2169,17 @@ describe("deny-list content snapshot", () => {
       "**/*.auto.tfvars.json",
       "**/*.tfstate",
       "**/*.tfstate.backup",
-      // Tool auth files (6)
+      // Tool auth files (10)
       "**/.npmrc",
       "**/.netrc",
       "**/_netrc",
       "**/.pgpass",
       "**/.htpasswd",
       "**/htpasswd",
+      "**/.git-credentials",
+      "**/.pypirc",
+      "**/.docker/config.json",
+      "**/.dockercfg",
       // Cloud provider and cluster credentials (6)
       "**/.aws/**",
       "**/.azure/**",
@@ -2257,7 +2261,7 @@ describe("deny-list content snapshot", () => {
   it("write-mode argv entry count equals CREDENTIAL_DENY_PATTERNS.length * 3 + BUILD_CONFIG_DENY_PATTERNS.length", async () => {
     // Each credential pattern contributes Read(pat) + Grep(pat) + Edit(pat) = 3 entries.
     // Each build-config pattern contributes Edit(pat) = 1 entry.
-    // Total expected with empty allow/deny overrides: 92*3 + 10 = 286.
+    // Total expected with empty allow/deny overrides: 96*3 + 10 = 298.
     const entry: ModelEntry = {
       id: "haiku",
       transport: "cli",
