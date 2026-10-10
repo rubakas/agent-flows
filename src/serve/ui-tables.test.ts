@@ -11,10 +11,13 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runPhase as canonicalRunPhase, type RunStatus } from "../runtime/runStatus.js";
 import {
   declaredStepRows,
   deleteConfirmText,
   emptyRunsMessage,
+  isActiveRun,
+  runPhase,
   resolveRunsFilter,
   progressCell,
   runProgress,
@@ -239,6 +242,75 @@ describe("runRow — unchanged behaviour, including the disk badge", () => {
   it("escapes the run id, pipeline id and status", () => {
     const html = runRow({ runId: HOSTILE, pipelineId: HOSTILE, status: HOSTILE });
     assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
+  });
+});
+
+describe("runPhase — the page's copy agrees with runStatus.ts (spec 047 FR-15)", () => {
+  const RUN_STATUSES: RunStatus[] = [
+    "running",
+    "awaiting_approval",
+    "succeeded",
+    "rejected",
+    "failed",
+    "cancelled",
+  ];
+  // "started" is a step status and "bogus" a future one: neither is a run phase.
+  const STATUSES = [...RUN_STATUSES, "unreadable", "started", "bogus"];
+  const SOURCES = ["live", "disk", undefined];
+
+  it("classifies every status x source x daemonUp the way the runtime does", () => {
+    for (const status of STATUSES) {
+      for (const source of SOURCES) {
+        for (const daemonUp of [true, false]) {
+          assert.equal(
+            runPhase({ status, source }, daemonUp),
+            canonicalRunPhase({ status, source: source! }, daemonUp),
+            `status=${status} source=${source} daemonUp=${daemonUp}`
+          );
+        }
+      }
+    }
+  });
+
+  it("counts only a live running or awaiting run as active", () => {
+    assert.equal(isActiveRun({ status: "running", source: "live" }), true);
+    assert.equal(isActiveRun({ status: "awaiting_approval", source: "live" }), true);
+    assert.equal(isActiveRun({ status: "running", source: "disk" }), false);
+    assert.equal(isActiveRun({ status: "awaiting_approval", source: "disk" }), false);
+    assert.equal(isActiveRun({ status: "started", source: "live" }), false);
+    assert.equal(isActiveRun({ status: "succeeded", source: "live" }), false);
+  });
+});
+
+describe("runRow — a restored row is not in flight (spec 047 FR-15)", () => {
+  const createdAt = "2026-09-14T10:00:00.000Z";
+
+  it("ticks the elapsed time of a live running run", () => {
+    const html = runRow({ runId: "r1", status: "running", source: "live", createdAt });
+    assert.ok(html.includes("running since"), html);
+  });
+
+  it("does not tick a stale disk running row, and still shows the disk badge", () => {
+    const html = runRow({ runId: "r1", status: "running", source: "disk", createdAt });
+    assert.ok(!html.includes("running since"), `a restored row must not tick: ${html}`);
+    assert.ok(html.includes("no settle time recorded"), html);
+    assert.ok(html.includes(">disk<"), html);
+  });
+
+  it("does not tick a disk awaiting row", () => {
+    const html = runRow({ runId: "r1", status: "awaiting_approval", source: "disk", createdAt });
+    assert.ok(!html.includes("running since"), `a restored row must not tick: ${html}`);
+  });
+
+  // The runs banner and chip counts live in ui.html, which has no DOM harness,
+  // so the call sites are gated as text.
+  it("keeps the page's in-flight, banner and gate decisions on the phase rules", () => {
+    const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "ui.html"), "utf8");
+    assert.ok(!html.includes("ACTIVE_STATUSES"), "the status-set check is gone from the page");
+    assert.ok(
+      html.includes('runs.filter((r) => runPhase(r) === "awaiting")'),
+      "the banner counts only live awaiting runs, not restored disk rows"
+    );
   });
 });
 

@@ -9,8 +9,37 @@
 
 import { esc } from "./ui-esc.js";
 
-/** Statuses counted as active by the In flight chip and the runs poller. */
-export const ACTIVE_STATUSES = new Set(["running", "started", "awaiting_approval"]);
+const RUNNING_OR_AWAITING = new Set(["running", "awaiting_approval"]);
+
+/**
+ * Classify a run for the page. A pinned copy of `runPhase` in
+ * src/runtime/runStatus.ts (spec 047 FR-15): the page cannot import TypeScript,
+ * so ui-tables.test.ts compares the two over every status and source and fails
+ * when they drift.
+ *
+ * @param {{ status?: string, source?: string }} run
+ * @param {boolean} [daemonUp] Only matters for a disk run that claims to be in flight.
+ * @returns {"live" | "awaiting" | "terminal" | "restored" | "orphaned" | "unreadable"}
+ */
+export function runPhase(run, daemonUp = true) {
+  if (run?.status === "unreadable") return "unreadable";
+  if (!RUNNING_OR_AWAITING.has(run?.status)) return "terminal";
+  if (run?.source === "live") return run.status === "running" ? "live" : "awaiting";
+  return daemonUp ? "restored" : "orphaned";
+}
+
+/**
+ * Whether a run counts as in flight on the page: executing, or suspended at a
+ * gate, in this daemon. A row restored from a killed daemon's artifact still
+ * says `running` but is not advancing, so it neither counts nor ticks.
+ *
+ * @param {{ status?: string, source?: string }} run
+ * @returns {boolean}
+ */
+export function isActiveRun(run) {
+  const phase = runPhase(run);
+  return phase === "live" || phase === "awaiting";
+}
 
 /**
  * What an empty runs list says (spec 042 FR-006).
@@ -335,7 +364,7 @@ export function workflowRow(wf) {
  */
 export function runRow(r, opts) {
   const sc = statusClass(r?.status);
-  const isActive = ACTIVE_STATUSES.has(r?.status);
+  const isActive = isActiveRun(r);
   // Active rows tick along with the poller; a settled run shows the fixed span
   // it actually took. A run settled before settledAt was recorded has no end to
   // measure to, so it shows no duration rather than a still-growing elapsed.

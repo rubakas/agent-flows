@@ -1249,7 +1249,8 @@
       import { parseHash, hashFor, pollersFor, VIEWS } from "/ui-route.js";
       import { renderLevelsSvg } from "/ui-graph.js";
       import {
-        ACTIVE_STATUSES,
+        isActiveRun,
+        runPhase,
         declaredStepRows,
         deleteConfirmText,
         emptyRunsMessage,
@@ -2092,7 +2093,7 @@
        * runs, which are not moving.
        */
       async function loadRunProgress(runs) {
-        const inFlight = runs.filter((r) => ACTIVE_STATUSES.has(r.status) && r.source !== "disk");
+        const inFlight = runs.filter(isActiveRun);
         const byRunId = {};
         await Promise.all(
           inFlight.map(async (r) => {
@@ -2172,7 +2173,7 @@
        * list client-side (FR-002) — switching chips costs no request.
        */
       function renderRuns(runs, wrap, progress) {
-        const activeCount = runs.filter((r) => ACTIVE_STATUSES.has(r.status)).length;
+        const activeCount = runs.filter(isActiveRun).length;
         // 042 D24: resolve the default BEFORE lighting a chip, so the chip that
         // lights up is the one the rows below it belong to.
         _runsFilter = resolveRunsFilter(_runsFilter, {
@@ -2185,12 +2186,12 @@
 
         const matches = (r) => {
           if (_runsFilter === "all") return true;
-          const isActive = ACTIVE_STATUSES.has(r.status);
+          const isActive = isActiveRun(r);
           return _runsFilter === "active" ? isActive : !isActive;
         };
         const shown = runs.filter(matches);
 
-        const awaitingApproval = runs.filter((r) => r.status === "awaiting_approval");
+        const awaitingApproval = runs.filter((r) => runPhase(r) === "awaiting");
         let html = "";
         if (awaitingApproval.length) {
           const noun = awaitingApproval.length === 1 ? "run" : "runs";
@@ -2378,8 +2379,7 @@
           wireResultTabs(el);
           return;
         }
-        const settled = ["succeeded", "failed", "rejected", "cancelled"].includes(snapshot.status);
-        if (!settled) return;
+        if (runPhase(snapshot) !== "terminal") return;
         let sink = null;
         try {
           sink = terminalStepId(await declaredStepsFull(snapshot.pipelineId));
@@ -3046,7 +3046,7 @@
         // Gate controls — shown only when the run is awaiting approval. The box
         // itself is built in ui-gate.js (spec 043): everything in it is model
         // output, so the escaping has to be testable without a browser.
-        if (!isDisk && status === "awaiting_approval" && snapshot.gateMessage) {
+        if (runPhase(snapshot) === "awaiting" && snapshot.gateMessage) {
           html += gateBox({
             gateMessage: snapshot.gateMessage,
             gateSummary: snapshot.gateSummary,
@@ -3056,7 +3056,7 @@
         }
 
         // Cancel control — shown while the run can still be stopped (FR-008).
-        if (!isDisk && (status === "running" || status === "awaiting_approval")) {
+        if (isActiveRun(snapshot)) {
           html += `<div style="margin-bottom:10px">
             <button class="btn danger" id="btn-cancel-run">Cancel run</button>
           </div>`;

@@ -24,7 +24,12 @@ export interface RunRowData {
   source?: string;
 }
 
-export declare const ACTIVE_STATUSES: Set<string>;
+export type RunPhase = "live" | "awaiting" | "terminal" | "restored" | "orphaned" | "unreadable";
+export declare function runPhase(
+  run: { status?: string; source?: string },
+  daemonUp?: boolean
+): RunPhase;
+export declare function isActiveRun(run: { status?: string; source?: string }): boolean;
 export declare function emptyRunsMessage(filter: string): string;
 export declare function resolveRunsFilter(
   filter: string,
