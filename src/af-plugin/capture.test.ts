@@ -852,6 +852,26 @@ describe("capture.mjs: audit L7 git hardening", () => {
     cli(repo, ["check-tree", runDir]);
     assert.equal(existsSync(marker), false, "core.fsmonitor ran");
   });
+
+  it("never runs a repo-configured clean filter while snapshotting a dirty worktree", () => {
+    const { repo, base } = twoCommitRepo();
+    const marker = join(scratch("filter-marker"), "ran");
+    const filter = join(scratch("filter-program"), "clean.sh");
+    writeFileSync(filter, `#!/bin/sh\ntouch '${marker}'\ncat\n`, { mode: 0o755 });
+    write(repo, ".gitattributes", "*.txt filter=x\n");
+    commit(repo, "assign a filter");
+    sh(repo, ["config", "filter.x.clean", filter]);
+    // Dirty after the commit, so comparing it with HEAD means hashing it through the filter.
+    write(repo, "a.txt", "one\ndirty, not committed\nthree\n");
+
+    // capture snapshots the tree; check-tree snapshots it again.
+    const { runDir } = captureOk(repo, ["--base", base]);
+    assert.equal(existsSync(marker), false, "the clean filter ran during capture");
+    const result = cli(repo, ["check-tree", runDir]);
+    assert.equal(result.status, 0, result.stdout);
+    assert.equal(existsSync(marker), false, "the clean filter ran during check-tree");
+    assert.deepEqual(result.json, { changed: [] });
+  });
 });
 
 describe("capture.mjs: audit L8/L9 snapshot", () => {

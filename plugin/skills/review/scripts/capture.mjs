@@ -232,9 +232,23 @@ function hashPath(root, path) {
  * Map of path -> sha256 for every path that differs from HEAD or is untracked,
  * excluding the capture directory itself. `--no-renames` so both halves of a
  * rename are listed. Returns undefined when git cannot answer.
+ *
+ * This is the one place a git command compares the WORKTREE with a commit, and for a
+ * dirty file git must hash it as it would be committed, which means running the
+ * repository's own `filter.<name>.clean` for any file `.gitattributes` assigns one. So
+ * the attributes are taken from the empty tree (`--attr-source`, git >= 2.40) with the
+ * user-level attributes file off; the repository's `.gitattributes` is then never read.
+ * An older git rejects the option, the call fails, and the snapshot is refused rather
+ * than run unguarded. The empty tree is asked of git, not spelled, because a SHA-256
+ * repository names it differently.
  */
 export function snapshotTree(root) {
+  const emptyTree = gitHere(root, ["hash-object", "-t", "tree", "/dev/null"]);
+  if (!emptyTree.ok) return undefined;
   const tracked = gitHere(root, [
+    "-c",
+    "core.attributesFile=/dev/null",
+    `--attr-source=${emptyTree.stdout.trim()}`,
     "diff",
     ...NO_DRIVERS,
     "HEAD",
