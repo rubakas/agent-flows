@@ -9,7 +9,6 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 import { ModelRegistry, defaultRegistry, getProfile } from "../../canon/registry.js";
-import { UNRECOGNIZED_MODEL_SUBTYPE } from "../../canon/runClaudeCli.js";
 import {
   CREDENTIAL_DENY_PATTERNS,
   StepTimeoutError,
@@ -604,6 +603,49 @@ describe("buildLlmStep — refuses an unportable step before the runner is calle
       }
     );
     assert.equal(runnerCalls, 0, "no model call may be made for an unportable step");
+  });
+
+  it("an unportable step still throws with required: false, and leaves no step.start behind", async () => {
+    const runId = "unportable-optional";
+    const dir = mkdtempSync(join(tmpdir(), "af-steplog-unportable-"));
+    openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+    try {
+      const step: StepDef = {
+        id: "develop.implement",
+        kind: "llm",
+        role: "worker",
+        prompt: "prompts/develop.md",
+        permissions: { contents: "write" },
+        required: false,
+      };
+      let runnerCalls = 0;
+      const runner: typeof runLlmStep = async () => {
+        runnerCalls += 1;
+        return "never";
+      };
+      const llmStep = buildLlmStep(
+        step,
+        { "develop.implement": "prompt" },
+        { registry: codexRegistry, store: NOOP_STORE, profile: codexProfile, runner },
+        undefined
+      );
+
+      await assert.rejects(
+        (llmStep as any).execute({ inputData: {}, runId, suspend: () => undefined as never }),
+        /permissions\.contents "write"/
+      );
+
+      assert.equal(runnerCalls, 0);
+      assert.deepEqual(
+        readRunLog(runLogFile(dir, "test-pipeline")).map((e) => e.kind),
+        [],
+        "a refused step must not read as one that started or failed in its log"
+      );
+    } finally {
+      clearStepIntrospection(runId);
+      closeRunLog(runId);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1311,126 +1353,6 @@ describe("buildLlmStep — provider failover", () => {
     };
   }
 
-  it("a transport failure is retried on the next profile, with a different model", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      if (entry.id === "m1") throw transportFailure();
-      return "answered by the fallback";
-    };
-
-    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
-    const out = (await (llmStep as any).execute({
-      inputData: {},
-      suspend: () => undefined as never,
-    })) as Record<string, unknown>;
-
-    assert.deepEqual(seen, ["m1", "m2"], "the fallback must resolve to a different model");
-    assert.equal(out["investigate.survey"], "answered by the fallback");
-  });
-
-  it("a step with failover: false is never handed to a second provider", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      throw transportFailure();
-    };
-    const pinnedStep: StepDef = { ...step, failover: false };
-
-    const llmStep = buildLlmStep(pinnedStep, prompts, makeDeps(runner, PRIMARY), undefined);
-
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
-      (err: Error) => {
-        assert.match(
-          err.message,
-          /Failover refused: the step sets failover: false/,
-          `the failure must say the step was pinned: ${err.message}`
-        );
-        return true;
-      }
-    );
-    assert.deepEqual(seen, ["m1"], "a pinned step must not attempt any candidate");
-  });
-
-  for (const [label, failover] of [
-    ["failover: true", true],
-    ["no failover field", undefined],
-  ] as const) {
-    it(`a step with ${label} still walks the chain`, async () => {
-      const seen: string[] = [];
-      const runner: typeof runLlmStep = async (entry) => {
-        seen.push(entry.id);
-        if (entry.id === "m1") throw transportFailure();
-        return "answered by the fallback";
-      };
-      const chainedStep: StepDef =
-        failover === undefined ? { ...step } : { ...step, failover: true };
-
-      const llmStep = buildLlmStep(chainedStep, prompts, makeDeps(runner, PRIMARY), undefined);
-      const out = (await (llmStep as any).execute({
-        inputData: {},
-        suspend: () => undefined as never,
-      })) as Record<string, unknown>;
-
-      assert.deepEqual(seen, ["m1", "m2"], "the chain must still be walked");
-      assert.equal(out["investigate.survey"], "answered by the fallback");
-    });
-  }
-
-  it("a step that declares permissions.contents is never failed over onto a text-only profile", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      throw transportFailure();
-    };
-    const readStep: StepDef = { ...step, permissions: { contents: "read" } };
-    const chained = { ...PRIMARY, fallback: ["text-only"] };
-
-    const llmStep = buildLlmStep(readStep, prompts, makeDeps(runner, chained), undefined);
-
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
-      (err: Error) => {
-        assert.match(err.message, /permissions\.contents "read"/);
-        return true;
-      }
-    );
-    assert.deepEqual(seen, ["m1"], "a text-only candidate must be skipped, not attempted");
-  });
-
-  it("a step that declares permissions.deny is never failed over onto a transport that cannot enforce it", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      throw transportFailure();
-    };
-    const denyStep: StepDef = {
-      ...step,
-      permissions: { contents: "read", deny: ["ops/secrets-notes/**"] },
-    };
-    const chained = { ...PRIMARY, fallback: ["text-only"] };
-
-    const llmStep = buildLlmStep(denyStep, prompts, makeDeps(runner, chained), undefined);
-
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
-      (err: Error) => {
-        assert.match(
-          err.message,
-          /permissions\.deny/,
-          `the refusal must name the deny list: ${err.message}`
-        );
-        return true;
-      }
-    );
-    assert.deepEqual(
-      seen,
-      ["m1"],
-      "a candidate that cannot enforce the deny list must be skipped, not attempted"
-    );
-  });
-
   // Two independent guards stop a cancelled step crossing providers: the error
   // name, and the run signal. One test covering both stays green when either is
   // removed, so they are pinned separately.
@@ -1477,90 +1399,6 @@ describe("buildLlmStep — provider failover", () => {
     assert.deepEqual(seen, ["m1"], "an operator cancellation must not reach another provider");
   });
 
-  it("a request-shaped claude subtype is not failed over", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      throw new TransportFailureError('claude: result subtype "error_max_turns": ran out', {
-        transport: "cli:claude",
-        exitCode: 0,
-        subtype: "error_max_turns",
-      });
-    };
-
-    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
-
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never })
-    );
-    assert.deepEqual(
-      seen,
-      ["m1"],
-      "a turn limit is about the request; a second provider would spend a whole step repeating it"
-    );
-  });
-
-  it("a model the local CLI does not recognise is failed over", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      if (entry.id === "m1") {
-        throw new TransportFailureError('claude CLI rejected model "m1": unrecognized_model', {
-          transport: "cli:claude",
-          exitCode: 0,
-          subtype: UNRECOGNIZED_MODEL_SUBTYPE,
-        });
-      }
-      return "answered by the fallback";
-    };
-
-    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
-    const out = (await (llmStep as any).execute({
-      inputData: {},
-      suspend: () => undefined as never,
-    })) as Record<string, unknown>;
-
-    assert.deepEqual(seen, ["m1", "m2"], "an alias one CLI lacks is exactly what another may have");
-    assert.equal(out["investigate.survey"], "answered by the fallback");
-  });
-
-  it("a transport syscall code is failed over but an ERR_* programming error is not", async () => {
-    const syscall: string[] = [];
-    const errSeen: string[] = [];
-
-    const syscallRunner: typeof runLlmStep = async (entry) => {
-      syscall.push(entry.id);
-      if (entry.id === "m1") {
-        const err: NodeJS.ErrnoException = new Error("spawn claude ENOENT");
-        err.code = "ENOENT";
-        throw err;
-      }
-      return "ok";
-    };
-    await (buildLlmStep(step, prompts, makeDeps(syscallRunner, PRIMARY), undefined) as any).execute(
-      { inputData: {}, suspend: () => undefined as never }
-    );
-    assert.deepEqual(syscall, ["m1", "m2"], "a child that never spawned is a transport failure");
-
-    const errRunner: typeof runLlmStep = async (entry) => {
-      errSeen.push(entry.id);
-      const err: NodeJS.ErrnoException = new Error('The "path" argument must be of type string');
-      err.code = "ERR_INVALID_ARG_TYPE";
-      throw err;
-    };
-    await assert.rejects(
-      (buildLlmStep(step, prompts, makeDeps(errRunner, PRIMARY), undefined) as any).execute({
-        inputData: {},
-        suspend: () => undefined as never,
-      })
-    );
-    assert.deepEqual(
-      errSeen,
-      ["m1"],
-      "every Node ERR_* error carries a string code; that is not a transport failure"
-    );
-  });
-
   it("an explicit per-run model override is never failed over", async () => {
     const seen: string[] = [];
     const runner: typeof runLlmStep = async (entry) => {
@@ -1572,13 +1410,13 @@ describe("buildLlmStep — provider failover", () => {
 
     await assert.rejects(
       (llmStep as any).execute({
-        inputData: { models: { "investigate.survey": "m2" } },
+        inputData: { models: { "investigate.survey": "m3" } },
         suspend: () => undefined as never,
       })
     );
     assert.deepEqual(
       seen,
-      ["m2"],
+      ["m3"],
       "an operator who pinned a model made a choice the chain must not quietly replace"
     );
   });
@@ -1606,27 +1444,6 @@ describe("buildLlmStep — provider failover", () => {
     );
   });
 
-  it("a chain is not walked once the step's deadline is already spent", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      throw transportFailure();
-    };
-
-    const timedStep: StepDef = { ...step, timeoutMs: 1 };
-    const llmStep = buildLlmStep(timedStep, prompts, makeDeps(runner, PRIMARY), undefined);
-
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
-      (err: Error) => {
-        assert.match(err.message, /deadline is spent/, err.message);
-        return true;
-      }
-    );
-    assert.deepEqual(seen, ["m1"], "a spent deadline must not buy a second full-length attempt");
-  });
-
   it("the step's declared budget bounds the STEP, not each attempt", async () => {
     const budgets: (number | undefined)[] = [];
     const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
@@ -1644,27 +1461,6 @@ describe("buildLlmStep — provider failover", () => {
 
     assert.equal(budgets[0], 1, "the first attempt gets the whole declared budget");
     assert.equal(budgets[1], 0.25, "the fallback gets only what the first attempt left");
-  });
-
-  it("a chain is not walked once the step's budget is already spent", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
-      seen.push(entry.id);
-      deps!.onEvent?.({ kind: "usage", costUsd: 1 });
-      throw transportFailure();
-    };
-
-    const costedStep: StepDef = { ...step, maxBudgetUsd: 1 };
-    const llmStep = buildLlmStep(costedStep, prompts, makeDeps(runner, PRIMARY), undefined);
-
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
-      (err: Error) => {
-        assert.match(err.message, /budget is spent/, err.message);
-        return true;
-      }
-    );
-    assert.deepEqual(seen, ["m1"], "a spent budget must not buy a second full-budget attempt");
   });
 
   it("a failed-over step records the provider that actually answered", async () => {
@@ -1720,48 +1516,6 @@ describe("buildLlmStep — provider failover", () => {
     }
   });
 
-  it("an exhausted chain throws the original error, naming the attempts", async () => {
-    const runner: typeof runLlmStep = async (entry) => {
-      if (entry.id === "m1") throw transportFailure();
-      throw new TransportFailureError("codex exec: exit 2; no agent_message found.", {
-        transport: "cli:codex",
-        exitCode: 2,
-      });
-    };
-
-    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
-
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
-      (err: Error) => {
-        assert.match(
-          err.message,
-          /claude exited with code 1/,
-          "the original failure is the one the operator must see"
-        );
-        assert.match(err.message, /Failover exhausted: secondary:/);
-        return true;
-      }
-    );
-  });
-
-  it("a budget failure is not failed over", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      const err = new Error("Step exceeded budget limit of $1.0000 USD");
-      err.name = "StepBudgetExceededError";
-      throw err;
-    };
-
-    const llmStep = buildLlmStep(step, prompts, makeDeps(runner, PRIMARY), undefined);
-
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never })
-    );
-    assert.deepEqual(seen, ["m1"], "a spent budget is not a transport failure");
-  });
-
   it("the crossing is recorded in the run's event log", async () => {
     const runId = "log-failover";
     const dir = mkdtempSync(join(tmpdir(), "af-steplog-failover-"));
@@ -1792,76 +1546,70 @@ describe("buildLlmStep — provider failover", () => {
     }
   });
 
-  it("a step that declares skills is never failed over onto a transport that ignores them", async () => {
-    const seen: string[] = [];
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      throw transportFailure();
-    };
-    const registry = new ModelRegistry([
-      { id: "m1", transport: "cli" as const, cli: { bin: "claude" as const, model: "m1" } },
-      { id: "m-codex", transport: "cli" as const, cli: { bin: "codex" as const, model: "gpt" } },
-    ]);
-    const chained = {
-      id: "primary",
-      roles: { reasoner: "m1", worker: "m1", scout: "m1" },
-      fallback: ["codex-profile"],
-    };
-    const codexProfile = {
-      id: "codex-profile",
-      roles: { reasoner: "m-codex", worker: "m-codex", scout: "m-codex" },
-    };
-    const skillsStep: StepDef = { ...step, skills: ["review"] };
+  it("names the candidate that answered when the schema retry on it then fails", async () => {
+    const runId = "provenance-failover-retry-fails";
+    const dir = mkdtempSync(join(tmpdir(), "af-steplog-failover-retry-"));
+    openRunLog(runId, { dir, pipelineId: "test-pipeline" });
+    try {
+      let m2Calls = 0;
+      const runner: typeof runLlmStep = async (entry) => {
+        if (entry.id === "m1") throw transportFailure();
+        m2Calls += 1;
+        if (m2Calls === 1) return "not json";
+        throw transportFailure();
+      };
+      const schemaStep: StepDef = { ...step, schema: "weaknesses" };
+      const llmStep = buildLlmStep(schemaStep, prompts, makeDeps(runner, PRIMARY), undefined);
 
-    const llmStep = buildLlmStep(
-      skillsStep,
-      prompts,
-      { ...makeDeps(runner, chained, [chained, codexProfile]), registry },
-      undefined
-    );
+      await assert.rejects(
+        (llmStep as any).execute({
+          inputData: {},
+          runId,
+          suspend: () => undefined as never,
+        })
+      );
 
-    await assert.rejects(
-      (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never }),
-      (err: Error) => {
-        assert.match(err.message, /codex-profile: skipped/);
-        assert.match(err.message, /skills/);
-        return true;
-      }
-    );
-    assert.deepEqual(seen, ["m1"], "the codex candidate would silently drop the skills");
+      const recorded = getStepIntrospection(runId)?.[step.id];
+      assert.match(String(recorded?.model), /^m2 /, "the run state must name who answered");
+      assert.equal(recorded?.actual?.modelId, "m2");
+      const result = readRunLog(runLogFile(dir, "test-pipeline")).find(
+        (e) => e.kind === "step.result"
+      ) as unknown as Record<string, unknown>;
+      assert.equal(result.status, "failed");
+      assert.match(String(result.model), /^m2 /);
+    } finally {
+      clearStepIntrospection(runId);
+      closeRunLog(runId);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
-  it("a schema retry after a failover runs on the model that answered, not the failed primary", async () => {
-    const seen: string[] = [];
-    const answers: Record<string, string[]> = {
-      m2: [`{"weaknesses":"not-an-array"}`, `{"weaknesses":[]}`],
+  it("a budget the step inherits from the pipeline bounds the step across a failover", async () => {
+    const budgets: (number | undefined)[] = [];
+    const runner: typeof runLlmStep = async (entry, _prompt, deps) => {
+      budgets.push(deps!.maxBudgetUsd);
+      if (entry.id === "m1") {
+        deps!.onEvent?.({ kind: "usage", costUsd: 0.75 });
+        throw transportFailure();
+      }
+      return "ok";
     };
-    const runner: typeof runLlmStep = async (entry) => {
-      seen.push(entry.id);
-      if (entry.id === "m1") throw transportFailure();
-      return answers[entry.id]?.shift() ?? "";
-    };
-    const schemaStep: StepDef = { ...step, schema: "weaknesses" };
 
-    const llmStep = buildLlmStep(schemaStep, prompts, makeDeps(runner, PRIMARY), undefined);
-    const out = (await (llmStep as any).execute({
-      inputData: {},
-      suspend: () => undefined as never,
-    })) as Record<string, unknown>;
-
-    assert.deepEqual(
-      seen,
-      ["m1", "m2", "m2"],
-      "the retry must go to the failover candidate, not back to the primary that just failed"
+    const llmStep = buildLlmStep(
+      step,
+      prompts,
+      { ...makeDeps(runner, PRIMARY), defaultMaxBudgetUsd: 1 },
+      undefined
     );
-    assert.deepEqual(out["investigate.survey"], { weaknesses: [] });
+    await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
+
+    assert.deepEqual(budgets, [1, 0.25]);
   });
 });
 
 // ─── Declared schema is enforced, not just pasted into the prompt ─────────────
 
 describe("buildLlmStep — schema-gated output is validated against the canon schema", () => {
-  const VALID_WEAKNESS = `{"weaknesses":[{"text":"Ambiguous","severity":"medium","blocking":false}]}`;
   // Parses, carries the required top-level key, and violates the FINDING enum.
   const BAD_SEVERITY = `{"weaknesses":[{"text":"Ambiguous","severity":"moderate","blocking":false}]}`;
 
@@ -1882,25 +1630,6 @@ describe("buildLlmStep — schema-gated output is validated against the canon sc
     return (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
   }
 
-  it("retries once with a prompt naming the field and the constraint", async () => {
-    const prompts: string[] = [];
-    let call = 0;
-    const runner: typeof runLlmStep = async (_entry, prompt) => {
-      prompts.push(prompt);
-      call += 1;
-      return call === 1 ? BAD_SEVERITY : VALID_WEAKNESS;
-    };
-
-    const out = await runStep(runner);
-
-    assert.equal(prompts.length, 2, "one retry, no more");
-    const retryPrompt = prompts[1] ?? "";
-    assert.match(retryPrompt, /weaknesses\.0\.severity/);
-    assert.match(retryPrompt, /must be one of low, medium, high, critical/);
-    assert.match(retryPrompt, /"moderate"/);
-    assert.deepEqual(out.critic, JSON.parse(VALID_WEAKNESS));
-  });
-
   it("fails the step when the retry violates the schema too", async () => {
     let call = 0;
     const runner: typeof runLlmStep = async () => {
@@ -1919,19 +1648,6 @@ describe("buildLlmStep — schema-gated output is validated against the canon sc
     assert.ok(thrown !== undefined, "a twice-invalid output must fail the step");
     assert.match(thrown.message, /Step "critic": output does not match schema "weaknesses"/);
     assert.match(thrown.message, /must be one of low, medium, high, critical/);
-  });
-
-  it("accepts a schema-valid output without retrying", async () => {
-    let call = 0;
-    const runner: typeof runLlmStep = async () => {
-      call += 1;
-      return VALID_WEAKNESS;
-    };
-
-    const out = await runStep(runner);
-
-    assert.equal(call, 1, "a valid output must not be retried");
-    assert.deepEqual(out.critic, JSON.parse(VALID_WEAKNESS));
   });
 });
 
@@ -2248,32 +1964,6 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
     }
   });
 
-  it("retries once, logging a schema retry, when the JSON breaks the schema", async () => {
-    const runId = "schema-violation";
-    const log = openTempRunLog(runId);
-    try {
-      let calls = 0;
-      const runner: typeof runLlmStep = async () => {
-        calls += 1;
-        return calls === 1
-          ? '{"weaknesses":[{"text":"x","severity":"moderate","blocking":false}]}'
-          : '{"weaknesses":[' + JSON.stringify(FINDING) + "]}";
-      };
-
-      const out = await runStep(runner, runId);
-
-      assert.equal(calls, 2);
-      assert.deepEqual(out.critic, { weaknesses: [FINDING] });
-      const retries = log
-        .events()
-        .filter((e): e is Extract<StepLogEvent, { kind: "retry" }> => e.kind === "retry");
-      assert.equal(retries.length, 1);
-      assert.equal(retries[0].reason, "schema", "parsed-but-invalid is a schema retry");
-    } finally {
-      log.cleanup();
-    }
-  });
-
   it("fails after the retry and leaves both raw answers on disk", async () => {
     const runId = "schema-twice-bad";
     const log = openTempRunLog(runId);
@@ -2305,23 +1995,6 @@ describe("buildLlmStep — extracting the JSON out of what the model actually sa
     await runStep(runner);
 
     assert.deepEqual(captured, WEAK_SCHEMA, "the declared schema must reach the runner deps");
-  });
-
-  it("hands no schema to the runner for a step that declares none", async () => {
-    let captured: unknown = "unset";
-    const runner: typeof runLlmStep = async (_entry, _prompt, deps) => {
-      captured = deps?.outputJsonSchema;
-      return "prose";
-    };
-    const llmStep = buildLlmStep(
-      { id: "enrich", kind: "llm", prompt: "prompts/enrich.md" },
-      { enrich: "enrich prompt" },
-      { registry: NOOP_REGISTRY, store: NOOP_STORE, runner },
-      undefined
-    );
-    await (llmStep as any).execute({ inputData: {}, suspend: () => undefined as never });
-
-    assert.equal(captured, undefined);
   });
 });
 

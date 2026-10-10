@@ -8,7 +8,7 @@ import { assembleSpec } from "../../canon/assemble.js";
 import { writeSpecDocument, writeSpecKitSpec } from "../../canon/exportSpec.js";
 import { schemaContract } from "../../canon/outputContract.js";
 import { persistTicket } from "../../canon/persistTicket.js";
-import { checkPortability } from "../../canon/portability.js";
+import { checkPortability, effectiveBudget } from "../../canon/portability.js";
 import {
   describeModel,
   getActiveProfile,
@@ -16,8 +16,8 @@ import {
   resolveStepModel,
 } from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
-import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
-import { isFailoverWorthy } from "../../canon/stepAttempt.js";
+import { runCheckStep, type runLlmStep } from "../../canon/runStep.js";
+import { StepAttemptError, attemptStep } from "../../canon/stepAttempt.js";
 import { recordManifestSpecSource } from "../../runtime/artifactStore.js";
 import { projectGitStatus } from "../../runtime/projectGitStatus.js";
 import { buildReviewMaterial, renderReviewMaterial } from "../../runtime/reviewMaterial.js";
@@ -30,10 +30,9 @@ import {
   writeStepOutput,
   writeStepRawOutput,
 } from "../../runtime/stepLog.js";
-import { runFailoverChain } from "./failover.js";
-import type { FailoverOutcome } from "./failover.js";
 import type { ModelEntry, ModelRegistry, ProviderProfile } from "../../canon/registry.js";
 import type { CheckResult, StepRunnerDeps } from "../../canon/runStep.js";
+import type { AttemptResult } from "../../canon/stepAttempt.js";
 import type { StepLogEventInput } from "../../canon/stepLogEvents.js";
 import type { HardenedSpec, LoadedPipeline, PipelineDef, StepDef } from "../../canon/types.js";
 import type { TicketStore } from "../../module/seams.js";
@@ -323,12 +322,12 @@ function baseRunnerDeps(
   defaultTimeoutMs: number | undefined
 ): StepRunnerDeps {
   // Step-level budget overrides pipeline-level budget (FR-007)
-  const effectiveBudget = step.maxBudgetUsd ?? deps.defaultMaxBudgetUsd;
+  const budget = effectiveBudget(step, deps.defaultMaxBudgetUsd);
   return {
     ...(deps.runnerDeps ?? {}),
     ...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
     ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
-    ...(effectiveBudget !== undefined ? { maxBudgetUsd: effectiveBudget } : {}),
+    ...(budget !== undefined ? { maxBudgetUsd: budget } : {}),
   };
 }
 
@@ -343,7 +342,6 @@ export function buildLlmStep(
   defaultTimeoutMs: number | undefined,
   visibleKeys?: Set<string>
 ) {
-  const runner = deps.runner ?? runLlmStep;
   return createStep({
     id: step.id,
     inputSchema: ctx,
@@ -360,14 +358,15 @@ export function buildLlmStep(
         ? deps.registry.resolve(override)
         : resolveStepModel(step, profile, deps.registry);
 
-      // D3: refuse an unportable step before any model call. The adapters throw
-      // for the same combinations, but only after a subprocess has been shaped.
-      const portabilityOpts = {
+      // D3: refuse an unportable step before any model call, and before the step
+      // has a log: an unportable step must not read as one that started, and
+      // `required: false` cannot swallow it. The attempt checks again for the
+      // failover candidates it picks itself.
+      const portability = checkPortability(step, entry, profile.id, {
         ...(deps.defaultMaxBudgetUsd !== undefined
           ? { defaultMaxBudgetUsd: deps.defaultMaxBudgetUsd }
           : {}),
-      };
-      const portability = checkPortability(step, entry, profile.id, portabilityOpts);
+      });
       if (!portability.ok) throw new Error(portability.reason);
 
       let prompt = renderPrompt(prompts[step.id], ctxVars(ctxData));
@@ -396,51 +395,9 @@ export function buildLlmStep(
       const model = describeModel(entry);
       recordStep(runId, step.id, { prompt, model });
 
-      // Thread per-step and pipeline-level timeouts into the runner deps.
-      // runLlmStep resolves the effective timeout as: timeoutMs ?? defaultTimeoutMs.
-      // The declared permissions travel with them: without it the canon's
-      // `permissions.contents: read|write` would be silently dropped and the agent
-      // would run with no repo access at all.
-      // skills travel the same way — a canon declaration dropped here is the exact
-      // bug class this project has hit before.
-      const contentsValue = step.permissions?.contents;
-      const hasContentsAccess = contentsValue !== undefined && contentsValue !== "none";
       // FR-013: the per-run signal comes from the execute params, never from the
       // build-time BuildDeps.runnerDeps shared across concurrent runs.
       const signal = combineSignals(deps.runnerDeps?.signal, abortSignal);
-      let spentUsd = 0;
-      const runnerDeps: StepRunnerDeps = {
-        ...baseRunnerDeps(step, deps, defaultTimeoutMs),
-        ...(signal ? { signal } : {}),
-        // Spec 036 D2: the sink is bound per execution, exactly like recordStep —
-        // never through BuildDeps, which every concurrent run shares.
-        onEvent: (event: StepLogEventInput) => {
-          // The chain's remaining-budget allowance is computed from what the
-          // failed attempts already reported spending.
-          if (event.kind === "usage" && typeof event.costUsd === "number") {
-            spentUsd += event.costUsd;
-          }
-          appendStepLog(runId, step.id, event);
-        },
-        ...(hasContentsAccess
-          ? {
-              contentsAccess: contentsValue,
-              ...(deps.cwd !== undefined ? { workspaceDir: deps.cwd } : {}),
-            }
-          : {}),
-        ...(step.skills?.length ? { skills: step.skills } : {}),
-        // Structured output for the transports that have it: the claude adapter
-        // turns this into --json-schema, and the others ignore it and keep the
-        // prompt instruction above as their only guarantee.
-        ...(outputJsonSchema !== undefined ? { outputJsonSchema } : {}),
-        // denyPatterns travels the same path as contentsAccess — a canon
-        // declaration dropped here is the bug class this project has hit before.
-        // It is gated on the SAME condition: a deny list for a step that declared
-        // no file access is a silent no-op.
-        ...(hasContentsAccess && step.permissions?.deny?.length
-          ? { denyPatterns: step.permissions.deny }
-          : {}),
-      };
 
       // Spec 036 D2: the builder owns step.start and the single terminal
       // step.result, so the watchdog's second attempt cannot double-count a step
@@ -462,119 +419,75 @@ export function buildLlmStep(
         });
       };
 
+      // The step did not run on what step.start named when a failover moved it.
+      // Correct every surface that reports the model — the run state, the
+      // introspection channel and, through it, the artifact's provenance — or the
+      // run claims a provider that never answered.
+      const recordAnswerer = (answeredBy: AttemptResult["answeredBy"]): void => {
+        if (answeredBy.entry === entry) return;
+        actualEntry = answeredBy.entry;
+        const actualModelName = answeredBy.entry.cli?.model ?? answeredBy.entry.api?.model;
+        recordStep(runId, step.id, {
+          model: describeModel(answeredBy.entry),
+          actual: {
+            profileId: answeredBy.profileId,
+            transport: answeredBy.entry.transport,
+            modelId: answeredBy.entry.id,
+            ...(actualModelName !== undefined ? { model: actualModelName } : {}),
+          },
+        });
+      };
+
       try {
-        // FR-007: wrap any runner error with the step id so the failure surface
-        // (RunRecord.error, GET /api/runs/:id) names the failing step.
+        // FR-007: a failed attempt names the failing step in its message, so the
+        // failure surface (RunRecord.error, GET /api/runs/:id) does too.
         // FR-008: for write steps, append workspace state before rethrowing —
         // the operator needs to know what was left behind after a timeout or crash.
-        let raw: string;
+        let attempt: AttemptResult;
         try {
-          raw = await runner(entry, prompt, runnerDeps);
-        } catch (err) {
-          const baseMsg = err instanceof Error ? err.message : String(err);
-          // The chain is walked only for failures another provider could plausibly
-          // answer; everything else fails here, as it did before.
-          // An explicit per-run `models[stepId]` is a deliberate choice about
-          // WHICH model answers; the chain resolves candidates from their own
-          // profiles and would silently discard it (spec 039 review).
-          // `failover: false` is the step's own refusal to cross vendors: the
-          // prompt a candidate would receive carries this step's upstream
-          // outputs, and a pinned step fails rather than hand them elsewhere.
-          const pinned = step.failover === false;
-          const worthy = isFailoverWorthy(err, signal);
-          const outcome: FailoverOutcome =
-            !pinned && override === undefined && worthy
-              ? await runFailoverChain({
-                  step,
-                  profile,
-                  entry,
-                  deps,
-                  prompt,
-                  runner,
-                  runnerDeps,
-                  portabilityOpts,
-                  reason: baseMsg,
-                  startedAt,
-                  spentUsd: () => spentUsd,
-                })
-              : { ok: false, attempts: [] };
-
-          if (outcome.ok) {
-            raw = outcome.raw;
-            // The step did not run on what step.start named. Correct every
-            // surface that reports the model — the run state, the introspection
-            // channel and, through it, the artifact's provenance — or the run
-            // claims a provider that never answered.
-            actualEntry = outcome.entry;
-            const actualModelName = outcome.entry.cli?.model ?? outcome.entry.api?.model;
-            recordStep(runId, step.id, {
-              model: describeModel(outcome.entry),
-              actual: {
-                profileId: outcome.profileId,
-                transport: outcome.entry.transport,
-                modelId: outcome.entry.id,
-                ...(actualModelName !== undefined ? { model: actualModelName } : {}),
+          attempt = await attemptStep(
+            {
+              step,
+              prompt,
+              // An explicit per-run `models[stepId]` is a deliberate choice about
+              // WHICH model answers; the chain would silently discard it (spec 039).
+              model: {
+                entry,
+                profile,
+                ...(override !== undefined ? { pinned: true as const } : {}),
               },
-            });
-          } else {
-            // An operator reading a failed run must not have to guess whether the
-            // chain was empty, exhausted or refused — name the reason here, on the
-            // message that becomes the step.result error.
-            const tried =
-              outcome.attempts.length > 0
-                ? `\nFailover exhausted: ${outcome.attempts.join("; ")}`
-                : pinned && worthy
-                  ? `\nFailover refused: the step sets failover: false, so it stayed pinned to profile "${profile.id}" and no other provider was tried.`
-                  : "";
-            const stepMsg = `Step "${step.id}": ${baseMsg}${tried}`;
-            if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
-              throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
+              ...(contract ? { output: contract } : {}),
+            },
+            {
+              registry: deps.registry,
+              ...(deps.providerProfiles ? { providerProfiles: deps.providerProfiles } : {}),
+              ...(deps.defaultMaxBudgetUsd !== undefined
+                ? { defaultMaxBudgetUsd: deps.defaultMaxBudgetUsd }
+                : {}),
+              ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+              ...(deps.cwd !== undefined ? { workspaceDir: deps.cwd } : {}),
+              ...(signal ? { signal } : {}),
+              // Spec 036 D2: the sink is bound per execution, exactly like
+              // recordStep — never through BuildDeps, which every concurrent run shares.
+              onEvent: (event: StepLogEventInput) => appendStepLog(runId, step.id, event),
+              ...(deps.runnerDeps ? { base: deps.runnerDeps } : {}),
+              ...(deps.runner ? { dispatch: deps.runner } : {}),
             }
-            throw new Error(stepMsg, { cause: err });
+          );
+        } catch (err) {
+          if (!(err instanceof StepAttemptError)) throw err;
+          if (err.answeredBy !== undefined) recordAnswerer(err.answeredBy);
+          if (err.raw.length > 0) persistRawAttempts(runId, step.id, err.raw);
+          const cause = err.cause !== undefined ? { cause: err.cause } : undefined;
+          // The workspace report belongs to a call that failed, not to an answer
+          // that broke its contract.
+          if (err.kind === "failed" && step.permissions?.contents === "write" && deps.cwd) {
+            throw new Error(`${err.message}\n${workspaceDirtyMessage(deps.cwd)}`, cause);
           }
+          throw new Error(err.message, cause);
         }
-
-        let value: unknown = raw;
-        if (contract) {
-          const r1 = contract.parse(raw);
-          if (!r1.ok) {
-            // A retry is otherwise only inferable from two `usage` events under
-            // one step.start/step.result pair — a run that paid twice reads as
-            // one expensive call.
-            appendStepLog(runId, step.id, {
-              kind: "retry",
-              stepId: step.id,
-              reason: r1.reason,
-              detail: r1.error,
-            });
-            // One retry with explicit error feedback.
-            const retryPrompt = `${prompt}\n\n${r1.retryNote}`;
-            let retryRaw: string;
-            try {
-              // After a failover the primary is the model that just failed; the
-              // correction goes to the one that answered.
-              retryRaw = await runner(actualEntry ?? entry, retryPrompt, runnerDeps);
-            } catch (err) {
-              persistRawAttempts(runId, step.id, [raw]);
-              const baseMsg = err instanceof Error ? err.message : String(err);
-              const stepMsg = `Step "${step.id}": ${baseMsg}`;
-              // FR-008: mirror the write-step workspace report onto the retry path —
-              // a write step that fails during schema retry must also expose workspace state.
-              if (step.permissions?.contents === "write" && deps.cwd !== undefined) {
-                throw new Error(`${stepMsg}\n${workspaceDirtyMessage(deps.cwd)}`, { cause: err });
-              }
-              throw new Error(stepMsg, { cause: err });
-            }
-            const r2 = contract.parse(retryRaw);
-            if (!r2.ok) {
-              persistRawAttempts(runId, step.id, [raw, retryRaw]);
-              throw new Error(`Step "${step.id}": ${r2.error}`);
-            }
-            value = r2.value;
-          } else {
-            value = r1.value;
-          }
-        }
+        recordAnswerer(attempt.answeredBy);
+        const value = attempt.value;
 
         // D6: the full value lives on disk per step; the run state keeps only
         // the 2048-character excerpt.

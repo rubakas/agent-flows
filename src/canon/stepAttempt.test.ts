@@ -828,6 +828,28 @@ describe("attemptStep — the corrective retry", () => {
     }
   });
 
+  it("hands the retry the same grant: file access, workspace, deny list and skills", async () => {
+    const { dispatch, calls } = scripted((_call, n) => (n === 0 ? "not json" : VALID));
+    const step: AttemptStep = {
+      ...STEP,
+      permissions: { contents: "read", deny: ["src/internal/**"] },
+      skills: ["review"],
+    };
+
+    await attemptStep(
+      request({ step, output: WEAKNESSES }),
+      context(dispatch, { workspaceDir: "/tmp/some-project" })
+    );
+
+    assert.equal(calls.length, 2);
+    for (const call of calls) {
+      assert.equal(call.deps.contentsAccess, "read");
+      assert.equal(call.deps.workspaceDir, "/tmp/some-project");
+      assert.deepEqual(call.deps.denyPatterns, ["src/internal/**"]);
+      assert.deepEqual(call.deps.skills, ["review"]);
+    }
+  });
+
   it("fails with the second answer's error, leaving both raw answers", async () => {
     const { dispatch, calls } = scripted((_call, n) =>
       n === 0 ? "first narration, no JSON" : BAD_SEVERITY
