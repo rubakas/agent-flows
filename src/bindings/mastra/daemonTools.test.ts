@@ -14,7 +14,6 @@ import { resolveProjectState } from "../../runtime/projectState.js";
 import { clearDaemonBaseCache } from "./daemonResolver.js";
 import {
   LIFECYCLE_KINDS,
-  TERMINAL_RUN_STATUSES,
   approveRun,
   cancelRun,
   formatRunProgress,
@@ -474,14 +473,6 @@ describe("get_run — compact by default, full only on verbose:true", () => {
 });
 
 describe("run_pipeline polling — 'cancelled' is terminal (FR-010)", () => {
-  it("includes cancelled in the terminal set", () => {
-    assert.equal(
-      TERMINAL_RUN_STATUSES.has("cancelled"),
-      true,
-      "a cancelled run never resumes — leaving it out makes run_pipeline poll forever"
-    );
-  });
-
   it("stops polling when the daemon reports 'cancelled'", async () => {
     let calls = 0;
     handler = (_req, res) => {

@@ -10,6 +10,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { isContained } from "../bundle/paths.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
 import { activeProfileIdOrUnknown } from "../canon/registry.js";
+import { isChainable } from "../runtime/runStatus.js";
 import type { HardenedSpec, PipelineDef } from "../canon/types.js";
 
 // ── Artifact input mapping (spec 029 FR-003/FR-011) ───────────────────────────
@@ -229,8 +230,7 @@ export function resolveArtifactInputs(params: {
   }
 
   // Reject unknown statuses — indicates a corrupt or incompatible artifact.
-  const KNOWN_STATUSES = new Set(["succeeded", "awaiting_approval", "failed", "rejected"]);
-  if (!KNOWN_STATUSES.has(artifactStatus)) {
+  if (!isChainable(artifactStatus)) {
     return {
       ok: false,
       error: `Artifact has unknown status "${artifactStatus}" — not a recognisable terminal artifact`,

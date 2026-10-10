@@ -28,6 +28,7 @@ import type { JudgeDeps, JudgeResult } from "./gateJudge.js";
 import { runGateSummary } from "./gateSummary.js";
 import type { GateSummaryDeps } from "./gateSummary.js";
 import type { GatePayload } from "./gateMaterial.js";
+import type { StepStatus } from "./runStatus.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepLogEvent, StepLogEventInput } from "../canon/stepLogEvents.js";
 import type { StepTransition } from "../canon/stepTransition.js";
@@ -149,7 +150,7 @@ export interface ApproveResult {
 
 /** Per-step state accumulated by the record-level watch (FR-006). */
 export interface StepState {
-  status: string;
+  status: StepStatus;
   /** ISO-8601 timestamp of the step's workflow-step-start event (spec 033 D3). */
   startedAt?: string;
   /** ISO-8601 timestamp of the step's result/cancellation event (spec 033 D3). */

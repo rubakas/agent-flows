@@ -9,6 +9,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isSafeRunId } from "../../runtime/artifactStore.js";
 import { resolveProjectState } from "../../runtime/projectState.js";
+import { hasStopped, runPhase } from "../../runtime/runStatus.js";
 import { readRunLog, runLogFile } from "../../runtime/stepLog.js";
 import { resolveDaemonBase } from "./daemonResolver.js";
 import { resolveProjectDir } from "./projectDir.js";
@@ -39,20 +40,6 @@ export async function daemonFetch(path: string, init?: RequestInit): Promise<Res
   }
   return res;
 }
-
-/**
- * Statuses at which a run has stopped advancing on its own. `run_pipeline`
- * polls until it sees one of these; "cancelled" belongs here because a cancelled
- * run never resumes, so leaving it out makes the poll loop forever (spec 033
- * FR-010).
- */
-export const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set([
-  "awaiting_approval",
-  "succeeded",
-  "rejected",
-  "failed",
-  "cancelled",
-]);
 
 /**
  * Wall-clock ceiling on `run_pipeline`'s poll loop. Runs are deliberately
@@ -154,7 +141,7 @@ function isoMs(iso: string | undefined): number | undefined {
  */
 export function formatRunProgress(state: DaemonRunState, now: number = Date.now()): string {
   const steps = Object.entries(state.steps ?? {}).filter(([id]) => !SYNTHETIC_STEP_ID.test(id));
-  const stopped = TERMINAL_RUN_STATUSES.has(state.status);
+  const stopped = hasStopped(state.status);
 
   const startMs =
     isoMs(state.invocation?.startedAt) ??
@@ -237,7 +224,7 @@ export async function pollRunUntilTerminal(
       return { error: `daemon GET /api/runs/${runId} returned HTTP ${getRes.status}` };
     }
     const state = (await getRes.json()) as DaemonRunState;
-    if (!TERMINAL_RUN_STATUSES.has(state.status)) continue;
+    if (!hasStopped(state.status)) continue;
     const artifactPathField =
       state.artifactPath !== undefined ? { artifactPath: state.artifactPath } : {};
     if (state.status === "awaiting_approval") {
@@ -530,8 +517,6 @@ function readJsonFile(path: string): unknown {
  * and a run that persisted no terminal status at all. Neither can be reported
  * as in-flight without inventing a run that is still going.
  */
-const ORPHANED_ON_DISK: ReadonlySet<string> = new Set(["running", "awaiting_approval"]);
-
 function lastPersistedStatusOf(dir: string, pipelineId: string | undefined): string {
   if (pipelineId === undefined) return "orphaned";
   const artifact = readJsonFile(join(dir, `${pipelineId}.json`)) as
@@ -548,7 +533,12 @@ function lastPersistedStatusOf(dir: string, pipelineId: string | undefined): str
   // `awaiting_approval` is as dead as `running`: RunService holds suspended runs
   // in memory only, so no daemon is left to accept the approval this status
   // invites. Reporting it verbatim sends the caller to `approve` for a throw.
-  if (recorded === undefined || ORPHANED_ON_DISK.has(recorded)) return "orphaned";
+  if (
+    recorded === undefined ||
+    runPhase({ status: recorded, source: "disk" }, false) === "orphaned"
+  ) {
+    return "orphaned";
+  }
   return recorded;
 }
 

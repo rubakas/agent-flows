@@ -11,6 +11,8 @@
 // one has an owner who expects it to stay up, and its port is the conventional
 // one they will dial again.
 
+import { isInFlight } from "../runtime/runStatus.js";
+
 /** Milliseconds of quiet before an auto-started daemon with no work stops. */
 export const DEFAULT_IDLE_MS = 15 * 60_000;
 
@@ -76,7 +78,5 @@ export interface RunLike {
  * every future daemon for that project open on the strength of an old crash.
  */
 export function countInFlight(runs: readonly RunLike[]): number {
-  return runs.filter(
-    (r) => r.source === "live" && (r.status === "running" || r.status === "awaiting_approval")
-  ).length;
+  return runs.filter(isInFlight).length;
 }
