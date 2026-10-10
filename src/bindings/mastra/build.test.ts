@@ -27,10 +27,10 @@ import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
 import { CREDENTIAL_DENY_PATTERNS } from "../../canon/denyPatterns.js";
 import { loadPipeline } from "../../canon/load.js";
+import { bundledPipelines } from "../../canon/pipelines.js";
 import { ModelRegistry } from "../../canon/registry.js";
 import { makeStreamJsonChild } from "../../canon/testing/fakeSpawn.js";
 import { makeInMemoryDb } from "../../db/index.js";
-import { bundledPipelinesDir } from "../../packageRoot.js";
 import { upsertManifestEntry } from "../../runtime/artifactStore.js";
 import { closeRunLog, openRunLog } from "../../runtime/stepLog.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
@@ -2098,7 +2098,10 @@ describe("bundled pipelines — timeoutMs regression guard (CHUNK A)", () => {
       "test.yaml",
     ];
     for (const file of pipelineFiles) {
-      const loaded = loadPipeline(join(bundledPipelinesDir(), file));
+      const bundled = bundledPipelines().get(file.replace(/\.yaml$/u, ""));
+      assert.equal(bundled.kind, "ok", `${file} must load`);
+      if (bundled.kind !== "ok") continue;
+      const loaded = bundled.loaded;
       for (const step of loaded.def.steps) {
         assert.equal(
           step.timeoutMs,
@@ -2382,7 +2385,10 @@ describe("buildPipelineWorkflow — a revision step publishes the spec (regressi
 // This pins the two ends of the wire against the real YAML.
 describe("bundled spec-creation — the revision reaches the gate's key", () => {
   it("correct.revise declares produces: spec and publishes to the key `approve` reads", () => {
-    const loaded = loadPipeline(join(bundledPipelinesDir(), "spec-creation.yaml"));
+    const specCreation = bundledPipelines().get("spec-creation");
+    assert.equal(specCreation.kind, "ok", "the bundled spec-creation pipeline must load");
+    if (specCreation.kind !== "ok") return;
+    const loaded = specCreation.loaded;
     const revise = loaded.def.steps.find((s) => s.id === "correct.revise");
     assert.ok(revise, "spec-creation must expand correct-plan into a correct.revise step");
     assert.equal(

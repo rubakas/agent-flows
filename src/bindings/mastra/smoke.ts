@@ -7,8 +7,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Mastra } from "@mastra/core/mastra";
 import { LibSQLStore } from "@mastra/libsql";
-import { listPipelines, loadPipeline } from "../../canon/load.js";
 import { loadProviders } from "../../canon/loadProviders.js";
+import { bundledPipelines } from "../../canon/pipelines.js";
 import { defaultRegistry, getProfile, resolveStepModel } from "../../canon/registry.js";
 import { makeDb } from "../../db/index.js";
 import { DrizzleTicketStore } from "../../store/sqlite.js";
@@ -64,14 +64,17 @@ const db = makeDb(dbPath);
 const store = new DrizzleTicketStore(db);
 const registry = defaultRegistry(process.env, providers.models);
 
-const pipelinesDir = join(repoRoot, "pipelines");
-const [pipelineFile] = listPipelines(pipelinesDir).filter((f) => f.includes("spec-creation"));
-if (!pipelineFile) {
-  console.error("No spec-creation pipeline found");
+const specCreation = bundledPipelines().get("spec-creation");
+if (specCreation.kind !== "ok") {
+  console.error(
+    specCreation.kind === "absent"
+      ? "No spec-creation pipeline found"
+      : `spec-creation does not load: ${specCreation.error.message}`
+  );
   process.exit(1);
 }
 
-const loaded = loadPipeline(pipelineFile);
+const loaded = specCreation.loaded;
 const llmSteps = loaded.def.steps.filter((s): s is StepDef => s.kind === "llm");
 
 // ── Build models override map ─────────────────────────────────────────────────

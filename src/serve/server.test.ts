@@ -39,7 +39,7 @@ import { after, before, describe, it } from "node:test";
 import { Mastra } from "@mastra/core";
 import { buildPipelineWorkflow } from "../bindings/mastra/build.js";
 import { renderSpecKitSpec } from "../canon/exportSpec.js";
-import { loadPipeline } from "../canon/load.js";
+import { bundledPipelines } from "../canon/pipelines.js";
 import { ModelRegistry } from "../canon/registry.js";
 import { bundledPipelinesDir, packageRoot, packageVersion } from "../packageRoot.js";
 import { probeDaemon, readDaemonRecord, type DaemonRecord } from "../runtime/daemonRecord.js";
@@ -2569,7 +2569,9 @@ describe("A restart keeps a real run visible (spec 034 V5)", () => {
     state = makeState(REAL_REPO_ROOT, tmpDir);
 
     // First daemon: a real `test` pipeline (one check step) run to completion.
-    const pipeline = loadPipeline(join(bundledPipelinesDir(), "test.yaml"));
+    const bundledTest = bundledPipelines().get("test");
+    assert.ok(bundledTest.kind === "ok", "the bundled test pipeline must load");
+    const pipeline = bundledTest.loaded;
     const wf = buildPipelineWorkflow(pipeline, {
       registry: new ModelRegistry([]),
       store: {} as unknown as TicketStore,

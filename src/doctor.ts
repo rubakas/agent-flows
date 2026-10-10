@@ -8,8 +8,8 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { resolveProjectDir } from "./bindings/mastra/projectDir.js";
-import { listPipelines, loadPipeline } from "./canon/load.js";
 import { loadProviders } from "./canon/loadProviders.js";
+import { bundledPipelines } from "./canon/pipelines.js";
 import { defaultRegistry, getActiveProfile } from "./canon/registry.js";
 import {
   harnessReach,
@@ -18,7 +18,7 @@ import {
   whichOnPath,
   type HarnessReach,
 } from "./harness/harnesses.js";
-import { bundledPipelinesDir, packageVersion } from "./packageRoot.js";
+import { packageVersion } from "./packageRoot.js";
 import { classifyIdentity, probeDaemon, readDaemonRecord } from "./runtime/daemonRecord.js";
 import { resolveProjectState } from "./runtime/projectState.js";
 import type { ProviderConfig } from "./canon/registry.js";
@@ -595,27 +595,8 @@ export function defaultProbes(): DoctorProbes {
     },
 
     loadCanon: () => {
-      const pipelinesDir = bundledPipelinesDir();
-      const loaded: string[] = [];
-      const failed: { file: string; error: string }[] = [];
-      let files: string[];
-      try {
-        files = listPipelines(pipelinesDir);
-      } catch (err) {
-        return {
-          loaded,
-          failed: [{ file: pipelinesDir, error: String(err instanceof Error ? err.message : err) }],
-        };
-      }
-      for (const file of files) {
-        try {
-          const pipeline = loadPipeline(file);
-          loaded.push(pipeline.def.id);
-        } catch (err) {
-          failed.push({ file, error: String(err instanceof Error ? err.message : err) });
-        }
-      }
-      return { loaded, failed };
+      const { found, errors } = bundledPipelines().all();
+      return { loaded: found.map((f) => f.file.id), failed: errors };
     },
 
     harnessReach: () => harnessReach(resolveSetupEnv()),

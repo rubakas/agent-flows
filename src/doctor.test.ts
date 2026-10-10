@@ -643,4 +643,10 @@ describe("defaultProbes", () => {
       else process.env.AGENT_FLOWS_PROJECT_DIR = previous;
     }
   });
+
+  it("loadCanon reports the bundled pipelines as loaded, with nothing failed", () => {
+    const canon = defaultProbes().loadCanon();
+    assert.deepEqual(canon.failed, []);
+    assert.ok(canon.loaded.includes("build"), `build mounts its children: ${canon.loaded.join()}`);
+  });
 });

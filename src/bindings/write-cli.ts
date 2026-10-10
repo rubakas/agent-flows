@@ -11,10 +11,9 @@
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { listPipelines, loadPipeline } from "../canon/load.js";
 import { loadProviders } from "../canon/loadProviders.js";
+import { bundledPipelines } from "../canon/pipelines.js";
 import { defaultRegistry, getActiveProfile } from "../canon/registry.js";
-import { bundledPipelinesDir } from "../packageRoot.js";
 import { generateWorkflowScript } from "./claudeCode.js";
 import { resolveProjectDir } from "./mastra/projectDir.js";
 
@@ -34,7 +33,13 @@ function main(args: string[]): void {
 
   // The pipelines are read from the package (spec 038 D5); everything written
   // and every project override read belongs to the project directory.
-  const pipelinesDir = bundledPipelinesDir();
+  // A catalogue error is fatal and nothing is written: a script set generated
+  // from a partly unloadable catalogue would look complete.
+  const { found, errors } = bundledPipelines().all();
+  if (errors.length > 0) {
+    for (const { file, error } of errors) console.error(`ERROR: ${file}: ${error}`);
+    process.exit(1);
+  }
   const projectDir = resolveProjectDir();
   const outDir = join(projectDir, ".claude", "workflows");
 
@@ -43,9 +48,7 @@ function main(args: string[]): void {
   const providers = loadProviders(projectDir);
   const profile = getActiveProfile(process.env, providers);
   const registry = defaultRegistry(process.env, providers.models);
-  const yamlFiles = listPipelines(pipelinesDir);
-  for (const yamlFile of yamlFiles) {
-    const loaded = loadPipeline(yamlFile);
+  for (const { loaded } of found) {
     const outFile = join(outDir, `${loaded.def.id}.js`);
     let script: string;
     try {

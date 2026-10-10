@@ -36,8 +36,8 @@ import { LibSQLStore } from "@mastra/libsql";
 import { buildPipelineWorkflow } from "../bindings/mastra/build.js";
 import { mastraDbPath } from "../bindings/mastra/paths.js";
 import { extractRunError } from "../bindings/mastra/runError.js";
-import { loadPipeline } from "../canon/load.js";
 import { loadProviders } from "../canon/loadProviders.js";
+import { bundledPipelines } from "../canon/pipelines.js";
 import { defaultRegistry, getProfile } from "../canon/registry.js";
 import { makeDb } from "../db/index.js";
 import { DrizzleTicketStore } from "../store/sqlite.js";
@@ -193,7 +193,6 @@ const THRESHOLDS = {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = join(__dirname, "..", "..");
-const pipelinesDir = join(repoRoot, "pipelines");
 
 // ── CLI args ──────────────────────────────────────────────────────────────────
 
@@ -244,13 +243,16 @@ for (const p of fixture.expectedPaths) {
 
 // ── Load pipeline ─────────────────────────────────────────────────────────────
 
-const pipelineFile =
+const pipelineId =
   isCodeReviewFixture(fixture) || isSeverityFixture(fixture)
-    ? "code-review.yaml"
+    ? "code-review"
     : isAuditFixture(fixture)
-      ? "audit.yaml"
-      : "investigate.yaml";
-const loadedFull = loadPipeline(join(pipelinesDir, pipelineFile));
+      ? "audit"
+      : "investigate";
+const pipelineLookup = bundledPipelines().get(pipelineId);
+if (pipelineLookup.kind === "absent") throw new Error(`Bundled pipeline "${pipelineId}" not found`);
+if (pipelineLookup.kind === "broken") throw pipelineLookup.error;
+const loadedFull = pipelineLookup.loaded;
 
 // Safety guard: refuse pipelines with any writing or shell-exec steps (including loop bodies).
 // Applied to the whole pipeline, before any trimming: a step removed from the graph must not be

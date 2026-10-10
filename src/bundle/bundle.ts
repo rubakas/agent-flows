@@ -21,8 +21,9 @@ import { basename, dirname, join, normalize, resolve } from "node:path";
 import { parse, stringify } from "yaml";
 
 import { assertWritableRoot } from "../canon/fork.js";
-import { loadPipeline } from "../canon/load.js";
+import { layerFrom } from "../canon/layers.js";
 import { parseProviders } from "../canon/loadProviders.js";
+import { pipelinesIn } from "../canon/pipelines.js";
 import { computeClosure } from "./closure.js";
 import { assertSafePath, isContained } from "./paths.js";
 
@@ -244,8 +245,9 @@ export interface BundleImportReport {
  * chosen root is what containment is measured against, so a new target changes
  * where the guards point, never whether they run.
  *
- * Validation-first: writes all bundle files to a temp directory, then calls
- * loadPipeline on every pipeline in the bundle. If any pipeline fails to load,
+ * Validation-first: writes all bundle files to a temp directory, then loads
+ * every pipeline in the bundle through a view over that directory alone, so a
+ * nested child has to be a pipeline of the bundle itself. If any pipeline fails to load,
  * the temp directory is deleted and an error is thrown — nothing is written to
  * the target.
  *
@@ -282,7 +284,7 @@ export function importBundle(
 
   // Phase 2: Write files to a temp directory and validate each pipeline loads.
   // realpathSync ensures the macOS /tmp → /private/tmp symlink is resolved so
-  // loadPipeline's containment check (which also uses realpathSync) passes.
+  // the loader's containment check (which also uses realpathSync) passes.
   const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "agent-flows-import-")));
   try {
     for (const entry of bundle.files) {
@@ -292,10 +294,11 @@ export function importBundle(
     }
 
     const pipelineFiles = bundle.files.filter((f) => f.path.startsWith("pipelines/"));
+    const view = pipelinesIn([layerFrom("repo", tmpRoot)]);
     for (const f of pipelineFiles) {
       const yamlPath = join(tmpRoot, f.path);
       try {
-        loadPipeline(yamlPath);
+        view.check(yamlPath);
       } catch (err) {
         throw new Error(`Bundle validation failed for "${f.path}": ${(err as Error).message}`, {
           cause: err,

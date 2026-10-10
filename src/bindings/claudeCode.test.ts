@@ -4,18 +4,17 @@ import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { listPipelines, loadPipeline } from "../canon/load.js";
-import { packageRoot } from "../packageRoot.js";
+import { bundledPipelines } from "../canon/pipelines.js";
 import { generateWorkflowScript } from "./claudeCode.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
-const repoRoot = packageRoot();
-// audit.yaml is an all-llm pipeline (supported by Binding A) with a parallel
+// audit is an all-llm pipeline (supported by Binding A) with a parallel
 // level and a sequential level — enough structure to exercise the generator.
-const pipelineYaml = join(repoRoot, "pipelines", "audit.yaml");
-
 function getGenerated(): string {
-  return generateWorkflowScript(loadPipeline(pipelineYaml));
+  const audit = bundledPipelines().get("audit");
+  assert.equal(audit.kind, "ok", "the bundled audit pipeline must load");
+  if (audit.kind !== "ok") throw new Error("unreachable");
+  return generateWorkflowScript(audit.loaded);
 }
 
 describe("generateWorkflowScript — structural checks", () => {
@@ -165,8 +164,9 @@ describe("generateWorkflowScript — the Binding A partition", () => {
   it("emits a script for exactly the pipelines that must generate, and refuses exactly the rest", () => {
     const generated: string[] = [];
     const refused: string[] = [];
-    for (const yamlFile of listPipelines(join(repoRoot, "pipelines"))) {
-      const loaded = loadPipeline(yamlFile);
+    const { found, errors } = bundledPipelines().all();
+    assert.deepEqual(errors, [], "every bundled pipeline loads");
+    for (const { loaded } of found) {
       try {
         generateWorkflowScript(loaded);
         generated.push(loaded.def.id);
@@ -197,13 +197,13 @@ describe("generateWorkflowScript — every bundled pipeline", () => {
   // ship it either refuses loudly or emits a script that parses. Nothing is
   // written into the repository.
   it("either refuses loudly or emits a syntactically valid script", () => {
-    const yamlFiles = listPipelines(join(repoRoot, "pipelines"));
-    assert.ok(yamlFiles.length >= 3, `expected the bundled pipeline set, got ${yamlFiles.length}`);
+    const { found, errors } = bundledPipelines().all();
+    assert.deepEqual(errors, [], "every bundled pipeline loads");
+    assert.ok(found.length >= 3, `expected the bundled pipeline set, got ${found.length}`);
 
     const outDir = mkdtempSync(join(tmpdir(), "agent-flows-gen-all-"));
     try {
-      for (const yamlFile of yamlFiles) {
-        const loaded = loadPipeline(yamlFile);
+      for (const { loaded } of found) {
         let script: string;
         try {
           script = generateWorkflowScript(loaded);

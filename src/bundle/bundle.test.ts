@@ -18,7 +18,8 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { describe, it } from "node:test";
 
-import { loadPipeline } from "../canon/load.js";
+import { layerFrom } from "../canon/layers.js";
+import { pipelinesIn } from "../canon/pipelines.js";
 import { packageRoot } from "../packageRoot.js";
 import { exportBundle, importBundle, parseBundle, stringifyBundle } from "./bundle.js";
 
@@ -106,7 +107,7 @@ describe("exportBundle — cycle closure", () => {
 // ── 2. Export-then-import round-trip ──────────────────────────────────────────
 
 describe("exportBundle + importBundle — round-trip", () => {
-  it("imported cycle canon is loadable via loadPipeline", () => {
+  it("imported cycle canon is loadable through the project's pipelines view", () => {
     const projectDir = makeTempDir("agent-flows-bundle-roundtrip-");
     try {
       const bundle = exportBundle("cycle", bundledPipelinesDir);
@@ -117,14 +118,16 @@ describe("exportBundle + importBundle — round-trip", () => {
       assert.equal(report.skipped.length, 0, "fresh import must have no skips");
 
       // Load the root pipeline — this is the definitive round-trip check.
-      // loadPipeline recursively loads all nested pipelines and prompts;
-      // if any piece is missing or malformed, it throws.
+      // The view loads all nested pipelines and prompts; if any piece is
+      // missing or malformed, the lookup is not ok.
       const cycleYaml = join(projectDir, ".agent-flows", "pipelines", "cycle.yaml");
       assert.ok(existsSync(cycleYaml), "cycle.yaml must exist after import");
 
-      const loaded = loadPipeline(cycleYaml);
-      assert.equal(loaded.def.id, "cycle");
-      assert.ok(loaded.def.steps.length > 0, "cycle must have steps after round-trip");
+      const imported = pipelinesIn([layerFrom("repo", canonRoot(projectDir))]).get("cycle");
+      assert.equal(imported.kind, "ok", "the imported cycle must load");
+      if (imported.kind !== "ok") return;
+      assert.equal(imported.loaded.def.id, "cycle");
+      assert.ok(imported.loaded.def.steps.length > 0, "cycle must have steps after round-trip");
     } finally {
       rmSync(projectDir, { recursive: true });
     }
