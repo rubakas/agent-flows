@@ -6,10 +6,14 @@
 // inputs, layer, exportedAt — is escaped.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   declaredStepRows,
+  deleteConfirmText,
   emptyRunsMessage,
   resolveRunsFilter,
   progressCell,
@@ -57,6 +61,58 @@ describe("terminalStepId — the step whose output is the run's answer (042 D17)
   it("has no answer for an empty pipeline", () => {
     assert.equal(terminalStepId([]), null);
     assert.equal(terminalStepId(undefined), null);
+  });
+});
+
+describe("deleteConfirmText — a user-library workflow is deleted for every project (FR-12 M2)", () => {
+  it("names the workflow and, for the user layer, that every project on the machine loses it", () => {
+    const text = deleteConfirmText("personal", "user");
+    assert.ok(text.includes('"personal"'), text);
+    assert.match(text, /user library/);
+    assert.match(text, /every project on this machine/);
+  });
+
+  it("says nothing of other projects for a repository workflow", () => {
+    const text = deleteConfirmText("mine", "repo");
+    assert.ok(text.includes('"mine"'), text);
+    assert.ok(!/every project|user library/.test(text), `repo delete is local: ${text}`);
+  });
+
+  it("does not guess when the layer is unknown", () => {
+    assert.ok(!deleteConfirmText("x", undefined).includes("every project"));
+  });
+
+  it("the Delete button carries the row's layer for the page to read", () => {
+    assert.ok(
+      workflowRow({ id: "personal", layer: "user" }).includes('data-wf-layer="user"'),
+      "the click handler needs the layer to word its confirm"
+    );
+    assert.ok(workflowRow({ id: "mine", layer: "repo" }).includes('data-wf-layer="repo"'));
+  });
+
+  // ui.html has no DOM harness, so the wiring is gated as text: the confirm is worded
+  // by the tested function and both places that delete hand it the workflow's layer.
+  it("the page words every delete confirm through deleteConfirmText, with the layer", () => {
+    const html = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "ui.html"), "utf8");
+    assert.ok(
+      html.includes("confirm(deleteConfirmText(id, layer))"),
+      "the confirm is not worded by it"
+    );
+    assert.ok(
+      !html.includes("confirm(`Delete workflow"),
+      "a delete still confirms with a bare string"
+    );
+    assert.ok(html.includes("btn.dataset.wfLayer"), "the list does not pass the row's layer");
+    assert.match(
+      html,
+      /deleteWorkflow\(\s*id,\s*\(\) => \{[^}]*\},\s*layer\s*\)/,
+      "the detail view does not pass its layer"
+    );
+  });
+
+  it("escapes a hostile layer value in the attribute", () => {
+    const html = workflowRow({ id: "x", layer: HOSTILE });
+    assert.ok(!html.includes("<img"), `raw markup must not reach the row: ${html}`);
   });
 });
 

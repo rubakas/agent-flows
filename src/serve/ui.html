@@ -1251,6 +1251,7 @@
       import {
         ACTIVE_STATUSES,
         declaredStepRows,
+        deleteConfirmText,
         emptyRunsMessage,
         resolveRunsFilter,
         fmtElapsed,
@@ -1406,12 +1407,12 @@
             toggleWorkflowVisibility(btn.dataset.toggleWf, btn.dataset.wfHidden !== "true");
         }
         for (const btn of wrap.querySelectorAll("[data-del-wf]")) {
-          btn.onclick = () => deleteWorkflow(btn.dataset.delWf, loadWorkflows);
+          btn.onclick = () => deleteWorkflow(btn.dataset.delWf, loadWorkflows, btn.dataset.wfLayer);
         }
       }
 
-      async function deleteWorkflow(id, onDone) {
-        if (!confirm(`Delete workflow "${id}"?`)) return;
+      async function deleteWorkflow(id, onDone, layer) {
+        if (!confirm(deleteConfirmText(id, layer))) return;
         try {
           await api("DELETE", `/api/pipelines/${encodeURIComponent(id)}`, {});
           flash(`Deleted "${id}"`);
@@ -1709,9 +1710,13 @@
           const delBtn = body.querySelector("[data-wf-delete]");
           if (delBtn)
             delBtn.onclick = () =>
-              deleteWorkflow(id, () => {
-                location.hash = hashFor("workflows");
-              });
+              deleteWorkflow(
+                id,
+                () => {
+                  location.hash = hashFor("workflows");
+                },
+                layer
+              );
         } catch (e) {
           body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
         }

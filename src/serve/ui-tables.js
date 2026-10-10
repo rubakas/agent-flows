@@ -248,6 +248,23 @@ function btn(label, attr, value, extraClass, extraAttrs) {
 }
 
 /**
+ * The confirm text for deleting a workflow.
+ *
+ * A user-library workflow lives under the home directory, not in the project, so
+ * deleting it removes it for every project on this machine, not only the one the
+ * page is open on. Saying so is the whole point of a confirm that names the layer.
+ *
+ * @param {string} id
+ * @param {string | undefined} layer the layer that owns the workflow
+ * @returns {string}
+ */
+export function deleteConfirmText(id, layer) {
+  const ask = `Delete workflow "${id}"?`;
+  if (layer !== "user") return ask;
+  return `${ask}\n\nIt is in your user library, so deleting it removes it for every project on this machine.`;
+}
+
+/**
  * One row of the Workflows table (spec 038 D13/D14/D15).
  *
  * A workflow the project cannot write — a bundled one — offers `Fork…` where a
@@ -277,7 +294,9 @@ export function workflowRow(wf) {
     btn("Run…", "data-run-wf", id),
     writable ? btn("Edit", "data-edit-wf", id) : btn("Fork…", "data-fork-wf", id),
     btn(hidden ? "Show" : "Hide", "data-toggle-wf", id, "", `data-wf-hidden="${hidden}"`),
-    ...(writable ? [btn("Delete", "data-del-wf", id, "danger")] : []),
+    ...(writable
+      ? [btn("Delete", "data-del-wf", id, "danger", `data-wf-layer="${esc(layer)}"`)]
+      : []),
   ].join("");
   return (
     `<tr data-wf-row="${esc(id)}">` +

@@ -1500,6 +1500,11 @@ async function handleRequest(
     // Refuse if a winning pipeline in ANY layer nests this one — deleting it would
     // break their loads. Unless a lower layer still defines the id (D2): the
     // nesters then fall back to that version.
+    // Per project only: `nesters` reads the layers of THIS project's view. Deleting
+    // a user-library workflow removes it for every project on the machine, and a
+    // parent in another project that mounts it is not checked here. The page says
+    // so in its confirm (deleteConfirmText); the route does not take a flag to skip
+    // or force the check.
     const nesters = ctx.pipelines.nesters(id);
     if (nesters.length > 0 && entry.file.shadows.length === 0) {
       await refuse(req, res, 409, {
