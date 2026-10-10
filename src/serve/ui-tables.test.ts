@@ -256,7 +256,7 @@ describe("runPhase — the page's copy agrees with runStatus.ts (spec 047 FR-15)
   ];
   // "started" is a step status and "bogus" a future one: neither is a run phase.
   const STATUSES = [...RUN_STATUSES, "unreadable", "started", "bogus"];
-  const SOURCES = ["live", "disk", undefined];
+  const SOURCES = ["live", "disk"];
 
   it("classifies every status x source x daemonUp the way the runtime does", () => {
     for (const status of STATUSES) {
@@ -264,12 +264,20 @@ describe("runPhase — the page's copy agrees with runStatus.ts (spec 047 FR-15)
         for (const daemonUp of [true, false]) {
           assert.equal(
             runPhase({ status, source }, daemonUp),
-            canonicalRunPhase({ status, source: source! }, daemonUp),
+            canonicalRunPhase({ status, source }, daemonUp),
             `status=${status} source=${source} daemonUp=${daemonUp}`
           );
         }
       }
     }
+  });
+
+  it("missing source counts as live (older daemons)", () => {
+    assert.equal(runPhase({ status: "running" }), "live");
+    assert.equal(runPhase({ status: "awaiting_approval" }), "awaiting");
+    assert.equal(runPhase({ status: "succeeded" }), "terminal");
+    assert.equal(runPhase({ status: "unreadable" }), "unreadable");
+    assert.equal(isActiveRun({ status: "running" }), true);
   });
 
   it("counts only a live running or awaiting run as active", () => {

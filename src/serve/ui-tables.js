@@ -14,8 +14,8 @@ const RUNNING_OR_AWAITING = new Set(["running", "awaiting_approval"]);
 /**
  * Classify a run for the page. A pinned copy of `runPhase` in
  * src/runtime/runStatus.ts (spec 047 FR-15): the page cannot import TypeScript,
- * so ui-tables.test.ts compares the two over every status and source and fails
- * when they drift.
+ * so ui-tables.test.ts compares the two over every status and both sources and
+ * fails when they drift. The one deliberate difference: a missing source is live.
  *
  * @param {{ status?: string, source?: string }} run
  * @param {boolean} [daemonUp] Only matters for a disk run that claims to be in flight.
@@ -24,7 +24,12 @@ const RUNNING_OR_AWAITING = new Set(["running", "awaiting_approval"]);
 export function runPhase(run, daemonUp = true) {
   if (run?.status === "unreadable") return "unreadable";
   if (!RUNNING_OR_AWAITING.has(run?.status)) return "terminal";
-  if (run?.source === "live") return run.status === "running" ? "live" : "awaiting";
+  // The page merges runs from other projects' daemons (spec 039), and an older
+  // daemon omits `source`. Only an explicit "disk" marks a restored record; the
+  // runtime copy has no such case because it never reads another version's wire.
+  if (run?.source === undefined || run.source === "live") {
+    return run.status === "running" ? "live" : "awaiting";
+  }
   return daemonUp ? "restored" : "orphaned";
 }
 
