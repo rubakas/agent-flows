@@ -57,13 +57,20 @@ export interface PipelineFile {
   layer: CanonLayer;
   /** Layers holding a same-id workflow this one shadows, lowest precedence first. */
   shadows: readonly LayerSource[];
-  /** False for the bundled layer, which is never written. */
+  /**
+   * Whether this file may be written or deleted. Decided by where the file really
+   * is (`layerOf`, after realpath), not by the layer label it was listed under: a
+   * layer whose `pipelines/` is a link into the package lists the package's own
+   * files under a writable label, and they are not editable.
+   */
   editable: boolean;
   /**
-   * The prompt file of every OWN llm step, read from the YAML on disk rather than
-   * from the loaded definition: expansion inlines nested pipelines under
-   * `parent.child` ids whose prompts belong to another file. A document that does
-   * not parse yields an empty map.
+   * The DECLARED prompt of every OWN llm step, unfiltered: a path the loader
+   * accepts but a write must not touch is in here too. Every entry carries
+   * `writable`; a caller reads or writes only the ones where it is true. Read
+   * from the YAML on disk rather than from the loaded definition: expansion
+   * inlines nested pipelines under `parent.child` ids whose prompts belong to
+   * another file. A document that does not parse yields an empty map.
    */
   readonly prompts: ReadonlyMap<string, PromptFile>;
 }
@@ -111,8 +118,23 @@ export interface Pipelines {
     filePath: string,
     edits?: { body?: string; prompts?: Record<string, string> }
   ): LoadedPipeline;
-  /** The layer whose `pipelines/` directory holds `filePath`, if any. */
+  /**
+   * The layer whose `pipelines/` directory really holds `filePath`, if any.
+   *
+   * Decided on realpaths: of the file when it exists (a symlinked file is where
+   * it points, not where it is listed), otherwise of its directory. When several
+   * layers resolve to the same directory (one layer's `pipelines/` is a link to
+   * another's) the bundled layer wins, so a path that reaches the package's own
+   * files is never reported as writable.
+   */
   layerOf(filePath: string): CanonLayer | undefined;
+  /**
+   * Whether a write may replace the prompt file at `absPath` of `layer`: an
+   * existing `.md` file whose realpath sits inside the realpath of the layer's
+   * `prompts/` directory and outside every bundled layer's `prompts/`. Cheap
+   * enough to repeat immediately before a write.
+   */
+  canWritePrompt(absPath: string, layer: CanonLayer): boolean;
   /**
    * Ids of the WINNING pipelines, in any layer, that mount `id` with a pipeline
    * or loop step of their own. A shadowed copy is not counted: it is not in use.
@@ -142,19 +164,22 @@ function viewOf(catalog: MergedCatalog): Pipelines {
 
   function layerOf(filePath: string): CanonLayer | undefined {
     if (!/\.ya?ml$/u.test(filePath)) return undefined;
-    let dir: string;
-    try {
-      dir = realpathSync(dirname(resolve(filePath)));
-    } catch {
-      return undefined;
-    }
-    return catalog.layers.find((layer) => {
-      try {
-        return realpathSync(layer.pipelinesDir) === dir;
-      } catch {
-        return false;
-      }
-    });
+    const dir = realDirectoryOf(resolve(filePath));
+    if (dir === undefined) return undefined;
+    const holding = catalog.layers.filter(
+      (layer) => realpathOrUndefined(layer.pipelinesDir) === dir
+    );
+    // Written out rather than left to layer order: the answer to "which layer is
+    // this" gates every write, and the bundled catalogue must win a tie.
+    return holding.find((layer) => layer.source === "bundled") ?? holding[0];
+  }
+
+  const bundledPromptDirs = catalog.layers
+    .filter((layer) => layer.source === "bundled")
+    .map((layer) => layer.promptsDir);
+
+  function canWritePrompt(absPath: string, layer: CanonLayer): boolean {
+    return isWritablePrompt(absPath, layer.promptsDir, bundledPromptDirs);
   }
 
   return {
@@ -164,7 +189,7 @@ function viewOf(catalog: MergedCatalog): Pipelines {
     get(id) {
       const entry = catalog.entries.get(id);
       if (entry === undefined) return { kind: "absent" };
-      const file = fileOf(entry);
+      const file = fileOf(entry, layerOf, canWritePrompt);
       try {
         return { kind: "ok", file, loaded: loadPipeline(entry.filePath, { resolvePath }) };
       } catch (err) {
@@ -178,7 +203,7 @@ function viewOf(catalog: MergedCatalog): Pipelines {
       for (const entry of rows()) {
         try {
           found.push({
-            file: fileOf(entry),
+            file: fileOf(entry, layerOf, canWritePrompt),
             loaded: loadPipeline(entry.filePath, { resolvePath }),
           });
         } catch (err) {
@@ -216,6 +241,8 @@ function viewOf(catalog: MergedCatalog): Pipelines {
 
     layerOf,
 
+    canWritePrompt,
+
     nesters(id) {
       const ids: string[] = [];
       for (const entry of rows()) {
@@ -237,19 +264,43 @@ function viewOf(catalog: MergedCatalog): Pipelines {
   };
 }
 
-function fileOf(entry: CatalogEntry): PipelineFile {
+function fileOf(
+  entry: CatalogEntry,
+  layerOf: (filePath: string) => CanonLayer | undefined,
+  canWritePrompt: (absPath: string, layer: CanonLayer) => boolean
+): PipelineFile {
   let prompts: ReadonlyMap<string, PromptFile> | undefined;
+  const real = layerOf(entry.filePath);
   return {
     id: entry.id,
     filePath: entry.filePath,
     layer: entry.layer,
     shadows: [...entry.shadows],
-    editable: entry.layer.source !== "bundled",
+    editable: real !== undefined && real.source !== "bundled",
     get prompts() {
-      prompts ??= promptFilesOf(entry.filePath, entry.layer);
+      prompts ??= promptFilesOf(entry.filePath, entry.layer, canWritePrompt);
       return prompts;
     },
   };
+}
+
+function realpathOrUndefined(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The directory `absFile` really lives in. A file that exists is resolved itself,
+ * so a symlinked `x.yaml` is where it points. One that does not exist (a draft
+ * whose file was deleted, a file about to be created) is placed by its directory;
+ * a write there replaces the name, it does not follow a link.
+ */
+function realDirectoryOf(absFile: string): string | undefined {
+  const real = realpathOrUndefined(absFile);
+  return real !== undefined ? dirname(real) : realpathOrUndefined(dirname(absFile));
 }
 
 /** Own llm steps' declared prompt paths (step id → path as written). */
@@ -271,11 +322,15 @@ function ownLlmPrompts(source: { text: string } | { path: string }): Map<string,
   return out;
 }
 
-function promptFilesOf(filePath: string, layer: CanonLayer): Map<string, PromptFile> {
+function promptFilesOf(
+  filePath: string,
+  layer: CanonLayer,
+  canWritePrompt: (absPath: string, layer: CanonLayer) => boolean
+): Map<string, PromptFile> {
   const files = new Map<string, PromptFile>();
   for (const [stepId, rel] of ownLlmPrompts({ path: filePath })) {
     const abs = resolve(layer.root, rel);
-    files.set(stepId, { rel, abs, writable: isWritablePrompt(abs, layer.promptsDir) });
+    files.set(stepId, { rel, abs, writable: canWritePrompt(abs, layer) });
   }
   return files;
 }
@@ -287,10 +342,16 @@ function promptFilesOf(filePath: string, layer: CanonLayer): Map<string, PromptF
  * The loader's own containment is not sufficient for a write — it accepts any
  * path under the layer root, `providers.yaml` included — so this is a second,
  * narrower gate, applied after realpath so a symlink planted inside `prompts/`
- * cannot redirect the write. Hard links are not detected: that residual needs
- * prior local write access to the directory.
+ * cannot redirect the write. A target that resolves into one of `readOnlyDirs`
+ * (the bundled layers' `prompts/`) is refused even when the layer's own `prompts/`
+ * is a link to it. Hard links are not detected: that residual needs prior local
+ * write access to the directory.
  */
-function isWritablePrompt(absPath: string, promptsDir: string): boolean {
+function isWritablePrompt(
+  absPath: string,
+  promptsDir: string,
+  readOnlyDirs: readonly string[]
+): boolean {
   if (!absPath.endsWith(".md")) return false;
   let realTarget: string;
   let realDir: string;
@@ -302,6 +363,11 @@ function isWritablePrompt(absPath: string, promptsDir: string): boolean {
   }
   if (!realTarget.endsWith(".md")) return false;
   if (!statSync(realTarget).isFile()) return false;
-  const dirWithSep = realDir.endsWith(sep) ? realDir : realDir + sep;
-  return realTarget.startsWith(dirWithSep);
+  const within = (dir: string): boolean =>
+    realTarget.startsWith(dir.endsWith(sep) ? dir : dir + sep);
+  if (!within(realDir)) return false;
+  return !readOnlyDirs.some((dir) => {
+    const real = realpathOrUndefined(dir);
+    return real !== undefined && within(real);
+  });
 }

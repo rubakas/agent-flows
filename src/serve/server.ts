@@ -1397,13 +1397,30 @@ async function handleRequest(
     // followed exactly as writeFileSync followed it, not replaced.
     const realTarget = realpathSync(target.abs);
     const tmpPath = join(dirname(realTarget), `.${basename(realTarget)}.${randomUUID()}.tmp`);
+    let escaped = false;
     try {
       writeFileSync(tmpPath, text, { encoding: "utf8", mode: 0o600, flag: "wx" });
       chmodSync(tmpPath, statSync(realTarget).mode & 0o777);
-      renameSync(tmpPath, realTarget);
+      // The writable check above ran when the prompt list was read; a link
+      // swapped in since would send the rename somewhere else. Asked again on
+      // the path the rename will land on, as late as the code allows. A swap
+      // between this line and the rename remains possible and needs write
+      // access to the layer's prompts/ directory already.
+      if (ctx.pipelines.canWritePrompt(realTarget, entry.file.layer)) {
+        renameSync(tmpPath, realTarget);
+      } else {
+        escaped = true;
+        rmSync(tmpPath, { force: true });
+      }
     } catch (err) {
       rmSync(tmpPath, { force: true });
       throw err;
+    }
+    if (escaped) {
+      json(res, 403, {
+        error: `Step "${stepId}" prompt "${target.rel}" is not an existing .md file under prompts/`,
+      });
+      return;
     }
     json(res, 200, { ok: true, hash: hashContent(text) });
     return;
@@ -1474,6 +1491,13 @@ async function handleRequest(
       return;
     }
     await readAndDiscardBody(req, BODY_LIMIT_DEFAULT); // consume body
+    // Asked again where the file really is, immediately before the unlink: the
+    // lookup above and this line are separated by the nesters scan and a body read.
+    const owner = ctx.pipelines.layerOf(entry.file.filePath);
+    if (owner === undefined || owner.source === "bundled") {
+      json(res, 403, { error: "Cannot delete from the bundled pipeline catalog" });
+      return;
+    }
     rmSync(entry.file.filePath);
     json(res, 200, { ok: true, id });
     return;
@@ -2031,6 +2055,10 @@ async function handleRequest(
       stateDir: ctx.state.dir,
       runsDir: ctx.state.runsDir,
       dbPath: ctx.dbPath,
+      // The page shows this as the CREATE target (`writeTargetLayer`): the repository
+      // canon when the project has one, otherwise the bundled layer, which refuses
+      // creation. A project with only a user library therefore reports "bundled" --
+      // true of where a new workflow would go, not of where existing ones live.
       pipelinesSource: isBundled ? "bundled" : "project",
       pipelinesDir: ctx.pipelinesDir,
       port: ctx.boundPort,

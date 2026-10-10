@@ -1,7 +1,7 @@
 // FR-007: The only write path by which a canon draft becomes a file on disk.
 //
 // Save sequence (spec order):
-//   1. Validate the draft body with loadPipeline.
+//   1. Validate the draft body with `pipelines.check`, nested pipelines resolved through the layers.
 //   2. Re-hash the file on disk.
 //   3. If the disk hash differs from the draft's baseHash, refuse as conflict.
 //   4. Write through yaml's Document AST to preserve comments and key order.

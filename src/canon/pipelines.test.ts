@@ -744,3 +744,109 @@ describe("all — the listing path", () => {
     assert.match(errors[0].file, /broken\.yaml$/);
   });
 });
+
+// Editability is decided by where a file really is, never by the label of the layer
+// that listed it. A hostile repository can commit `.agent-flows/pipelines` as a link to
+// the installed package's `pipelines/`; its layer then wins the id and lists the
+// package's own files under a writable label.
+describe("editable and layerOf — decided on realpaths", () => {
+  /** A bundled layer with two pipelines (one gate-only) and a prompt. */
+  function makeBundled(): CanonLayer {
+    const bundled = makeLayer("bundled", "package");
+    write(bundled, "shared", GATE);
+    write(bundled, "other", GATE);
+    writeFileSync(join(bundled.promptsDir, "shared.md"), "{{request}}\n");
+    return bundled;
+  }
+
+  /** A layer of `source` whose pipelines/ and prompts/ are links into `bundled`. */
+  function makeLinkedLayer(source: CanonLayer["source"], name: string, bundled: CanonLayer) {
+    const layer = layerFrom(source, join(dir, name));
+    mkdirSync(layer.root, { recursive: true });
+    symlinkSync(bundled.pipelinesDir, layer.pipelinesDir, "dir");
+    symlinkSync(bundled.promptsDir, layer.promptsDir, "dir");
+    return layer;
+  }
+
+  for (const source of ["user", "repo"] as const) {
+    it(`a ${source} layer whose pipelines/ is a link into the package is not editable`, () => {
+      const bundled = makeBundled();
+      const linked = makeLinkedLayer(source, source, bundled);
+      const view = pipelinesIn([bundled, linked]);
+
+      const found = okOf(view.get("shared"));
+
+      assert.equal(found.file.layer.source, source, "listed under the writable label");
+      assert.equal(found.file.editable, false, "but it is the package's own file");
+      assert.equal(view.layerOf(found.file.filePath)?.source, "bundled");
+    });
+  }
+
+  it("layerOf answers the bundled layer when several layers resolve to one directory, whatever the order", () => {
+    const bundled = makeBundled();
+    const linked = makeLinkedLayer("user", "user", bundled);
+    const file = join(linked.pipelinesDir, "shared.yaml");
+
+    assert.equal(pipelinesIn([bundled, linked]).layerOf(file)?.source, "bundled");
+    assert.equal(pipelinesIn([linked, bundled]).layerOf(file)?.source, "bundled");
+  });
+
+  it("a symlinked file is where it points: into the package, or into no layer at all", () => {
+    const bundled = makeBundled();
+    const repo = makeLayer("repo", "repo");
+    const outside = join(dir, "outside");
+    mkdirSync(outside);
+    writeFileSync(
+      join(outside, "elsewhere.yaml"),
+      readFileSync(join(bundled.pipelinesDir, "other.yaml"))
+    );
+    symlinkSync(join(bundled.pipelinesDir, "other.yaml"), join(repo.pipelinesDir, "into-pkg.yaml"));
+    symlinkSync(join(outside, "elsewhere.yaml"), join(repo.pipelinesDir, "out.yaml"));
+    const view = pipelinesIn([bundled, repo]);
+
+    assert.equal(view.layerOf(join(repo.pipelinesDir, "into-pkg.yaml"))?.source, "bundled");
+    assert.equal(view.layerOf(join(repo.pipelinesDir, "out.yaml")), undefined);
+  });
+
+  it("a symlink to a file in the same layer is that layer's", () => {
+    const repo = makeLayer("repo", "repo");
+    write(repo, "real", GATE);
+    symlinkSync(join(repo.pipelinesDir, "real.yaml"), join(repo.pipelinesDir, "alias.yaml"));
+
+    assert.equal(
+      pipelinesIn([repo]).layerOf(join(repo.pipelinesDir, "alias.yaml"))?.source,
+      "repo"
+    );
+  });
+
+  it("a file that no longer exists is placed by its directory", () => {
+    const repo = makeLayer("repo", "repo");
+    assert.equal(
+      pipelinesIn([repo]).layerOf(join(repo.pipelinesDir, "deleted.yaml"))?.source,
+      "repo"
+    );
+    assert.equal(pipelinesIn([repo]).layerOf(join(dir, "no-such-dir", "x.yaml")), undefined);
+  });
+
+  it("an ordinary repo layer stays editable, and a bundled one does not", () => {
+    const bundled = makeBundled();
+    const repo = makeLayer("repo", "repo");
+    write(repo, "mine", GATE);
+    const view = pipelinesIn([bundled, repo]);
+
+    assert.equal(okOf(view.get("mine")).file.editable, true);
+    assert.equal(okOf(view.get("shared")).file.editable, false);
+  });
+
+  it("canWritePrompt refuses a target that resolves into the package's prompts/", () => {
+    const bundled = makeBundled();
+    const repo = makeLayer("repo", "repo");
+    const view = pipelinesIn([bundled, repo]);
+    writeFileSync(join(repo.promptsDir, "own.md"), "x");
+    symlinkSync(join(bundled.promptsDir, "shared.md"), join(repo.promptsDir, "link.md"));
+
+    assert.equal(view.canWritePrompt(join(repo.promptsDir, "own.md"), repo), true);
+    assert.equal(view.canWritePrompt(join(repo.promptsDir, "link.md"), repo), false);
+    assert.equal(view.canWritePrompt(join(bundled.promptsDir, "shared.md"), bundled), false);
+  });
+});
