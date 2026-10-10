@@ -16,6 +16,10 @@ describe("hasStopped — the MCP poll loop's exit", () => {
     }
   });
 
+  it("is true for an unreadable run: its artifact will not parse, so nothing will advance it", () => {
+    assert.equal(hasStopped("unreadable"), true);
+  });
+
   it("is false while the run is executing, and for a status nobody knows", () => {
     assert.equal(hasStopped("running"), false);
     assert.equal(hasStopped("martian"), false);

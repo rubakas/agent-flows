@@ -89,6 +89,11 @@ export interface DaemonRunState {
   runId: string;
   pipelineId: string;
   status: string;
+  /**
+   * Where the daemon got this state: its own registry ("live"), or the run's
+   * artifact after a restart ("disk"). Absent from a daemon that predates it.
+   */
+  source?: "live" | "disk";
   result?: unknown;
   gateMessage?: string;
   spec?: unknown;
@@ -98,6 +103,29 @@ export interface DaemonRunState {
   cancelled?: { at: string; reason?: string };
   /** Daemon-derived path of the run's events file; never caller-supplied. */
   eventsPath?: string;
+}
+
+/**
+ * Whether the daemon is reporting a run it does not hold: the artifact says
+ * running or awaiting_approval, but the process that was advancing it is gone.
+ */
+function isRestored(state: DaemonRunState): boolean {
+  return (
+    state.source !== undefined &&
+    runPhase({ status: state.status, source: state.source }) === "restored"
+  );
+}
+
+const RESTORED_NOTE =
+  "Restored from the run's artifact: this daemon does not hold the run, so it cannot be " +
+  "advanced and cannot be approved. Start a new run, or chain a new run from `artifactPath`.";
+
+/** The `source` and, for a restored run, the `note` that goes with it. */
+function sourceFields(state: DaemonRunState): { source?: "live" | "disk"; note?: string } {
+  return {
+    ...(state.source !== undefined ? { source: state.source } : {}),
+    ...(isRestored(state) ? { note: RESTORED_NOTE } : {}),
+  };
 }
 
 /**
@@ -141,7 +169,8 @@ function isoMs(iso: string | undefined): number | undefined {
  */
 export function formatRunProgress(state: DaemonRunState, now: number = Date.now()): string {
   const steps = Object.entries(state.steps ?? {}).filter(([id]) => !SYNTHETIC_STEP_ID.test(id));
-  const stopped = hasStopped(state.status);
+  const restored = isRestored(state);
+  const stopped = hasStopped(state.status) || restored;
 
   const startMs =
     isoMs(state.invocation?.startedAt) ??
@@ -149,12 +178,15 @@ export function formatRunProgress(state: DaemonRunState, now: number = Date.now(
   const finishedMs = steps
     .map(([, st]) => isoMs(st.finishedAt))
     .filter((ms): ms is number => ms !== undefined);
-  const endMs = stopped && finishedMs.length > 0 ? Math.max(...finishedMs) : now;
+  // A restored run is not advancing, so its clock must not keep counting.
+  const endMs =
+    stopped && finishedMs.length > 0 ? Math.max(...finishedMs) : restored ? (startMs ?? now) : now;
   const elapsed = compactElapsed(startMs === undefined ? 0 : endMs - startMs);
 
   if (stopped) {
     const count = `${steps.length} step${steps.length === 1 ? "" : "s"}`;
-    return [state.pipelineId, state.status, count, elapsed].join(" · ");
+    const status = restored ? `${state.status} (restored)` : state.status;
+    return [state.pipelineId, status, count, elapsed].join(" · ");
   }
 
   // The running step (the producer says "started", or "suspended" at a gate), or
@@ -224,9 +256,14 @@ export async function pollRunUntilTerminal(
       return { error: `daemon GET /api/runs/${runId} returned HTTP ${getRes.status}` };
     }
     const state = (await getRes.json()) as DaemonRunState;
-    if (!hasStopped(state.status)) continue;
+    const restored = isRestored(state);
+    if (!hasStopped(state.status) && !restored) continue;
     const artifactPathField =
       state.artifactPath !== undefined ? { artifactPath: state.artifactPath } : {};
+    // A run this daemon does not hold is not at a gate anyone can answer, and
+    // nothing will ever advance it: report what is on disk, and say so.
+    if (restored)
+      return { runId, status: state.status, ...sourceFields(state), ...artifactPathField };
     if (state.status === "awaiting_approval") {
       return {
         runId,
@@ -249,6 +286,9 @@ export async function pollRunUntilTerminal(
         ...(state.cancelled !== undefined ? { cancelled: state.cancelled } : {}),
         ...artifactPathField,
       };
+    }
+    if (state.status === "unreadable") {
+      return { runId, status: "unreadable", ...artifactPathField };
     }
     return { runId, status: "failed" };
   }
@@ -408,8 +448,9 @@ function compactRunState(
     runId: got.runId,
     pipelineId: got.pipelineId,
     status: got.status,
+    ...sourceFields(got),
     progress: formatRunProgress(got),
-    ...(got.gateMessage !== undefined ? { gateMessage: got.gateMessage } : {}),
+    ...(got.gateMessage !== undefined && !isRestored(got) ? { gateMessage: got.gateMessage } : {}),
     ...(invocation !== undefined ? { invocation } : {}),
     steps: toCompactStepViews(got.steps),
     ...(got.artifactPath !== undefined ? { artifactPath: got.artifactPath } : {}),
@@ -460,8 +501,10 @@ export async function getRunState(
     runId: got.runId,
     pipelineId: got.pipelineId,
     status: got.status,
+    ...sourceFields(got),
     result: got.result,
-    gateMessage: got.gateMessage,
+    // A restored gate cannot be answered by this daemon; do not invite it.
+    gateMessage: isRestored(got) ? undefined : got.gateMessage,
     spec: got.spec,
     ...(got.invocation !== undefined ? { invocation: got.invocation } : {}),
     steps: toStepViews(got.steps),

@@ -495,6 +495,85 @@ describe("run_pipeline polling — 'cancelled' is terminal (FR-010)", () => {
   });
 });
 
+describe("run_pipeline polling — an unreadable run has stopped (spec 047 FR-11)", () => {
+  it("stops polling when the daemon reports 'unreadable', instead of waiting for the ceiling", async () => {
+    let calls = 0;
+    handler = (_req, res) => {
+      calls += 1;
+      respondJson(res, 200, {
+        runId: "run-u",
+        pipelineId: "unknown",
+        status: calls === 1 ? "running" : "unreadable",
+        source: calls === 1 ? "live" : "disk",
+      });
+    };
+
+    // A ceiling far below the default 6 h: the failure mode is a throw at the
+    // ceiling, not a hang, so the test fails fast.
+    const out = await pollRunUntilTerminal("run-u", 1, 2_000);
+    assert.equal(calls, 2);
+    assert.deepEqual(out, { runId: "run-u", status: "unreadable" });
+  });
+});
+
+describe("get_run — a run restored from disk is not a run to act on (spec 047 FR-11)", () => {
+  const restoredAtGate = {
+    runId: "run-restored",
+    pipelineId: "spec-creation",
+    status: "awaiting_approval",
+    source: "disk",
+    gateMessage: "Approve this spec?",
+    spec: { title: "T" },
+    steps: {},
+  };
+
+  it("carries source 'disk' and does not invite an approval this daemon cannot take", async () => {
+    handler = (_req, res) => respondJson(res, 200, restoredAtGate);
+
+    for (const verbose of [false, true]) {
+      const out = await getRunState("run-restored", verbose);
+      assert.equal(out.source, "disk", `verbose=${verbose}`);
+      assert.equal("gateMessage" in out && out.gateMessage !== undefined, false, "no invitation");
+      assert.match(String(out.note), /restored/iu);
+      assert.match(String(out.note), /cannot be approved/u);
+    }
+  });
+
+  it("keeps the gate message and adds no note for a live run at a gate", async () => {
+    handler = (_req, res) => respondJson(res, 200, { ...restoredAtGate, source: "live" });
+
+    const out = await getRunState("run-restored");
+    assert.equal(out.source, "live");
+    assert.equal(out.gateMessage, "Approve this spec?");
+    assert.equal("note" in out, false);
+  });
+
+  it("run_pipeline does not return a restored gate as an approvable one", async () => {
+    handler = (_req, res) => respondJson(res, 200, restoredAtGate);
+
+    const out = await pollRunUntilTerminal("run-restored", 1, 2_000);
+    assert.equal(out.source, "disk");
+    assert.equal(out.gateMessage, undefined);
+    assert.match(String(out.note), /cannot be approved/u);
+  });
+
+  it("shows a restored run as stopped, with no growing clock", () => {
+    const line = formatRunProgress(
+      {
+        runId: "r",
+        pipelineId: "code-review",
+        status: "running",
+        source: "disk",
+        invocation: { startedAt: "2026-09-21T10:00:00.000Z" },
+        steps: { a: { status: "started", startedAt: "2026-09-21T10:00:00.000Z" } },
+      },
+      Date.parse("2026-09-21T14:00:00.000Z")
+    );
+    assert.match(line, /restored/u);
+    assert.doesNotMatch(line, /4h/u, "the clock must not keep counting for a run nobody advances");
+  });
+});
+
 describe("pollRunUntilTerminal — bounded wall clock (spec 033 review follow-up)", () => {
   it("gives up and throws naming the runId once the ceiling is passed", async () => {
     // A daemon that never advances the run. The assertion is raced against a

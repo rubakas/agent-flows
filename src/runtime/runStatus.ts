@@ -48,12 +48,13 @@ const CHAINABLE: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether a run has stopped advancing on its own: at a gate, or settled.
- * `run_pipeline` polls until this is true. "cancelled" belongs here because a
- * cancelled run never resumes (spec 033 FR-010).
+ * Whether a run has stopped advancing on its own: at a gate, settled, or
+ * unreadable. `run_pipeline` polls until this is true. "cancelled" belongs here
+ * because a cancelled run never resumes (spec 033 FR-010), and "unreadable"
+ * because a run whose artifact will not parse never changes either.
  */
 export function hasStopped(status: string): boolean {
-  return status === "awaiting_approval" || SETTLED.has(status);
+  return status === "awaiting_approval" || status === "unreadable" || SETTLED.has(status);
 }
 
 /**
