@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 
 export interface RawStep {
+  id?: string;
   kind?: string;
   prompt?: string;
   pipeline?: string;

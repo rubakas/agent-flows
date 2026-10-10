@@ -164,11 +164,25 @@ export function mergedCatalog(layers: readonly CanonLayer[]): MergedCatalog {
         continue;
       }
       const previous = entries.get(id);
+      // Two files of one layer declaring one id is not shadowing: the later file
+      // still wins (as it always did), but the collision is reported so a view
+      // built on this catalogue cannot silently hide one of the two files.
+      if (previous?.layer === layer) {
+        errors.push({
+          file: filePath,
+          error: `pipeline id "${id}" is also declared by ${previous.filePath}`,
+        });
+      }
       entries.set(id, {
         id,
         filePath,
         layer,
-        shadows: previous ? [...previous.shadows, previous.layer.source] : [],
+        shadows:
+          previous === undefined
+            ? []
+            : previous.layer === layer
+              ? previous.shadows
+              : [...previous.shadows, previous.layer.source],
       });
     }
   }
