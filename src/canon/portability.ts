@@ -28,12 +28,24 @@ export interface PortabilityOptions {
 }
 
 /**
+ * The cost cap a step runs under: its own `maxBudgetUsd`, else the pipeline's
+ * `defaultMaxBudgetUsd` (FR-007). One rule, shared by the portability check and
+ * the dispatch, so a cap the check approved is the cap the adapter is handed.
+ */
+export function effectiveBudget(
+  step: Pick<StepDef, "maxBudgetUsd">,
+  defaultMaxBudgetUsd: number | undefined
+): number | undefined {
+  return step.maxBudgetUsd ?? defaultMaxBudgetUsd;
+}
+
+/**
  * Compares what the step declares against what the resolved adapter can enforce.
  * `entry` must be resolved exactly as the binding resolves it (ctx models
  * override first, else the profile role).
  */
 export function checkPortability(
-  step: StepDef,
+  step: Pick<StepDef, "id" | "permissions" | "skills" | "maxBudgetUsd">,
   entry: ModelEntry,
   profileId: string,
   opts: PortabilityOptions = {}
@@ -64,8 +76,7 @@ export function checkPortability(
   if (contents === "write" && !capabilities.workspaceWrite) {
     return refuse(`permissions.contents "write"`);
   }
-  const effectiveBudget = step.maxBudgetUsd ?? opts.defaultMaxBudgetUsd;
-  if (effectiveBudget !== undefined && !capabilities.budgetCap) {
+  if (effectiveBudget(step, opts.defaultMaxBudgetUsd) !== undefined && !capabilities.budgetCap) {
     return refuse("maxBudgetUsd");
   }
 

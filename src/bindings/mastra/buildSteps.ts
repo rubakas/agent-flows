@@ -9,9 +9,15 @@ import { writeSpecDocument, writeSpecKitSpec } from "../../canon/exportSpec.js";
 import { schemaContract } from "../../canon/outputContract.js";
 import { persistTicket } from "../../canon/persistTicket.js";
 import { checkPortability } from "../../canon/portability.js";
-import { getActiveProfile, getProfile, resolveStepModel } from "../../canon/registry.js";
+import {
+  describeModel,
+  getActiveProfile,
+  getProfile,
+  resolveStepModel,
+} from "../../canon/registry.js";
 import { renderPrompt } from "../../canon/render.js";
 import { runCheckStep, runLlmStep } from "../../canon/runStep.js";
+import { isFailoverWorthy } from "../../canon/stepAttempt.js";
 import { recordManifestSpecSource } from "../../runtime/artifactStore.js";
 import { projectGitStatus } from "../../runtime/projectGitStatus.js";
 import { buildReviewMaterial, renderReviewMaterial } from "../../runtime/reviewMaterial.js";
@@ -24,7 +30,7 @@ import {
   writeStepOutput,
   writeStepRawOutput,
 } from "../../runtime/stepLog.js";
-import { describeModel, isFailoverWorthy, runFailoverChain } from "./failover.js";
+import { runFailoverChain } from "./failover.js";
 import type { FailoverOutcome } from "./failover.js";
 import type { ModelEntry, ModelRegistry, ProviderProfile } from "../../canon/registry.js";
 import type { CheckResult, StepRunnerDeps } from "../../canon/runStep.js";

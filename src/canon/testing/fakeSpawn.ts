@@ -54,6 +54,25 @@ export function makeFakeSpawn(opts: FakeChildOptions = {}): {
 }
 
 /**
+ * Like makeFakeSpawn, but every spawn gets a child of its own, shaped by
+ * `optsFor(callIndex)`. makeFakeSpawn hands back the same, already-closed child
+ * every time, so a test that dispatches more than once through a real adapter
+ * (a retry, a failover) needs this.
+ */
+export function makeFakeSpawnEach(optsFor: (call: number) => FakeChildOptions): {
+  spawn: SpawnFn;
+  capturedArgs: string[][];
+} {
+  const capturedArgs: string[][] = [];
+  const spawn = ((_cmd: string, args: string[]) => {
+    const { child } = makeFakeChild(optsFor(capturedArgs.length));
+    capturedArgs.push(args);
+    return child;
+  }) as unknown as SpawnFn;
+  return { spawn, capturedArgs };
+}
+
+/**
  * Formats a plain text result into stream-json stdout that runClaudeCli can parse.
  * Wraps the text in a minimal result event preceded by a system/init event.
  */

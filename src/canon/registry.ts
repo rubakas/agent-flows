@@ -215,7 +215,7 @@ export function activeProfileIdOrUnknown(
  * - step.role present → profile.roles[role] → registry lookup.
  */
 export function resolveStepModel(
-  step: StepDef,
+  step: Pick<StepDef, "model" | "role">,
   profile: ProviderProfile,
   registry: ModelRegistry
 ): ModelEntry {
@@ -224,4 +224,9 @@ export function resolveStepModel(
   }
   const modelId = profile.roles[step.role!];
   return registry.resolve(modelId);
+}
+
+/** Registry id plus transport, as recorded for the run state and the step log. */
+export function describeModel(entry: ModelEntry): string {
+  return `${entry.id} (${entry.transport}${entry.cli?.bin ? ":" + entry.cli.bin : ""})`;
 }
