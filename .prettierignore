@@ -7,3 +7,4 @@ bootstrap.sh
 integrations/
 plugin/workflows/
 .af-review/
+plugin/skills/review/scripts/lib/
