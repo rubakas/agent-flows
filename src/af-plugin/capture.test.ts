@@ -49,7 +49,7 @@ interface SpecSourceResolution {
 // The script is plain ESM outside tsconfig's program, so its surface is declared
 // here and the module is loaded by a computed specifier rather than a static import.
 interface CaptureModule {
-  CREDENTIAL_DENY_PATTERNS: readonly string[];
+  CAPTURE_DENY_PATTERNS: readonly string[];
   REVIEW_MATERIAL_CAP: number;
   rejectBaseline(baseline: unknown): string | undefined;
   parseSpecRef(
@@ -68,6 +68,16 @@ interface CaptureModule {
     gh: (args: readonly string[]) => GhOutcome,
     budget?: { used: number }
   ): SpecSourceResolution;
+  renderReviewMaterial(
+    material: {
+      baseline: string;
+      baselineRule: string;
+      withheld: string[];
+      bodies: Record<"diff" | "commits" | "changedFiles" | "history", string>;
+    },
+    paths: Record<string, string>,
+    specs?: { resolution: SpecSourceResolution; path?: string }[]
+  ): string;
 }
 
 const capture = (await import(pathToFileURL(SCRIPT).href)) as CaptureModule;
@@ -334,6 +344,14 @@ describe("capture.mjs: baseline validation", () => {
     assert.match(result.json.reason as string, /git work tree/u);
   });
 
+  it("refuses a whitespace-only baseline as empty, where the daemon would derive one", () => {
+    const { repo } = twoCommitRepo();
+    const result = cli(repo, ["--base", "   "]);
+    assert.equal(result.status, 2);
+    assert.match(result.json.reason as string, /baseline is empty/u);
+    assert.equal(existsSync(join(repo, ".af-review")), false);
+  });
+
   it("refuses an empty diff", () => {
     const repo = makeRepo();
     write(repo, "a.txt", "one\n");
@@ -384,6 +402,28 @@ describe("capture.mjs: derived baseline", () => {
     const result = cli(repo, []);
     assert.equal(result.status, 2);
     assert.match(result.json.reason as string, /none could be derived/u);
+  });
+});
+
+describe("capture.mjs: git environment", () => {
+  it("gives every git call the plugin's environment, the capture's and the snapshot's alike", () => {
+    const { repo, base } = twoCommitRepo();
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const bin = scratch("fakebin-env");
+    const log = join(bin, "log");
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\nprintf '%s|%s|%s\\n' "\${GIT_CONFIG_NOSYSTEM-unset}" "\${GIT_PAGER-unset}" "\${LANGUAGE-unset}" >> '${log}'\nexec '${realGit}' "$@"\n`,
+      { mode: 0o755 }
+    );
+    const env = { PATH: `${bin}:${process.env.PATH ?? ""}` };
+    const result = cli(repo, ["--base", base], { env });
+    assert.equal(result.status, 0, result.stdout);
+    cli(repo, ["check-tree", result.json.runDir as string], { env });
+
+    const lines = readFileSync(log, "utf8").trim().split("\n");
+    assert.ok(lines.length > 10, "the logging git barely ran");
+    for (const line of lines) assert.equal(line, "1|cat|C");
   });
 });
 
@@ -477,6 +517,32 @@ describe("capture.mjs: run directory and layout", () => {
 });
 
 describe("capture.mjs: spec sources and plan", () => {
+  it("labels a fetched spec source 'fetched with gh', a literal one 'literal text', and skips an empty one", () => {
+    const material = {
+      baseline: "b",
+      baselineRule: "caller",
+      withheld: [],
+      bodies: { diff: "d", commits: "c", changedFiles: "f", history: "h" },
+    };
+    const text = capture.renderReviewMaterial(material, { diff: "/run/diff.patch" }, [
+      {
+        resolution: { literal: false, text: "T1", full: "T1", notes: ["o/r#1: fetched"] },
+        path: "/run/specs/1.md",
+      },
+      { resolution: { literal: true, text: "T2", full: "T2", notes: ["from a file"] } },
+      { resolution: { literal: true, text: "", full: "  ", notes: [] } },
+    ]);
+    assert.ok(
+      text.includes(
+        "## spec sources (fetched with gh — full: /run/specs/1.md)\n- o/r#1: fetched\n\nT1"
+      )
+    );
+    assert.ok(text.includes("## spec sources (literal text)\n- from a file\n\nT2"));
+    assert.equal(text.split("## spec sources").length - 1, 2);
+    assert.ok(text.includes("## diff (full: /run/diff.patch)\nd"));
+    assert.ok(text.includes("## commits (not written to disk)\nc"));
+  });
+
   it("takes literal spec text from --spec-file, verbatim, and copies the plan file", () => {
     const { repo, base } = twoCommitRepo();
     const dir = scratch("plan");
@@ -657,7 +723,8 @@ describe("capture.mjs check-tree", () => {
 
 describe("capture.mjs: deny-list pin", () => {
   it("covers every pattern of src/canon/denyPatterns.ts, case-folded, and adds no case duplicates", () => {
-    const ours = capture.CREDENTIAL_DENY_PATTERNS.map((pattern) => pattern.toLowerCase());
+    // The plugin's export IS the capture core's list (CAPTURE_DENY_PATTERNS), not a copy.
+    const ours = capture.CAPTURE_DENY_PATTERNS.map((pattern) => pattern.toLowerCase());
     for (const pattern of AF_DENY_PATTERNS) {
       assert.ok(ours.includes(pattern.toLowerCase()), `${pattern} is missing from the plugin list`);
     }
@@ -746,7 +813,7 @@ describe("capture.mjs: audit H1 planted symlinks", () => {
 describe("capture.mjs: audit H2 rename limit", () => {
   it("fails closed when rename detection is skipped and a denied path is in the range", () => {
     const repo = makeRepo();
-    const denied = capture.CREDENTIAL_DENY_PATTERNS[0].replace(/^\*\*\//u, "");
+    const denied = capture.CAPTURE_DENY_PATTERNS[0].replace(/^\*\*\//u, "");
     const body = Array.from(
       { length: 40 },
       (_, i) => `RENAMELEAK${String(i)} padding ${String(i)}`
@@ -818,7 +885,7 @@ describe("capture.mjs: audit M5 input files", () => {
 
     it(`${flag} rejects a deny-list-named file even in the temp directory`, () => {
       const { repo, base } = twoCommitRepo();
-      const deniedName = capture.CREDENTIAL_DENY_PATTERNS[0].replace(/^\*\*\//u, "");
+      const deniedName = capture.CAPTURE_DENY_PATTERNS[0].replace(/^\*\*\//u, "");
       const file = join(scratch("denied"), deniedName);
       writeFileSync(file, "TOKEN=abc\n");
       assert.match(rejected(repo, base, flag, file), /credential/u);
@@ -984,6 +1051,8 @@ describe("capture.mjs: audit L12 timeout", () => {
     });
     assert.equal(result.status, 2);
     assert.match(result.json.reason as string, /timed out/u);
+    // The timeout is a refusal of its own, not the catch-all for an unexpected throw.
+    assert.doesNotMatch(result.json.reason as string, /unexpected error/u);
   });
 });
 

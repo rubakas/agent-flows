@@ -163,3 +163,38 @@ describe("the generator", () => {
     assert.doesNotMatch(text, /SpawnSyncReturns/u);
   });
 });
+
+describe("the capture script", () => {
+  const script = readFileSync(
+    join(root, "plugin", "skills", "review", "scripts", "capture.mjs"),
+    "utf8"
+  );
+
+  it("takes its git, its deny list and its rendering from the generated core", () => {
+    assert.match(script, /from "\.\/lib\/reviewCapture\.mjs"/u);
+    // Each of these is an argv, a pattern or a spawn the core owns. A copy of any of
+    // them here is a second implementation that nothing keeps level with the first.
+    for (const own of [
+      /\bspawnSync\b/u,
+      /--no-ext-diff/u,
+      /--name-status/u,
+      /\bRE_REVISION\b/u,
+      /log\.showSignature/u,
+      /"\*\*\/\.env"/u,
+      /\bescapeControl\b/u,
+      /refused — only an https/u,
+    ]) {
+      assert.doesNotMatch(script, own, `capture.mjs still carries its own ${String(own)}`);
+    }
+  });
+
+  it("ships as a plugin version that a cache holding the script without lib/ cannot be", () => {
+    const manifest = JSON.parse(
+      readFileSync(join(root, "plugin", ".claude-plugin", "plugin.json"), "utf8")
+    ) as { version: string };
+    const [major, minor] = manifest.version.split(".").map(Number);
+    // 0.1.0 shipped a self-contained capture.mjs. Caches are keyed by version, so the
+    // first version that needs ./lib/ must be a different one.
+    assert.ok(major > 0 || minor >= 2, `plugin version ${manifest.version} was already published`);
+  });
+});
