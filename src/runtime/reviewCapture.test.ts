@@ -8,7 +8,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
-import { GitTimeoutError, captureGit, git, resolveSpecRefs } from "./reviewCapture.js";
+import { CREDENTIAL_DENY_PATTERNS } from "../canon/credentialPatterns.js";
+import {
+  CAPTURE_DENY_PATTERNS,
+  GitTimeoutError,
+  captureGit,
+  git,
+  resolveSpecRefs,
+} from "./reviewCapture.js";
 
 const cleanups: (() => void)[] = [];
 after(() => {
@@ -90,6 +97,31 @@ describe("GitTimeoutError", () => {
     } finally {
       if (previous === undefined) delete process.env.AF_REVIEW_GIT_TIMEOUT_MS;
       else process.env.AF_REVIEW_GIT_TIMEOUT_MS = previous;
+    }
+  });
+});
+
+describe("CAPTURE_DENY_PATTERNS", () => {
+  it("covers every pattern the model's own tools are denied, case-folded, with no case twins", () => {
+    const ours = CAPTURE_DENY_PATTERNS.map((pattern) => pattern.toLowerCase());
+    for (const pattern of CREDENTIAL_DENY_PATTERNS) {
+      assert.ok(
+        ours.includes(pattern.toLowerCase()),
+        `${pattern} is missing from the capture list`
+      );
+    }
+    // Every pathspec carries `icase`, so an upper-case twin is noise.
+    assert.equal(new Set(ours).size, ours.length, "the list has case-variant duplicates");
+    assert.deepEqual([...CAPTURE_DENY_PATTERNS], ours, "the list is not case-folded");
+  });
+
+  it("adds the dotenv globs, which the model's own list deliberately leaves out", () => {
+    // `.env.*` also withholds `.env.example`, which a step may still Read: a pathspec
+    // exclusion cannot carve an exception out of a wildcard. The trade is made here
+    // once, for both callers of the capture.
+    for (const glob of ["**/.env.*", "**/*.env"]) {
+      assert.ok(CAPTURE_DENY_PATTERNS.includes(glob), `${glob} is not withheld`);
+      assert.ok(!CREDENTIAL_DENY_PATTERNS.includes(glob), `${glob} reached the model's list`);
     }
   });
 });

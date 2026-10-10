@@ -90,8 +90,29 @@ const RE_OID = /^[0-9a-f]{40}$/u;
  * the same list has to be enforced on this path too.
  *
  * Imported, never re-spelled: a hand-copied second list drifts from the first.
+ *
+ * The capture withholds more than the model's own tools are denied: the dotenv
+ * globs below. `.env.*` also withholds `.env.example`, which
+ * CREDENTIAL_DENY_PATTERNS deliberately leaves readable (a template holds
+ * placeholders, and a step needs it to understand configuration). A pathspec
+ * exclusion cannot carve an exception out of a wildcard, and a variant nobody
+ * listed (`.env.qa`, `app.env`) holding a real secret reaching a prompt costs
+ * far more than a placeholder file missing from a diff, so here the wildcard wins.
+ * The trade is made once, in this list, for both callers of the capture.
+ *
+ * Case-folded and de-duplicated: every pathspec carries `icase`, so the upper-case
+ * twins CREDENTIAL_DENY_PATTERNS keeps for the model's case-sensitive matcher are
+ * noise here.
  */
-export const CAPTURE_DENY_PATTERNS: readonly string[] = CREDENTIAL_DENY_PATTERNS;
+const CAPTURE_ONLY_DENY_PATTERNS: readonly string[] = ["**/.env.*", "**/*.env"];
+
+export const CAPTURE_DENY_PATTERNS: readonly string[] = [
+  ...new Set(
+    [...CREDENTIAL_DENY_PATTERNS, ...CAPTURE_ONLY_DENY_PATTERNS].map((pattern) =>
+      pattern.toLowerCase()
+    )
+  ),
+];
 
 /**
  * The deny list, expressed as git pathspecs.

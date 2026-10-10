@@ -172,8 +172,6 @@ interface Built {
   baseline?: string;
   /** Strings that must reach neither capture's output. */
   secrets?: string[];
-  /** The subset of `secrets` the daemon capture still carries: a declared gap. */
-  daemonLeaks?: string[];
   /** Environment for the duration of both captures. */
   env?: Record<string, string>;
   /** Files that must not exist after both captures ran. */
@@ -278,12 +276,6 @@ function differingFields(daemon: View, pluginSide: View): Field[] {
  * removes it; the entry and its uses are deleted in that commit.
  */
 const INTENDED: Record<string, { reason: string; closedBy?: string }> = {
-  "deny-list-gap": {
-    reason:
-      "the plugin withholds the dotenv globs (.env.*, *.env) that the daemon's list lacks; " +
-      "the model's own Read can still open an example file, so they are capture-only",
-    closedBy: "fix(runtime): withhold the dotenv globs in the daemon capture",
-  },
   "control-char-escaping": {
     reason:
       "the plugin writes control characters of paths and commit subjects as \\uXXXX; " +
@@ -431,13 +423,9 @@ const fixtures: Fixture[] = [
         ".docker/config.json",
         ".dockercfg",
       ]);
-      // The dotenv globs are the plugin's alone; the four files after them are in
-      // both lists.
-      return { repo, baseline, secrets, daemonLeaks: secrets.slice(0, 3) };
+      return { repo, baseline, secrets };
     },
-    intended: [
-      { id: "deny-list-gap", fields: ["withheld", "diff", "changedFiles", "history", "rendered"] },
-    ],
+    intended: [],
   },
   {
     name: "a textconv driver and diff.external in the repository's own config",
@@ -663,14 +651,7 @@ describe("daemon and plugin capture, on the same hostile repositories", () => {
           !JSON.stringify(pluginSide).includes(secret),
           `the plugin capture carries ${secret}`
         );
-        const declaredLeak = (built.daemonLeaks ?? []).includes(secret);
-        assert.equal(
-          JSON.stringify(daemon).includes(secret),
-          declaredLeak,
-          declaredLeak
-            ? `the deny-list gap is declared but the daemon no longer carries ${secret}`
-            : `the daemon capture carries ${secret}`
-        );
+        assert.ok(!JSON.stringify(daemon).includes(secret), `the daemon capture carries ${secret}`);
       }
     });
   }
