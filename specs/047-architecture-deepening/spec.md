@@ -1,11 +1,11 @@
 # 047. Deepening the architecture, and the defects found on the way
 
-| Field        | Value                                                                        |
-| ------------ | ---------------------------------------------------------------------------- |
-| Feature Name | Architecture deepening — eight candidates, eight defects                     |
-| Branch       | `feat/047-architecture-deepening`                                            |
-| Status       | Phase 1 done 2026-10-10 (uncommitted); FR-8 and Phase 2 await owner decision |
-| Created      | 2026-10-10                                                                   |
+| Field        | Value                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------- |
+| Feature Name | Architecture deepening — eight candidates, eight defects                               |
+| Branch       | `feat/047-architecture-deepening`                                                      |
+| Status       | Phase 1 + FR-8 + FR-17 done; FR-9, FR-11, FR-12 in progress (decisions recorded below) |
+| Created      | 2026-10-10                                                                             |
 
 ## Origin
 
@@ -61,25 +61,25 @@ full suite.
 
 ## Functional Requirements
 
-| ID    | Requirement                                                              | Phase | Status    |
-| ----- | ------------------------------------------------------------------------ | ----- | --------- |
-| FR-1  | Schema retry after a successful failover runs on the model that answered | 1     | Fixed     |
-| FR-2  | Binding A: a parallel level's results are reachable by later prompts     | 1     | Fixed     |
-| FR-3  | Daemon review capture cannot be blinded by repository git config         | 1     | Fixed     |
-| FR-4  | A step that declares skills never lands on a transport that ignores them | 1     | Fixed     |
-| FR-5  | The manifest route resolves a chained stage's run id                     | 1     | Fixed     |
-| FR-6  | The run progress line names the step that is actually running            | 1     | Fixed     |
-| FR-7  | Load rejects prompt placeholders the runtime never provides              | 1     | Fixed     |
-| FR-8  | An edited pipeline runs its edited definition                            | 1     | Confirmed |
-| FR-9  | Step attempt: the canon owns running a step on a model                   | 2     | Proposed  |
-| FR-10 | Run start: the rules for a valid run live below the HTTP route           | 4     | Proposed  |
-| FR-11 | Run store: one module owns where a run lives and what its status means   | 3     | Proposed  |
-| FR-12 | Pipeline by id: one way to load a pipeline across layers                 | 3     | Proposed  |
-| FR-13 | Output-schema contract lives in the canon                                | 4     | Proposed  |
-| FR-14 | One review-capture module, generated into the plugin                     | 5     | Proposed  |
-| FR-15 | The page's run-view state moves out of inline script                     | 6     | Proposed  |
-| FR-16 | One generator from a canon pipeline to a Claude workflow script          | 5     | Proposed  |
-| FR-17 | Daemon `git status` callers cannot run repo-configured commands          | 1     | Open      |
+| ID    | Requirement                                                              | Phase | Status      |
+| ----- | ------------------------------------------------------------------------ | ----- | ----------- |
+| FR-1  | Schema retry after a successful failover runs on the model that answered | 1     | Fixed       |
+| FR-2  | Binding A: a parallel level's results are reachable by later prompts     | 1     | Fixed       |
+| FR-3  | Daemon review capture cannot be blinded by repository git config         | 1     | Fixed       |
+| FR-4  | A step that declares skills never lands on a transport that ignores them | 1     | Fixed       |
+| FR-5  | The manifest route resolves a chained stage's run id                     | 1     | Fixed       |
+| FR-6  | The run progress line names the step that is actually running            | 1     | Fixed       |
+| FR-7  | Load rejects prompt placeholders the runtime never provides              | 1     | Fixed       |
+| FR-8  | An edited pipeline runs its edited definition                            | 1     | Fixed       |
+| FR-9  | Step attempt: the canon owns running a step on a model                   | 2     | In progress |
+| FR-10 | Run start: the rules for a valid run live below the HTTP route           | 4     | Proposed    |
+| FR-11 | Run store: one module owns where a run lives and what its status means   | 3     | In progress |
+| FR-12 | Pipeline by id: one way to load a pipeline across layers                 | 3     | Designed    |
+| FR-13 | Output-schema contract lives in the canon                                | 4     | Proposed    |
+| FR-14 | One review-capture module, generated into the plugin                     | 5     | Proposed    |
+| FR-15 | The page's run-view state moves out of inline script                     | 6     | Proposed    |
+| FR-16 | One generator from a canon pipeline to a Claude workflow script          | 5     | Proposed    |
+| FR-17 | Daemon `git status` callers cannot run repo-configured commands          | 1     | Fixed       |
 
 ## Phase 1 — defects
 
@@ -193,7 +193,7 @@ full suite.
   failed later with `expanded.def.inputs is not iterable` — a spread that happened to throw — so no
   pipeline that loaded before stops loading.
 
-### FR-8. Edited pipeline runs its startup build (confirmed)
+### FR-8. Edited pipeline runs its startup build (fixed — see Decisions)
 
 - **Confirmed by code reading (2026-10-10).** The daemon loads and builds every pipeline once at
   startup (`src/serve/server.ts:2644-2657`). The build closes over the step list and graph
@@ -326,6 +326,60 @@ Each is **Proposed**; D5 applies.
 - **Direction.** One module turns a canon pipeline into a workflow script, carrying
   topology, `required` flags and roles as data (spec 046 D5's fail-and-continue choice
   included).
+
+## Decisions made during implementation (2026-10-10)
+
+The owner asked to "work till the end", so the lead made the open design calls. Each was challenged by a `devil` review before code, and each is recorded here so it can be overturned:
+
+### FR-8 — option A, not C
+
+The daemon fingerprints the requested pipeline (sha256 of its loaded definition, prompts and nested children) on every `getWorkflow`. It rebuilds from that same read when the fingerprint changed. It fails closed: an absent, unloadable or unbuildable requested pipeline throws and never runs from cache. Other pipelines that fail to build during a rebuild keep their previous workflow (carry-forward). A per-pipeline guard at startup means one broken pipeline no longer stops the daemon. The replaced Mastra instance's global hooks are unregistered (never `shutdown()`, which would break in-flight runs). Page saves are atomic (temp file + rename). Option C (build each run from the route's validated definition) was not taken: it changes `MastraLike` / `RunService.start` and every start path, and registering several builds under one workflow id in Mastra is unverified. A small window remains between the route's read and the fingerprint read. Out of scope: `providers.yaml`, the env profile and `checkCommand` remain fixed at daemon start. Commits 5879ffc, dc7f5fa.
+
+### FR-17 — narrower than the audit framed it
+
+These `git status` calls run in the owner's own project under the owner's own git config. Disabling `filter.*.clean` would break Git LFS, and the owner's own terminal `git status` runs the same filters. So one helper (`src/runtime/projectGitStatus.ts`) adds `core.fsmonitor=false` (fsmonitor is only a performance cache), `GIT_OPTIONAL_LOCKS=0` (no index lock while the owner uses git), `GIT_NO_LAZY_FETCH=1` and a timeout. A repo-configured clean filter remains an accepted risk. Commit a6f8db7.
+
+### FR-9 — reduced scope
+
+Four behaviour-preserving commits: an output contract (`src/canon/outputContract.ts`), a step-attempt module (`src/canon/stepAttempt.ts`, owning failover and the schema retry), the Mastra binding switched onto it (`failover.ts` deleted), and `runLlmStep` replaced by the `Dispatch` type. Decided after review:
+
+- The binding keeps its portability pre-flight before `step.start`, so an unportable step never logs and `required: false` cannot swallow it.
+- The output contract keeps the `parse` / `schema` retry reason the step log reports.
+- The result type is only `{ value, answeredBy }`.
+- **Dropped:** retrying under the _remaining_ budget and deadline. The retry keeps the full allowance as today, because only claude reports cost and the project runs steps without duration limits.
+- **Deferred:** moving the gates (judge, summary) onto the attempt. They keep their explicit transport decision and the judge keeps its own retry loop.
+
+### FR-11 — run store, the 80% path
+
+- Both traced defects were confirmed by review:
+  - a chained stage's run id is unreachable after a daemon restart, on every reader (HTTP and MCP);
+  - the HTTP and MCP disk readers can pick different files in a chain directory.
+- **Shared vocabulary:** one status vocabulary (`src/runtime/runStatus.ts`) is shared by the readers.
+- **One store:** `src/runtime/artifactStore.ts` is deepened into the run store, with no new wrapper module.
+- **Locating a run:** by its own id, scanning run directories for the artifact whose `runId` matches. There is no pointer file.
+- **No borrowing another run's file:** a run whose own artifact is gone is not found, instead of being shown another run's data. This covers a re-run of the same pipeline overwriting the earlier one.
+- **Chained stages are listed:** the list shows one row per run, chained stages included.
+- **MCP:** `get_run` gains `source` (live / disk), and a restored run waiting at a gate is not offered for approval.
+- **`settledAt`:** the disk reader omits it for unfinished runs. What is written to disk does not change.
+- **Dropped:** a chain pointer file (it cannot express an anchor in another project, and does not name the pipeline of a crashed child), a typed artifact rewrite, an on-disk `settledAt` change, and the page changes.
+- **Accepted:** a crashed in-flight chained stage, and anchors in another project, are not resolvable after a restart.
+
+### FR-12 — pipeline by id: owner decisions D1–D3
+
+- **D1:** a pipeline whose winning file is in the repo or the user layer is editable in the page — edit, prompt write and delete. The page already offers "user" as a fork target and shows Delete for user rows. Bundled is never editable. The create route stays repo-only.
+- **D2:** delete is allowed when nesting pipelines exist but a lower layer still defines the id; nesters fall back to the lower version.
+- **D3:** a pipeline file that fails to load stays 404 in the editor (out of scope).
+
+Also decided after review:
+
+- **Bundled guard:** bundled mode keeps its 403 before any lookup, and every refusal drains the request body.
+- **`check(path, edits)`:** refuses paths outside a workflow layer and takes prompt paths from the draft body.
+- **`saveDraft`:** checks editability itself.
+- **Public API kept:** `MergedCatalog` stays public for fork, export and the CLIs.
+- **Duplicate ids:** two files declaring one id in a layer are reported as errors, and "still in use" counts only winning pipelines.
+- **CLIs:** they fail on catalogue errors.
+- **Redaction:** error paths are redacted relative to the file's own layer.
+- **Deferred:** removing the loader's sibling-file fallback. A lint rule routes production code through the new module instead.
 
 ## Tests
 
