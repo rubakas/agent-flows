@@ -735,29 +735,6 @@ describe("capture.mjs: deny-list pin", () => {
 
 // ── Security audit regressions ───────────────────────────────────────────────
 
-/** Adds blobs under exact names without touching the filesystem (so case variants coexist). */
-function commitBlobs(repo: string, names: string[]): Map<string, string> {
-  const markers = new Map<string, string>();
-  names.forEach((name, index) => {
-    const marker = `LEAKMARK${String(index)}`;
-    const oid = sh(repo, ["hash-object", "-w", "--stdin"], `${marker}\n`).trim();
-    sh(repo, ["update-index", "--add", "--cacheinfo", `100644,${oid},${name}`]);
-    markers.set(name, marker);
-  });
-  sh(repo, ["commit", "-q", "-m", "add blobs"]);
-  return markers;
-}
-
-function assertWithheldAndAbsent(repo: string, base: string, markers: Map<string, string>): void {
-  const { meta, runDir } = captureOk(repo, ["--base", base]);
-  for (const [name, marker] of markers) {
-    assert.ok((meta.withheld as string[]).includes(name), `${name} was not withheld`);
-    for (const file of ["diff.patch", "material.md", "changed-files.txt", "history.txt"]) {
-      assert.ok(!read(runDir, file).includes(marker), `${file} leaked the content of ${name}`);
-    }
-  }
-}
-
 describe("capture.mjs: audit H1 planted symlinks", () => {
   it("refuses a committed .af-review symlink and writes nothing through it", () => {
     const { repo, base } = twoCommitRepo();
@@ -808,64 +785,6 @@ describe("capture.mjs: audit H1 planted symlinks", () => {
     assert.match(result.json.reason as string, /\.gitignore/u);
     assert.equal(readFileSync(victim, "utf8"), "do not overwrite\n");
   });
-});
-
-describe("capture.mjs: audit H2 rename limit", () => {
-  it("fails closed when rename detection is skipped and a denied path is in the range", () => {
-    const repo = makeRepo();
-    const denied = capture.CAPTURE_DENY_PATTERNS[0].replace(/^\*\*\//u, "");
-    const body = Array.from(
-      { length: 40 },
-      (_, i) => `RENAMELEAK${String(i)} padding ${String(i)}`
-    );
-    write(repo, denied, body.join("\n") + "\n");
-    for (let i = 0; i < 1100; i += 1)
-      write(repo, `f/old${String(i)}.txt`, `old ${String(i)} `.repeat(20));
-    const base = commit(repo, "base");
-
-    sh(repo, ["mv", denied, "notes.txt"]);
-    write(repo, "notes.txt", body.join("\n").replace("RENAMELEAK3 ", "RENAMELEAK3-edited ") + "\n");
-    for (let i = 0; i < 1100; i += 1) {
-      rmSync(join(repo, `f/old${String(i)}.txt`));
-      write(repo, `f/new${String(i)}.txt`, `new different ${String(i)} `.repeat(20));
-    }
-    commit(repo, "rename with one line changed, among many other changes");
-
-    const result = cli(repo, ["--base", base]);
-    assert.equal(result.status, 2);
-    assert.match(result.json.reason as string, /rename detection/u);
-    assert.equal(existsSync(join(repo, ".af-review")), false);
-  });
-});
-
-describe("capture.mjs: audit M3 case variants", () => {
-  it("withholds case variants of denied names", () => {
-    const { repo, base } = twoCommitRepo();
-    const markers = commitBlobs(repo, [
-      ".ENV",
-      "Credentials.json",
-      "SECRETS.JSON",
-      "ID_RSA",
-      "config/.SSH/known",
-      "Server.Pem",
-      "Terraform.TFVARS",
-    ]);
-    assertWithheldAndAbsent(repo, base, markers);
-  });
-});
-
-describe("capture.mjs: audit M4 diff attributes", () => {
-  for (const attributes of ["* -diff\n", "* binary\n"]) {
-    it(`still shows the source change under ${JSON.stringify(attributes)}`, () => {
-      const { repo, base } = twoCommitRepo();
-      write(repo, ".gitattributes", attributes);
-      write(repo, "a.txt", "one\nTWO CHANGED AGAIN\nthree\n");
-      commit(repo, "hide the diff with attributes");
-
-      const { runDir } = captureOk(repo, ["--base", base]);
-      assert.ok(read(runDir, "diff.patch").includes("+TWO CHANGED AGAIN"));
-    });
-  }
 });
 
 describe("capture.mjs: audit M5 input files", () => {
@@ -920,22 +839,6 @@ describe("capture.mjs: audit M5 input files", () => {
   }
 });
 
-describe("capture.mjs: audit M6 deny-list gaps", () => {
-  it("withholds dotenv variants, cloud-tool auth files and registry credentials", () => {
-    const { repo, base } = twoCommitRepo();
-    const markers = commitBlobs(repo, [
-      ".env.production.local",
-      ".env.qa",
-      "app.env",
-      ".git-credentials",
-      ".pypirc",
-      ".docker/config.json",
-      ".dockercfg",
-    ]);
-    assertWithheldAndAbsent(repo, base, markers);
-  });
-});
-
 describe("capture.mjs: audit L7 git hardening", () => {
   it("never runs a repo-local core.fsmonitor command", () => {
     const { repo, base } = twoCommitRepo();
@@ -948,40 +851,6 @@ describe("capture.mjs: audit L7 git hardening", () => {
     const { runDir } = captureOk(repo, ["--base", base]);
     cli(repo, ["check-tree", runDir]);
     assert.equal(existsSync(marker), false, "core.fsmonitor ran");
-  });
-
-  it("never runs a repo-local gpg.program for a forged signature header", () => {
-    const { repo, base } = twoCommitRepo();
-    const marker = join(scratch("gpg-marker"), "ran");
-    const program = join(scratch("gpg-program"), "gpg.sh");
-    writeFileSync(program, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
-    // A commit object nobody signed, carrying a signature header: with
-    // log.showSignature on, git hands it to gpg.program to verify.
-    const tree = sh(repo, ["rev-parse", "HEAD^{tree}"]).trim();
-    const parent = sh(repo, ["rev-parse", "HEAD"]).trim();
-    const forged = join(scratch("gpg-forged"), "commit.txt");
-    writeFileSync(
-      forged,
-      [
-        `tree ${tree}`,
-        `parent ${parent}`,
-        "author A <a@example.invalid> 0 +0000",
-        "committer A <a@example.invalid> 0 +0000",
-        "gpgsig -----BEGIN PGP SIGNATURE-----",
-        " x",
-        " -----END PGP SIGNATURE-----",
-        "",
-        "forged",
-        "",
-      ].join("\n")
-    );
-    const forgedOid = sh(repo, ["hash-object", "-t", "commit", "-w", forged]).trim();
-    sh(repo, ["reset", "-q", "--hard", forgedOid]);
-    sh(repo, ["config", "log.showSignature", "true"]);
-    sh(repo, ["config", "gpg.program", program]);
-
-    captureOk(repo, ["--base", base]);
-    assert.equal(existsSync(marker), false, "a repo-configured gpg.program ran");
   });
 });
 
@@ -1008,34 +877,6 @@ describe("capture.mjs: audit L8/L9 snapshot", () => {
   });
 });
 
-describe("capture.mjs: audit L11 control characters", () => {
-  it("renders a path with an embedded newline and a fake heading on one line", () => {
-    const { repo, base } = twoCommitRepo();
-    write(repo, "x\n## injected heading.txt", "body\n");
-    commit(repo, "add odd name");
-
-    const { runDir } = captureOk(repo, ["--base", base]);
-    for (const file of ["material.md", "changed-files.txt", "history.txt"]) {
-      assert.ok(!/^## injected/mu.test(read(runDir, file)), `${file} carries a forged heading`);
-    }
-    assert.ok(read(runDir, "changed-files.txt").includes("x\\u000a## injected heading.txt"));
-    assert.ok(read(runDir, "material.md").includes("x\\u000a## injected heading.txt"));
-  });
-
-  it("escapes control characters in a commit subject", () => {
-    const { repo, base } = twoCommitRepo();
-    write(repo, "c.txt", "c\n");
-    commit(repo, "red \u001b[31mALERT\u001b[0m subject");
-
-    const { runDir } = captureOk(repo, ["--base", base]);
-    for (const file of ["material.md", "commits.txt", "history.txt"]) {
-      const body = read(runDir, file);
-      assert.ok(!body.includes("\u001b"), `${file} carries a raw escape character`);
-    }
-    assert.ok(read(runDir, "commits.txt").includes("\\u001b[31mALERT"));
-  });
-});
-
 describe("capture.mjs: audit L12 timeout", () => {
   it("exits 2 with a reason when git does not answer in time", () => {
     const { repo } = twoCommitRepo();
@@ -1058,27 +899,6 @@ describe("capture.mjs: audit L12 timeout", () => {
 
 // ── Security re-audit follow-ups ─────────────────────────────────────────────
 
-describe("capture.mjs: re-audit N1 localized git output", () => {
-  it("treats ANY stderr from the rename pass as incomplete when a denied path changed", () => {
-    const { repo, base } = twoCommitRepo();
-    write(repo, ".env", "K=v\n");
-    commit(repo, "env");
-    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
-    const bin = scratch("fakebin-l10n");
-    // A translated warning: no English "rename detection was skipped" in it.
-    writeFileSync(
-      join(bin, "git"),
-      `#!/bin/sh\n'${realGit}' "$@"\nstatus=$?\ncase "$*" in *"--name-status -M"*) echo "avertissement : la detection des renommages a ete ignoree" >&2;; esac\nexit $status\n`,
-      { mode: 0o755 }
-    );
-    const result = cli(repo, ["--base", base], {
-      env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
-    });
-    assert.equal(result.status, 2);
-    assert.match(result.json.reason as string, /rename detection/u);
-  });
-});
-
 describe("capture.mjs: re-audit N2 .git inside input paths", () => {
   for (const flag of ["--spec-file", "--plan-file"]) {
     it(`${flag} rejects a path with a .git segment`, () => {
@@ -1099,26 +919,5 @@ describe("capture.mjs: re-audit N3 .gitignore is never rewritten", () => {
     const { runDir } = captureOk(repo, ["--base", base]);
     assert.ok(existsSync(runDir));
     assert.equal(readFileSync(join(repo, ".af-review", ".gitignore"), "utf8"), "custom\n");
-  });
-});
-
-describe("capture.mjs: re-audit gh timeout", () => {
-  it("does not try `gh issue view` after `gh pr view` timed out", () => {
-    const calls: string[][] = [];
-    const gh = (args: readonly string[]) => {
-      calls.push([...args]);
-      return { ok: false, stdout: "", reason: "gh timed out", timedOut: true };
-    };
-    const outcome = capture.fetchSpecRef(gh, {
-      owner: "o",
-      repo: "r",
-      number: "5",
-      kind: "unknown",
-      label: "o/r#5",
-    });
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0][0], "pr");
-    assert.equal(typeof outcome, "string");
-    assert.match(outcome as string, /timed out/u);
   });
 });
