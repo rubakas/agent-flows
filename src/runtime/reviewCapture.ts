@@ -303,6 +303,7 @@ export function ghRunnerFor(projectDir: string): GhRunner {
         encoding: "utf8",
         maxBuffer: GIT_MAX_BUFFER,
         timeout: ghTimeoutMs(),
+        killSignal: "SIGKILL",
       });
       if (result.error !== null && result.error !== undefined) {
         const timedOut = (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
@@ -694,6 +695,9 @@ export function git(projectDir: string, args: readonly string[], env?: GitEnvExt
       encoding: "utf8",
       maxBuffer: GIT_MAX_BUFFER,
       timeout,
+      // spawnSync waits for the child to exit after the timeout's signal, and the default
+      // SIGTERM can be ignored; SIGKILL cannot, so the deadline is a deadline.
+      killSignal: "SIGKILL",
       env: gitEnv(env),
     });
   } catch (err) {

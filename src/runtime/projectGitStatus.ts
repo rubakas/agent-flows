@@ -39,6 +39,7 @@ export function projectGitStatus(cwd: string): SpawnSyncReturns<string> {
     cwd,
     encoding: "utf8",
     timeout: gitTimeoutMs(),
+    killSignal: "SIGKILL",
     env: {
       ...process.env,
       GIT_OPTIONAL_LOCKS: "0",

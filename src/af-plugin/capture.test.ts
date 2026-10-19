@@ -915,6 +915,34 @@ describe("capture.mjs: audit L12 timeout", () => {
     // The timeout is a refusal of its own, not the catch-all for an unexpected throw.
     assert.doesNotMatch(result.json.reason as string, /unexpected error/u);
   });
+
+  // spawnSync's timeout sends SIGTERM by default and then waits for the child to exit, so
+  // a child that ignores SIGTERM held the capture for its whole life. No clock is involved:
+  // the fake git would touch the marker after its sleep, so a timeout that merely waited
+  // for it to finish leaves the marker behind, and a SIGKILL does not.
+  it("kills a git that ignores SIGTERM instead of waiting for it", () => {
+    const { repo } = twoCommitRepo();
+    const realGit = spawnSync("which", ["git"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    }).stdout.trim();
+    const bin = scratch("fakebin-term");
+    const marker = join(bin, "survived");
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\ncase "$*" in *show-toplevel*) trap '' TERM; sleep 8 </dev/null >/dev/null 2>&1; touch '${marker}';; esac\nexec '${realGit}' "$@"\n`,
+      { mode: 0o755 }
+    );
+    // The first exec of a new script can take longer than the timeout (the OS scans it),
+    // and a git killed before it installs its trap proves nothing. Run it once first.
+    spawnSync(join(bin, "git"), ["--version"], { timeout: 10_000 });
+    const result = cli(repo, [], {
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, AF_REVIEW_GIT_TIMEOUT_MS: "500" },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.json.reason as string, /timed out/u);
+    assert.equal(existsSync(marker), false, "the timed-out git outlived its timeout");
+  });
 });
 
 // ── Security re-audit follow-ups ─────────────────────────────────────────────

@@ -661,7 +661,11 @@ function providerAccounts(): Record<string, ProviderAccount> {
   if (_accounts !== undefined) return _accounts;
   _accounts = probeProviderAccounts((bin, args) => {
     try {
-      const out = spawnSync(bin, args, { encoding: "utf8", timeout: 10_000 });
+      const out = spawnSync(bin, args, {
+        encoding: "utf8",
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+      });
       if (out.status !== 0) return undefined;
       // `codex login status` prints to STDERR, not stdout — reading stdout alone
       // reported a working CLI as silent. Status on stderr is common enough that

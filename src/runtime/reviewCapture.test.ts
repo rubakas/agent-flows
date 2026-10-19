@@ -3,7 +3,15 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -102,6 +110,41 @@ describe("GitTimeoutError", () => {
     } finally {
       if (previous === undefined) delete process.env.AF_REVIEW_GIT_TIMEOUT_MS;
       else process.env.AF_REVIEW_GIT_TIMEOUT_MS = previous;
+    }
+  });
+});
+
+describe("git() deadline", () => {
+  // Same shape as the plugin's test (capture.test.ts): a git that ignores SIGTERM must be
+  // killed at the timeout, not waited for. The marker is touched only if it was waited for.
+  it("kills a git that ignores SIGTERM instead of waiting for it", () => {
+    const { repo } = twoCommitRepo();
+    const realGit = spawnSync("which", ["git"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    }).stdout.trim();
+    const bin = mkdtempSync(join(tmpdir(), "af-capture-core-term-"));
+    cleanups.push(() => rmSync(bin, { recursive: true, force: true }));
+    const marker = join(bin, "survived");
+    writeFileSync(
+      join(bin, "git"),
+      `#!/bin/sh\ncase "$*" in *show-toplevel*) trap '' TERM; sleep 8 </dev/null >/dev/null 2>&1; touch '${marker}';; esac\nexec '${realGit}' "$@"\n`
+    );
+    chmodSync(join(bin, "git"), 0o755);
+    // The first exec of a new script can take longer than the timeout (the OS scans it),
+    // and a git killed before it installs its trap proves nothing. Run it once first.
+    spawnSync(join(bin, "git"), ["--version"], { timeout: 10_000 });
+    const previousPath = process.env.PATH;
+    const previousTimeout = process.env.AF_REVIEW_GIT_TIMEOUT_MS;
+    process.env.PATH = `${bin}:${previousPath ?? ""}`;
+    process.env.AF_REVIEW_GIT_TIMEOUT_MS = "500";
+    try {
+      assert.throws(() => git(repo, ["rev-parse", "--show-toplevel"]), GitTimeoutError);
+      assert.equal(existsSync(marker), false, "the timed-out git outlived its timeout");
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousTimeout === undefined) delete process.env.AF_REVIEW_GIT_TIMEOUT_MS;
+      else process.env.AF_REVIEW_GIT_TIMEOUT_MS = previousTimeout;
     }
   });
 });
