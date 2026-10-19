@@ -76,13 +76,21 @@ export function parseHash(hash) {
  *
  * The runs list is the only screen a poll can change, so every other view
  * leaves the page idle — a browser extension has to be able to capture
- * #/workflows, and a 4 s interval that never stops makes it never idle.
+ * #/workflows, and a 4 s interval that never stops makes it never idle. The
+ * "runs" poller refreshes the list and the daemons panel above it.
+ *
+ * A run's details sit beside the list on a wide screen, so that screen shows the
+ * list too and keeps it polled; on a narrow one the details replace the list.
+ * A hidden tab polls nothing at all.
  *
  * @param {string} view A view name from parseHash.
+ * @param {{ wide?: boolean, hidden?: boolean }} [screen]
  * @returns {string[]}
  */
-export function pollersFor(view) {
-  return view === "runs" ? ["runs"] : [];
+export function pollersFor(view, { wide = false, hidden = false } = {}) {
+  if (hidden) return [];
+  const listOnScreen = view === "runs" || (view === "run" && wide);
+  return listOnScreen ? ["runs"] : [];
 }
 
 /**

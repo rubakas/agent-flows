@@ -111,13 +111,39 @@ describe("parseHash — catalogue detail routes (spec 037 D2/FR-006)", () => {
 });
 
 describe("pollersFor — the runs poller is view-gated (spec 037 D9/FR-010)", () => {
-  it("allows the runs poller only on the runs list", () => {
+  it("allows the runs poller on the runs list, whatever the layout", () => {
     assert.deepEqual(pollersFor("runs"), ["runs"]);
+    assert.deepEqual(pollersFor("runs", { wide: false }), ["runs"]);
+    assert.deepEqual(pollersFor("runs", { wide: true }), ["runs"]);
   });
 
-  it("leaves every other view idle, including the run details", () => {
-    for (const view of ["run", "workflows", "settings", "nope"]) {
-      assert.deepEqual(pollersFor(view), [], `view ${view} must poll nothing`);
+  it("keeps the list polled beside an open run on a wide screen only", () => {
+    assert.deepEqual(pollersFor("run", { wide: true }), ["runs"]);
+    assert.deepEqual(pollersFor("run", { wide: false }), []);
+    assert.deepEqual(pollersFor("run"), []);
+  });
+
+  it("leaves every other view idle, wide or not", () => {
+    for (const view of ["workflows", "workflow", "workflow-edit", "settings", "nope"]) {
+      for (const wide of [false, true]) {
+        assert.deepEqual(
+          pollersFor(view, { wide }),
+          [],
+          `view ${view} (wide ${wide}) polls nothing`
+        );
+      }
+    }
+  });
+
+  it("polls nothing at all in a hidden tab", () => {
+    for (const view of ["runs", "run", "workflows", "settings"]) {
+      for (const wide of [false, true]) {
+        assert.deepEqual(
+          pollersFor(view, { wide, hidden: true }),
+          [],
+          `a hidden tab on ${view} (wide ${wide}) must not poll`
+        );
+      }
     }
   });
 });

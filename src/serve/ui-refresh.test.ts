@@ -70,17 +70,68 @@ describe("Refresh refreshes the whole runs view", () => {
   });
 });
 
-describe("the poller keeps the daemons panel alive while a run streams", () => {
-  it("refreshes daemons before the early return the open stream takes", () => {
+describe("the poller asks one question — what is allowed to poll right now", () => {
+  /** The visibilitychange handler, from its registration to the end of the call. */
+  function visibilityHandler(): string {
+    const start = UI.indexOf('addEventListener("visibilitychange"');
+    assert.notEqual(start, -1, "nothing reacts to the tab being hidden or shown");
+    return UI.slice(start, UI.indexOf("});", start));
+  }
+
+  /** route() runs to the hashchange listener below it; it is the last function there. */
+  function routeSource(): string {
+    const start = UI.indexOf("function route(");
+    const end = UI.indexOf('window.addEventListener("hashchange"', start);
+    assert.ok(start !== -1 && end > start, "cannot find where route() ends");
+    return UI.slice(start, end);
+  }
+
+  it("currentPollers reads the view, the layout and the tab's visibility", () => {
+    const source = fnSource("currentPollers");
+    assert.match(source, /pollersFor\(/u, "the answer does not come from the route table");
+    assert.match(source, /parseHash\(location\.hash\)\.view/u, "the view on screen is not read");
+    assert.match(
+      source,
+      /wide: WIDE\.matches/u,
+      "the layout is not read: a split view is never polled"
+    );
+    assert.match(source, /hidden: document\.hidden/u, "a hidden tab would be polled");
+  });
+
+  it("the interval polls the daemons panel and the list, behind that question", () => {
     const poller = fnSource("startRunsPoller");
-    const daemons = poller.indexOf("loadDaemons()");
-    const bail = poller.search(/if \(_session\?\.streamState === "open"\) return;/u);
-    assert.notEqual(daemons, -1, "the poller never refreshes the daemons panel");
-    assert.notEqual(bail, -1, "the poller no longer skips work while a stream is open");
+    const gate = poller.indexOf('currentPollers().includes("runs")');
+    assert.notEqual(gate, -1, "the interval polls whatever the screen shows");
+    assert.ok(poller.indexOf("loadDaemons()") > gate, "the daemons panel is not refreshed");
+    assert.ok(poller.indexOf("loadRuns()") > gate, "the runs list is not refreshed");
+  });
+
+  it("the visibility handler and the router ask it too, instead of testing the view themselves", () => {
+    assert.match(visibilityHandler(), /currentPollers\(\)\.includes\("runs"\)/u);
+    assert.match(routeSource(), /currentPollers\(\)\.includes\("runs"\)/u);
+    for (const [where, source] of [
+      ["the interval", fnSource("startRunsPoller")],
+      ["the visibility handler", visibilityHandler()],
+      ["the router's poller start", routeSource()],
+    ] as const) {
+      assert.ok(
+        !/pollersFor\(|document\.hidden/u.test(source),
+        `${where} decides what to poll by itself instead of asking currentPollers()`
+      );
+    }
+  });
+
+  it("returning to a visible tab polls at once, not at the next tick", () => {
+    const handler = visibilityHandler();
+    assert.match(handler, /startRunsPoller\(\)/u, "the interval is not restarted");
+    assert.match(handler, /loadDaemons\(\)/u, "the daemons panel waits for the next tick");
+    assert.match(handler, /loadRuns\(\)/u, "the list waits for the next tick");
+  });
+
+  it("does not wait on a stream: the list is not driven by one", () => {
     assert.ok(
-      daemons < bail,
-      "the open stream drives the runs list and the detail pane, not the daemons panel — " +
-        "returning before loadDaemons() freezes it for as long as the run is open"
+      !/activeRunEs|streamState/u.test(fnSource("startRunsPoller") + visibilityHandler()),
+      "the poller still skips work for a stream that cannot be open while the list is on screen"
     );
   });
 });

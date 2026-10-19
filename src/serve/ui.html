@@ -2274,27 +2274,32 @@
 
       let _runsPoller = null;
 
+      /**
+       * The pollers this screen may run right now (spec 037 FR-010): the view on
+       * screen, whether the run's details sit beside the list, and whether the
+       * tab is hidden. The interval, the visibility handler and the router all
+       * ask this one question, so they cannot disagree about it.
+       */
+      function currentPollers() {
+        return pollersFor(parseHash(location.hash).view, {
+          wide: WIDE.matches,
+          hidden: document.hidden,
+        });
+      }
+
       function startRunsPoller() {
         if (_runsPoller !== null) return;
         _runsPoller = setInterval(() => {
-          // Poll only while the landing view is on screen: a hidden tab or
-          // another view makes the request pure waste.
-          if (document.hidden) return;
-          if (document.getElementById("view-runs").hidden) return;
+          // The view or the tab may have changed since the interval was started.
+          if (!currentPollers().includes("runs")) return;
           // 042: a daemon that crashed since the last read must show as stale on
           // the next one, so liveness is re-probed every poll, never cached.
           loadDaemons();
-          // Deliberately above the return below: the open stream drives the runs
-          // list and the detail pane, and nothing else refreshes the daemons
-          // panel while it is open.
-          //
-          // The runs list is driven by the open stream while one is open.
-          if (_session?.streamState === "open") return;
           loadRuns();
         }, 4000);
       }
 
-      /** Stop polling. The router calls this on every view that is not the runs list. */
+      /** Stop polling. The router calls this on every view that does not poll. */
       function stopRunsPoller() {
         if (_runsPoller === null) return;
         clearInterval(_runsPoller);
@@ -2304,14 +2309,13 @@
       // A hidden tab polls nothing at all (spec 037 FR-010); becoming visible
       // again both restarts the poller and refreshes the list at once.
       document.addEventListener("visibilitychange", () => {
-        if (document.hidden) {
+        if (!currentPollers().includes("runs")) {
           stopRunsPoller();
           return;
         }
-        if (!pollersFor(parseHash(location.hash).view).includes("runs")) return;
         startRunsPoller();
         loadDaemons();
-        if (_session?.streamState !== "open") loadRuns();
+        loadRuns();
       });
 
       /**
@@ -3540,9 +3544,10 @@
           document.getElementById(`tab-${id}`).classList.toggle("active", id === activeTab);
         }
 
-        // FR-010: only the runs list polls, so every other view leaves the page
-        // idle — a browser extension has to be able to capture #/workflows.
-        if (!document.hidden && pollersFor(view).includes("runs")) startRunsPoller();
+        // FR-010: only the runs list polls (and the run details beside it on a
+        // wide screen), so every other view leaves the page idle — a browser
+        // extension has to be able to capture #/workflows.
+        if (currentPollers().includes("runs")) startRunsPoller();
         else stopRunsPoller();
 
         if (view === "runs") {
