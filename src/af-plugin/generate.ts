@@ -1,3 +1,3 @@
-import { writeWorkflow } from "./buildReviewEngine.js";
+import { writeGenerated } from "./buildReviewEngine.js";
 
-writeWorkflow();
+await writeGenerated();

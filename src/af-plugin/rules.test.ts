@@ -1,5 +1,6 @@
 // Rule parity (spec 046 FR-6). The plugin cannot call af's validateCanonOutput, so the
-// eight cross-field rules live in the plugin's JSON schemas as if/then and pattern. Three
+// eight cross-field rules live in the plugin's JSON schemas as if/then and pattern; they are
+// owned by src/canon/schemaRules.ts and generated into the plugin. Three
 // validators must agree on every case here: af's own, ajv on the plugin schemas (what
 // Claude's structured output enforces) and check.mjs (what Codex runs).
 
@@ -13,7 +14,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { Ajv } from "ajv";
 
-import { canonSchemas } from "../canon/schemas.js";
 import { validateCanonOutput } from "../canon/validateOutput.js";
 
 const checkScript = join(
@@ -347,30 +347,6 @@ describe("plugin schemas agree with af's validateCanonOutput", () => {
         `no mutation for rule ${String(rule)}`
       );
     }
-  });
-});
-
-/** A schema with its rule entries (every allOf) and annotations removed. */
-function withoutRules(node: unknown): unknown {
-  if (Array.isArray(node)) return node.map(withoutRules);
-  if (node === null || typeof node !== "object") return node;
-  return Object.fromEntries(
-    Object.entries(node)
-      .filter(([key]) => key !== "allOf" && key !== "title")
-      .map(([key, value]) => [key, withoutRules(value)])
-  );
-}
-
-describe("plugin schemas are af's schemas plus the rules", () => {
-  for (const key of ["codeReviewFindings", "codeReviewDelivery"] as const) {
-    it(`${key} minus its allOf entries deep-equals src/canon/schemas.ts`, () => {
-      assert.deepEqual(withoutRules(loadSchema(schemaFile[key])), canonSchemas[key]);
-    });
-  }
-
-  it("every rule entry names itself", () => {
-    const text = JSON.stringify([loadSchema("findings"), loadSchema("delivery")]);
-    assert.equal((text.match(/"description":"Rule: /g) ?? []).length, 8);
   });
 });
 

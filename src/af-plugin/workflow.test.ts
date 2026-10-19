@@ -1,9 +1,9 @@
-// The review-engine workflow (spec 046 D5, FR-5). The committed script is generated from
-// the plugin's prompts and schemas; this file pins it to the generator and runs it against
+// The review-engine workflow (spec 046 D5, FR-5). The committed script and schema files are
+// generated from the plugin's prompts and the canon's schema rules; this file pins it to the generator and runs it against
 // stub runtime globals to prove the step graph, models, schemas and isolation it promises.
 
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -13,7 +13,7 @@ import vm from "node:vm";
 import { unavailableStepMarker } from "../bindings/mastra/buildSteps.js";
 import { bundledPipelines } from "../canon/pipelines.js";
 import { getProfile } from "../canon/registry.js";
-import { buildWorkflow, STEPS, WORKFLOW_PATH } from "./buildReviewEngine.js";
+import { buildSchemaFiles, buildWorkflow, STEPS, WORKFLOW_PATH } from "./buildReviewEngine.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -105,6 +105,23 @@ describe("review-engine freshness (FR-5)", () => {
       committed,
       buildWorkflow(),
       "plugin/workflows/review-engine.js is stale or hand-edited - run: pnpm plugin:generate"
+    );
+  });
+
+  it("the committed schema files equal the generated ones, and nothing else sits beside them", async () => {
+    const generated = await buildSchemaFiles();
+    for (const [path, text] of Object.entries(generated)) {
+      assert.equal(
+        readFileSync(path, "utf8"),
+        text,
+        `${path} is stale or hand-edited - run: pnpm plugin:generate`
+      );
+    }
+    assert.deepEqual(
+      readdirSync(join(root, "plugin", "skills", "review", "references", "schemas")).sort(),
+      Object.keys(generated)
+        .map((path) => path.slice(path.lastIndexOf("/") + 1))
+        .sort()
     );
   });
 
