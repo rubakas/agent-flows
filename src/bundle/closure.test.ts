@@ -196,3 +196,66 @@ describe("FR-028: exportBundle still depends on computeClosure", () => {
     assert.deepEqual(exported, [...pipelines].sort());
   });
 });
+
+// ── 8. A resolver that misses is an error, not a filename lookup ──────────────
+//
+// The catalogue is keyed by declared id (layers.ts), and the resolver is the
+// merged view's answer to "which file defines this id". A file that merely
+// happens to be named `<id>.yaml` next to the parent is not that answer, so a
+// miss must surface instead of exporting whatever the filename finds.
+
+describe("computeClosure — a resolver that misses", () => {
+  const pipelineYaml = (id: string, steps: string[]): string =>
+    ["id: " + id, "version: 1", "description: " + id, "inputs: []", "steps:", ...steps].join("\n") +
+    "\n";
+  const gate = ["  - id: g", "    kind: gate", "    message: ok?"];
+  const mountChild = ["  - id: sub", "    kind: pipeline", "    pipeline: child"];
+
+  function fixture(): { dir: string; pipelinesDir: string; rootPath: string } {
+    const dir = makeTempDir("af-closure-miss-");
+    const pipelinesDir = join(dir, "pipelines");
+    mkdirSync(pipelinesDir);
+    const rootPath = join(pipelinesDir, "root.yaml");
+    writeFileSync(rootPath, pipelineYaml("root", mountChild));
+    // Found by filename, but declared as a different id: the catalogue knows it as "other".
+    writeFileSync(join(pipelinesDir, "child.yaml"), pipelineYaml("other", gate));
+    return { dir, pipelinesDir, rootPath };
+  }
+
+  it("does not fall back to a sibling file for a nested id the resolver lacks", () => {
+    const { dir, pipelinesDir, rootPath } = fixture();
+    try {
+      assert.throws(
+        () => computeClosure("root", pipelinesDir, (id) => (id === "root" ? rootPath : undefined)),
+        /Pipeline "child" is not defined in any workflow layer/
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces the error from an export when the ROOT id misses the resolver", () => {
+    const { dir, pipelinesDir } = fixture();
+    try {
+      assert.throws(
+        () => exportBundle("root", pipelinesDir, () => undefined),
+        /Pipeline "root" is not defined in any workflow layer/
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still closes over a nested id the resolver does supply", () => {
+    const { dir, pipelinesDir, rootPath } = fixture();
+    try {
+      const childPath = join(pipelinesDir, "child.yaml");
+      const { pipelines } = computeClosure("root", pipelinesDir, (id) =>
+        id === "root" ? rootPath : id === "child" ? childPath : undefined
+      );
+      assert.deepEqual(pipelines, new Set(["root", "child"]));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

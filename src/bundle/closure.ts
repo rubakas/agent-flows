@@ -27,8 +27,11 @@ export interface PipelineClosure {
  * `resolvePath` maps a nested pipeline id to the file that defines it. The
  * merged three-layer view (spec 038 D13) passes one, so exporting a repository
  * parent that mounts a bundled child resolves that child where it actually
- * lives instead of failing inside one directory. Without it the legacy rule
- * holds: a sibling file in `pipelinesDir`.
+ * lives instead of failing inside one directory. With one, an id it does not
+ * know is an error: a file merely named `<id>.yaml` is not the catalogue's
+ * answer. Without one, a sibling file in `pipelinesDir` is used; that mode has
+ * no production caller and exists for the tests, which also pin its
+ * `assertSafePath` traversal guard.
  *
  * The two maps record which file each entry came from, because with a resolver
  * the closure can span layer roots and "the" root is no longer well-defined.
@@ -46,6 +49,9 @@ export function computeClosure(
   function visit(id: string): void {
     if (pipelines.has(id)) return;
     const resolved = resolvePath?.(id);
+    if (resolvePath !== undefined && resolved === undefined) {
+      throw new Error(`Pipeline "${id}" is not defined in any workflow layer`);
+    }
     // Containment is asserted here, where the directory a path is resolved
     // against is known — a caller reading the maps afterwards cannot tell which
     // root an entry came from. A path the resolver supplied came from a
