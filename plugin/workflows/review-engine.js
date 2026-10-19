@@ -1,6 +1,6 @@
 // GENERATED FILE - DO NOT EDIT.
-// Source: plugin/skills/review/references/{prompts,schemas}/ and scripts/build-af-review-workflow.mjs
-// Regenerate with: node scripts/build-af-review-workflow.mjs
+// Source: plugin/skills/review/references/{prompts,schemas}/ and src/af-plugin/buildReviewEngine.ts
+// Regenerate with: pnpm plugin:generate
 export const meta = {
   name: 'review-engine',
   description:

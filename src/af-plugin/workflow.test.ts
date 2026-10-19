@@ -13,27 +13,19 @@ import vm from "node:vm";
 import { unavailableStepMarker } from "../bindings/mastra/buildSteps.js";
 import { bundledPipelines } from "../canon/pipelines.js";
 import { getProfile } from "../canon/registry.js";
+import { buildWorkflow, STEPS, WORKFLOW_PATH } from "./buildReviewEngine.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-// Plain .mjs files outside tsconfig's program are loaded by a computed specifier and
-// described here, so no declaration file has to ship inside the plugin or scripts/.
-interface Generator {
-  STEPS: string[];
-  WORKFLOW_PATH: string;
-  buildWorkflow: (promptsDir?: string) => string;
-}
+// The plugin's check.mjs sits outside tsconfig's program: it is loaded by a computed
+// specifier and described here, so no declaration file has to ship inside the plugin.
 interface Checker {
   loadSchema: (name: string) => unknown;
 }
-const generator = (await import(
-  pathToFileURL(join(root, "scripts", "build-af-review-workflow.mjs")).href
-)) as Generator;
 const checker = (await import(
   pathToFileURL(join(root, "plugin", "skills", "review", "scripts", "check.mjs")).href
 )) as Checker;
-const { buildWorkflow, WORKFLOW_PATH, STEPS } = generator;
 const { loadSchema } = checker;
 const committed = readFileSync(WORKFLOW_PATH, "utf8");
 const promptsDir = join(root, "plugin", "skills", "review", "references", "prompts");
@@ -112,7 +104,7 @@ describe("review-engine freshness (FR-5)", () => {
     assert.equal(
       committed,
       buildWorkflow(),
-      "plugin/workflows/review-engine.js is stale or hand-edited - run: node scripts/build-af-review-workflow.mjs"
+      "plugin/workflows/review-engine.js is stale or hand-edited - run: pnpm plugin:generate"
     );
   });
 

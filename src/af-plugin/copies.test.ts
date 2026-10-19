@@ -6,14 +6,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+
+import { STEPS } from "./buildReviewEngine.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-// Plain .mjs outside tsconfig's program: loaded by a computed specifier, typed locally.
-const { STEPS } = (await import(
-  pathToFileURL(join(root, "scripts", "build-af-review-workflow.mjs")).href
-)) as { STEPS: string[] };
 
 describe("plugin prompt copies", () => {
   it("covers the eight review steps", () => {

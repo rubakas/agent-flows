@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Generates plugin/workflows/review-engine.js (spec 046 D2, D5).
 //
 // A Claude dynamic workflow cannot read files, so the eight step prompts and the two
@@ -7,17 +6,17 @@
 // of the string it lives in. The output is deterministic: a test compares the committed
 // script with buildWorkflow(), so editing the generated file by hand fails the build.
 //
-//   node scripts/build-af-review-workflow.mjs
+//   pnpm plugin:generate
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const reference = join(root, "plugin", "skills", "review", "references");
 export const WORKFLOW_PATH = join(root, "plugin", "workflows", "review-engine.js");
 
-export const STEPS = [
+export const STEPS: string[] = [
   "brief",
   "radius",
   "falsifiability",
@@ -45,12 +44,12 @@ const KNOWN_PLACEHOLDERS = [
 /** Structural isolation: the synthesis step may see the verifier's output and nothing else. */
 const SYNTHESIS_PLACEHOLDERS = ["verify"];
 
-function placeholdersIn(template) {
+function placeholdersIn(template: string): string[] {
   return [...new Set([...template.matchAll(/\{\{([\w.]+)\}\}/g)].map((match) => match[1]))];
 }
 
-function readPrompts(promptsDir) {
-  const prompts = {};
+function readPrompts(promptsDir: string): Record<string, string> {
+  const prompts: Record<string, string> = {};
   for (const step of STEPS) {
     const template = readFileSync(join(promptsDir, `${step}.md`), "utf8");
     const unknown = placeholdersIn(template).filter((name) => !KNOWN_PLACEHOLDERS.includes(name));
@@ -72,15 +71,15 @@ function readPrompts(promptsDir) {
   return prompts;
 }
 
-function readSchemas() {
-  const read = (name) =>
+function readSchemas(): { findings: unknown; delivery: unknown } {
+  const read = (name: string): unknown =>
     JSON.parse(readFileSync(join(reference, "schemas", `${name}.json`), "utf8"));
   return { findings: read("findings"), delivery: read("delivery") };
 }
 
 const HEADER = `// GENERATED FILE - DO NOT EDIT.
-// Source: plugin/skills/review/references/{prompts,schemas}/ and scripts/build-af-review-workflow.mjs
-// Regenerate with: node scripts/build-af-review-workflow.mjs
+// Source: plugin/skills/review/references/{prompts,schemas}/ and src/af-plugin/buildReviewEngine.ts
+// Regenerate with: pnpm plugin:generate
 `;
 
 const META = `export const meta = {
@@ -242,7 +241,7 @@ return { synthesis: synthesis, verify: verify }
 `;
 
 /** @param promptsDir where the eight step prompts live (a test points it elsewhere) */
-export function buildWorkflow(promptsDir = join(reference, "prompts")) {
+export function buildWorkflow(promptsDir = join(reference, "prompts")): string {
   const prompts = readPrompts(promptsDir);
   const schemas = readSchemas();
   return (
@@ -257,7 +256,8 @@ export function buildWorkflow(promptsDir = join(reference, "prompts")) {
   );
 }
 
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+/** Writes the generated script; src/af-plugin/generate.ts is the command-line entry. */
+export function writeWorkflow(): void {
   writeFileSync(WORKFLOW_PATH, buildWorkflow());
   process.stdout.write(`wrote ${WORKFLOW_PATH}\n`);
 }
