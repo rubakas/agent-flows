@@ -309,16 +309,28 @@ export type { GateSummaryDeps } from "./gateSummary.js";
 // ── Internal record ────────────────────────────────────────────────────────────
 
 /**
- * Step kinds whose builder already writes its own `step.start` and single
- * terminal `step.result` (spec 036 D2). Everything else is structural: it runs
- * inside the workflow and writes nothing, which is why a gate, a persist or an
- * export used to be absent from the events file entirely.
+ * How each step kind reaches the events file (spec 036 D2): "builder" kinds
+ * write their own `step.start` and single terminal `step.result`; "structural"
+ * kinds run inside the workflow and write no start/result pair (a gate writes
+ * only `step.suspended`; a pipeline step is expanded at load and never built).
+ *
+ * A table over every StepKind rather than a set of the builder kinds, so adding
+ * a kind fails to compile here until someone decides which side it is on. A
+ * kind quietly left out of a set reads as structural, and its builder's lines
+ * would then be doubled. The table forces the decision; it does not prove the
+ * builder really logs.
  */
-const BUILDER_LOGGED_KINDS: ReadonlySet<StepKind> = new Set<StepKind>([
-  "llm",
-  "check",
-  "review-material",
-]);
+const STEP_JOURNAL = {
+  llm: "builder",
+  check: "builder",
+  "review-material": "builder",
+  gate: "structural",
+  loop: "structural",
+  "assemble-spec": "structural",
+  "persist-ticket": "structural",
+  "export-spec": "structural",
+  pipeline: "structural",
+} as const satisfies Record<StepKind, "builder" | "structural">;
 
 /**
  * The ids whose builder writes its own log lines, across the WHOLE expanded
@@ -347,7 +359,7 @@ function builderLoggedStepIds(
     bodyMap: Record<string, LoadedPipeline> | undefined
   ): void => {
     for (const step of stepList) {
-      if (BUILDER_LOGGED_KINDS.has(step.kind)) ids.add(step.id);
+      if (STEP_JOURNAL[step.kind] === "builder") ids.add(step.id);
     }
     for (const body of Object.values(bodyMap ?? {})) walk(body.def.steps, body.bodies);
   };
