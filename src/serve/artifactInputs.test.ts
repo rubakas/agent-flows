@@ -84,8 +84,8 @@ describe("resolveArtifactInputs", () => {
       const plan = result.inputs.plan;
       assert.equal(typeof plan, "string");
       // Rendered as the Spec Kit document the human approved, not ad-hoc JSON.
-      assert.match(plan as string, /^# Feature Specification: Add pooling$/m);
-      assert.ok(!(plan as string).includes('"title"'));
+      assert.match(plan, /^# Feature Specification: Add pooling$/m);
+      assert.ok(!plan.includes('"title"'));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
