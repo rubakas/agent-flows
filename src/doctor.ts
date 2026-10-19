@@ -80,6 +80,8 @@ export interface DaemonProbe {
  *
  * The record alone proves nothing: it survives a crash, and the port it names
  * can meanwhile be serving another project or another version of agent-flows.
+ * It deliberately ignores whether the recorded pid is the one answering: doctor
+ * reports whose daemon this project would reach, and never signals anything.
  */
 export async function projectDaemonStatus(deps: DaemonProbe): Promise<DaemonStatus> {
   const checked = await checkRecordedDaemon(deps.stateDir, deps.probe);
