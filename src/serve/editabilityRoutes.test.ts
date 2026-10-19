@@ -10,11 +10,11 @@
 // layer is a COPY of the package's pipelines/ and prompts/ (startServer's
 // bundledPipelinesDir relocates it), so if the guard under test ever fails, a request
 // deletes a file in a temp directory, not in the installed package. A file-level hash
-// of the real package, taken before the first case and compared after the last, proves
+// of the real package, taken when this file loads and compared after the last case, proves
 // the real files were never touched.
 //
 // Do not test `?source=bundled` with a package copy: layerForPipelinesDir labels a
-// copy "repo" (layers.ts:114-119), so the answer would not be the bundled one.
+// copy "repo", so the answer would not be the bundled one.
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
