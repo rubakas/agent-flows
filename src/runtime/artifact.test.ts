@@ -1888,6 +1888,37 @@ describe("spec 047 FR-10: an artifact reads back as the run it recorded", () => 
       assert.equal(full?.invocation, undefined);
     });
 
+    it("keeps the provider a failed-over step ran on, field by field", () => {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      writeArtifactFile(runsDir, "run-failover", {
+        pipelineId: "investigate",
+        status: "succeeded",
+        steps: {
+          moved: {
+            status: "succeeded",
+            actual: { profileId: "openai", transport: "cli", modelId: "codex", model: "gpt-5" },
+          },
+          bare: {
+            status: "succeeded",
+            actual: { profileId: "openai", transport: "api", modelId: "o", extra: 1 },
+          },
+          bad: { status: "succeeded", actual: { profileId: "openai", transport: "pigeon" } },
+        },
+      });
+
+      assert.deepEqual(readPersistedRun(runsDir, "run-failover")?.steps, {
+        moved: {
+          status: "succeeded",
+          actual: { profileId: "openai", transport: "cli", modelId: "codex", model: "gpt-5" },
+        },
+        bare: {
+          status: "succeeded",
+          actual: { profileId: "openai", transport: "api", modelId: "o" },
+        },
+        bad: { status: "succeeded" },
+      });
+    });
+
     it("drops a step whose status is unknown and keeps its neighbours", () => {
       const runsDir = makeStateRunsDir(makeTmpDir());
       writeArtifactFile(runsDir, "run-steps", {

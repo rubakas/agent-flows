@@ -6,6 +6,7 @@
 // only import is the status vocabulary.
 
 import type { ReadStatus, StepStatus } from "./runStatus.js";
+import type { StepActualProvider } from "./stepIntrospection.js";
 
 /**
  * Per-step model and transport info recorded in every artifact.
@@ -92,6 +93,8 @@ export interface StepState {
   command?: string;
   /** Resolved model id and transport for the step (spec 033 FR-017). */
   model?: string;
+  /** Present only when a failover moved the step onto another provider (spec 039). */
+  actual?: StepActualProvider;
 }
 
 /**

@@ -22,6 +22,7 @@ import type {
   StepState,
 } from "./runState.js";
 import type { ReadStatus } from "./runStatus.js";
+import type { StepActualProvider } from "./stepIntrospection.js";
 
 export type { ArtifactProvenance, PersistedRun, StepProvenance } from "./runState.js";
 
@@ -723,8 +724,17 @@ function booleanFields<K extends string>(
   return out;
 }
 
+function actualOf(raw: unknown): StepActualProvider | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const { profileId, transport, modelId } = raw;
+  if (typeof profileId !== "string" || typeof modelId !== "string") return undefined;
+  if (transport !== "cli" && transport !== "api") return undefined;
+  return { profileId, transport, modelId, ...stringFields(raw, ["model"]) };
+}
+
 function stepStateOf(raw: unknown): StepState | undefined {
   if (!isPlainObject(raw) || !isStepStatus(raw.status)) return undefined;
+  const actual = actualOf(raw.actual);
   return {
     status: raw.status,
     ...stringFields(raw, [
@@ -737,6 +747,7 @@ function stepStateOf(raw: unknown): StepState | undefined {
       "model",
     ]),
     ...booleanFields(raw, ["outputTruncated"]),
+    ...(actual !== undefined ? { actual } : {}),
   };
 }
 
