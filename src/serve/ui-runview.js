@@ -33,7 +33,7 @@ export const SETTLED_STEP_STATUSES = ["succeeded", "failed", "cancelled"];
 
 /** The cache key for one step's output: project, run and step never collide. */
 export function outputKey(projectKey, runId, stepId) {
-  return [projectKey, runId, stepId].join("\u0000");
+  return JSON.stringify([projectKey, runId, stepId]);
 }
 
 /**

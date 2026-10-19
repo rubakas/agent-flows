@@ -544,6 +544,8 @@ describe("stepOutput — one fetcher, one cache", () => {
   it("builds a key that tells project, run and step apart", () => {
     assert.notEqual(outputKey("P1", "r", "s"), outputKey("P2", "r", "s"));
     assert.notEqual(outputKey("p", "ab", "c"), outputKey("p", "a", "bc"));
+    // A separator character inside an id must not let two triples collide.
+    assert.notEqual(outputKey("a\u0000b", "c", "d"), outputKey("a", "b\u0000c", "d"));
   });
 });
 
