@@ -265,7 +265,8 @@ describe("checkRecordedDaemon — one verification of a recorded daemon", () => 
         ports.push(port);
         return undefined;
       });
-      assert.equal(result.kind, "silent");
+      assert.ok(result.kind === "silent");
+      assert.deepEqual(result.record, { ...RECORD, projectDir: fx.projectDir });
       assert.deepEqual(ports, [51234]);
     } finally {
       fx.cleanup();
@@ -277,8 +278,8 @@ describe("checkRecordedDaemon — one verification of a recorded daemon", () => 
     try {
       const identity = { ...IDENTITY, projectDir: fx.projectDir, pid: 9999 };
       const result = await checkRecordedDaemon(fx.stateDir, async () => identity);
-      assert.equal(result.kind, "other-pid");
-      assert.deepEqual(result.kind === "other-pid" && result.identity, identity);
+      assert.ok(result.kind === "other-pid");
+      assert.deepEqual(result.identity, identity);
     } finally {
       fx.cleanup();
     }
@@ -312,11 +313,35 @@ describe("checkRecordedDaemon — one verification of a recorded daemon", () => 
       const identity = { ...IDENTITY, projectDir: fx.projectDir, version: "9.9.9" };
       const result = await checkRecordedDaemon(fx.stateDir, async () => identity);
       assert.equal(result.kind, "verified");
-      assert.deepEqual(result.kind === "verified" && result.record.version, IDENTITY.version);
     } finally {
       fx.cleanup();
     }
   });
+
+  for (const [label, over] of [
+    ["pid -1 (kill would signal every process the user owns)", { pid: -1 }],
+    ["pid 0 (kill would signal the process group)", { pid: 0 }],
+    ["pid 1", { pid: 1 }],
+    ["a fractional pid", { pid: 1.5 }],
+    ["port 70000", { port: 70000 }],
+    ["port 0", { port: 0 }],
+  ] as const) {
+    it(`unreadable: a record with ${label} is refused and never probed`, async () => {
+      const stateDir = tmpStateDir();
+      try {
+        writeDaemonRecord(stateDir, { ...RECORD, ...over });
+        let calls = 0;
+        const result = await checkRecordedDaemon(stateDir, async () => {
+          calls += 1;
+          return IDENTITY;
+        });
+        assert.deepEqual(result, { kind: "unreadable", path: daemonRecordPath(stateDir) });
+        assert.equal(calls, 0);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+  }
 
   it("verified: two spellings of the project directory are the same project", async () => {
     const fx = stateWithRecord();
@@ -332,4 +357,23 @@ describe("checkRecordedDaemon — one verification of a recorded daemon", () => 
       fx.cleanup();
     }
   });
+});
+
+describe("probeDaemon — an impossible pid is no answer", () => {
+  for (const pid of [-1, 0, 1, 1.5]) {
+    it(`a daemon claiming pid ${pid} reads as nothing answering`, async () => {
+      const server = createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ...IDENTITY, pid }));
+      });
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+      try {
+        const { port } = server.address() as { port: number };
+        assert.equal(await probeDaemon(port), undefined);
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((r) => server.close(() => r()));
+      }
+    });
+  }
 });

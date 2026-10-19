@@ -82,6 +82,32 @@ describe("stop — nothing recorded (FR-016)", () => {
     assert.deepEqual(spy.calls, []);
   });
 
+  for (const [label, over] of [
+    ["pid -1", { pid: -1 }],
+    ["pid 0", { pid: 0 }],
+    ["pid 1", { pid: 1 }],
+    ["a fractional pid", { pid: 1.5 }],
+    ["port 70000", { port: 70000 }],
+  ] as const) {
+    it(`a record with ${label} is refused: nothing is signalled`, async () => {
+      const fx = makeFixture();
+      writeDaemonRecord(fx.stateDir, { ...identity(fx), port: 51234, ...over });
+      const spy = killSpy();
+
+      const report = await stopProjectDaemon(fx.stateDir, {
+        kill: spy.kill,
+        probe: async () => identity(fx, { pid: over.pid ?? 4242 }),
+        pollMs: 5,
+        waitMs: 30,
+      });
+
+      assert.equal(report.stopped, false);
+      assert.equal(report.outcome, "unresolved");
+      assert.deepEqual(spy.calls, [], "process.kill(0 | -1) would signal a group or everything");
+      assert.ok(existsSync(daemonRecordPath(fx.stateDir)));
+    });
+  }
+
   it("a malformed daemon.json is unresolved, never no-daemon, and is left in place", async () => {
     const fx = makeFixture();
     writeFileSync(daemonRecordPath(fx.stateDir), "{ not json");

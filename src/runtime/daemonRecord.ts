@@ -48,6 +48,18 @@ function realPathOf(dir: string): string {
   }
 }
 
+/**
+ * A pid that is safe to hand to `process.kill`. 0 signals the caller's process
+ * group and -1 every process the user owns; 1 is init. None is ever a daemon.
+ */
+function isSignalablePid(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 1;
+}
+
+function isTcpPort(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value < 65536;
+}
+
 /** Write `<stateDir>/daemon.json` at listen time, mode 0600 (FR-011). */
 export function writeDaemonRecord(stateDir: string, record: DaemonRecord): void {
   writeStateFile(stateDir, daemonRecordPath(stateDir), JSON.stringify(record, null, 2));
@@ -72,8 +84,8 @@ export function readDaemonRecord(stateDir: string): DaemonRecord | undefined {
     typeof rec.projectDir !== "string" ||
     typeof rec.version !== "string" ||
     typeof rec.startedAt !== "string" ||
-    typeof rec.pid !== "number" ||
-    typeof rec.port !== "number"
+    !isSignalablePid(rec.pid) ||
+    !isTcpPort(rec.port)
   ) {
     return undefined;
   }
@@ -131,7 +143,7 @@ export async function probeDaemon(
     if (
       typeof id.projectDir !== "string" ||
       typeof id.version !== "string" ||
-      typeof id.pid !== "number" ||
+      !isSignalablePid(id.pid) ||
       typeof id.startedAt !== "string"
     ) {
       return undefined;
