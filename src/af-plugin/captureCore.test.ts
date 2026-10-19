@@ -64,6 +64,13 @@ describe("the plugin's copy of the capture core", () => {
     });
   }
 
+  it("still kills a timed-out git with SIGKILL and pins GIT_OPTIONAL_LOCKS=0 in its git environment", () => {
+    const core = committed("reviewCapture.mjs");
+    // One for git, one for gh.
+    assert.equal(core.match(/killSignal: "SIGKILL"/gu)?.length, 2);
+    assert.match(core, /GIT_OPTIONAL_LOCKS: "0"/u);
+  });
+
   it("holds no file the generator does not make", () => {
     assert.deepEqual(readdirSync(OUT_DIR).sort(), Object.keys(buildCapture()).sort());
   });

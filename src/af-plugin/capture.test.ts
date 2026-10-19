@@ -100,7 +100,14 @@ const GIT_ENV = {
 };
 
 function sh(cwd: string, args: string[], input?: string): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV, input });
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: GIT_ENV,
+    input,
+    timeout: 120_000,
+    killSignal: "SIGKILL",
+  });
   assert.equal(result.status, 0, `git ${args.join(" ")} failed: ${result.stderr}`);
   return result.stdout;
 }
@@ -161,6 +168,8 @@ function cli(
     encoding: "utf8",
     env: { ...GIT_ENV, ...options.env },
     timeout: 60_000,
+    // SIGTERM (the default) can be ignored, and spawnSync then waits out the child.
+    killSignal: "SIGKILL",
   });
   const lines = result.stdout.split("\n").filter((line) => line !== "");
   assert.equal(
@@ -408,7 +417,10 @@ describe("capture.mjs: derived baseline", () => {
 describe("capture.mjs: git environment", () => {
   it("gives every git call the plugin's environment, the capture's and the snapshot's alike", () => {
     const { repo, base } = twoCommitRepo();
-    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const realGit = spawnSync("which", ["git"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    }).stdout.trim();
     const bin = scratch("fakebin-env");
     const log = join(bin, "log");
     writeFileSync(
@@ -900,7 +912,10 @@ describe("capture.mjs: audit L8/L9 snapshot", () => {
 describe("capture.mjs: audit L12 timeout", () => {
   it("exits 2 with a reason when git does not answer in time", () => {
     const { repo } = twoCommitRepo();
-    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const realGit = spawnSync("which", ["git"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    }).stdout.trim();
     const bin = scratch("fakebin");
     writeFileSync(
       join(bin, "git"),
