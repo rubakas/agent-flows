@@ -1999,6 +1999,23 @@ describe("spec 047 FR-10: an artifact reads back as the run it recorded", () => 
       assert.equal(full?.invocation, undefined);
     });
 
+    it("ignores a step id that would set the steps object's prototype", () => {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      const dir = join(runsDir, "run-proto");
+      mkdirSync(dir, { recursive: true });
+      // JSON.parse makes "__proto__" an own key, which a plain assignment would not.
+      writeFileSync(
+        join(dir, "investigate.json"),
+        '{"runId":"run-proto","pipelineId":"investigate","status":"succeeded","steps":' +
+          '{"__proto__":{"status":"failed","error":"inherited"},"a":{"status":"succeeded"}}}'
+      );
+
+      const steps = readPersistedRun(runsDir, "run-proto")?.steps as Record<string, unknown>;
+      assert.deepEqual(steps, { a: { status: "succeeded" } });
+      assert.equal(Object.getPrototypeOf(steps), Object.prototype);
+      assert.equal("status" in steps, false, "nothing is inherited from the artifact");
+    });
+
     it("keeps the provider a failed-over step ran on, field by field", () => {
       const runsDir = makeStateRunsDir(makeTmpDir());
       writeArtifactFile(runsDir, "run-failover", {

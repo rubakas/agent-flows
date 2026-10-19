@@ -885,6 +885,9 @@ function normaliseArtifact(
   const steps: Record<string, StepState> = {};
   if (isPlainObject(raw.steps)) {
     for (const [id, entry] of Object.entries(raw.steps)) {
+      // An own "__proto__" key (JSON.parse makes one) would hit the prototype
+      // setter on assignment and make every step id inherit the entry's fields.
+      if (id === "__proto__") continue;
       const state = stepStateOf(entry);
       if (state !== undefined) steps[id] = state;
     }
