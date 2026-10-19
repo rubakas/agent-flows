@@ -1865,6 +1865,19 @@ function makeCancellableRun(runId: string, stepId: string): CancellableRun {
 }
 
 /**
+ * Wait for every artifact write the run has queued. waitForSettled is the public
+ * barrier, but an auto run does not settle when a human approves its gate, so it
+ * has nothing to wait for there; the persist chain is the only thing that does.
+ * Reaching into the record is deliberate and confined to this helper.
+ */
+async function persistsDone(service: RunService, runId: string): Promise<void> {
+  const registry = (
+    service as unknown as { registry: Map<string, { persistPromise?: Promise<void> }> }
+  ).registry;
+  await registry.get(runId)?.persistPromise;
+}
+
+/**
  * Wait for the persistArtifact write to land, or give up.
  *
  * Readiness is parseable content, not mere existence: a file that exists but is
@@ -2419,6 +2432,7 @@ describe("RunService — persisted runs are listed and readable after a restart"
         runsDir
       );
       const started = await service.start("test-pipeline", { request: "now" });
+      await service.waitForSettled(started.runId);
 
       const listed = service.list();
       const live = listed.find((r) => r.runId === started.runId);
@@ -2453,6 +2467,7 @@ describe("RunService — persisted runs are listed and readable after a restart"
         runsDir
       );
       const started = await service.start("live-pipeline", {});
+      await service.waitForSettled(started.runId);
       // The run's own (older) artifact, as persistArtifact would have left it.
       writePersisted(runsDir, started.runId, "stale-pipeline");
 
@@ -2530,6 +2545,7 @@ describe("RunService — step log file and decisions", () => {
       assert.equal("log" in got.steps["test.check"], false, "no step gains a log field");
 
       await service.cancel(runId);
+      await service.waitForSettled(runId);
     } finally {
       removeRunsDir(runsDir);
     }
@@ -2569,6 +2585,7 @@ describe("RunService — step log file and decisions", () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
       await service.cancel(runId, "operator changed their mind");
+      await service.waitForSettled(runId);
 
       const events = eventsOf(runsDir, runId, "test-pipeline");
       const last = events[events.length - 1];
@@ -2616,7 +2633,13 @@ describe("RunService — step log file and decisions", () => {
       const beforeJudge = eventsOf(runsDir, runId, "test-pipeline");
 
       releaseJudge('{"verdict":"reject","reason":"Too slow."}');
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      // The late verdict is the point of the test: wait for it to be logged, not
+      // for a tick that a loaded machine may not have finished by.
+      for (let i = 0; i < 200; i++) {
+        if (eventsOf(runsDir, runId, "test-pipeline").length > beforeJudge.length) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      }
+      await persistsDone(service, runId);
 
       const events = eventsOf(runsDir, runId, "test-pipeline");
       const last = events[events.length - 1];
@@ -2885,8 +2908,8 @@ describe("RunService — structural steps reach the events file", () => {
       await service.cancel(runId, "changed their mind");
       // The step's own result lands after the cancellation closed it out.
       run.emit({ type: "workflow-step-result", payload: { id: "approve", status: "success" } });
-      // Let settlement finish writing the artifact before the directory goes.
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      // Settlement writes the artifact; the directory must not go before it lands.
+      await service.waitForSettled(runId);
 
       const terminal = logOf(runsDir, runId).filter((e) => e.kind === "step.result");
       assert.equal(terminal.length, 1, "two terminal lines would make a caller count 8 of 7 done");
@@ -2908,7 +2931,7 @@ describe("RunService — structural steps reach the events file", () => {
       run.emit({ type: "workflow-step-suspended", payload: { id: "approve" } });
 
       await service.cancel(runId, "changed their mind");
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      await service.waitForSettled(runId);
 
       const terminal = logOf(runsDir, runId).filter(
         (e) => e.stepId === "approve" && e.kind === "step.result"
