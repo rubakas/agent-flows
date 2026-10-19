@@ -5,15 +5,21 @@
 // library is a layer, so an unpinned case would read and write the owner's real
 // ~/.agent-flows/workflows.
 //
-// The linked-layer cases point a layer's `pipelines/` at the installed package's own
-// `pipelines/` -- the file a hostile repository could commit as a link. They run
-// against the real package directory, because the bundled layer is always the
-// package. If the guard under test ever fails, a request really would delete a
-// package file, so every such case snapshots the package's pipelines and prompts
-// first and puts back whatever differs afterwards.
+// The linked-layer cases point a layer's `pipelines/` at the bundled layer's own
+// `pipelines/` -- the file a hostile repository could commit as a link. The bundled
+// layer is a COPY of the package's pipelines/ and prompts/ (startServer's
+// bundledPipelinesDir relocates it), so if the guard under test ever fails, a request
+// deletes a file in a temp directory, not in the installed package. A file-level hash
+// of the real package, taken before the first case and compared after the last, proves
+// the real files were never touched.
+//
+// Do not test `?source=bundled` with a package copy: layerForPipelinesDir labels a
+// copy "repo" (layers.ts:114-119), so the answer would not be the bundled one.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -44,21 +50,36 @@ async function call(port: number, method: string, path: string, body?: unknown):
   });
 }
 
-/** Every file under the package's pipelines/ and prompts/, so a failed guard can be undone. */
-function snapshotPackage(): Map<string, Buffer> {
-  const files = new Map<string, Buffer>();
+/** sha256 over the sorted (name, bytes) of every file in the real package's pipelines/ and prompts/. */
+function packageDigest(): string {
+  const hash = createHash("sha256");
   for (const sub of ["pipelines", "prompts"]) {
     const dir = join(packageRoot(), sub);
-    for (const name of readdirSync(dir)) files.set(join(dir, name), readFileSync(join(dir, name)));
+    for (const name of readdirSync(dir).sort()) {
+      hash.update(`${sub}/${name}\0`);
+      hash.update(readFileSync(join(dir, name)));
+    }
   }
-  return files;
+  return hash.digest("hex");
 }
 
-function restorePackage(snapshot: Map<string, Buffer>): void {
-  for (const [path, content] of snapshot) {
-    if (!existsSync(path) || !readFileSync(path).equals(content)) writeFileSync(path, content);
+/** A throwaway copy of the package's pipelines/ and prompts/: `<tmp>/pkg/{pipelines,prompts}`. */
+function packageCopy(tmpDir: string): string {
+  const copy = join(tmpDir, "pkg");
+  for (const sub of ["pipelines", "prompts"]) {
+    cpSync(join(packageRoot(), sub), join(copy, sub), { recursive: true });
   }
+  return copy;
 }
+
+const digestBefore = packageDigest();
+after(() => {
+  assert.equal(
+    packageDigest(),
+    digestBefore,
+    "a test changed a file in the real package's pipelines/ or prompts/"
+  );
+});
 
 /** A pipeline with no llm step: the loader refuses a linked prompts/, so only these load through a link. */
 const PACKAGE_PIPELINE = "ship";
@@ -69,32 +90,32 @@ describe("a layer whose pipelines/ is a link into the package is not editable (M
       let srv: ServeHandle;
       let tmpDir: string;
       let previousHome: string | undefined;
-      let snapshot: Map<string, Buffer>;
-      const target = join(packageRoot(), "pipelines", `${PACKAGE_PIPELINE}.yaml`);
+      let target: string;
 
       before(async () => {
-        snapshot = snapshotPackage();
         tmpDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), `af-linked-${linked}-`)));
+        const copy = packageCopy(tmpDir);
+        target = join(copy, "pipelines", `${PACKAGE_PIPELINE}.yaml`);
         const projectDir = join(tmpDir, "project");
         const home = join(tmpDir, "home");
         mkdirSync(projectDir, { recursive: true });
         const layerRoot =
           linked === "user" ? join(home, "workflows") : join(projectDir, ".agent-flows");
         mkdirSync(layerRoot, { recursive: true });
-        symlinkSync(join(packageRoot(), "pipelines"), join(layerRoot, "pipelines"), "dir");
+        symlinkSync(join(copy, "pipelines"), join(layerRoot, "pipelines"), "dir");
         mkdirSync(join(layerRoot, "prompts"));
 
         previousHome = process.env.AGENT_FLOWS_HOME;
         process.env.AGENT_FLOWS_HOME = home;
         srv = await startServer({
           state: resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }),
+          bundledPipelinesDir: join(copy, "pipelines"),
           port: 0,
           dbPath: ":memory:",
           projectDir,
         });
       });
       after(async () => {
-        restorePackage(snapshot);
         await srv.close();
         if (previousHome === undefined) delete process.env.AGENT_FLOWS_HOME;
         else process.env.AGENT_FLOWS_HOME = previousHome;
@@ -131,6 +152,7 @@ describe("a layer whose pipelines/ is a link into the package is not editable (M
 
   it("a real file in a project layer is still deletable (the guard is not blanket)", async () => {
     const tmpDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "af-control-")));
+    const copy = packageCopy(tmpDir);
     const previousHome = process.env.AGENT_FLOWS_HOME;
     const home = join(tmpDir, "home");
     const projectDir = join(tmpDir, "project");
@@ -143,6 +165,7 @@ describe("a layer whose pipelines/ is a link into the package is not editable (M
     process.env.AGENT_FLOWS_HOME = home;
     const srv = await startServer({
       state: resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }),
+      bundledPipelinesDir: join(copy, "pipelines"),
       port: 0,
       dbPath: ":memory:",
       projectDir,
@@ -171,6 +194,7 @@ describe("an error about a file in any layer redacts every root (L1)", () => {
 
   before(async () => {
     tmpDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "af-redact-")));
+    const copy = packageCopy(tmpDir);
     const projectDir = join(tmpDir, "project");
     const home = join(tmpDir, "home");
     const gate = (id: string) =>
@@ -187,6 +211,7 @@ describe("an error about a file in any layer redacts every root (L1)", () => {
     process.env.AGENT_FLOWS_HOME = home;
     srv = await startServer({
       state: resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }),
+      bundledPipelinesDir: join(copy, "pipelines"),
       port: 0,
       dbPath: ":memory:",
       projectDir,
@@ -236,9 +261,11 @@ describe("preview and save re-check the file a stored draft names (W1)", () => {
   let previousHome: string | undefined;
   let db: DbInstance;
   let outside: string;
+  let copyRoot: string;
 
   before(async () => {
     tmpDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "af-guard-")));
+    copyRoot = packageCopy(tmpDir);
     const projectDir = join(tmpDir, "project");
     const home = join(tmpDir, "home");
     mkdirSync(join(projectDir, ".agent-flows", "pipelines"), { recursive: true });
@@ -259,6 +286,7 @@ describe("preview and save re-check the file a stored draft names (W1)", () => {
     process.env.AGENT_FLOWS_HOME = home;
     srv = await startServer({
       state: resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }),
+      bundledPipelinesDir: join(copyRoot, "pipelines"),
       port: 0,
       dbPath,
       projectDir,
@@ -293,7 +321,7 @@ describe("preview and save re-check the file a stored draft names (W1)", () => {
   });
 
   it("a draft re-pointed at a bundled file is refused with 403 by preview and save", async () => {
-    const draftId = await draftNaming(packageRoot(), join("pipelines", "ship.yaml"));
+    const draftId = await draftNaming(copyRoot, join("pipelines", "ship.yaml"));
     const preview = await call(srv.port, "POST", `/api/drafts/${draftId}/preview`, {});
     assert.equal(preview.status, 403, await preview.clone().text());
     const save = await call(srv.port, "POST", `/api/drafts/${draftId}/save`);
@@ -306,5 +334,33 @@ describe("preview and save re-check the file a stored draft names (W1)", () => {
     assert.equal(preview.status, 404, await preview.clone().text());
     const save = await call(srv.port, "POST", `/api/drafts/${draftId}/save`);
     assert.equal(save.status, 404, await save.clone().text());
+  });
+});
+
+// The bundled layer is addressed by its `pipelines/` directory but relocated by its
+// root: only a directory named `pipelines` has a root that holds a `prompts/` beside it.
+describe("a relocated bundled directory must be a package's pipelines/", () => {
+  it("startServer refuses a bundledPipelinesDir that is not named pipelines", async () => {
+    const tmpDir = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), "af-bundled-name-")));
+    try {
+      const projectDir = join(tmpDir, "project");
+      const home = join(tmpDir, "home");
+      mkdirSync(projectDir, { recursive: true });
+      const attempt = startServer({
+        state: resolveProjectState(projectDir, { AGENT_FLOWS_HOME: home }),
+        port: 0,
+        dbPath: ":memory:",
+        projectDir,
+        bundledPipelinesDir: join(tmpDir, "wf"),
+      });
+      // A server that did start must not keep the process alive after the assertion fails.
+      attempt.then(
+        (handle) => handle.close(),
+        () => undefined
+      );
+      await assert.rejects(attempt, /bundledPipelinesDir.*pipelines/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
