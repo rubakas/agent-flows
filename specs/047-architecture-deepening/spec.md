@@ -446,10 +446,14 @@ Also decided after review:
 
 - The page counts only live runs as in flight, using a pinned copy of the run-status rules with a parity test against `src/runtime/runStatus.ts`. Restored-from-disk rows don't count, don't tick, raise no approval banner, and show no gate box or Cancel.
 - A run without a `source` (older daemons in the cross-project view) still counts as live.
-- **Deferred to the owner:**
+- **Deferred to the owner (now Phase 3 track C):**
   - moving the run-view state (snapshot, SSE, refresh, output cache) out of `ui.html` into a DOM-free module, since there is no CI browser coverage and four of the last six page fixes were there;
   - the polling rule change.
-- Browser test request: `~/.claude/chrome-test/agent-flows/request-33abe823.md` — DEFERRED, pending operator.
+- Browser test 33abe823 PASSED all 5 scenarios on 2026-10-13; report `~/.claude/chrome-test/agent-flows/report-33abe823.md`; run by dev session through Chrome tools against daemon on throwaway state home (real run directory untouched).
+  - No screenshots (controlled tab was hidden, captures timed out).
+  - Ticking checked with Refresh (hidden tab polls nothing by design).
+  - Restored runs were patched copies of old runs, not a daemon killed mid-run.
+  - Live run's gate summary made one model call.
 
 ## Follow-ups
 
@@ -457,17 +461,57 @@ Also decided after review:
   - the FR-14 deny-list policy;
   - FR-12 D1 (user-layer workflows editable and deletable from the page);
   - whether Binding A stays (spec 027).
-- **Owner actions:**
-  - re-run the `/af:review` smoke run;
-  - re-add the Codex plugin;
-  - run the browser test request.
-- **Deferred design work:** FR-10 C3/C4, FR-11's typed artifact and chain pointer, FR-13/16's shared modules, FR-15 commits 2–3, removing the loader's sibling-file fallback (FR-12; a lint rule guards production code instead).
-- **Smaller observations:**
-  - the step-journal invariant (`BUILDER_LOGGED_KINDS`);
-  - four copies of the daemon-record probe;
-  - the ticket DDL beside the Drizzle schema;
-  - `src/serve/editabilityRoutes.test.ts` exercises symlinks into the real package directory with snapshot/restore (would be safer against a package copy);
-  - `artifact.test.ts` and `capture.test.ts` "audit L12" are load-sensitive when several suites run at once.
+- **Open owner actions:**
+  - re-run the `/af:review` smoke run.
+- **Completed owner actions:**
+  - re-add the Codex plugin (af 0.2.0 installed in Claude Code and Codex on 2026-10-13; both installed skills directories byte-identical to plugin/skills; Claude Code needs a restart to load it).
+  - run the browser test request (PASS, report above).
+- **Deferred design work:** pulled into Phase 3 (below), except Binding A's render/onFailure rewrite; FR-10 C3/C4, FR-11's typed artifact and chain pointer, FR-13/16's shared modules, FR-15 commits 2–3, removing the loader's sibling-file fallback (FR-12; a lint rule guards production code instead).
+- **Smaller observations (pulled into Phase 3):** the step-journal invariant (`BUILDER_LOGGED_KINDS`), four copies of the daemon-record probe, the ticket DDL beside the Drizzle schema, `src/serve/editabilityRoutes.test.ts` symlink exercises, `artifact.test.ts` and `capture.test.ts` "audit L12" load sensitivity.
+
+## Phase 3 — follow-ups (approved 2026-10-19)
+
+Approved by the owner on 2026-10-19. Process same as Phase 2: design refreshed against current code, `devil` challenge before code, red-first tests with a recorded neuter probe for every new gate, reviewer after, security-auditor where paths, git or the page are touched, one commit per item. Each track in its own git worktree branched from feat/047 and cherry-picked back.
+
+### Track A — run service (one worktree, items in order)
+
+- **A0:** `artifact.test.ts`'s `flushAsync` stops waiting a fixed 20 ms; it waits for the condition it needs. AC: no fixed-delay wait left in it; file green when run alone and beside a full suite.
+- **A1:** The step-journal rule (`BUILDER_LOGGED_KINDS`, `src/runtime/runService.ts`) is exhaustive over `StepKind`. AC: adding a `StepKind` without classifying it fails `tsc` (neuter probe recorded).
+- **A2 (FR-10 C3):** `RunService.start` takes the loaded definition and the run control values (models, provider) as options instead of mixed into inputs; the control keys merge once; the split inside start is deleted. AC: no behaviour change; only the test calls that passed models/provider inside inputs change.
+- **A3 (FR-11 remainder):** The saved run record gets a named type and a read-back normaliser at the disk boundary (unknown status → unreadable) replacing the `as unknown as` casts in runService. The chain pointer is re-examined first: if a chained stage that crashed before its first artifact is still not found by id after a restart, or its pipeline is lost, fix it with a design that also works when the anchor run is in another project; if no gap remains, record the evidence and drop it. On-disk `settledAt` only for terminal runs, if not already so.
+- **A4 (FR-10 C4):** A feasibility test runs first: two builds of one workflow id with different definitions, one run in flight on the first while a second starts. Only if it passes does the run build from the definition the route validated; otherwise A4 is dropped and the evidence recorded. Flag: this reverses FR-8's recorded choice of option A.
+
+### Track B — loader
+
+- **B1:** Remove the loader's sibling-file fallback for nested pipelines (callers pass the resolver explicitly; a nested reference without one fails loudly; decide whether the lint rule that guarded production code is still needed).
+- **B2:** `src/serve/editabilityRoutes.test.ts` stops symlinking into the real package directory; it uses a temporary package copy through the existing server options. AC for B2: the test never writes inside the real package directory.
+
+### Track C — page (FR-15 commits 2–3)
+
+Run-view state (snapshot, SSE stream, refresh, step output cache) moves out of `src/serve/ui.html` into a DOM-free `src/serve/ui-runview.js` tested in node; closing a session drops its late responses (replacing the separate staleness guards); one fetcher for step output; the output cache key includes the project. Commit 3 changes the polling rule so polling does not duplicate what the open stream delivers. The browser test fires again; it must start no paid model calls (test workflows use check steps only, no gate).
+
+### Track D — daemon records
+
+One function in `src/runtime/daemonRecord.ts` answers which daemon, if any, serves a project; `src/serve/daemons.ts`, `src/serve/stop.ts`, `src/bindings/mastra/daemonResolver.ts` and `src/doctor.ts` use it. AC: no behaviour change; existing tests unchanged and green.
+
+### Track E — database
+
+A test fails when the hand-written ticket DDL (`src/db/index.ts`) and the Drizzle schema (`src/db/schema.ts`) disagree on tables, columns, types, nullability or primary key (neuter probe recorded).
+
+### Track F — tests
+
+The root cause of the `capture.test.ts` "audit L12 timeout" hang (once 16 minutes under load) is found and fixed, or the test is made independent of machine load; evidence recorded.
+
+### Track G — plugin and bindings (FR-13/16 remainder, Binding A untouched)
+
+The plugin generator moves to TypeScript with generated output unchanged apart from its header; the cross-field schema rules live once in the canon and the plugin's schema JSON files are generated from them; the generator derives the review engine's steps, models, failure modes and schema keys from `pipelines/code-review.yaml` instead of hard-coding them.
+
+### Excluded from Phase 3
+
+- Binding A's render/onFailure rewrite (waits on spec 027's decision whether Binding A stays).
+- Paid smoke runs.
+- Push and merge.
+- OpenCode support (on hold).
 
 ## Tests
 
@@ -482,11 +526,7 @@ Also decided after review:
 - Splitting `handleRequest` routes into files (2026-09-21 measurement: no field
   clustering).
 - Retiring af's `code-review` pipeline in favour of the plugin (owner's call).
-- Smaller observations not pulled into a phase: the step-journal invariant
-  (`BUILDER_LOGGED_KINDS`, `runService.ts:315-354`), four copies of the daemon-record
-  probe, the ticket DDL restated beside the Drizzle schema (`src/db/index.ts:10-107`), the
-  owner-only file-mode rule restated in four modules, the `{{…}}` pattern written four
-  times, the CLI verb list kept three times in `src/cli.ts`.
+- Smaller observations not pulled into a phase: the owner-only file-mode rule restated in four modules, the `{{…}}` pattern written four times, the CLI verb list kept three times in `src/cli.ts`.
 
 ## Risks
 
