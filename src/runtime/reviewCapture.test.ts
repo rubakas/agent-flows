@@ -295,6 +295,32 @@ describe("a gh call that times out", () => {
       else process.env.AF_REVIEW_GH_TIMEOUT_MS = previousTimeout;
     }
   });
+
+  it("kills a gh that ignores SIGTERM instead of waiting for it", () => {
+    const bin = mkdtempSync(join(tmpdir(), "af-capture-core-gh-term-"));
+    cleanups.push(() => rmSync(bin, { recursive: true, force: true }));
+    const marker = join(bin, "survived");
+    writeFileSync(
+      join(bin, "gh"),
+      `#!/bin/sh\ncase "$1" in pr) trap '' TERM; sleep 8 </dev/null >/dev/null 2>&1; touch '${marker}';; esac\n`
+    );
+    chmodSync(join(bin, "gh"), 0o755);
+    // Run it once first: a gh killed before it installs its trap proves nothing.
+    spawnSync(join(bin, "gh"), ["--version"], { timeout: 10_000 });
+    const previousPath = process.env.PATH;
+    const previousTimeout = process.env.AF_REVIEW_GH_TIMEOUT_MS;
+    process.env.PATH = `${bin}:${previousPath ?? ""}`;
+    process.env.AF_REVIEW_GH_TIMEOUT_MS = "200";
+    try {
+      const outcome = ghRunnerFor(bin)(["pr", "view", "1"]);
+      assert.equal(outcome.timedOut, true);
+      assert.equal(existsSync(marker), false, "the timed-out gh outlived its timeout");
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousTimeout === undefined) delete process.env.AF_REVIEW_GH_TIMEOUT_MS;
+      else process.env.AF_REVIEW_GH_TIMEOUT_MS = previousTimeout;
+    }
+  });
 });
 
 describe("environment a caller adds to git", () => {
