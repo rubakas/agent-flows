@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import {
+  checkRecordedDaemon,
   classifyIdentity,
   daemonRecordPath,
   probeDaemon,
@@ -206,5 +207,129 @@ describe("probeDaemon — only our shape counts (FR-015)", () => {
     silent = createNetServer();
     silent.on("connection", (socket) => sockets.push(socket));
     await new Promise<void>((r) => silent.listen(silentPort, "127.0.0.1", () => r()));
+  });
+});
+
+describe("checkRecordedDaemon — one verification of a recorded daemon", () => {
+  const RECORD = { ...IDENTITY, port: 51234 };
+
+  /** A state directory holding `RECORD` for a project directory that really exists. */
+  function stateWithRecord(): { stateDir: string; projectDir: string; cleanup: () => void } {
+    const stateDir = tmpStateDir();
+    const projectDir = join(stateDir, "project");
+    mkdirSync(projectDir);
+    writeDaemonRecord(stateDir, { ...RECORD, projectDir });
+    return {
+      stateDir,
+      projectDir,
+      cleanup: () => rmSync(stateDir, { recursive: true, force: true }),
+    };
+  }
+
+  it("absent: no file, and the probe is never called", async () => {
+    const stateDir = tmpStateDir();
+    try {
+      let calls = 0;
+      const result = await checkRecordedDaemon(stateDir, async () => {
+        calls += 1;
+        return undefined;
+      });
+      assert.deepEqual(result, { kind: "absent" });
+      assert.equal(calls, 0);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("unreadable: a malformed file is not absent, carries its path, and is never probed", async () => {
+    const stateDir = tmpStateDir();
+    try {
+      writeFileSync(daemonRecordPath(stateDir), "{ not json");
+      let calls = 0;
+      const result = await checkRecordedDaemon(stateDir, async () => {
+        calls += 1;
+        return undefined;
+      });
+      assert.deepEqual(result, { kind: "unreadable", path: daemonRecordPath(stateDir) });
+      assert.equal(calls, 0);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("silent: nothing answers, and the probe is asked about the recorded port once", async () => {
+    const fx = stateWithRecord();
+    try {
+      const ports: number[] = [];
+      const result = await checkRecordedDaemon(fx.stateDir, async (port) => {
+        ports.push(port);
+        return undefined;
+      });
+      assert.equal(result.kind, "silent");
+      assert.deepEqual(ports, [51234]);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("other-pid: the port is held by a different pid", async () => {
+    const fx = stateWithRecord();
+    try {
+      const identity = { ...IDENTITY, projectDir: fx.projectDir, pid: 9999 };
+      const result = await checkRecordedDaemon(fx.stateDir, async () => identity);
+      assert.equal(result.kind, "other-pid");
+      assert.deepEqual(result.kind === "other-pid" && result.identity, identity);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("other-project: same pid, different project", async () => {
+    const fx = stateWithRecord();
+    try {
+      const identity = { ...IDENTITY, projectDir: join(fx.stateDir, "elsewhere") };
+      const result = await checkRecordedDaemon(fx.stateDir, async () => identity);
+      assert.equal(result.kind, "other-project");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("the pid is checked before the project: both differing reads as other-pid", async () => {
+    const fx = stateWithRecord();
+    try {
+      const identity = { ...IDENTITY, pid: 9999, projectDir: join(fx.stateDir, "elsewhere") };
+      const result = await checkRecordedDaemon(fx.stateDir, async () => identity);
+      assert.equal(result.kind, "other-pid");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("verified: same pid and project, and the version is not compared", async () => {
+    const fx = stateWithRecord();
+    try {
+      const identity = { ...IDENTITY, projectDir: fx.projectDir, version: "9.9.9" };
+      const result = await checkRecordedDaemon(fx.stateDir, async () => identity);
+      assert.equal(result.kind, "verified");
+      assert.deepEqual(result.kind === "verified" && result.record.version, IDENTITY.version);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("verified: two spellings of the project directory are the same project", async () => {
+    const fx = stateWithRecord();
+    try {
+      const link = join(fx.stateDir, "link-to-project");
+      symlinkSync(fx.projectDir, link);
+      const result = await checkRecordedDaemon(fx.stateDir, async () => ({
+        ...IDENTITY,
+        projectDir: link,
+      }));
+      assert.equal(result.kind, "verified");
+    } finally {
+      fx.cleanup();
+    }
   });
 });

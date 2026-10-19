@@ -13,7 +13,7 @@
 // (which reads and probes it) and `agent-flows stop` (which verifies before it
 // kills), so it imports nothing from any of them.
 
-import { readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { writeStateFile } from "./stateFile.js";
@@ -170,6 +170,44 @@ export function classifyIdentity(
   if (!sameProject(identity.projectDir, expected.projectDir)) return "other-project";
   if (identity.version !== expected.version) return "other-version";
   return "match";
+}
+
+/**
+ * What a state directory's recorded daemon turned out to be, from the record
+ * and one probe of its recorded port. Callers switch over `kind` exhaustively:
+ * only `verified` proves the recorded pid is the live agent-flows daemon.
+ */
+export type RecordedDaemon =
+  | { kind: "absent" }
+  | { kind: "unreadable"; path: string }
+  | { kind: "silent"; record: DaemonRecord }
+  | { kind: "other-pid"; record: DaemonRecord; identity: DaemonIdentity }
+  | { kind: "other-project"; record: DaemonRecord; identity: DaemonIdentity }
+  | { kind: "verified"; record: DaemonRecord; identity: DaemonIdentity };
+
+/**
+ * Read a state directory's record and probe its recorded port once (FR-015).
+ *
+ * The pid is compared before the project, and the version is not compared at
+ * all: a recorded daemon is "ours to act on" by pid and project alone.
+ * Callers that also care about the version (doctor) read it off `identity`.
+ */
+export async function checkRecordedDaemon(
+  stateDir: string,
+  probe: (port: number) => Promise<DaemonIdentity | undefined> = (port) => probeDaemon(port)
+): Promise<RecordedDaemon> {
+  const record = readDaemonRecord(stateDir);
+  if (record === undefined) {
+    const path = daemonRecordPath(stateDir);
+    return existsSync(path) ? { kind: "unreadable", path } : { kind: "absent" };
+  }
+  const identity = await probe(record.port);
+  if (identity === undefined) return { kind: "silent", record };
+  if (identity.pid !== record.pid) return { kind: "other-pid", record, identity };
+  if (!sameProject(identity.projectDir, record.projectDir)) {
+    return { kind: "other-project", record, identity };
+  }
+  return { kind: "verified", record, identity };
 }
 
 /** Pause for `ms`. Shared by the auto-start poll loop and `stop`'s wait loop. */

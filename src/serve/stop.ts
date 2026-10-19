@@ -10,19 +10,18 @@
 // process killer. The process at the recorded port must first answer
 // `GET /api/daemon` with the recorded pid and project.
 
-import { existsSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveProjectDir } from "../bindings/mastra/projectDir.js";
 import {
-  daemonRecordPath,
+  checkRecordedDaemon,
   probeDaemon,
-  readDaemonRecord,
   removeDaemonRecordIfOwned,
-  sameProject,
   sleep,
   type DaemonIdentity,
+  type DaemonRecord,
 } from "../runtime/daemonRecord.js";
 import { resolveProjectState, stateRoot, type StateEnv } from "../runtime/projectState.js";
 
@@ -58,6 +57,13 @@ export interface StopDeps {
   pollMs?: number;
 }
 
+function reportBase(
+  stateDir: string,
+  record: DaemonRecord
+): Pick<StopReport, "stateDir" | "projectDir" | "port" | "pid"> {
+  return { stateDir, projectDir: record.projectDir, port: record.port, pid: record.pid };
+}
+
 const DEFAULT_WAIT_MS = 5_000;
 const DEFAULT_LIVENESS_POLL_MS = 100;
 
@@ -77,52 +83,59 @@ export async function stopProjectDaemon(
   const waitMs = deps.waitMs ?? DEFAULT_WAIT_MS;
   const pollMs = deps.pollMs ?? DEFAULT_LIVENESS_POLL_MS;
 
-  const record = readDaemonRecord(stateDir);
-  if (record === undefined) {
-    const present = existsSync(daemonRecordPath(stateDir));
-    return {
-      stateDir,
-      stopped: false,
-      outcome: present ? "unresolved" : "no-daemon",
-      reason: present
-        ? `${daemonRecordPath(stateDir)} is unreadable or malformed — left it alone`
-        : "no daemon.json — no daemon was recorded for this project",
-    };
+  const checked = await checkRecordedDaemon(stateDir, probe);
+  switch (checked.kind) {
+    case "absent":
+      return {
+        stateDir,
+        stopped: false,
+        outcome: "no-daemon",
+        reason: "no daemon.json — no daemon was recorded for this project",
+      };
+    case "unreadable":
+      return {
+        stateDir,
+        stopped: false,
+        outcome: "unresolved",
+        reason: `${checked.path} is unreadable or malformed — left it alone`,
+      };
+    case "silent":
+      return {
+        ...reportBase(stateDir, checked.record),
+        stopped: false,
+        outcome: "no-daemon",
+        reason:
+          `nothing answered GET /api/daemon on port ${checked.record.port} — ` +
+          `the record is stale and pid ${checked.record.pid} was NOT signalled`,
+      };
+    case "other-pid":
+      return {
+        ...reportBase(stateDir, checked.record),
+        stopped: false,
+        outcome: "unresolved",
+        reason:
+          `port ${checked.record.port} is held by pid ${checked.identity.pid}, not the recorded pid ` +
+          `${checked.record.pid} — nothing was signalled`,
+      };
+    case "other-project":
+      return {
+        ...reportBase(stateDir, checked.record),
+        stopped: false,
+        outcome: "unresolved",
+        reason:
+          `the daemon on port ${checked.record.port} serves ${checked.identity.projectDir}, not the recorded ` +
+          `${checked.record.projectDir} — nothing was signalled`,
+      };
+    case "verified":
+      break;
+    default: {
+      const unreachable: never = checked;
+      return unreachable;
+    }
   }
 
-  const base = { stateDir, projectDir: record.projectDir, port: record.port, pid: record.pid };
-  const identity = await probe(record.port);
-  if (identity === undefined) {
-    return {
-      ...base,
-      stopped: false,
-      outcome: "no-daemon",
-      reason:
-        `nothing answered GET /api/daemon on port ${record.port} — ` +
-        `the record is stale and pid ${record.pid} was NOT signalled`,
-    };
-  }
-  if (identity.pid !== record.pid) {
-    return {
-      ...base,
-      stopped: false,
-      outcome: "unresolved",
-      reason:
-        `port ${record.port} is held by pid ${identity.pid}, not the recorded pid ` +
-        `${record.pid} — nothing was signalled`,
-    };
-  }
-  if (!sameProject(identity.projectDir, record.projectDir)) {
-    return {
-      ...base,
-      stopped: false,
-      outcome: "unresolved",
-      reason:
-        `the daemon on port ${record.port} serves ${identity.projectDir}, not the recorded ` +
-        `${record.projectDir} — nothing was signalled`,
-    };
-  }
-
+  const { record } = checked;
+  const base = reportBase(stateDir, record);
   kill(record.pid, "SIGTERM");
 
   const deadline = Date.now() + waitMs;

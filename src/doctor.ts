@@ -19,7 +19,7 @@ import {
   type HarnessReach,
 } from "./harness/harnesses.js";
 import { packageVersion } from "./packageRoot.js";
-import { classifyIdentity, probeDaemon, readDaemonRecord } from "./runtime/daemonRecord.js";
+import { checkRecordedDaemon, classifyIdentity, probeDaemon } from "./runtime/daemonRecord.js";
 import { resolveProjectState } from "./runtime/projectState.js";
 import type { ProviderConfig } from "./canon/registry.js";
 import type { DaemonIdentity } from "./runtime/daemonRecord.js";
@@ -82,37 +82,48 @@ export interface DaemonProbe {
  * can meanwhile be serving another project or another version of agent-flows.
  */
 export async function projectDaemonStatus(deps: DaemonProbe): Promise<DaemonStatus> {
-  const record = readDaemonRecord(deps.stateDir);
-  if (record === undefined) {
-    return {
-      state: "not-running",
-      detail: `not running — no ${join(deps.stateDir, "daemon.json")} (a tool call starts one)`,
-    };
+  const checked = await checkRecordedDaemon(deps.stateDir, deps.probe);
+  switch (checked.kind) {
+    case "absent":
+    case "unreadable":
+      return {
+        state: "not-running",
+        detail: `not running — no ${join(deps.stateDir, "daemon.json")} (a tool call starts one)`,
+      };
+    case "silent":
+      return {
+        state: "stale-record",
+        detail: `daemon.json records pid ${checked.record.pid} on port ${checked.record.port}, but nothing answers there`,
+      };
+    case "other-pid":
+    case "other-project":
+    case "verified": {
+      // Doctor asks whose daemon this is for THIS project, not whether the
+      // recorded pid is alive: only the answered identity matters here.
+      const { identity, record } = checked;
+      const verdict = classifyIdentity(identity, {
+        projectDir: deps.projectDir,
+        version: deps.version,
+      });
+      if (verdict === "match") {
+        return {
+          state: "listening",
+          detail: `listening on port ${record.port} (pid ${identity.pid}, version ${identity.version})`,
+        };
+      }
+      return {
+        state: "mismatch",
+        detail:
+          verdict === "other-project"
+            ? `port ${record.port} serves ${identity.projectDir}, not this project`
+            : `port ${record.port} runs agent-flows ${identity.version}, not ${deps.version}`,
+      };
+    }
+    default: {
+      const unreachable: never = checked;
+      return unreachable;
+    }
   }
-  const identity = await deps.probe(record.port);
-  if (identity === undefined) {
-    return {
-      state: "stale-record",
-      detail: `daemon.json records pid ${record.pid} on port ${record.port}, but nothing answers there`,
-    };
-  }
-  const verdict = classifyIdentity(identity, {
-    projectDir: deps.projectDir,
-    version: deps.version,
-  });
-  if (verdict === "match") {
-    return {
-      state: "listening",
-      detail: `listening on port ${record.port} (pid ${identity.pid}, version ${identity.version})`,
-    };
-  }
-  return {
-    state: "mismatch",
-    detail:
-      verdict === "other-project"
-        ? `port ${record.port} serves ${identity.projectDir}, not this project`
-        : `port ${record.port} runs agent-flows ${identity.version}, not ${deps.version}`,
-  };
 }
 
 /**

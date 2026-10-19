@@ -11,7 +11,8 @@
 // process would otherwise be reported as a running daemon and offered a Stop
 // button wired to a stranger. The port is probed with `GET /api/daemon` and the
 // answer's pid AND project must both match the record — the same rule
-// `stopProjectDaemon` enforces before it signals anything (`stop.ts:94-124`).
+// `stopProjectDaemon` enforces before it signals anything; both ask
+// `checkRecordedDaemon` (runtime/daemonRecord.ts), so it cannot drift.
 //
 // Reading is all this does. It never writes into another project's state
 // directory and never dispatches a run there; the only cross-project mutation
@@ -19,7 +20,7 @@
 
 import { basename } from "node:path";
 
-import { probeDaemon, readDaemonRecord, sameProject } from "../runtime/daemonRecord.js";
+import { checkRecordedDaemon, probeDaemon, sameProject } from "../runtime/daemonRecord.js";
 import { listProjectStateDirs } from "./stop.js";
 import type { DaemonIdentity } from "../runtime/daemonRecord.js";
 
@@ -56,18 +57,19 @@ export interface ListDaemonsDeps {
 /**
  * Verify one state directory's record against the process at its recorded port.
  *
- * Mirrors `stopProjectDaemon`'s three refusal branches — nothing answering, a
- * different pid, a different project — because a row the page offers a Stop on
- * must have passed exactly the checks the stop itself will repeat.
+ * Uses the same `checkRecordedDaemon` as `stopProjectDaemon`, because a row the
+ * page offers a Stop on must have passed exactly the checks the stop itself
+ * will repeat.
  */
 async function classify(
   stateDir: string,
   probe: (port: number) => Promise<DaemonIdentity | undefined>,
   self: { pid: number; projectDir: string } | undefined
 ): Promise<DaemonListEntry | undefined> {
-  const record = readDaemonRecord(stateDir);
-  if (record === undefined) return undefined;
+  const checked = await checkRecordedDaemon(stateDir, probe);
+  if (checked.kind === "absent" || checked.kind === "unreadable") return undefined;
 
+  const { record } = checked;
   const base: Omit<DaemonListEntry, "live"> = {
     stateDir,
     projectKey: basename(stateDir),
@@ -79,29 +81,28 @@ async function classify(
     self: self?.pid === record.pid && sameProject(self.projectDir, record.projectDir),
   };
 
-  const identity = await probe(record.port);
-  if (identity === undefined) {
-    return {
-      ...base,
-      live: false,
-      staleReason: `nothing answered on port ${record.port}`,
-    };
+  switch (checked.kind) {
+    case "silent":
+      return { ...base, live: false, staleReason: `nothing answered on port ${record.port}` };
+    case "other-pid":
+      return {
+        ...base,
+        live: false,
+        staleReason: `port ${record.port} is held by pid ${checked.identity.pid}, not the recorded ${record.pid}`,
+      };
+    case "other-project":
+      return {
+        ...base,
+        live: false,
+        staleReason: `the daemon on port ${record.port} serves ${checked.identity.projectDir}, not ${record.projectDir}`,
+      };
+    case "verified":
+      return { ...base, live: true };
+    default: {
+      const unreachable: never = checked;
+      return unreachable;
+    }
   }
-  if (identity.pid !== record.pid) {
-    return {
-      ...base,
-      live: false,
-      staleReason: `port ${record.port} is held by pid ${identity.pid}, not the recorded ${record.pid}`,
-    };
-  }
-  if (!sameProject(identity.projectDir, record.projectDir)) {
-    return {
-      ...base,
-      live: false,
-      staleReason: `the daemon on port ${record.port} serves ${identity.projectDir}, not ${record.projectDir}`,
-    };
-  }
-  return { ...base, live: true };
 }
 
 /**
