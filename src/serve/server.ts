@@ -311,7 +311,11 @@ export interface ServeOptions {
   runService?: RunService;
   /** The user's project directory (install target). Defaults to process.cwd(). */
   projectDir?: string;
-  /** The tool's bundled pipeline catalog directory. Defaults to the package's own. */
+  /**
+   * The tool's bundled pipeline catalog directory. Defaults to the package's own.
+   * Must be named `pipelines`: when no `pipelinesDir` is pinned it also relocates
+   * the bundled layer of the merged view to this directory's parent.
+   */
   bundledPipelinesDir?: string;
   /** Root directory containing skills/ and agents/ subdirs. Defaults to AGENT_FLOWS_SKILLS_DIR or ~/.claude. */
   skillsBase?: string;
@@ -429,6 +433,15 @@ export function readAgentFlowsConfig(projectDir: string): string | undefined {
  * (useful when port 0 was requested) and a close function.
  */
 export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
+  // The bundled layer is relocated by its root, which is the parent of this directory.
+  if (
+    opts.bundledPipelinesDir !== undefined &&
+    basename(opts.bundledPipelinesDir) !== "pipelines"
+  ) {
+    throw new Error(
+      `bundledPipelinesDir must be a directory named "pipelines" (its parent is the package root): ${opts.bundledPipelinesDir}`
+    );
+  }
   // opts.pipelinesDir is an explicit override (used by tests to pin a specific dir).
   // When absent, the canon directory is resolved per-request from projectDir (FR-004).
   const explicitPipelinesDir: string | undefined = opts.pipelinesDir;
@@ -439,6 +452,8 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
   const runService = opts.runService ?? null;
   const uiPath = join(__dirname, "ui.html");
   const bundledPipelinesDir = opts.bundledPipelinesDir ?? defaultBundledPipelinesDir();
+  const bundledRoot =
+    opts.bundledPipelinesDir !== undefined ? dirname(opts.bundledPipelinesDir) : undefined;
 
   const skillsBase =
     opts.skillsBase ?? process.env.AGENT_FLOWS_SKILLS_DIR ?? join(homedir(), ".claude");
@@ -470,7 +485,7 @@ export async function startServer(opts: ServeOptions): Promise<ServeHandle> {
     const pipelines =
       explicitPipelinesDir !== undefined
         ? pipelinesIn([layerForPipelinesDir(explicitPipelinesDir)])
-        : projectPipelines(projectDir);
+        : projectPipelines(projectDir, process.env, bundledRoot);
     const layerLine = pipelines.layers.map((l) => `${l.source} (${l.root})`).join(", ");
     if (layerLine !== lastLayerLine) {
       console.log(`agent-flows serve: workflow layers ${layerLine}`);

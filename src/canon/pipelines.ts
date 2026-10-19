@@ -148,8 +148,12 @@ export function pipelinesIn(layers: readonly CanonLayer[]): Pipelines {
 }
 
 /** The layers present for `projectDir` (bundled, user library, repository canon). */
-export function projectPipelines(projectDir: string, env: StateEnv = process.env): Pipelines {
-  return pipelinesIn(resolveLayers(projectDir, env));
+export function projectPipelines(
+  projectDir: string,
+  env: StateEnv = process.env,
+  bundledRoot?: string
+): Pipelines {
+  return pipelinesIn(resolveLayers(projectDir, env, bundledRoot));
 }
 
 /** The pipelines shipped with the package, and nothing else. */

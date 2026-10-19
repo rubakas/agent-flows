@@ -93,9 +93,16 @@ export function repoCanonRoot(projectDir: string): string {
  * `env` is injected rather than read from the ambient environment at the call
  * site so a test can pin AGENT_FLOWS_HOME and never touch the owner's real
  * user library.
+ *
+ * `bundledRoot` is the package root the bundled layer is read from; only a test
+ * that must not touch the installed package passes another.
  */
-export function resolveLayers(projectDir: string, env: StateEnv = process.env): CanonLayer[] {
-  const layers: CanonLayer[] = [layerFrom("bundled", packageRoot())];
+export function resolveLayers(
+  projectDir: string,
+  env: StateEnv = process.env,
+  bundledRoot: string = packageRoot()
+): CanonLayer[] {
+  const layers: CanonLayer[] = [layerFrom("bundled", bundledRoot)];
   const userRoot = userLibraryRoot(env);
   if (isDir(userRoot)) layers.push(layerFrom("user", userRoot));
   const repoRoot = repoCanonRoot(projectDir);
