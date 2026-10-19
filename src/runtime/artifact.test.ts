@@ -126,11 +126,12 @@ after(() => {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Wait for all microtasks and I/O to flush so fire-and-forget writes land. */
-async function flushAsync(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  // One extra tick to allow the artifact's mkdir+writeFile chain to complete.
-  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+/** Wait until the run has settled and its artifact write has landed. */
+async function settled(service: RunService, runId: string): Promise<void> {
+  assert.ok(
+    (await service.waitForSettled(runId)) !== undefined,
+    `run ${runId} is not live in this service`
+  );
 }
 
 /** Recursive, sorted list of relative paths under dir — empty when dir is absent. */
@@ -158,7 +159,7 @@ describe("FR-001: artifact written when a run succeeds", () => {
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, { request: "test" });
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     assert.ok(existsSync(artifactPath), `artifact must exist at ${artifactPath}`);
@@ -209,7 +210,7 @@ describe("FR-001: artifact written when a run suspends at a gate", () => {
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     assert.ok(existsSync(artifactPath), "artifact must be written at gate suspension");
@@ -234,7 +235,7 @@ describe("FR-001/FR-007: artifact is readable after the service is garbage-colle
       const mockRun = makeMockRun(runId, successResult());
       const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
       await service.start(pipelineId, {});
-      await flushAsync();
+      await settled(service, runId);
       // `service` goes out of scope here — simulates daemon stopped.
     }
 
@@ -280,7 +281,7 @@ describe("spec 032 FR-008: a run writes nothing into <project>/.agent-flows", ()
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
-    await flushAsync();
+    await settled(service, runId);
 
     assert.deepEqual(
       listTree(canonDir),
@@ -310,7 +311,7 @@ describe("Security: no credential-shaped values in artifacts", () => {
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const raw = readFileSync(artifactPath, "utf8");
@@ -348,7 +349,7 @@ describe("Security: no credential-shaped values in artifacts", () => {
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, profile);
 
     await service.start(pipelineId, {});
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
@@ -375,7 +376,6 @@ describe("FR-001: no artifact written when projectDir is absent", () => {
 
     const { status } = await service.start(pipelineId, {});
     assert.equal(status, "running", "run must start successfully");
-    await flushAsync();
 
     const settled = await service.waitForSettled(runId);
     assert.ok(settled !== undefined);
@@ -399,7 +399,7 @@ describe("FR-001: artifact written when a run fails", () => {
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     assert.ok(existsSync(artifactPath), "artifact must be written on failure");
@@ -450,7 +450,7 @@ describe("FR-002: transportPerStep filled for model-bearing steps", () => {
     );
 
     await service.start(pipelineId, {}, { pipelineSteps: testSteps });
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
@@ -490,7 +490,7 @@ describe("FR-002: non-llm steps are omitted from transportPerStep", () => {
     );
 
     await service.start(pipelineId, {}, { pipelineSteps: testSteps });
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
@@ -524,7 +524,7 @@ describe("FR-002: per-run models override is recorded, not the profile default",
       { models: { "reason-step": "haiku" } },
       { pipelineSteps: testSteps }
     );
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
@@ -576,7 +576,7 @@ describe("spec 039: provenance records the per-run provider, not the startup def
         provider: { id: "cheap", roles: { reasoner: "haiku", worker: "haiku", scout: "haiku" } },
       }
     );
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
@@ -629,7 +629,7 @@ describe("FR-006: manifest created with the first stage", () => {
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
-    await flushAsync();
+    await settled(service, runId);
 
     const manifestPath = join(runsDir, runId, "manifest.json");
     assert.ok(existsSync(manifestPath), "manifest.json must be created on first stage");
@@ -661,7 +661,7 @@ describe("FR-006: second stage in same chain directory adds an ordered entry", (
     const service1 = new RunService(makeMastra(mockRun1), undefined, runsDir, stubProfile);
 
     await service1.start(stage1Pipeline, {});
-    await flushAsync();
+    await settled(service1, stage1RunId);
 
     // Stage 2: run spec-creation using chainArtifactDir pointing to stage 1's directory.
     // This simulates what the server does when POST /api/runs includes artifactPath.
@@ -672,7 +672,7 @@ describe("FR-006: second stage in same chain directory adds an ordered entry", (
     const service2 = new RunService(makeMastra(mockRun2), undefined, runsDir, stubProfile);
 
     await service2.start(stage2Pipeline, {}, { chainArtifactDir });
-    await flushAsync();
+    await settled(service2, stage2RunId);
 
     // Read the manifest from the chain directory (stage 1's directory).
     const manifestPath = join(chainArtifactDir, "manifest.json");
@@ -702,14 +702,14 @@ describe("FR-006: second stage in same chain directory adds an ordered entry", (
     const mockRun1 = makeMockRun(stage1RunId, successResult());
     const service1 = new RunService(makeMastra(mockRun1), undefined, runsDir, stubProfile);
     await service1.start("investigate", {});
-    await flushAsync();
+    await settled(service1, stage1RunId);
 
     const chainDir = join(runsDir, stage1RunId);
     const stage2RunId = "run-manifest-artdir-s2";
     const mockRun2 = makeMockRun(stage2RunId, successResult());
     const service2 = new RunService(makeMastra(mockRun2), undefined, runsDir, stubProfile);
     await service2.start("spec-creation", {}, { chainArtifactDir: chainDir });
-    await flushAsync();
+    await settled(service2, stage2RunId);
 
     // The second stage's artifact must be in the chain dir, not in its own runId dir.
     const stage2ArtifactInChain = join(chainDir, "spec-creation.json");
@@ -734,7 +734,7 @@ describe("FR-006: manifest is readable from disk without a live service instance
       const mockRun = makeMockRun(runId, successResult());
       const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
       await service.start(pipelineId, {});
-      await flushAsync();
+      await settled(service, runId);
     }
 
     // Read directly from disk — no service reference alive.
@@ -907,7 +907,7 @@ describe("FR-007: completing a stage starts no further run", () => {
 
     await service.start(pipelineId, {});
     // Let the background completion handler fire.
-    await flushAsync();
+    await settled(service, runId);
 
     // The registry contains ONLY the one run we started — no auto-started successor.
     const list = service.list();
@@ -928,7 +928,7 @@ describe("FR-007: completing a stage starts no further run", () => {
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start("investigate", {});
-    await flushAsync();
+    await settled(service, runId);
 
     const manifestPath = join(runsDir, runId, "manifest.json");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
@@ -954,7 +954,7 @@ describe("FR-009: GetResult includes artifactPath after settlement", () => {
     const service = new RunService(makeMastra(mockRun), undefined, runsDir, stubProfile);
 
     await service.start(pipelineId, {});
-    await flushAsync();
+    await settled(service, runId);
 
     const state = service.get(runId);
     assert.ok(state !== undefined, "run must be in registry");
@@ -1030,7 +1030,7 @@ describe("spec 033 FR-004: cancelling a run records cancelledAt and reason in th
 
     const result = await service.cancel(runId, "operator stopped it");
     assert.deepEqual(result, { ok: true });
-    await flushAsync();
+    await settled(service, runId);
 
     const manifest = await readManifest(join(runsDir, runId));
     assert.ok(manifest, "a cancelled run must still write a manifest");
@@ -1096,7 +1096,7 @@ describe("spec 033 FR-004: a cancelled run's manifest reports the chain as cance
     const service = new RunService(makeMastra(pendingRun), undefined, runsDir, stubProfile);
     await service.start("investigate", { request: "x" });
     assert.deepEqual(await service.cancel(runId, "stopped"), { ok: true });
-    await flushAsync();
+    await settled(service, runId);
 
     const manifestPath = join(runsDir, runId, "manifest.json");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as RunManifest;
@@ -1304,7 +1304,7 @@ describe("spec 047 FR-11: locating a run by its own id after a restart", () => {
       stubProfile
     );
     await first.start("investigate", {});
-    await flushAsync();
+    await settled(first, anchorId);
     const second = new RunService(
       makeMastra(makeMockRun(childId, successResult())),
       undefined,
@@ -1312,7 +1312,7 @@ describe("spec 047 FR-11: locating a run by its own id after a restart", () => {
       stubProfile
     );
     await second.start("spec-creation", {}, { chainArtifactDir: chainDir });
-    await flushAsync();
+    await settled(second, childId);
 
     const fresh = restarted(runsDir);
 
@@ -1343,7 +1343,7 @@ describe("spec 047 FR-11: locating a run by its own id after a restart", () => {
       stubProfile
     );
     await first.start("investigate", {});
-    await flushAsync();
+    await settled(first, firstId);
     const second = new RunService(
       makeMastra(makeMockRun(secondId, successResult())),
       undefined,
@@ -1352,7 +1352,7 @@ describe("spec 047 FR-11: locating a run by its own id after a restart", () => {
     );
     // Same pipeline into the same directory: investigate.json now describes the second run.
     await second.start("investigate", {}, { chainArtifactDir: dir });
-    await flushAsync();
+    await settled(second, secondId);
 
     assert.equal(
       readPersistedRun(runsDir, firstId),
@@ -1507,7 +1507,7 @@ describe("spec 039: provenance names the provider that answered after a failover
     });
 
     await service.start(pipelineId, {}, { pipelineSteps: testSteps });
-    await flushAsync();
+    await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
     const parsed = JSON.parse(readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
