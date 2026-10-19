@@ -488,9 +488,9 @@ const EVENTS_HEAD_BYTES = 64 * 1024;
  * With `mentioning`, only a line containing that text is parsed. The text is a
  * pre-filter, not the answer — an id quoted inside a nested field (a tool call's
  * input is an object) matches it too, so a line it matches is still judged by
- * its own top-level field. A file that cannot be read names no run.
+ * its own top-level field. Undefined when the file cannot be read.
  */
-function runIdsAtHeadOfEvents(path: string, mentioning?: string): Set<string> {
+function runIdsAtHeadOfEvents(path: string, mentioning?: string): Set<string> | undefined {
   const ids = new Set<string>();
   let text: string;
   let cut: boolean;
@@ -502,7 +502,7 @@ function runIdsAtHeadOfEvents(path: string, mentioning?: string): Set<string> {
     text = buffer.toString("utf8", 0, read);
     cut = read === EVENTS_HEAD_BYTES;
   } catch {
-    return ids;
+    return undefined;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -521,13 +521,16 @@ function runIdsAtHeadOfEvents(path: string, mentioning?: string): Set<string> {
   return ids;
 }
 
-/** The pipeline stems of a directory's events files that no artifact in it claims, sorted. */
-function unclaimedEventsStems(dir: string): string[] {
+/**
+ * The pipeline stems of a directory's events files that no artifact in it claims,
+ * sorted; undefined when the directory cannot be listed.
+ */
+function unclaimedEventsStems(dir: string): string[] | undefined {
   let names: string[];
   try {
     names = readdirSync(dir);
   } catch {
-    return [];
+    return undefined;
   }
   const claimed = new Set(
     names
@@ -551,10 +554,11 @@ function sizeOf(path: string): number | undefined {
 }
 
 /**
- * Whether `path` is itself a regular file. A link is not followed and a FIFO is
- * not opened: the state dir is owned by this user, but a lookup for an id that
- * came off a URL must not be the thing that reads through a link or blocks on a
- * pipe someone left there.
+ * Whether `path` is itself a regular file. For events files, which the lookup
+ * opens by name (scanRunDir's `*.json` reads are unchanged): a link is not
+ * followed and a FIFO is not opened. The state dir is owned by this user, but a
+ * lookup for an id that came off a URL must not be the thing that reads through a
+ * link or blocks on a pipe someone left there.
  */
 function isRegularFile(path: string): boolean {
   try {
@@ -584,14 +588,24 @@ function findInOwnDir(runsDir: string, runId: string): RunMatch | undefined {
   if (own) return { kind: "artifact", dir, ...own };
   if (scan.failure) return { kind: "unreadable", dir, ...scan.failure };
 
-  const candidates = unclaimedEventsStems(dir).map((pipelineId) => {
+  const candidates = (unclaimedEventsStems(dir) ?? []).map((pipelineId) => {
     const file = join(dir, `${pipelineId}${EVENTS_SUFFIX}`);
-    return { pipelineId, names: runIdsAtHeadOfEvents(file), empty: sizeOf(file) === 0 };
+    return {
+      pipelineId,
+      names: runIdsAtHeadOfEvents(file) ?? new Set<string>(),
+      empty: sizeOf(file) === 0,
+    };
   });
   // Only a file with nothing in it is a crash before the first event; one with
   // content that names no run belongs to some run, and may not be this one.
   const found = candidates.find((c) => c.names.has(runId)) ?? candidates.find((c) => c.empty);
   return found === undefined ? undefined : { kind: "events", dir, pipelineId: found.pipelineId };
+}
+
+/** What a scan of the other run directories found, and whether it could read all of them. */
+interface ScanOutcome {
+  found?: RunMatch;
+  complete: boolean;
 }
 
 /**
@@ -612,31 +626,41 @@ function findInOwnDir(runsDir: string, runId: string): RunMatch | undefined {
  * unresolved; a stage chained into a directory outside runsDir (a cross-project
  * anchor) is found only by the daemon of the project that holds the anchor.
  */
-function findByScan(runsDir: string, runId: string): RunMatch | undefined {
+function findByScan(runsDir: string, runId: string): ScanOutcome {
   let dirEntries: string[];
   try {
     dirEntries = readdirSync(runsDir);
   } catch {
-    return undefined;
+    return { complete: false };
   }
+  let complete = true;
   const others = dirEntries.filter((name) => name !== runId && isSafeRunId(name));
   // As the artifact's JSON spells it: an id with a quote in it is escaped there.
   const spelled = JSON.stringify(runId).slice(1, -1);
   for (const name of others) {
     const dir = join(runsDir, name);
     const scan = scanRunDir(dir, spelled);
+    // A directory that cannot be listed, or a file in it that would not parse (it
+    // may be mid-write), could have held the run.
+    if (scan === undefined || scan.failure !== undefined) complete = false;
     const found = scan?.artifacts.find((c) => c.artifact.runId === runId);
-    if (found) return { kind: "artifact", dir, ...found };
+    if (found) return { found: { kind: "artifact", dir, ...found }, complete };
   }
   const prefilter = `"runId":${JSON.stringify(runId)}`;
   for (const name of others) {
     const dir = join(runsDir, name);
-    for (const pipelineId of unclaimedEventsStems(dir)) {
+    const stems = unclaimedEventsStems(dir);
+    if (stems === undefined) {
+      complete = false;
+      continue;
+    }
+    for (const pipelineId of stems) {
       const named = runIdsAtHeadOfEvents(join(dir, `${pipelineId}${EVENTS_SUFFIX}`), prefilter);
-      if (named.has(runId)) return { kind: "events", dir, pipelineId };
+      if (named === undefined) complete = false;
+      else if (named.has(runId)) return { found: { kind: "events", dir, pipelineId }, complete };
     }
   }
-  return undefined;
+  return { complete };
 }
 
 /**
@@ -655,16 +679,19 @@ function findRun(runsDir: string, runId: string): RunMatch | undefined {
 // head of every unclaimed events file, synchronously, and a page or poller that
 // asks about a run it cannot find asks again at once, from several routes. The
 // miss is kept for a moment so those repeats cost nothing. The price is that a
-// run whose files appear within the TTL is not found until it ends; a run in
-// this daemon never depends on this, because the registry answers first.
+// run whose files appear within the 2 s window is not found until the window
+// ends; a run in this daemon never depends on this, because the registry answers
+// first. Only a scan that read everything is remembered, and the window is
+// measured on a monotonic clock and clamped, so a clock that steps cannot
+// stretch it.
 
 const MISS_TTL_MS = 2000;
 const MISS_CAPACITY = 256;
 const scanMisses = new Map<string, number>();
-let lookupClock: () => number = Date.now;
+let lookupClock: () => number = () => performance.now();
 
 /** Replace the clock the remembered misses expire by, and forget them. For tests. */
-export function setRunLookupClock(clock: () => number = Date.now): void {
+export function setRunLookupClock(clock: () => number = () => performance.now()): void {
   lookupClock = clock;
   scanMisses.clear();
 }
@@ -674,11 +701,14 @@ function findByScanRemembering(runsDir: string, runId: string): RunMatch | undef
   const now = lookupClock();
   const expiresAt = scanMisses.get(key);
   if (expiresAt !== undefined) {
-    if (now < expiresAt) return undefined;
+    // Valid only inside [now, now + TTL]: an entry from a clock that has since
+    // stepped back would otherwise outlive its window.
+    const remaining = expiresAt - now;
+    if (remaining >= 0 && remaining <= MISS_TTL_MS) return undefined;
     scanMisses.delete(key);
   }
-  const found = findByScan(runsDir, runId);
-  if (found === undefined) {
+  const { found, complete } = findByScan(runsDir, runId);
+  if (found === undefined && complete) {
     // A Map iterates in insertion order, so the first key is the oldest miss.
     if (scanMisses.size >= MISS_CAPACITY) {
       const oldest = scanMisses.keys().next();

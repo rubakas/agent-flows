@@ -13,6 +13,7 @@ import {
   rmSync,
   writeFileSync,
   mkdirSync,
+  chmodSync,
   symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2253,6 +2254,47 @@ describe("spec 047 FR-11: a missed run lookup is remembered briefly", () => {
       now += 2;
       assert.deepEqual(locateRun(runsDir, "run-late"), { dir, pipelineId: "build" });
     } finally {
+      setRunLookupClock();
+    }
+  });
+
+  it("never holds a miss past the TTL when the clock steps backwards", () => {
+    let now = 10_000;
+    setRunLookupClock(() => now);
+    try {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      mkdirSync(join(runsDir, "run-anchor"), { recursive: true });
+      assert.equal(locateRun(runsDir, "run-late"), undefined);
+
+      const dir = writeChild(runsDir, "run-late");
+      now = 0;
+      assert.deepEqual(locateRun(runsDir, "run-late"), { dir, pipelineId: "build" });
+    } finally {
+      setRunLookupClock();
+    }
+  });
+
+  it("does not remember a miss from a scan that could not read a directory", (t) => {
+    if (process.getuid?.() === 0) {
+      t.skip("root reads a mode-000 directory");
+      return;
+    }
+    setRunLookupClock(() => 20_000);
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const locked = join(runsDir, "run-locked");
+    mkdirSync(locked, { recursive: true });
+    try {
+      chmodSync(locked, 0o000);
+      assert.equal(locateRun(runsDir, "run-hidden"), undefined, "the scan cannot see inside");
+
+      chmodSync(locked, 0o700);
+      writeFileSync(
+        join(locked, "build.json"),
+        JSON.stringify({ runId: "run-hidden", pipelineId: "build", status: "succeeded" })
+      );
+      assert.deepEqual(locateRun(runsDir, "run-hidden"), { dir: locked, pipelineId: "build" });
+    } finally {
+      chmodSync(locked, 0o700);
       setRunLookupClock();
     }
   });
