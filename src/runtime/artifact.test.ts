@@ -24,6 +24,7 @@ import {
   deriveChainStatus,
   listPersistedRuns,
   locateRun,
+  setRunLookupClock,
   readManifest,
   readPersistedRun,
   upsertManifestEntry,
@@ -2156,5 +2157,75 @@ describe("spec 047 FR-11: locating a chained stage from its events file", () => 
       undefined,
       "a run whose first line is past the head is not found: the scan never reads a whole file"
     );
+  });
+});
+
+describe("spec 047 FR-11: a missed run lookup is remembered briefly", () => {
+  const TTL_MS = 2000;
+
+  function writeChild(runsDir: string, childId: string): string {
+    const dir = join(runsDir, "run-anchor");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${childId}.json`),
+      JSON.stringify({ runId: childId, pipelineId: "build", status: "succeeded" })
+    );
+    return dir;
+  }
+
+  it("answers a second miss without reading the directories, and looks again after the TTL", () => {
+    let now = 1_000_000;
+    setRunLookupClock(() => now);
+    try {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      mkdirSync(join(runsDir, "run-anchor"), { recursive: true });
+      assert.equal(locateRun(runsDir, "run-late"), undefined);
+
+      // The artifact appears. A lookup that read the directories would find it.
+      const dir = writeChild(runsDir, "run-late");
+      now += TTL_MS - 1;
+      assert.equal(locateRun(runsDir, "run-late"), undefined, "inside the TTL: remembered");
+      assert.equal(readPersistedRun(runsDir, "run-late"), undefined);
+
+      now += 2;
+      assert.deepEqual(locateRun(runsDir, "run-late"), { dir, pipelineId: "build" });
+    } finally {
+      setRunLookupClock();
+    }
+  });
+
+  it("remembers a miss per runs dir and per id", () => {
+    setRunLookupClock(() => 5_000_000);
+    try {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      const otherRunsDir = makeStateRunsDir(makeTmpDir());
+      assert.equal(locateRun(runsDir, "run-x"), undefined);
+      writeChild(runsDir, "run-y");
+      writeChild(otherRunsDir, "run-x");
+
+      assert.ok(
+        locateRun(runsDir, "run-y") !== undefined,
+        "another id is not remembered as missing"
+      );
+      assert.ok(locateRun(otherRunsDir, "run-x") !== undefined, "another runs dir is its own");
+    } finally {
+      setRunLookupClock();
+    }
+  });
+
+  it("holds a bounded number of misses, forgetting the oldest first", () => {
+    setRunLookupClock(() => 9_000_000);
+    try {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      mkdirSync(join(runsDir, "run-anchor"), { recursive: true });
+      for (let i = 0; i < 300; i++) assert.equal(locateRun(runsDir, `run-miss-${i}`), undefined);
+      writeChild(runsDir, "run-miss-0");
+      writeChild(runsDir, "run-miss-299");
+
+      assert.ok(locateRun(runsDir, "run-miss-0") !== undefined, "the oldest miss was evicted");
+      assert.equal(locateRun(runsDir, "run-miss-299"), undefined, "the newest is still held");
+    } finally {
+      setRunLookupClock();
+    }
   });
 });

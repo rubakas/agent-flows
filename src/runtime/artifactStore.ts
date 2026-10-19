@@ -601,7 +601,47 @@ function findByScan(runsDir: string, runId: string): RunMatch | undefined {
  */
 function findRun(runsDir: string, runId: string): RunMatch | undefined {
   if (!isSafeRunId(runId)) return undefined;
-  return findInOwnDir(runsDir, runId) ?? findByScan(runsDir, runId);
+  return findInOwnDir(runsDir, runId) ?? findByScanRemembering(runsDir, runId);
+}
+
+// ── A missed scan, remembered ────────────────────────────────────────────────
+//
+// A lookup for an id that is nowhere reads every artifact under runsDir and the
+// head of every unclaimed events file, synchronously, and a page or poller that
+// asks about a run it cannot find asks again at once, from several routes. The
+// miss is kept for a moment so those repeats cost nothing. The price is that a
+// run whose files appear within the TTL is not found until it ends; a run in
+// this daemon never depends on this, because the registry answers first.
+
+const MISS_TTL_MS = 2000;
+const MISS_CAPACITY = 256;
+const scanMisses = new Map<string, number>();
+let lookupClock: () => number = Date.now;
+
+/** Replace the clock the remembered misses expire by, and forget them. For tests. */
+export function setRunLookupClock(clock: () => number = Date.now): void {
+  lookupClock = clock;
+  scanMisses.clear();
+}
+
+function findByScanRemembering(runsDir: string, runId: string): RunMatch | undefined {
+  const key = `${runsDir}\0${runId}`;
+  const now = lookupClock();
+  const expiresAt = scanMisses.get(key);
+  if (expiresAt !== undefined) {
+    if (now < expiresAt) return undefined;
+    scanMisses.delete(key);
+  }
+  const found = findByScan(runsDir, runId);
+  if (found === undefined) {
+    // A Map iterates in insertion order, so the first key is the oldest miss.
+    if (scanMisses.size >= MISS_CAPACITY) {
+      const oldest = scanMisses.keys().next();
+      if (!oldest.done) scanMisses.delete(oldest.value);
+    }
+    scanMisses.set(key, now + MISS_TTL_MS);
+  }
+  return found;
 }
 
 /** Where a run's files live. */
