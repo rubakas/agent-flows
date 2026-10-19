@@ -2,10 +2,10 @@
 //
 // A Claude dynamic workflow cannot read files, so the eight step prompts, their model
 // tiers (all from pipelines/code-review.yaml) and the two output schemas are embedded into
-// the script. They are embedded with JSON.stringify
-// — never spliced into a template literal — so no character in a prompt can break out
-// of the string it lives in. The output is deterministic: a test compares the committed
-// script with buildWorkflow(), so editing the generated file by hand fails the build.
+// the script. They are embedded with JSON.stringify - never spliced into a template
+// literal - so no character in a prompt can break out of the string it lives in. The
+// output is deterministic: a test compares the committed script with buildWorkflow(), so
+// editing the generated file by hand fails the build.
 //
 //   pnpm plugin:generate
 
@@ -86,7 +86,7 @@ export function reviewEngineTables(
       );
     }
     if (step.schema !== undefined) {
-      if (!(step.schema in SCHEMA_FILE)) {
+      if (!Object.hasOwn(SCHEMA_FILE, step.schema)) {
         throw new Error(
           `step ${step.id} declares schema ${step.schema}, which has no plugin schema file`
         );

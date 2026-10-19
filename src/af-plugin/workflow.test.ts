@@ -198,6 +198,12 @@ describe("review-engine freshness (FR-5)", () => {
       }, /verify.*schema weaknesses/);
     });
 
+    it("a schema key that only exists on Object.prototype", () => {
+      refuses((loaded) => {
+        (step(loaded, "verify") as { schema?: string }).schema = "constructor";
+      }, /verify.*schema constructor/);
+    });
+
     it("a placeholder the engine cannot fill", () => {
       refuses((loaded) => {
         loaded.prompts.verify += "\n{{baseline}}\n";
