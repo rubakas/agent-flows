@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { packageRoot } from "../packageRoot.js";
 import { listPipelines, loadPipeline } from "./load.js";
+import { bundledPipelines } from "./pipelines.js";
 import { renderPortabilityMatrix } from "./portability.js";
 import { MATRIX_PROFILE_IDS, defaultRegistry, getProfile } from "./registry.js";
 
@@ -57,7 +58,9 @@ describe("portability matrix — canon:check output (V5)", () => {
     assert.equal(files.length, 12, "the repo ships 12 pipelines");
 
     // V7: every pipeline must still load after the permissions.allow removal.
-    const loaded = files.map((f) => loadPipeline(f));
+    const resolvePath = (id: string): string | undefined =>
+      bundledPipelines().catalog.entries.get(id)?.filePath;
+    const loaded = files.map((f) => loadPipeline(f, { resolvePath }));
 
     const table = renderPortabilityMatrix(
       loaded,

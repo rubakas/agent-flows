@@ -17,14 +17,21 @@ import { packageRoot } from "../packageRoot.js";
 import { assembleSpec } from "./assemble.js";
 import { pipelineAncestors, pipelineLevels } from "./graph.js";
 import { loadPipeline } from "./load.js";
+import { bundledPipelines } from "./pipelines.js";
 import { extractPlaceholders, renderPrompt } from "./render.js";
 
 const repoRoot = packageRoot();
 const pipelinesYaml = join(repoRoot, "pipelines", "spec-creation.yaml");
 
+// A nested pipeline loads only through a resolver. The fake pipelines live at
+// /fake/pipelines/<id>.yaml; the shipped ones resolve over the bundled catalogue.
+const fakeResolve = (id: string): string => `/fake/pipelines/${id}.yaml`;
+const bundledResolve = (id: string): string | undefined =>
+  bundledPipelines().catalog.entries.get(id)?.filePath;
+
 describe("loadPipeline", () => {
   it("loads spec-creation.yaml successfully", () => {
-    const { def, prompts } = loadPipeline(pipelinesYaml);
+    const { def, prompts } = loadPipeline(pipelinesYaml, { resolvePath: bundledResolve });
     assert.equal(def.id, "spec-creation");
     // 4 llm + assemble + 3 (verify.*) + 1 (correct.revise) + approve + persist + export = 12
     assert.equal(def.steps.length, 12);
@@ -39,7 +46,7 @@ describe("loadPipeline", () => {
   });
 
   it("spec-creation pipeline levels match expected execution order (equivalence)", () => {
-    const { def } = loadPipeline(pipelinesYaml);
+    const { def } = loadPipeline(pipelinesYaml, { resolvePath: bundledResolve });
     const levels = pipelineLevels(def.steps);
     assert.deepEqual(
       levels,
@@ -1126,6 +1133,7 @@ steps:
     prompt: prompts/eval.md
 `;
     const { def } = loadPipeline("/fake/pipelines/test.yaml", {
+      resolvePath: fakeResolve,
       readFile: (p) => {
         if (p.endsWith("test.yaml"))
           return makeLoopYaml("    pipeline: build-round\n    maxIterations: 3\n    until: passed");
@@ -1234,6 +1242,7 @@ describe("loadPipeline — run control keys are reserved", () => {
     `steps:\n${steps}`;
   const load = (yaml: string, children: Record<string, string> = {}) =>
     loadPipeline("/fake/pipelines/test.yaml", {
+      resolvePath: fakeResolve,
       readFile: (p) => {
         if (p.endsWith("test.yaml")) return yaml;
         const child = Object.entries(children).find(([id]) => p.endsWith(`${id}.yaml`));
@@ -1770,6 +1779,7 @@ steps:
     dependsOn: [foo]
 `;
     const { prompts } = loadPipeline("/fake/pipelines/outer.yaml", {
+      resolvePath: fakeResolve,
       readFile: (p) => {
         if (p.endsWith("outer.yaml")) return outerYaml;
         if (p.endsWith("inner.yaml")) return innerYaml;
@@ -1810,6 +1820,7 @@ steps:
     assert.throws(
       () =>
         loadPipeline("/fake/pipelines/outer.yaml", {
+          resolvePath: fakeResolve,
           readFile: (p) => {
             if (p.endsWith("outer.yaml")) return outerYaml;
             if (p.endsWith("inner.yaml")) return innerYaml;
@@ -1955,6 +1966,7 @@ steps:
       parentKey: parentKey
 `;
     const { prompts } = loadPipeline("/fake/pipelines/parent.yaml", {
+      resolvePath: fakeResolve,
       readFile: (p) => {
         if (p.endsWith("parent.yaml")) return parentYaml;
         if (p.endsWith("inner.yaml")) return innerYaml;
@@ -1996,6 +2008,7 @@ steps:
     assert.throws(
       () =>
         loadPipeline("/fake/pipelines/parent.yaml", {
+          resolvePath: fakeResolve,
           readFile: (p) => {
             if (p.endsWith("parent.yaml")) return parentYaml;
             if (p.endsWith("inner.yaml")) return innerYaml;
@@ -2044,6 +2057,7 @@ steps:
     assert.throws(
       () =>
         loadPipeline("/fake/pipelines/parent.yaml", {
+          resolvePath: fakeResolve,
           readFile: (p) => {
             if (p.endsWith("parent.yaml")) return parentYaml;
             if (p.endsWith("inner.yaml")) return innerYaml;
@@ -2091,7 +2105,7 @@ describe("cycle-dev.yaml — plan step wires investigate.findings into spec-crea
 
 describe("spec-creation — findings is an optional input", () => {
   it("loads with optionalInputs containing 'findings'", () => {
-    const { def } = loadPipeline(pipelinesYaml);
+    const { def } = loadPipeline(pipelinesYaml, { resolvePath: bundledResolve });
     assert.ok(def.inputs.includes("findings"), "findings must be in inputs");
     assert.ok(def.optionalInputs?.includes("findings"), "findings must be in optionalInputs");
   });
@@ -2160,7 +2174,7 @@ steps: []
 
 describe("spec-creation — verify and correct steps present after expansion (spec 018)", () => {
   it("expanded def contains verify.synthesis and correct.revise", () => {
-    const { def } = loadPipeline(pipelinesYaml);
+    const { def } = loadPipeline(pipelinesYaml, { resolvePath: bundledResolve });
     const ids = def.steps.map((s) => s.id);
     assert.ok(ids.includes("verify.synthesis"), "expanded def must include verify.synthesis");
     assert.ok(ids.includes("correct.revise"), "expanded def must include correct.revise");
@@ -2169,7 +2183,7 @@ describe("spec-creation — verify and correct steps present after expansion (sp
   it("correct.revise prompt placeholders resolve without error (ancestor check passes)", () => {
     // loadPipeline throws on any unresolved placeholder — if this passes, the
     // {{plan}} and {{findings}} in correct-plan.md are reachable from correct.revise.
-    assert.doesNotThrow(() => loadPipeline(pipelinesYaml));
+    assert.doesNotThrow(() => loadPipeline(pipelinesYaml, { resolvePath: bundledResolve }));
   });
 });
 
@@ -2397,7 +2411,7 @@ describe("build.yaml — terminal verification check (regression: success over a
   });
 
   it("nothing runs after the verification check — it is alone in the last level", () => {
-    const { def } = loadPipeline(buildYaml);
+    const { def } = loadPipeline(buildYaml, { resolvePath: bundledResolve });
     const levels = pipelineLevels(def.steps);
     assert.deepEqual(
       levels[levels.length - 1],
@@ -2462,6 +2476,7 @@ steps:
     assert.throws(
       () =>
         loadPipeline("/fake/pipelines/outer.yaml", {
+          resolvePath: fakeResolve,
           readFile: (p) => {
             if (p.endsWith("outer.yaml")) return outerYaml;
             if (p.endsWith("verify-inner.yaml")) return verifyInnerYaml;
@@ -2772,7 +2787,9 @@ describe("every shipped pipeline loads — graph, prompts and placeholders agree
 
   for (const file of files) {
     it(`${file} loads, and every {{placeholder}} resolves from an input or an ancestor`, () => {
-      const { def, prompts } = loadPipeline(join(pipelinesDir, file));
+      const { def, prompts } = loadPipeline(join(pipelinesDir, file), {
+        resolvePath: bundledResolve,
+      });
       assert.ok(def.steps.length > 0, `${file} declares no steps`);
       for (const step of def.steps) {
         if (step.kind !== "llm") continue;

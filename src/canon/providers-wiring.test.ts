@@ -157,7 +157,10 @@ describe("providers-wiring — Binding A generateWorkflowScript uses project reg
     const profile = getActiveProfile({}, providers);
     const registry = defaultRegistry({}, providers.models);
 
-    const loaded = loadMod.loadPipeline(pipelineFiles[0]);
+    const { bundledPipelines } = await import("./pipelines.js");
+    const resolvePath = (id: string): string | undefined =>
+      bundledPipelines().catalog.entries.get(id)?.filePath;
+    const loaded = loadMod.loadPipeline(pipelineFiles[0], { resolvePath });
     const script = ccMod.generateWorkflowScript(loaded, profile, registry);
 
     // The script should compile (is a non-empty string) — behavioural correctness
