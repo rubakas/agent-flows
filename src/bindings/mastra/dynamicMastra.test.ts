@@ -407,20 +407,23 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
     assert.deepEqual(prompts, ["N1 a"]);
   });
 
-  it("a run suspended at a gate completes on its original workflow after an edit rebuilt", async () => {
+  it("a run suspended at a gate completes on its original workflow after an edit rebuilt, and runs the steps it started with", async () => {
     const root = join(projectDir, ".agent-flows");
     mkdirSync(join(root, "pipelines"), { recursive: true });
     mkdirSync(join(root, "prompts"), { recursive: true });
-    const gated = (text: string): void => {
+    const gated = (text: string, afterText: string): void => {
       writeFileSync(
         join(root, "pipelines", "gated.yaml"),
         "id: gated\nversion: 1\ndescription: gate fixture\ninputs: []\nsteps:\n" +
           "  - id: first\n    kind: llm\n    model: first\n    prompt: prompts/gated-first.md\n" +
-          "  - id: approve\n    kind: gate\n    message: ok?\n    dependsOn: [first]\n"
+          "  - id: approve\n    kind: gate\n    message: ok?\n    dependsOn: [first]\n" +
+          "  - id: after\n    kind: llm\n    model: first\n    prompt: prompts/gated-after.md\n" +
+          "    dependsOn: [approve]\n"
       );
       writeFileSync(join(root, "prompts", "gated-first.md"), text);
+      writeFileSync(join(root, "prompts", "gated-after.md"), afterText);
     };
-    gated("A-BUILD");
+    gated("A-BUILD", "A-AFTER");
     const dyn = startup();
 
     const runA = await dyn.getWorkflow("gated").createRun();
@@ -428,7 +431,7 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
     assert.equal(startedA.status, "suspended");
     assert.ok(Array.isArray(startedA.suspended), "A must report where it suspended");
 
-    gated("B-BUILD");
+    gated("B-BUILD", "B-AFTER");
     const runB = await dyn.getWorkflow("gated").createRun();
     const startedB = await runB.start({ inputData: {} });
     assert.equal(startedB.status, "suspended");
@@ -439,6 +442,11 @@ describe("createDynamicMastra — an edited pipeline runs its edited build (spec
       resumeData: { approved: true },
     });
     assert.equal(resumedA.status, "success", "A completes after the instance was swapped");
+    assert.deepEqual(
+      prompts,
+      ["A-BUILD", "B-BUILD", "A-AFTER"],
+      "the step after the gate is A's own, not the edited definition's"
+    );
   });
 
   it("unregisters the replaced instance's global hooks, but never shuts it down", () => {
