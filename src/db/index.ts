@@ -7,7 +7,7 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 
 export type DbInstance = BetterSQLite3Database<typeof schema>;
 
-// DDL that matches schema.ts — used only to bootstrap an in-memory DB for tests.
+// The DDL both factories run; it must match schema.ts (pinned by schema.test.ts).
 const SCHEMA_DDL = `
 PRAGMA foreign_keys = ON;
 
