@@ -49,7 +49,10 @@ export function parseHash(hash) {
     const tail = rest.join("/");
     if (tail === "") return { view: "runs" };
     const runId = decode(tail);
-    return runId === null ? { view: "runs" } : { view: "run", runId };
+    // "." and ".." survive encodeURIComponent, so as a run id they would climb
+    // out of /api/runs/<id>/… the moment they are put into a request path.
+    if (runId === null || runId === "." || runId === "..") return { view: "runs" };
+    return { view: "run", runId };
   }
 
   if (head === "workflows" && rest.length > 0 && rest[0] !== "") {

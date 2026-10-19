@@ -71,6 +71,21 @@ describe("parseHash — route table (FR-001)", () => {
   });
 });
 
+describe("parseHash — dot-segment run ids are not runs", () => {
+  it("treats '.' and '..', plain or percent-encoded, as no run at all", () => {
+    // encodeURIComponent leaves dots alone, so such an id would climb out of
+    // /api/runs/<id>/… once it is put into a request path.
+    for (const hash of ["#/runs/.", "#/runs/..", "#/runs/%2e", "#/runs/%2E%2E", "#/runs/%2e%2E"]) {
+      assert.deepEqual(parseHash(hash), { view: "runs" }, `${hash} must fall back to the list`);
+    }
+  });
+
+  it("still opens ids that merely contain dots", () => {
+    assert.deepEqual(parseHash("#/runs/a..b"), { view: "run", runId: "a..b" });
+    assert.deepEqual(parseHash("#/runs/..x"), { view: "run", runId: "..x" });
+  });
+});
+
 describe("parseHash — catalogue detail routes (spec 037 D2/FR-006)", () => {
   it("maps the workflow and editor routes to their views", () => {
     assert.deepEqual(parseHash("#/workflows/investigate"), {

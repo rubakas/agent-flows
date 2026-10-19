@@ -217,6 +217,24 @@ describe("open — what is requested, and in what order", () => {
   });
 });
 
+describe("dot-segment ids never reach a request path", () => {
+  it("refuses to create a session for a run id of '.' or '..'", () => {
+    for (const runId of [".", ".."]) {
+      assert.throws(() => rig({ runId }), /run id/u, `a session was created for ${runId}`);
+    }
+  });
+
+  it("asks nothing for a step id of '.' or '..'", async () => {
+    const r = await opened();
+    const before = r.net.calls.length;
+    for (const stepId of [".", ".."]) {
+      assert.equal(await r.session.stepOutput(stepId), null);
+      assert.equal(await r.session.stepDetail(stepId), undefined);
+    }
+    assert.equal(r.net.calls.length, before, "a dot-segment step id was put into a request");
+  });
+});
+
 describe("close — a closed session never paints", () => {
   it("before the snapshot lands: nothing is emitted, opened or requested, and open() resolves", async () => {
     const r = rig();

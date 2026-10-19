@@ -54,6 +54,12 @@ function parseJson(text) {
 }
 
 /**
+ * "." and ".." survive encodeURIComponent, so as an id they would climb out of
+ * /api/runs/<id>/… once put into a request path.
+ */
+const isDotSegment = (id) => id === "." || id === "..";
+
+/**
  * @param {object} o
  * @param {string} o.projectKey "" is this daemon's own project.
  * @param {string} o.runId
@@ -64,6 +70,7 @@ function parseJson(text) {
  */
 export function createRunSession(o) {
   const { projectKey, runId, outputs, on } = o;
+  if (isDotSegment(runId)) throw new Error(`Refusing to open run id "${runId}"`);
   const api = (suffix) => pathFor(projectKey, `/api/runs/${encodeURIComponent(runId)}${suffix}`);
 
   let closed = false;
@@ -271,6 +278,7 @@ export function createRunSession(o) {
 
     /** One step's current state from a fresh snapshot; undefined when it cannot be read. */
     stepDetail(stepId) {
+      if (isDotSegment(stepId)) return whileOpen(undefined);
       return whileOpen(
         getSnapshot().then(
           (fresh) => fresh.steps?.[stepId],
@@ -281,6 +289,7 @@ export function createRunSession(o) {
 
     /** The persisted output of a step, or null when none was written. */
     stepOutput(stepId) {
+      if (isDotSegment(stepId)) return whileOpen(null);
       return whileOpen(cachedOutput(stepId));
     },
 
