@@ -85,6 +85,19 @@ export function pollersFor(view) {
   return view === "runs" ? ["runs"] : [];
 }
 
+/**
+ * The path a request to project `key` takes: direct for this daemon's own
+ * project (an empty key), forwarded through `/api/projects/<key>` otherwise
+ * (spec 042 D13).
+ *
+ * @param {string} key
+ * @param {string} path
+ * @returns {string}
+ */
+export function pathFor(key, path) {
+  return !key ? path : `/api/projects/${encodeURIComponent(key)}${path}`;
+}
+
 /** The hash a view (and optional id) is reached by. Inverse of parseHash. */
 export function hashFor(view, id) {
   if (view === "run") return id === undefined ? "#/runs" : `#/runs/${encodeURIComponent(id)}`;

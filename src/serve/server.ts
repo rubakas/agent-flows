@@ -174,6 +174,7 @@ const STATIC_MODULES: ReadonlyMap<string, string> = new Map([
   ["/ui-daemons.js", "ui-daemons.js"],
   ["/ui-gate.js", "ui-gate.js"],
   ["/ui-markdown.js", "ui-markdown.js"],
+  ["/ui-runview.js", "ui-runview.js"],
 ]);
 
 const RE_DAEMON_STOP = /^\/api\/daemons\/([^/]+)\/stop$/u;

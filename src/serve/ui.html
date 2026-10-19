@@ -1246,7 +1246,7 @@
 
     <script type="module">
       import { esc as escH } from "/ui-esc.js";
-      import { parseHash, hashFor, pollersFor, VIEWS } from "/ui-route.js";
+      import { parseHash, hashFor, pathFor, pollersFor, VIEWS } from "/ui-route.js";
       import { renderLevelsSvg } from "/ui-graph.js";
       import {
         isActiveRun,
@@ -1265,13 +1265,8 @@
       } from "/ui-tables.js";
       import { daemonsTable, stopConfirmText, stopResultLine } from "/ui-daemons.js";
       import { gateBox } from "/ui-gate.js";
-      import {
-        mergeLogEvents,
-        renderDecisions,
-        renderLogEvent,
-        renderOutput,
-        renderStepFooter,
-      } from "/ui-log.js";
+      import { renderDecisions, renderLogEvent, renderOutput, renderStepFooter } from "/ui-log.js";
+      import { createOutputCache, createRunSession } from "/ui-runview.js";
       import {
         collectProviderDocument,
         parseProviderError,
@@ -1298,11 +1293,6 @@
       // this daemon's own, which it answers directly. It rides in the URL so a
       // reload or a copied link reopens the same run against the same project.
       let projectKey = new URLSearchParams(location.search).get("project") || "";
-
-      /** The path a request to `key` takes: direct for ours, forwarded otherwise. */
-      function pathFor(key, path) {
-        return !key ? path : `/api/projects/${encodeURIComponent(key)}${path}`;
-      }
 
       function apiPath(path) {
         return pathFor(projectKey, path);
@@ -2044,8 +2034,11 @@
 
       // ── Run observability ──────────────────────────────────────────────────
 
-      /** Active SSE connection for the currently-watched run, if any. */
-      let activeRunEs = null;
+      /** The session of the run on screen, if any (ui-runview.js). */
+      let _session = null;
+
+      /** Full step outputs, shared by every session for the life of the page. */
+      const _outputs = createOutputCache();
 
       /** Which chip is selected in the Runs view (D2). "active" is the default. */
       let _runsFilter = "active";
@@ -2296,7 +2289,7 @@
           // panel while it is open.
           //
           // The runs list is driven by the open stream while one is open.
-          if (activeRunEs !== null) return;
+          if (_session?.streamState === "open") return;
           loadRuns();
         }, 4000);
       }
@@ -2318,7 +2311,7 @@
         if (!pollersFor(parseHash(location.hash).view).includes("runs")) return;
         startRunsPoller();
         loadDaemons();
-        if (activeRunEs === null) loadRuns();
+        if (_session?.streamState !== "open") loadRuns();
       });
 
       /**
@@ -2330,11 +2323,9 @@
 
       /** Close the run stream, if any. Idempotent — leaving a view calls it blindly. */
       function closeRunStream() {
-        if (!activeRunEs) return;
-        activeRunEs.close();
-        activeRunEs = null;
-        window.__afDebug.sseCloses += 1;
-        window.__afDebug.openStreams = window.__afDebug.sseOpens - window.__afDebug.sseCloses;
+        if (_session === null) return;
+        _session.close();
+        _session = null;
       }
 
       /**
@@ -2367,7 +2358,8 @@
       // snapshot costs no second fetch — and so the block survives it at all.
       const _runResultHtml = {};
 
-      async function fillRunResult(runId, snapshot, scope) {
+      async function fillRunResult(session, snapshot, scope) {
+        const runId = session.runId;
         // Scoped to the body just rendered, never `getElementById`: a stale
         // duplicate elsewhere in the document would otherwise win (042 D25).
         const el = (scope ?? document).querySelector("#run-result");
@@ -2382,19 +2374,14 @@
         if (runPhase(snapshot) !== "terminal") return;
         let sink = null;
         try {
-          sink = terminalStepId(await declaredStepsFull(snapshot.pipelineId));
+          sink = terminalStepId(await session.whileOpen(declaredStepsFull(snapshot.pipelineId)));
         } catch {
           return;
         }
         if (sink === null) return;
         try {
-          const res = await fetch(
-            apiPath(
-              `/api/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(sink)}/output`
-            )
-          );
-          if (!res.ok) return;
-          const payload = await res.json();
+          const payload = await session.stepOutput(sink);
+          if (payload === null) return;
           // 042 D27: two views of one answer. Preview leads, because the blocks
           // are what the operator reads at a glance; `md` is the source, because
           // that is what gets pasted elsewhere. Copy hands over the SOURCE from
@@ -2422,7 +2409,7 @@
           // The stream may have re-rendered the body while this was in flight,
           // so the element is looked up again rather than held across the await.
           const target = (scope ?? document).querySelector("#run-result");
-          if (target === null || _activeRunId !== runId) return;
+          if (target === null) return;
           target.innerHTML = html;
           target.hidden = false;
           // The payload index the button carries is registered per render, so it
@@ -2436,137 +2423,47 @@
       }
 
       async function openRunView(runId) {
-        _activeRunId = runId;
         closeRunStream();
-        resetLogState();
+        _decisions = [];
+        _judgeError = undefined;
 
         const body = runDetailTarget();
         body.innerHTML = `<p style="color:var(--muted);font-size:13px">Loading…</p>`;
 
-        // Fetch the current snapshot first so the view has a starting state.
-        let snapshot;
-        try {
-          snapshot = await api("GET", `/api/runs/${encodeURIComponent(runId)}`);
-        } catch (e) {
-          body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
-          return;
-        }
-
-        // The router may have moved on while the snapshot was in flight; opening
-        // a stream for a run the operator already left is exactly the leak
-        // FR-004 is about.
-        if (parseHash(location.hash).runId !== runId) return;
-
-        renderRunDetail(runId, snapshot, body);
-
-        // FR-011: a run restored from disk has nothing left to stream. Opening an
-        // EventSource for it would burn a connection on a stream that closes
-        // immediately, and __afDebug.openStreams is how a test proves we don't.
-        // Its step log is still on disk, so the backfill runs on its own.
-        if (snapshot.source === "disk") {
-          await backfillRunLog(runId);
-          return;
-        }
-
-        const es = new EventSource(apiPath(`/api/runs/${encodeURIComponent(runId)}/events`));
-        activeRunEs = es;
-        window.__afDebug.sseOpens += 1;
-        window.__afDebug.openStreams = window.__afDebug.sseOpens - window.__afDebug.sseCloses;
-
-        es.addEventListener("snapshot", (ev) => {
-          let data;
-          try {
-            data = JSON.parse(ev.data);
-          } catch {
-            return;
-          }
-          renderRunDetail(runId, data, body);
+        // The session binds this run to the project the page is showing NOW, and
+        // everything it does afterwards is for that pair alone. Closing it (the
+        // router does, on any route change) is what makes a late response from
+        // this run unable to paint into the next one.
+        const session = createRunSession({
+          projectKey,
+          runId,
+          fetch: (u, i) => window.fetch(u, i),
+          openStream: (u) => new EventSource(u),
+          outputs: _outputs,
+          on: {
+            snapshot: (snapshot) => renderRunDetail(session, snapshot, body),
+            step: updateStepRow,
+            log: paintLogBatch,
+            stream: (open) => {
+              const debug = window.__afDebug;
+              if (open) debug.sseOpens += 1;
+              else debug.sseCloses += 1;
+              debug.openStreams = debug.sseOpens - debug.sseCloses;
+            },
+            error: (e) => {
+              body.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
+            },
+          },
         });
-
-        es.addEventListener("step", (ev) => {
-          let data;
-          try {
-            data = JSON.parse(ev.data);
-          } catch {
-            return;
-          }
-          updateStepRow(data);
-        });
-
-        // spec 036 D4: log events that arrive while the backfill is in flight are
-        // buffered, not rendered — the backfill has to land first so the lines
-        // stay in seq order. backfillRunLog flushes the buffer when it is done.
-        es.addEventListener("log", (ev) => {
-          let data;
-          try {
-            data = JSON.parse(ev.data);
-          } catch {
-            return;
-          }
-          if (_logBuffer !== null) _logBuffer.push(data);
-          else applyLogEvents([data]);
-        });
-
-        es.onerror = () => {
-          // Silently stop — the view still shows last-known state.
-          if (activeRunEs === es) closeRunStream();
-          else es.close();
-        };
-
-        // The stream is open, so nothing emitted from here on can be missed.
-        await backfillRunLog(runId);
+        _session = session;
+        await session.open();
       }
 
       // ── Step log: Activity, Decisions and Output (spec 036 D9/D10) ─────────
 
-      /** Merge state for the attached run: the last applied seq and its events per step. */
-      let _logState = null;
-
-      /** Log events held back while the backfill is in flight; null once flushed. */
-      let _logBuffer = null;
-
       /** Gate decisions on screen, seeded from the snapshot and grown by log events. */
       let _decisions = [];
       let _judgeError;
-
-      /** Forget the previous run's log — every view of a run starts from nothing. */
-      function resetLogState() {
-        _logState = mergeLogEvents(null, []);
-        _logBuffer = [];
-        _decisions = [];
-        _judgeError = undefined;
-      }
-
-      /**
-       * Fetch the run's whole step log as NDJSON and apply it, then flush the
-       * events the stream buffered while the fetch was in flight (spec 036 D4).
-       * Duplicates between the two are dropped by seq.
-       */
-      async function backfillRunLog(runId) {
-        let text = "";
-        try {
-          const res = await fetch(apiPath(`/api/runs/${encodeURIComponent(runId)}/log`));
-          if (res.ok) text = await res.text();
-        } catch {
-          // The activity list is an addition to the view, not the view itself.
-        }
-        if (_activeRunId !== runId) return;
-
-        const events = [];
-        for (const line of text.split("\n")) {
-          if (line.trim() === "") continue;
-          try {
-            events.push(JSON.parse(line));
-          } catch {
-            // A torn last line of a file still being written — skip it.
-          }
-        }
-        applyLogEvents(events);
-
-        const buffered = _logBuffer ?? [];
-        _logBuffer = null;
-        applyLogEvents(buffered);
-      }
 
       /** The step row for an id, whether the scope is the run body or the row itself. */
       function findStepRow(scope, stepId) {
@@ -2589,14 +2486,15 @@
 
       /** Paint every step's activity list from the merge state, after a re-render. */
       function repaintLogs(scope) {
-        if (_logState === null) return;
-        for (const [stepId, events] of _logState.byStep) {
+        const state = _session?.logState;
+        if (!state) return;
+        for (const [stepId, events] of state.byStep) {
           const row = findStepRow(scope, stepId);
           if (!row) continue;
           const list = row.querySelector(".log-events");
           if (list) list.innerHTML = events.map(renderLogEvent).join("");
           setStepFooter(row, events);
-          setEarlierCount(row, _logState.droppedEarlier.get(stepId) ?? 0);
+          setEarlierCount(row, state.droppedEarlier.get(stepId) ?? 0);
         }
       }
 
@@ -2632,26 +2530,15 @@
       }
 
       /**
-       * Merge incoming log events into the state and paint the ones that were
-       * new. Each step is appended to once per batch, so the backfill is a single
-       * insert per step and a live event is a single line.
+       * Paint a batch of new log events. The session has already merged them into
+       * its state and dropped the duplicates; this is only the drawing. Each step
+       * is appended to once per batch, so the backfill is a single insert per
+       * step and a live event is a single line.
        */
-      function applyLogEvents(incoming) {
-        if (_logState === null || incoming.length === 0) return;
-        const lastSeq = _logState.lastSeq;
-        const droppedBefore = _logState.droppedEarlier;
-        _logState = mergeLogEvents(_logState, incoming);
-
-        const applied = incoming
-          .filter((ev) => ev && typeof ev.seq === "number" && ev.seq > lastSeq)
-          .sort((a, b) => a.seq - b.seq);
-
-        const seen = new Set();
+      function paintLogBatch({ applied, state, droppedBefore }) {
         const html = new Map();
         let decisionsChanged = false;
         for (const ev of applied) {
-          if (seen.has(ev.seq)) continue;
-          seen.add(ev.seq);
           const stepId = String(ev.stepId ?? "");
           html.set(stepId, (html.get(stepId) ?? "") + renderLogEvent(ev));
           if (ev.kind === "decision" || ev.kind === "judge.degraded") {
@@ -2664,8 +2551,8 @@
         for (const [stepId, added] of html) {
           const row = findStepRow(scope, stepId);
           if (!row) continue; // the row appears with the next snapshot, painted from state
-          const events = _logState.byStep.get(stepId) ?? [];
-          const dropped = _logState.droppedEarlier.get(stepId) ?? 0;
+          const events = state.byStep.get(stepId) ?? [];
+          const dropped = state.droppedEarlier.get(stepId) ?? 0;
           const list = row.querySelector(".log-events");
           if (list) {
             // A step at the 2000-event cap lost its oldest lines, so its list is
@@ -2688,33 +2575,6 @@
        * the operator reading a cut output as if it were the whole one.
        */
       const EXCERPT_NOTE = "Excerpt only — click it to load the full output.";
-
-      /**
-       * Full step outputs already fetched, keyed run + step.
-       *
-       * Outputs are immutable once a step settles, so a second open of the same
-       * excerpt must not pay for a second request.
-       */
-      const _fullOutputs = new Map();
-
-      /** The persisted output of one step, or null when none was written. */
-      async function fetchStepOutput(runId, stepId) {
-        const key = `${runId}\u0000${stepId}`;
-        if (_fullOutputs.has(key)) return _fullOutputs.get(key);
-        const res = await fetch(
-          apiPath(
-            `/api/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/output`
-          )
-        );
-        if (res.status === 404) {
-          _fullOutputs.set(key, null);
-          return null;
-        }
-        if (!res.ok) throw new Error(`Request failed (${res.status})`);
-        const payload = await res.json();
-        _fullOutputs.set(key, payload);
-        return payload;
-      }
 
       /** Put, update or drop the note that says this step's text is cut. */
       function setExcerptNote(row, outEl, text) {
@@ -2742,12 +2602,12 @@
        * Every failure leaves the excerpt on screen — the operator keeps what
        * they were already reading and is told why there is no more.
        */
-      async function loadFullOutput(el, runId) {
+      async function loadFullOutput(el, session) {
         const row = el.closest?.(".step-row");
-        if (!row || !runId || el.dataset.full === "yes") return;
+        if (!row || !session || el.dataset.full === "yes") return;
         const stepId = row.dataset.stepId;
         try {
-          const payload = await fetchStepOutput(runId, stepId);
+          const payload = await session.stepOutput(stepId);
           if (payload === null) {
             setExcerptNote(row, el, "Excerpt only — no full output was persisted for this step.");
             return;
@@ -2767,13 +2627,13 @@
        * Delegated from the panel rather than bound per row: the stream replaces
        * step rows as they advance, and a handler bound to a row dies with it.
        */
-      function wireExcerptToggles(scope, runId) {
+      function wireExcerptToggles(scope, session) {
         scope.onclick = (ev) => {
           const el = ev.target.closest?.(".step-output");
           if (el === null || el === undefined || !scope.contains(el)) return;
           el.classList.toggle("expanded");
           el.title = el.classList.contains("expanded") ? "Click to collapse" : "Click to expand";
-          if (el.classList.contains("expanded")) void loadFullOutput(el, runId);
+          if (el.classList.contains("expanded")) void loadFullOutput(el, session);
         };
       }
 
@@ -2791,18 +2651,18 @@
       /**
        * Re-open the outputs that were expanded before a re-render replaced the
        * rows holding them. The text comes back through loadFullOutput, which
-       * reads the cache fetchStepOutput already filled — a restore costs no
-       * second request, and a step whose output has since gone keeps its
+       * reads the cache the session's stepOutput already filled — a restore costs
+       * no second request, and a step whose output has since gone keeps its
        * excerpt and the note saying so.
        */
-      function restoreExpandedOutputs(body, runId, stepIds) {
+      function restoreExpandedOutputs(body, session, stepIds) {
         for (const stepId of stepIds) {
           const row = body.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
           const el = row?.querySelector(".step-output");
           if (!el) continue;
           el.classList.add("expanded");
           el.title = "Click to collapse";
-          void loadFullOutput(el, runId);
+          void loadFullOutput(el, session);
         }
       }
 
@@ -2810,7 +2670,7 @@
        * Fetch a step's persisted output the first time its Output block is opened
        * (spec 036 D6/D10). It is never part of the snapshot or the SSE stream.
        */
-      function wireStepOutputs(scope, runId) {
+      function wireStepOutputs(scope, session) {
         for (const details of scope.querySelectorAll(".step-output-full")) {
           const row = details.closest(".step-row");
           if (!row) continue;
@@ -2820,17 +2680,12 @@
             details.dataset.loaded = "yes";
             const target = details.querySelector(".step-output-body");
             try {
-              const res = await fetch(
-                apiPath(
-                  `/api/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/output`
-                )
-              );
-              if (res.status === 404) {
+              const payload = await session.stepOutput(stepId);
+              if (payload === null) {
                 target.textContent = "no persisted output"; // .textContent — safe
                 return;
               }
-              if (!res.ok) throw new Error(`Request failed (${res.status})`);
-              target.innerHTML = renderOutput(await res.json());
+              target.innerHTML = renderOutput(payload);
             } catch (e) {
               details.dataset.loaded = "no"; // a failed fetch may be retried
               target.innerHTML = `<div class="error-box">${escH(e.message)}</div>`;
@@ -2840,9 +2695,6 @@
       }
 
       // ── Run detail: invocation and per-step introspection (spec 033 D6) ────
-
-      /** Run id of the currently attached run, needed by the live step updater. */
-      let _activeRunId = null;
 
       /**
        * Text handed to each copy button, by index. Prompts and commands are far
@@ -2998,19 +2850,19 @@
        * view of a run whose definition is not cached yet. The second render
        * finds the cache filled, so this cannot loop.
        */
-      async function primeDeclaredSteps(runId, snapshot, body) {
+      async function primeDeclaredSteps(session, snapshot, body) {
         const pipelineId = snapshot.pipelineId;
         if (_declaredSteps[pipelineId] !== undefined) return;
-        await declaredStepsFull(pipelineId);
-        if (_activeRunId !== runId) return;
-        renderRunDetail(runId, snapshot, body);
+        await session.whileOpen(declaredStepsFull(pipelineId));
+        renderRunDetail(session, snapshot, body);
       }
 
       /**
        * Render (or re-render) the run detail panel body from a snapshot object.
        * All server data is escaped or written via textContent.
        */
-      function renderRunDetail(runId, snapshot, body) {
+      function renderRunDetail(session, snapshot, body) {
+        const runId = session.runId;
         const status = snapshot.status || "unknown";
         const sc = statusClass(status);
         const inv = snapshot.invocation;
@@ -3034,7 +2886,7 @@
         html += `<div id="run-result" hidden></div>`;
         // Filled after this html lands in the DOM, and refilled on every
         // re-render the stream causes — the fill used to run once and be wiped.
-        queueMicrotask(() => void fillRunResult(runId, snapshot, body));
+        queueMicrotask(() => void fillRunResult(session, snapshot, body));
 
         // A persisted run cannot be acted on: the workflow it belonged to is
         // gone with the daemon that ran it (FR-011).
@@ -3083,7 +2935,7 @@
         const steps = snapshot.steps || {};
         const declared = _declaredSteps[snapshot.pipelineId];
         if (declared === undefined && snapshot.pipelineId) {
-          queueMicrotask(() => void primeDeclaredSteps(runId, snapshot, body));
+          queueMicrotask(() => void primeDeclaredSteps(session, snapshot, body));
         }
         const stepRows = declaredStepRows(declared ?? [], steps);
         if (stepRows.length) {
@@ -3105,9 +2957,9 @@
         const expanded = expandedOutputStepIds(body);
         body.innerHTML = html;
         wireCopyButtons(body);
-        wireStepOutputs(body, runId);
-        wireExcerptToggles(body, runId);
-        restoreExpandedOutputs(body, runId, expanded);
+        wireStepOutputs(body, session);
+        wireExcerptToggles(body, session);
+        restoreExpandedOutputs(body, session, expanded);
         // The step rows are new DOM, so their activity lists are repainted from
         // the merge state rather than refetched (spec 036 D4).
         repaintLogs(body);
@@ -3220,15 +3072,9 @@
        * command block appears as soon as the step records it (FR-021).
        */
       async function refreshStepDetail(stepId) {
-        const runId = _activeRunId;
-        if (!runId) return;
-        let snapshot;
-        try {
-          snapshot = await api("GET", `/api/runs/${encodeURIComponent(runId)}`);
-        } catch {
-          return; // last-known state stays on screen
-        }
-        const st = (snapshot.steps || {})[stepId];
+        const session = _session;
+        if (session === null) return;
+        const st = await session.stepDetail(stepId);
         if (!st || (st.prompt === undefined && st.command === undefined)) return;
         const row = document.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
         if (!row) return;
@@ -3236,7 +3082,7 @@
         const fresh = document.querySelector(`[data-step-id="${CSS.escape(stepId)}"]`);
         if (fresh) {
           wireCopyButtons(fresh);
-          wireStepOutputs(fresh, runId);
+          wireStepOutputs(fresh, session);
           repaintLogs(fresh);
         }
       }
@@ -3244,21 +3090,10 @@
       /**
        * Re-fetch the run and re-render its whole detail body, for the one case
        * updateStepRow cannot patch in place: a step that has no row at all.
+       * Resolves at once when no run is open.
        */
-      let _refreshingSnapshot = false;
-      async function refreshRunSnapshot() {
-        const runId = _activeRunId;
-        if (!runId || _refreshingSnapshot) return;
-        _refreshingSnapshot = true;
-        try {
-          const snapshot = await api("GET", `/api/runs/${encodeURIComponent(runId)}`);
-          if (_activeRunId !== runId) return;
-          renderRunDetail(runId, snapshot, runDetailTarget());
-        } catch {
-          // last-known state stays on screen
-        } finally {
-          _refreshingSnapshot = false;
-        }
+      function refreshRunSnapshot() {
+        return _session?.refresh();
       }
 
       // ── Settings view (D6) ─────────────────────────────────────────────────
@@ -3687,7 +3522,7 @@
         }
         // FR-004/FR-014: the stream belongs to the selected run, not to a pane —
         // the layout the details happen to render in never changes this rule.
-        if (view !== "run" || runId !== _activeRunId) closeRunStream();
+        if (view !== "run" || runId !== _session?.runId) closeRunStream();
 
         // FR-013: while a run is selected on a wide screen the Runs view stays on
         // screen and the details fill its right pane, so #view-run is only ever

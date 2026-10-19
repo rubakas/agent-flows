@@ -2205,9 +2205,15 @@ describe("GET / — run observability wired in served HTML (FR-003/FR-004/FR-006
   it("served HTML references /events SSE endpoint for live run attachment (FR-004)", async () => {
     const res = await fetch(`http://127.0.0.1:${srv.port}/`);
     const html = await res.text();
+    // The stream is opened by the run session (spec 047 FR-15), which the page loads.
+    const session = await (await fetch(`http://127.0.0.1:${srv.port}/ui-runview.js`)).text();
     assert.ok(
-      html.includes("/events"),
-      'served HTML must reference the SSE "/events" path — live run attachment is missing'
+      session.includes("/events"),
+      'the served run session must reference the SSE "/events" path — live run attachment is missing'
+    );
+    assert.ok(
+      html.includes('from "/ui-runview.js"'),
+      "the served HTML must import the run session that opens the stream"
     );
     assert.ok(
       html.includes("openRunView"),
@@ -2669,7 +2675,7 @@ describe("GET / — four views, tabs and router wired in served HTML (V1)", () =
 
   it("imports the router module and routes every tab by hash", () => {
     assert.ok(html.includes('from "/ui-route.js"'), "the page must import the shared router");
-    for (const mod of ["/ui-graph.js", "/ui-tables.js", "/ui-log.js"]) {
+    for (const mod of ["/ui-graph.js", "/ui-tables.js", "/ui-log.js", "/ui-runview.js"]) {
       assert.ok(html.includes(`from "${mod}"`), `the page must import ${mod}`);
     }
     for (const hash of ["#/runs", "#/workflows", "#/settings"])
@@ -2751,6 +2757,17 @@ describe("GET /ui-*.js — the page's ESM helpers are served next to it (D7, 037
       assert.equal(res.status, 200, `${name} must be served`);
       assert.match(res.headers.get("content-type") ?? "", /javascript/u);
       assert.ok((await res.text()).includes(exported), `${name} must export its renderer`);
+    }
+  });
+
+  it("serves every module the page imports", async () => {
+    const page = await (await fetch(`http://127.0.0.1:${srv.port}/`)).text();
+    const imported = [...page.matchAll(/from "(\/ui-[a-z]+\.js)"/gu)].map((m) => m[1]);
+    assert.ok(imported.includes("/ui-runview.js"), "the page must import the run session");
+    for (const path of imported) {
+      const res = await fetch(`http://127.0.0.1:${srv.port}${path}`);
+      assert.equal(res.status, 200, `${path} is imported by the page but not served`);
+      await res.text();
     }
   });
 

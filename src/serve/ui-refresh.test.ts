@@ -74,7 +74,7 @@ describe("the poller keeps the daemons panel alive while a run streams", () => {
   it("refreshes daemons before the early return the open stream takes", () => {
     const poller = fnSource("startRunsPoller");
     const daemons = poller.indexOf("loadDaemons()");
-    const bail = poller.search(/if \(activeRunEs !== null\) return;/u);
+    const bail = poller.search(/if \(_session\?\.streamState === "open"\) return;/u);
     assert.notEqual(daemons, -1, "the poller never refreshes the daemons panel");
     assert.notEqual(bail, -1, "the poller no longer skips work while a stream is open");
     assert.ok(
@@ -95,14 +95,14 @@ describe("a re-render keeps the outputs the operator opened", () => {
     assert.ok(capture < wipe, "the ids are read after the rows holding them are gone");
     assert.match(
       render,
-      /restoreExpandedOutputs\(body, runId, expanded\)/u,
+      /restoreExpandedOutputs\(body, session, expanded\)/u,
       "the expanded outputs are recorded and never re-opened"
     );
   });
 
   it("the restore re-opens through loadFullOutput, so a cached output costs no request", () => {
     const restore = fnSource("restoreExpandedOutputs");
-    assert.match(restore, /loadFullOutput\(el, runId\)/u, "the full text is never fetched back");
+    assert.match(restore, /loadFullOutput\(el, session\)/u, "the full text is never fetched back");
     assert.match(restore, /classList\.add\("expanded"\)/u, "the block is filled but stays clamped");
   });
 });

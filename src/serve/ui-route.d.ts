@@ -7,3 +7,4 @@ export declare const VIEWS: string[];
 export declare function parseHash(hash: string): { view: string; runId?: string; id?: string };
 export declare function hashFor(view: string, id?: string): string;
 export declare function pollersFor(view: string): string[];
+export declare function pathFor(key: string, path: string): string;

@@ -40,20 +40,23 @@ describe("an excerpt opens into the real output (042 D18)", () => {
     );
   });
 
-  it("the full output comes from the existing route, through the existing renderer", () => {
-    const fetcher = fnSource("fetchStepOutput");
+  it("the full output comes from the session's one fetcher, through the existing renderer", () => {
     assert.match(
-      fetcher,
-      /\/api\/runs\/\$\{encodeURIComponent\(runId\)\}\/steps\/\$\{encodeURIComponent\(stepId\)\}\/output/u,
-      "the excerpt loader must reuse GET /api/runs/:id/steps/:stepId/output"
+      fnSource("loadFullOutput"),
+      /session\.stepOutput\(/u,
+      "the excerpt loader must ask the run session, which owns GET /api/runs/:id/steps/:stepId/output"
     );
     assert.match(fnSource("loadFullOutput"), /renderOutput\(/u, "must render, not dump text");
+    assert.ok(
+      !/\/steps\/|\/output`/u.test(UI),
+      "the page builds a step-output URL itself again; every reader must share session.stepOutput"
+    );
   });
 
-  it("a second open of the same excerpt costs no second request", () => {
-    const fetcher = fnSource("fetchStepOutput");
-    assert.match(fetcher, /_fullOutputs\.has\(key\)/u, "no cache lookup before the fetch");
-    assert.match(fetcher, /_fullOutputs\.set\(key/u, "nothing is ever put in the cache");
+  it("every reader of a step's full output shares that fetcher", () => {
+    for (const reader of ["loadFullOutput", "wireStepOutputs", "fillRunResult"]) {
+      assert.match(fnSource(reader), /\.stepOutput\(/u, `${reader} fetches the output by itself`);
+    }
   });
 
   it("a 404 or a failed request leaves the excerpt on screen", () => {

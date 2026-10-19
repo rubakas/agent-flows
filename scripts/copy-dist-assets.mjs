@@ -25,6 +25,7 @@ export const PAGE_ASSETS = [
   "ui-daemons.js",
   "ui-gate.js",
   "ui-markdown.js",
+  "ui-runview.js",
 ];
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));

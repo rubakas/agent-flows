@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { DEFAULT_VIEW, hashFor, parseHash, pollersFor, VIEWS } from "./ui-route.js";
+import { DEFAULT_VIEW, hashFor, parseHash, pathFor, pollersFor, VIEWS } from "./ui-route.js";
 
 describe("parseHash — route table (FR-001)", () => {
   it("falls back to the runs view for no hash, a bare '#', and unknown routes", () => {
@@ -119,5 +119,19 @@ describe("pollersFor — the runs poller is view-gated (spec 037 D9/FR-010)", ()
     for (const view of ["run", "workflows", "settings", "nope"]) {
       assert.deepEqual(pollersFor(view), [], `view ${view} must poll nothing`);
     }
+  });
+});
+
+describe("pathFor — which daemon a request goes to (spec 042 D13)", () => {
+  it("leaves this daemon's own paths alone", () => {
+    assert.equal(pathFor("", "/api/runs/r1"), "/api/runs/r1");
+  });
+
+  it("forwards another project's paths through /api/projects/<key>", () => {
+    assert.equal(pathFor("k", "/api/runs/r1"), "/api/projects/k/api/runs/r1");
+  });
+
+  it("encodes a key that is itself a path, so it stays one segment", () => {
+    assert.equal(pathFor("k/x", "/api/runs"), "/api/projects/k%2Fx/api/runs");
   });
 });
