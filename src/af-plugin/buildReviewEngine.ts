@@ -1,80 +1,122 @@
 // Generates plugin/workflows/review-engine.js (spec 046 D2, D5).
 //
-// A Claude dynamic workflow cannot read files, so the eight step prompts and the two
-// output schemas are embedded into the script. They are embedded with JSON.stringify
+// A Claude dynamic workflow cannot read files, so the eight step prompts, their model
+// tiers (all from pipelines/code-review.yaml) and the two output schemas are embedded into
+// the script. They are embedded with JSON.stringify
 // — never spliced into a template literal — so no character in a prompt can break out
 // of the string it lives in. The output is deterministic: a test compares the committed
 // script with buildWorkflow(), so editing the generated file by hand fails the build.
 //
 //   pnpm plugin:generate
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { pipelineAncestors } from "../canon/graph.js";
+import { bundledPipelines } from "../canon/pipelines.js";
+import { getProfile } from "../canon/registry.js";
+import { extractPlaceholders } from "../canon/render.js";
 import { workflowSchema } from "../canon/schemaRules.js";
+import type { LoadedPipeline, Role } from "../canon/types.js";
 
 const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const reference = join(root, "plugin", "skills", "review", "references");
 export const WORKFLOW_PATH = join(root, "plugin", "workflows", "review-engine.js");
 
-export const STEPS: string[] = [
-  "brief",
-  "radius",
-  "falsifiability",
-  "delivery",
-  "correctness",
-  "security",
-  "verify",
-  "synthesis",
-];
+/** The pipeline the engine is generated from: code-review.yaml and its prompts. */
+function codeReview(): LoadedPipeline {
+  const found = bundledPipelines().get("code-review");
+  if (found.kind !== "ok") throw new Error("the bundled code-review pipeline does not load");
+  return found.loaded;
+}
 
-/** Every placeholder the generated script knows how to fill. */
-const KNOWN_PLACEHOLDERS = [
-  "material",
-  "plan",
-  "specSources",
-  "brief",
-  "radius",
-  "falsifiability",
-  "delivery",
-  "correctness",
-  "security",
-  "verify",
-];
+/** The eight review steps, in the pipeline's order. */
+export const STEPS: string[] = codeReview()
+  .def.steps.filter((step) => step.kind === "llm")
+  .map((step) => step.id);
+
+/** Placeholders the script fills from its own arguments, whatever a step depends on. */
+const PROVIDED_INPUTS = ["plan", "specSources"];
 
 /** Structural isolation: the synthesis step may see the verifier's output and nothing else. */
-const SYNTHESIS_PLACEHOLDERS = ["verify"];
+const ISOLATED: Record<string, string[]> = { synthesis: ["verify"] };
 
-function placeholdersIn(template: string): string[] {
-  return [...new Set([...template.matchAll(/\{\{([\w.]+)\}\}/g)].map((match) => match[1]))];
-}
-
-function readPrompts(promptsDir: string): Record<string, string> {
-  const prompts: Record<string, string> = {};
-  for (const step of STEPS) {
-    const template = readFileSync(join(promptsDir, `${step}.md`), "utf8");
-    const unknown = placeholdersIn(template).filter((name) => !KNOWN_PLACEHOLDERS.includes(name));
-    if (unknown.length > 0) {
-      throw new Error(
-        `prompt ${step}.md uses placeholder(s) the engine cannot fill: ${unknown.join(", ")}`
-      );
-    }
-    prompts[step] = template;
-  }
-  const extra = placeholdersIn(prompts.synthesis).filter(
-    (name) => !SYNTHESIS_PLACEHOLDERS.includes(name)
-  );
-  if (extra.length > 0) {
-    throw new Error(
-      `synthesis.md uses placeholder(s) beyond {{verify}}: ${extra.join(", ")} — synthesis must see only the verifier's output`
-    );
-  }
-  return prompts;
-}
+/** The tiers the Claude workflow runtime accepts as an agent's `model`. */
+const CLAUDE_TIERS = ["opus", "sonnet", "haiku"];
 
 /** The plugin's schema files, by the canon key each one is generated from. */
 const SCHEMA_FILE = { codeReviewFindings: "findings", codeReviewDelivery: "delivery" } as const;
+
+interface EngineTables {
+  steps: string[];
+  prompts: Record<string, string>;
+  models: Record<string, string>;
+  schemas: Record<string, object>;
+}
+
+/**
+ * What the script takes from the pipeline: the llm steps, their prompts, their model tier
+ * and their output schema. The generator refuses a pipeline the hand-written schedule in
+ * the script cannot run. The tiers are the anthropic profile's, never the active
+ * provider's, so the committed script does not depend on who regenerates it.
+ */
+export function reviewEngineTables(
+  loaded: LoadedPipeline = codeReview(),
+  roles: Record<Role, string> = getProfile("anthropic").roles
+): EngineTables {
+  const steps = loaded.def.steps;
+  const provided = [
+    ...PROVIDED_INPUTS,
+    ...steps.filter((st) => st.kind === "review-material").map((st) => st.id),
+  ];
+  const ancestors = pipelineAncestors(steps);
+  const tables: EngineTables = { steps: [], prompts: {}, models: {}, schemas: {} };
+
+  for (const step of steps) {
+    if (step.kind === "review-material") continue;
+    if (step.kind !== "llm") {
+      throw new Error(`step ${step.id} has kind ${step.kind}; the engine runs llm steps only`);
+    }
+    if (step.role === undefined) throw new Error(`step ${step.id} has no role`);
+    const model = roles[step.role];
+    if (!CLAUDE_TIERS.includes(model)) {
+      throw new Error(
+        `step ${step.id}: role ${step.role} maps to ${model}, outside ${CLAUDE_TIERS.join(", ")}`
+      );
+    }
+    if (step.schema !== undefined) {
+      if (!(step.schema in SCHEMA_FILE)) {
+        throw new Error(
+          `step ${step.id} declares schema ${step.schema}, which has no plugin schema file`
+        );
+      }
+      tables.schemas[step.id] = workflowSchema(step.schema as keyof typeof SCHEMA_FILE);
+    }
+
+    const prompt = loaded.prompts[step.id];
+    const names = [...new Set(extractPlaceholders(prompt))];
+    const fillable = [...provided, ...(ancestors.get(step.id) ?? [])];
+    const unknown = names.filter((name) => !fillable.includes(name));
+    if (unknown.length > 0) {
+      throw new Error(
+        `prompt of ${step.id} uses placeholder(s) the engine cannot fill: ${unknown.join(", ")}`
+      );
+    }
+    const isolated = ISOLATED[step.id];
+    const extra = isolated === undefined ? [] : names.filter((name) => !isolated.includes(name));
+    if (extra.length > 0) {
+      throw new Error(
+        `prompt of ${step.id} uses placeholder(s) beyond {{${isolated.join("}}, {{")}}}: ${extra.join(", ")} — ${step.id} must see only the verifier's output`
+      );
+    }
+
+    tables.steps.push(step.id);
+    tables.prompts[step.id] = prompt;
+    tables.models[step.id] = model;
+  }
+  return tables;
+}
 
 /**
  * The generated schema files, keyed by absolute path. They are formatted the way
@@ -95,7 +137,7 @@ export async function buildSchemaFiles(): Promise<Record<string, string>> {
 }
 
 const HEADER = `// GENERATED FILE - DO NOT EDIT.
-// Source: plugin/skills/review/references/prompts/ and src/canon/schemaRules.ts (generated by src/af-plugin/buildReviewEngine.ts)
+// Source: pipelines/code-review.yaml, its prompts and src/canon/schemaRules.ts (generated by src/af-plugin/buildReviewEngine.ts)
 // Regenerate with: pnpm plugin:generate
 `;
 
@@ -195,7 +237,7 @@ async function optional(name, phaseTitle, model, vars, extra) {
   return unavailableStepMarker(name, reason)
 }
 
-const worker = (name, vars, extra) => optional(name, 'Review', 'sonnet', vars, extra)
+const worker = (name, vars, extra) => optional(name, 'Review', MODELS[name], vars, extra)
 
 // radius and verify are required, as in af: radius feeds correctness and security, and verify
 // has no placeholder through which a marker for radius could reach it, so a failed radius
@@ -210,7 +252,7 @@ async function required(name, phaseTitle, model, vars, extra) {
 
 phase('Brief')
 const brief = text(
-  await optional('brief', 'Brief', 'haiku', { material: MATERIAL, plan: PLAN, specSources: SPEC_SOURCES })
+  await optional('brief', 'Brief', MODELS.brief, { material: MATERIAL, plan: PLAN, specSources: SPEC_SOURCES })
 )
 
 phase('Review')
@@ -219,7 +261,7 @@ const base = { material: MATERIAL, plan: PLAN, specSources: SPEC_SOURCES, brief:
 // correctness and security wait for radius only, never for falsifiability or delivery.
 const [blast, falsifiabilityOut, deliveryOut] = await parallel([
   async () => {
-    const radiusOut = await required('radius', 'Review', 'sonnet', base)
+    const radiusOut = await required('radius', 'Review', MODELS.radius, base)
     const withRadius = Object.assign({}, base, { radius: text(radiusOut) })
     const [correctnessOut, securityOut] = await parallel([
       () => worker('correctness', withRadius),
@@ -235,7 +277,7 @@ phase('Verify')
 const verify = await required(
   'verify',
   'Verify',
-  'opus',
+  MODELS.verify,
   Object.assign({}, base, {
     radius: text(blast.radiusOut),
     correctness: text(blast.correctnessOut),
@@ -243,32 +285,29 @@ const verify = await required(
     falsifiability: text(falsifiabilityOut),
     delivery: text(deliveryOut),
   }),
-  { schema: SCHEMAS.findings }
+  { schema: SCHEMAS.verify }
 )
 
 // Synthesis is handed the verifier's output and nothing else, by construction.
 phase('Synthesis')
 const synthesis = await agent(
   render(PROMPTS.synthesis, { verify: text(verify) }),
-  options('synthesis', 'Synthesis', 'opus')
+  options('synthesis', 'Synthesis', MODELS.synthesis)
 )
 if (synthesis === null || synthesis === undefined) log('synthesis returned no output')
 
 return { synthesis: synthesis, verify: verify }
 `;
 
-/** @param promptsDir where the eight step prompts live (a test points it elsewhere) */
-export function buildWorkflow(promptsDir = join(reference, "prompts")): string {
-  const prompts = readPrompts(promptsDir);
-  const schemas = {
-    findings: workflowSchema("codeReviewFindings"),
-    delivery: workflowSchema("codeReviewDelivery"),
-  };
+export function buildWorkflow(loaded: LoadedPipeline = codeReview()): string {
+  const { prompts, models, schemas } = reviewEngineTables(loaded);
   return (
     HEADER +
     META +
     "\nconst PROMPTS = " +
     JSON.stringify(prompts, null, 2) +
+    "\n\nconst MODELS = " +
+    JSON.stringify(models, null, 2) +
     "\n\nconst SCHEMAS = " +
     JSON.stringify(schemas, null, 2) +
     "\n" +

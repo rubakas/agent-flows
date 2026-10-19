@@ -3,17 +3,23 @@
 // stub runtime globals to prove the step graph, models, schemas and isolation it promises.
 
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import vm from "node:vm";
 
 import { unavailableStepMarker } from "../bindings/mastra/buildSteps.js";
+import { pipelineAncestors } from "../canon/graph.js";
 import { bundledPipelines } from "../canon/pipelines.js";
 import { getProfile } from "../canon/registry.js";
-import { buildSchemaFiles, buildWorkflow, STEPS, WORKFLOW_PATH } from "./buildReviewEngine.js";
+import {
+  buildSchemaFiles,
+  buildWorkflow,
+  reviewEngineTables,
+  STEPS,
+  WORKFLOW_PATH,
+} from "./buildReviewEngine.js";
 import type { LoadedPipeline } from "../canon/types.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -28,7 +34,14 @@ const checker = (await import(
 )) as Checker;
 const { loadSchema } = checker;
 const committed = readFileSync(WORKFLOW_PATH, "utf8");
-const promptsDir = join(root, "plugin", "skills", "review", "references", "prompts");
+
+/** The bundled code-review pipeline as the generator loads it, safe to mutate. */
+function reviewPipeline(): LoadedPipeline {
+  const found = bundledPipelines().get("code-review");
+  assert.equal(found.kind, "ok", "the bundled code-review pipeline must load");
+  if (found.kind !== "ok") throw new Error("unreachable");
+  return structuredClone(found.loaded);
+}
 
 interface Call {
   prompt: string;
@@ -145,37 +158,75 @@ describe("review-engine freshness (FR-5)", () => {
     );
   });
 
-  describe("generator refusals", () => {
-    function withSynthesis(text: string, fn: (dir: string) => void) {
-      const dir = mkdtempSync(join(tmpdir(), "af-prompts-"));
+  describe("generator refuses", () => {
+    const refuses = (edit: (loaded: LoadedPipeline) => void, message: RegExp) => {
+      const loaded = reviewPipeline();
+      edit(loaded);
+      assert.throws(() => buildWorkflow(loaded), message);
+    };
+    const step = (loaded: LoadedPipeline, id: string) =>
+      loaded.def.steps.find((st) => st.id === id)!;
+
+    it("builds the committed script from the pipeline as it is", () => {
+      assert.equal(buildWorkflow(reviewPipeline()), committed);
+    });
+
+    it("a step kind the engine has no code for", () => {
+      refuses((loaded) => {
+        step(loaded, "security").kind = "check";
+      }, /security.*kind check/);
+    });
+
+    it("an llm step without a role", () => {
+      refuses((loaded) => {
+        delete step(loaded, "correctness").role;
+      }, /correctness.*no role/);
+    });
+
+    it("a role the anthropic profile maps outside opus, sonnet and haiku", () => {
+      const roles = { reasoner: "gpt-terra", worker: "sonnet", scout: "haiku" } as const;
+      assert.throws(
+        () => reviewEngineTables(reviewPipeline(), roles),
+        /verify.*gpt-terra.*opus, sonnet, haiku/
+      );
+    });
+
+    it("a schema key with no schema file", () => {
+      refuses((loaded) => {
+        step(loaded, "verify").schema = "weaknesses";
+      }, /verify.*schema weaknesses/);
+    });
+
+    it("a placeholder the engine cannot fill", () => {
+      refuses((loaded) => {
+        loaded.prompts.verify += "\n{{baseline}}\n";
+      }, /verify.*placeholder.*baseline/);
+    });
+
+    it("a synthesis prompt that takes more than {{verify}}", () => {
+      refuses((loaded) => {
+        loaded.prompts.synthesis += "\nBrief:\n{{brief}}\n";
+      }, /synthesis.*beyond \{\{verify\}\}: brief/);
+    });
+
+    it("follows a flipped role into the script's model table", () => {
+      const loaded = reviewPipeline();
+      step(loaded, "correctness").role = "reasoner";
+      const script = buildWorkflow(loaded);
+      assert.notEqual(script, committed);
+      assert.match(script, /"correctness": "opus"/);
+      assert.match(committed, /"correctness": "sonnet"/);
+    });
+
+    it("reads the anthropic tiers, never the active provider", () => {
+      const before = process.env.AGENT_FLOWS_PROVIDER;
+      process.env.AGENT_FLOWS_PROVIDER = "openai";
       try {
-        cpSync(promptsDir, dir, { recursive: true });
-        writeFileSync(join(dir, "synthesis.md"), text);
-        fn(dir);
+        assert.equal(buildWorkflow(), committed);
       } finally {
-        rmSync(dir, { recursive: true, force: true });
+        if (before === undefined) delete process.env.AGENT_FLOWS_PROVIDER;
+        else process.env.AGENT_FLOWS_PROVIDER = before;
       }
-    }
-
-    it("builds the committed script from a copy of the prompts directory", () => {
-      withSynthesis(readFileSync(join(promptsDir, "synthesis.md"), "utf8"), (dir) => {
-        assert.equal(buildWorkflow(dir), committed);
-      });
-    });
-
-    it("refuses a synthesis prompt that takes more than {{verify}}", () => {
-      withSynthesis("Verified:\n{{verify}}\nBrief:\n{{brief}}\n", (dir) => {
-        assert.throws(
-          () => buildWorkflow(dir),
-          /synthesis\.md uses placeholder\(s\) beyond \{\{verify\}\}: brief/
-        );
-      });
-    });
-
-    it("refuses a prompt with a placeholder the engine cannot fill", () => {
-      withSynthesis("{{verify}} {{mystery}}", (dir) => {
-        assert.throws(() => buildWorkflow(dir), /mystery/);
-      });
     });
   });
 });
@@ -555,6 +606,40 @@ describe("review engine vs the code-review pipeline", () => {
         .map((step) => [step.id, step.schema])
     );
     assert.deepEqual(schemas, { delivery: "codeReviewDelivery", verify: "codeReviewFindings" });
+  });
+
+  it("hides no wait: independent steps run side by side", async () => {
+    const def = codeReview();
+    const ancestors = pipelineAncestors(def.steps);
+    const llm = def.steps.filter((st) => st.kind === "llm").map((st) => st.id);
+    const related = (a: string, b: string) => ancestors.get(a)!.has(b) || ancestors.get(b)!.has(a);
+    const serialised: string[] = [];
+    for (const a of llm) {
+      for (const b of llm) {
+        if (a === b || related(a, b)) continue;
+        // a's agent call stays open until b's has started: if the engine makes b wait for a,
+        // b never starts and the race below times out.
+        let started!: () => void;
+        const bStarted = new Promise<void>((resolve) => (started = resolve));
+        const s = stubs({ [a]: () => bStarted.then(() => `${a}_OUT`) });
+        const [agent, ...rest] = s.globals(args);
+        const watching = (prompt: string, opts: Record<string, any>) => {
+          if (opts.label === b) started();
+          return (agent as (p: string, o: Record<string, any>) => Promise<unknown>)(prompt, opts);
+        };
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), 2000);
+        });
+        try {
+          const outcome = await Promise.race([run(watching, ...rest).then(() => "done"), timeout]);
+          if (outcome === "timeout") serialised.push(`${a} -> ${b}`);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    }
+    assert.deepEqual(serialised, []);
   });
 
   describe("can fail", () => {
