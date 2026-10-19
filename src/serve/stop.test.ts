@@ -78,6 +78,7 @@ describe("stop — nothing recorded (FR-016)", () => {
     });
     assert.equal(report.stopped, false);
     assert.equal(report.outcome, "no-daemon");
+    assert.equal(report.pid, undefined);
     assert.match(report.reason, /no daemon\.json/u);
     assert.deepEqual(spy.calls, []);
   });
@@ -125,6 +126,7 @@ describe("stop — nothing recorded (FR-016)", () => {
     assert.equal(report.stopped, false);
     assert.equal(report.outcome, "unresolved", "a caller deleting the state dir must not proceed");
     assert.match(report.reason, /unreadable|malformed/u);
+    assert.equal(report.pid, undefined);
     assert.deepEqual(spy.calls, []);
     assert.equal(probed, false, "there is no port to probe without a record");
     assert.ok(existsSync(daemonRecordPath(fx.stateDir)), "the file is left alone");
@@ -145,6 +147,8 @@ describe("stop — the identity handshake gates the kill (FR-016)", () => {
     assert.equal(report.stopped, false);
     assert.equal(report.outcome, "no-daemon");
     assert.match(report.reason, /NOT signalled/u);
+    assert.match(report.reason, /pid 4242 was NOT signalled/u);
+    assert.deepEqual([report.pid, report.port, report.projectDir], [4242, 51234, fx.projectDir]);
     assert.deepEqual(spy.calls, [], "a pid may have been recycled — it must not be killed");
     assert.ok(existsSync(daemonRecordPath(fx.stateDir)));
   });
@@ -161,7 +165,8 @@ describe("stop — the identity handshake gates the kill (FR-016)", () => {
 
     assert.equal(report.stopped, false);
     assert.equal(report.outcome, "unresolved");
-    assert.match(report.reason, /9999/u);
+    assert.match(report.reason, /held by pid 9999, not the recorded pid 4242/u);
+    assert.deepEqual([report.pid, report.port, report.projectDir], [4242, 51234, fx.projectDir]);
     assert.deepEqual(spy.calls, []);
   });
 
@@ -177,7 +182,8 @@ describe("stop — the identity handshake gates the kill (FR-016)", () => {
 
     assert.equal(report.stopped, false);
     assert.equal(report.outcome, "unresolved");
-    assert.match(report.reason, /somewhere-else/u);
+    assert.match(report.reason, /serves .*somewhere-else, not the recorded .*project/u);
+    assert.deepEqual([report.pid, report.port, report.projectDir], [4242, 51234, fx.projectDir]);
     assert.deepEqual(spy.calls, []);
   });
 });
