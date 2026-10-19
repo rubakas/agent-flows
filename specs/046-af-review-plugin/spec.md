@@ -55,7 +55,7 @@ Names avoid agent-notes' `code-review` skill and Claude's built-in review comman
 `plugin/skills/review/references/schemas/{findings,delivery}.json` (af's schema + rule `allOf`
 entries) and pinned by a test that strips the rules and deep-equals af's object. Claude workflows
 cannot read files, so `plugin/workflows/review-engine.js` is GENERATED from these files by
-`scripts/build-af-review-workflow.mjs`. A test fails when the committed script differs from
+`src/af-plugin/buildReviewEngine.ts` (`pnpm plugin:generate`). A test fails when the committed script differs from
 generator output.
 
 **D3 — Cross-field rules move into schemas as `if/then`/`pattern`.** Reverses the choice in

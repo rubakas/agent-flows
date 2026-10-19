@@ -339,7 +339,7 @@ Each is **Proposed**; D5 applies.
 
 ### FR-16. Canon to workflow script (Phase 5)
 
-- **Problem.** `src/bindings/claudeCode.ts` and `scripts/build-af-review-workflow.mjs`
+- **Problem.** `src/bindings/claudeCode.ts` and `src/af-plugin/buildReviewEngine.ts`
   generate Claude workflow scripts with different prompt embedding and hard-coded model
   tiers; a change to `pipelines/code-review.yaml` neither reaches the plugin nor turns a
   test red.
@@ -426,7 +426,7 @@ Also decided after review:
 - **FR-13:** Binding A emits `JSON.stringify` of the canon's own schemas. This closes a latent `ReferenceError` (an undefined `CODE_REVIEW_DELIVERY_SCHEMA`) for user pipelines.
 - **FR-16:** one test loads `pipelines/code-review.yaml` and pins the plugin's review engine to it: steps, every dependency edge (by stub event order), models per role, and schema keys. The plugin's deliberate continue-on-failure choices (falsifiability, correctness and security degrade to a marker; synthesis logs only) are an explicit list that must equal the observed deviations. In-memory YAML mutations each turn it red.
 - `pipelines/code-review.yaml` was NOT changed to adopt the plugin's choices.
-- **Deferred:** a canon rules module, the TypeScript port of the plugin generator, a shared step-table module, and Binding A's render/onFailure rewrite. Nothing in the daemon reads Binding A output, and whether Binding A stays is spec 027's open owner decision.
+- **Deferred (updated in Phase 3):** the canon rules module, the TypeScript port and the YAML-derived tables were done in Phase 3 track G; Binding A's render/onFailure rewrite and a shared step-table module remain deferred. Nothing in the daemon reads Binding A output, and whether Binding A stays is spec 027's open owner decision.
 
 ### FR-14 — one capture core
 
@@ -500,11 +500,55 @@ A test fails when the hand-written ticket DDL (`src/db/index.ts`) and the Drizzl
 
 ### Track F — tests
 
-The root cause of the `capture.test.ts` "audit L12 timeout" hang (once 16 minutes under load) is found and fixed, or the test is made independent of machine load; evidence recorded.
+The root cause of the `capture.test.ts` "audit L12 timeout" hang (once 16 minutes under load) is found and fixed, or the test is made independent of machine load; evidence recorded. Outcome: hardening only — see the decisions below.
 
 ### Track G — plugin and bindings (FR-13/16 remainder, Binding A untouched)
 
 The plugin generator moves to TypeScript with generated output unchanged apart from its header; the cross-field schema rules live once in the canon and the plugin's schema JSON files are generated from them; the generator derives the review engine's steps, models, failure modes and schema keys from `pipelines/code-review.yaml` instead of hard-coding them.
+
+### Decisions made during Phase 3 (2026-10-19)
+
+**Track A** (run service):
+
+- A0, A1, A2 done. A2 deviation: the merge of models/provider into the workflow input moved into `RunService.start` (Mastra reads them from the input), it was not removed; about 25 test call sites changed, not only the four the AC named.
+- A3a done. Deliberate behaviour changes: an unknown or missing on-disk status reads as `unreadable` (with the error and the file path); undeclared keys are no longer passed through from disk artifacts; the pipeline id falls back to provenance, then the file stem. A golden round-trip test pins every field a restored run shows (including a failed-over step's `actual`).
+- A3b done without a pointer file: a chained stage that crashed before its artifact is found by scanning only the first 64 KiB of unclaimed events files, confirming the top-level `runId`; regular files only; misses are remembered for up to 2 s. Limits: an events file can hold several runs; a crashed stage re-running a pipeline whose stem an artifact already claims stays unresolved; a stage whose anchor is in another project is found only by that project's daemon.
+- A3c cut. Evidence: the readers already hide `settledAt` for non-terminal runs; a new `persistedAt` field would make an older daemon drop a gate-suspended stage from the manifest.
+- A4 cut by the lead, not by a failed feasibility test. Evidence: there is no `await` between the route's lazy, synchronous load and `getWorkflow`, so only an outside writer in a window of a few milliseconds can race; approve and resume use the Run created at start, so a resumed run can't pick up a different build (now pinned by a test); the change would also reverse FR-8's fail-closed rule. The owner may overturn.
+
+**Track B** (loader):
+
+- B1 done (the closure's no-resolver mode stays, test-only, because it holds the traversal guard; the lint rule stays as the single-entry guard). B2 done through a new programmatic seam: `resolveLayers`/`projectPipelines` take an injectable bundled root, set only from `ServeOptions.bundledPipelinesDir` (basename must be `pipelines`); no CLI, env or HTTP path sets it.
+
+**Track C** (page, FR-15 commits 2–3):
+
+- Commit 2 done (one run session per opened run; `close()` replaces the staleness guards and fixes five unguarded cases; one step-output fetcher; the cache key includes the project; a missing output is cached only if the step had settled when asked; run and step ids `.`/`..` are refused). Commit 2b fixes Copy on a re-opened settled run. Commit 3 re-scoped: its premise was false (nothing polled while a run stream was open); it now refreshes the run list and daemons panel beside an open run on a wide screen (more requests, none removed) and deletes the dead stream check. Cut: follow states, detached-run polling, `coversRun`.
+
+**Track D** (daemon records):
+
+- Done for `daemons.ts`, `stop.ts` and `doctor.ts`. `findOurDaemon` stays separate (it probes the pinned port first, ignores the recorded pid and throws on a version mismatch) — a deviation from "four callers". Added: a daemon record whose pid is not an integer above 1 or whose port is outside 1–65535 is refused; the stop path signals only inside the `verified` branch.
+
+**Track E** (database):
+
+- Done. The test cannot see drift in an existing on-disk database, because `CREATE TABLE IF NOT EXISTS` never migrates one.
+
+**Track F** (tests):
+
+- Hardening, not a root-cause fix: the 16-minute hang was not reproduced and its cause is unknown. Timed-out `git`, `gh` and the provider login probe are now killed with SIGKILL (a timeout did not bound a child that ignores SIGTERM). The test script fails any test file that runs longer than ten minutes (node applies `--test-timeout` per file). Left unbounded: `src/canon/workspace/sanitize.ts` `git ls-files` and `src/harness/harnesses.ts` `defaultRun`.
+
+**Track G** (plugin and bindings, FR-13/16 remainder, Binding A untouched):
+
+- G1 done (`src/af-plugin/buildReviewEngine.ts`, `pnpm plugin:generate`). G2 done (the eight rules live in `src/canon/schemaRules.ts`; the plugin's schema JSON is generated and came out byte-identical). G3 reduced: the generator reads the step list, models, schema keys and prompts from `pipelines/code-review.yaml` and refuses unsupported shapes; failure handling and the schedule stay hand-written in the engine body (rewriting them needs a paid smoke run); no shared `workflowSteps.ts` (one consumer). A new test fails if the engine serialises steps the YAML leaves independent.
+
+### Follow-ups found in Phase 3
+
+- `waitForSettled` never resolves for an auto-mode run after a human approves its gate (`approve()` never calls `settle()`); no production caller today.
+- The run header, gate box and Cancel go stale after a streamed run settles: the stream never carries run-level status (needs a server-side run event).
+- Declared steps are fetched from the page's project, not the run's; `primeDeclaredSteps` re-renders from an older snapshot.
+- Export reads prompt files and fork writes targets with lexical path checks only (no realpath check against symlinks).
+- `doctor` ignores `AGENT_FLOWS_PORT`; `removeDaemonRecordIfOwned` checks the pid only.
+- `layerForPipelinesDir` still labels an injected bundled root "repo".
+- The split view's 4 s poll re-renders the run list, which drops keyboard focus.
 
 ### Excluded from Phase 3
 
