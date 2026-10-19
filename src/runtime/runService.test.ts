@@ -1874,7 +1874,9 @@ async function persistsDone(service: RunService, runId: string): Promise<void> {
   const registry = (
     service as unknown as { registry: Map<string, { persistPromise?: Promise<void> }> }
   ).registry;
-  await registry.get(runId)?.persistPromise;
+  const record = registry.get(runId);
+  assert.ok(record?.persistPromise !== undefined, `run ${runId} has no persist to wait for`);
+  await record.persistPromise;
 }
 
 /**

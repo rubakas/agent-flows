@@ -598,10 +598,6 @@ export class RunService {
       }
     });
 
-    // Fire the run in the background — do NOT await.
-    // The result/rejection updates the registry record and resolves settledPromise.
-    // The void operator makes the dangling promise intentional; the catch branch
-    // ensures no unhandled rejection can surface.
     // The workflow reads the run control fields from its input beside the
     // pipeline's own inputs (bindings/mastra/build.ts controlShape), so they are
     // merged here and nowhere else.
@@ -610,6 +606,11 @@ export class RunService {
       ...(opts.models !== undefined ? { models: opts.models } : {}),
       ...(opts.provider !== undefined ? { provider: opts.provider.id } : {}),
     };
+
+    // Fire the run in the background — do NOT await.
+    // The result/rejection updates the registry record and resolves settledPromise.
+    // The void operator makes the dangling promise intentional; the catch branch
+    // ensures no unhandled rejection can surface.
     void run
       .start({ inputData: wfInput })
       .then((r1) => {

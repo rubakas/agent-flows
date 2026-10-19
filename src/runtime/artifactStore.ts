@@ -452,6 +452,19 @@ function stemOf(path: string): string {
   return basename(path, ".json");
 }
 
+/**
+ * The pipeline an artifact says it belongs to: its own `pipelineId`, else its
+ * provenance's, else the name of its file. One answer for every reader.
+ */
+function pipelineIdOf(artifact: Record<string, unknown>, path: string): string {
+  if (typeof artifact.pipelineId === "string") return artifact.pipelineId;
+  const provenance = artifact.provenance;
+  if (isPlainObject(provenance) && typeof provenance.pipelineId === "string") {
+    return provenance.pipelineId;
+  }
+  return stemOf(path);
+}
+
 /** Where a run was found, and what describes it there. */
 type RunMatch =
   | { kind: "artifact"; dir: string; path: string; artifact: Record<string, unknown> }
@@ -697,10 +710,10 @@ export function locateRun(runsDir: string, runId: string): RunLocation | undefin
   const match = findRun(runsDir, runId);
   if (match === undefined) return undefined;
   if (match.kind === "events") return { dir: match.dir, pipelineId: match.pipelineId };
-  const declared = match.kind === "artifact" ? match.artifact.pipelineId : undefined;
   return {
     dir: match.dir,
-    pipelineId: typeof declared === "string" ? declared : stemOf(match.path),
+    pipelineId:
+      match.kind === "artifact" ? pipelineIdOf(match.artifact, match.path) : stemOf(match.path),
   };
 }
 
@@ -875,12 +888,7 @@ function normaliseArtifact(
   const provenance = isPlainObject(raw.provenance)
     ? (raw.provenance as unknown as ArtifactProvenance)
     : undefined;
-  const pipelineId =
-    typeof raw.pipelineId === "string"
-      ? raw.pipelineId
-      : typeof provenance?.pipelineId === "string"
-        ? provenance.pipelineId
-        : stemOf(path);
+  const pipelineId = pipelineIdOf(raw, path);
 
   const steps: Record<string, StepState> = {};
   if (isPlainObject(raw.steps)) {
@@ -961,7 +969,7 @@ export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
       if (scan.failure === undefined) continue;
       summaries.push({
         runId: dirName,
-        pipelineId: "unknown",
+        pipelineId: stemOf(scan.failure.path),
         status: "unreadable",
         createdAt: startedAtOf({}, runDir),
         source: "disk",
@@ -1008,7 +1016,7 @@ export function readPersistedRun(runsDir: string, runId: string): PersistedRun |
   if (match.kind === "unreadable") {
     return {
       runId,
-      pipelineId: "unknown",
+      pipelineId: stemOf(match.path),
       status: "unreadable",
       source: "disk",
       gateMode: "manual",

@@ -1245,6 +1245,7 @@ describe("listPersistedRuns / readPersistedRun — runs survive the daemon", () 
       assert.equal(summaries.length, 1, "a broken artifact is still a run the operator can see");
       assert.equal(summaries[0].status, "unreadable");
       assert.equal(summaries[0].path, join(dir, "test.json"));
+      assert.equal(summaries[0].pipelineId, "test", "the file's own name still titles the run");
       assert.ok(
         typeof summaries[0].error === "string" && summaries[0].error.length > 0,
         "the parse error must be reported so the operator can act on it"
@@ -1253,6 +1254,7 @@ describe("listPersistedRuns / readPersistedRun — runs survive the daemon", () 
       const full = readPersistedRun(runsDir, "run-bad");
       assert.equal(full?.status, "unreadable");
       assert.deepEqual(full?.steps, {});
+      assert.equal(full?.pipelineId, "test");
     } finally {
       rmSync(runsDir, { recursive: true, force: true });
     }
@@ -2104,6 +2106,24 @@ describe("spec 047 FR-11: locating a chained stage from its events file", () => 
       JSON.stringify({ runId: anchorId, pipelineId: "investigate", status: "succeeded" })
     );
   }
+
+  it("names a run's pipeline the same way when locating it as when reading it", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    // No top-level pipelineId: the provenance block is the next place the artifact says it.
+    writeDirFile(
+      runsDir,
+      "run-prov",
+      "file-stem.json",
+      JSON.stringify({
+        runId: "run-prov",
+        status: "succeeded",
+        provenance: { pipelineId: "from-provenance" },
+      })
+    );
+
+    assert.equal(locateRun(runsDir, "run-prov")?.pipelineId, "from-provenance");
+    assert.equal(readPersistedRun(runsDir, "run-prov")?.pipelineId, "from-provenance");
+  });
 
   it("finds a crashed child by the events file in its anchor's directory", () => {
     const runsDir = makeStateRunsDir(makeTmpDir());
