@@ -40,16 +40,20 @@ const EXEMPT: readonly { match: string; why: string }[] = [
 ];
 
 /**
- * Lines that hand the browser's own transport to the run session. They carry no
- * path: the session builds every URL itself, through pathFor.
+ * The exact lines, in one file, that hand the browser's own transport to the run
+ * session. They carry no path: the session builds every URL itself, through
+ * pathFor. Compared whole (trimmed) and per file, so the same call written
+ * anywhere else, or with anything added to the line, is not exempt.
  */
-const TRANSPORT: readonly { match: string; why: string }[] = [
+const TRANSPORT: readonly { file: string; line: string; why: string }[] = [
   {
-    match: "window.fetch(u, i)",
+    file: "ui.html",
+    line: "fetch: (u, i) => window.fetch(u, i),",
     why: "wires the browser's fetch into the session, which routes the URL",
   },
   {
-    match: "new EventSource(u)",
+    file: "ui.html",
+    line: "openStream: (u) => new EventSource(u),",
     why: "wires the browser's EventSource into the session, which routes the URL",
   },
 ];
@@ -85,7 +89,7 @@ describe("every /api/ request names its project (spec 042 D13)", () => {
       lines.forEach((line, i) => {
         if (!/\b(fetch|new EventSource)\(/u.test(line)) return;
         if (line.includes("fetch(url, opts)")) return;
-        if (TRANSPORT.some((t) => line.includes(t.match))) return;
+        if (TRANSPORT.some((t) => t.file === name && t.line === line.trim())) return;
         const window = lines.slice(i, i + 4).join("\n");
         if (!ROUTERS.some((r) => window.includes(r))) bare.push(`${name}:${i + 1}: ${line.trim()}`);
       });
