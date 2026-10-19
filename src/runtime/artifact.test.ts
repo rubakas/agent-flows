@@ -32,7 +32,7 @@ import {
 import { ensureProjectState, resolveProjectState } from "./projectState.js";
 import { RunService } from "./runService.js";
 import { recordStep } from "./stepIntrospection.js";
-import type { MastraLike } from "./runService.js";
+import type { JudgeDeps, MastraLike } from "./runService.js";
 import type { RunArtifact } from "./runState.js";
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
@@ -1838,6 +1838,115 @@ describe("spec 047 FR-10: an artifact reads back as the run it recorded", () => 
     const disk = wire(restarted(runsDir).get("rt-cancelled"));
     assert.equal(disk.reason, "operator stopped it");
     assert.equal(typeof disk.cancelledAt, "string");
+  });
+
+  it("an auto run: a judge that lost the race, a degraded gate, a truncated excerpt, a failover", async () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const runId = "rt-everything";
+    let releaseJudge!: (raw: string) => void;
+    const firstVerdict = new Promise<string>((resolve) => {
+      releaseJudge = resolve;
+    });
+    let judgeCalls = 0;
+    const judgeDeps: JudgeDeps = {
+      // The first gate's judge is slow; the second gate's answers with no verdict.
+      runner: async () => (++judgeCalls === 1 ? firstVerdict : "no verdict in here"),
+      registry: testRegistry,
+      profile: testProfileFull,
+      projectDir: "/tmp",
+      judgePrompt: "You are the gate judge.",
+    };
+    let finishResume!: (result: Record<string, unknown>) => void;
+    const run = makeMockRun(runId, suspendedResult());
+    let resumes = 0;
+    // The first resume (the human's) is held open; cancelling the second gate resumes it too.
+    run.resume = () =>
+      ++resumes === 1
+        ? new Promise<Record<string, unknown>>((resolve) => {
+            finishResume = resolve;
+          })
+        : Promise.resolve(successResult());
+    const service = new RunService(
+      makeMastra(run),
+      judgeDeps,
+      runsDir,
+      testProfileFull,
+      testRegistry
+    );
+    await service.start("investigate", { request: "r" }, { gateMode: "auto" });
+    recordStep(runId, "reason-step", {
+      actual: { profileId: "openai", transport: "cli", modelId: "codex", model: "gpt-5-codex" },
+    });
+    emit(run, { type: "workflow-step-start", payload: { id: "reason-step" } });
+    emit(run, {
+      type: "workflow-step-result",
+      payload: {
+        id: "reason-step",
+        status: "success",
+        output: { "reason-step": { answer: "y".repeat(5000) } },
+      },
+    });
+    // The human answers gate one while its judge is still thinking.
+    const approving = service.approve(runId, true, "I got there first");
+    releaseJudge('{"verdict":"approve","reason":"too late"}');
+    for (let i = 0; i < 200 && (service.get(runId)?.gateDecisions.length ?? 0) < 2; i++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    finishResume(suspendedResult());
+    await approving;
+    // Gate two is judged next; the judge gives no verdict and the gate degrades.
+    for (let i = 0; i < 200 && service.get(runId)?.judgeError === undefined; i++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(service.get(runId)?.judgeError !== undefined, "the second gate must degrade");
+    assert.deepEqual(await service.cancel(runId, "enough"), { ok: true });
+    await settled(service, runId);
+    const live = await assertRestoredMatchesLive(runsDir, service, runId);
+    const decisions = live.gateDecisions as Record<string, unknown>[];
+    assert.deepEqual(
+      decisions.map((d) => [d.decidedBy, d.superseded]),
+      [
+        ["human", undefined],
+        ["agent", true],
+        ["human", undefined],
+      ]
+    );
+    assert.equal(typeof decisions[1].judgeModelId, "string");
+    assert.equal(decisions[1].workspaceAccess, true);
+    assert.equal(typeof live.judgeError, "string");
+    const step = (live.steps as Record<string, Record<string, unknown>>)["reason-step"];
+    assert.equal(step.outputTruncated, true);
+    assert.equal((step.actual as { modelId?: string }).modelId, "codex");
+  });
+
+  it("a gate with its summary, as the artifact records it", () => {
+    // A summary arrives after the write that suspends the run, so the service only
+    // persists one when a later write catches it; the reader must keep it then.
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const dir = join(runsDir, "rt-summary");
+    mkdirSync(dir, { recursive: true });
+    const fields = {
+      gateMessage: "Approve this spec?",
+      spec: { title: "T" },
+      gateSummary: "Approving ships the plan as written.",
+      gateStepId: "approve",
+      judgeError: "no verdict",
+    };
+    writeFileSync(
+      join(dir, "investigate.json"),
+      JSON.stringify({
+        runId: "rt-summary",
+        pipelineId: "investigate",
+        status: "awaiting_approval",
+        ...fields,
+      })
+    );
+
+    const restored = readPersistedRun(runsDir, "rt-summary");
+    assert.ok(restored !== undefined);
+    for (const [key, value] of Object.entries(fields)) {
+      assert.deepEqual((restored as unknown as Record<string, unknown>)[key], value, key);
+    }
   });
 
   describe("an artifact this build cannot read as written", () => {
