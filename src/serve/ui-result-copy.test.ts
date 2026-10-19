@@ -8,7 +8,10 @@
 //
 // The page has no DOM harness (there is no jsdom in this repo), so this reads
 // the shipped inline script as text, one function at a time — the same pattern
-// as ui-step-output.test.ts. The rest of the behaviour is the browser test's.
+// as ui-step-output.test.ts. These are wiring and name checks: they prove the
+// cache is gone and the pieces are still connected in the right order, not that
+// Copy puts the Result on the clipboard. That behaviour is covered only by the
+// browser scenario (re-open a settled run, click Copy, read the clipboard).
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
