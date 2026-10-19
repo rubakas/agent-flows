@@ -2354,23 +2354,11 @@
         }
       }
 
-      // Rendered result per run, so the re-render the stream triggers on every
-      // snapshot costs no second fetch — and so the block survives it at all.
-      const _runResultHtml = {};
-
       async function fillRunResult(session, snapshot, scope) {
-        const runId = session.runId;
         // Scoped to the body just rendered, never `getElementById`: a stale
         // duplicate elsewhere in the document would otherwise win (042 D25).
         const el = (scope ?? document).querySelector("#run-result");
         if (!el) return;
-        if (_runResultHtml[runId] !== undefined) {
-          el.innerHTML = _runResultHtml[runId];
-          el.hidden = false;
-          wireCopyButtons(el);
-          wireResultTabs(el);
-          return;
-        }
         if (runPhase(snapshot) !== "terminal") return;
         let sink = null;
         try {
@@ -2405,7 +2393,6 @@
               : `<pre class="code-block result-source" data-result-pane="md" hidden>${escH(
                   source
                 )}</pre>`);
-          _runResultHtml[runId] = html;
           // The stream may have re-rendered the body while this was in flight,
           // so the element is looked up again rather than held across the await.
           const target = (scope ?? document).querySelector("#run-result");
