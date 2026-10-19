@@ -13,6 +13,7 @@ import {
   rmSync,
   writeFileSync,
   mkdirSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2139,6 +2140,21 @@ describe("spec 047 FR-11: locating a chained stage from its events file", () => 
 
     assert.equal(locateRun(runsDir, "run-decoy"), undefined);
     assert.deepEqual(locateRun(runsDir, "run-A"), { dir, pipelineId: "build" });
+  });
+
+  it("never opens an events file that is not a regular file", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    // A link to a file outside the state dir that happens to name the run.
+    const outside = join(makeTmpDir(), "elsewhere.jsonl");
+    writeFileSync(outside, `${eventLine("run-linked")}\n`);
+    const anchorDir = writeAnchorArtifact(runsDir, "run-anchor");
+    symlinkSync(outside, join(anchorDir, "build.events.jsonl"));
+    const ownDir = join(runsDir, "run-own");
+    mkdirSync(ownDir, { recursive: true });
+    symlinkSync(outside, join(ownDir, "build.events.jsonl"));
+
+    assert.equal(locateRun(runsDir, "run-linked"), undefined, "not found through a link");
+    assert.equal(locateRun(runsDir, "run-own"), undefined, "a link is not an empty file either");
   });
 
   it("reads only the head of an events file", () => {

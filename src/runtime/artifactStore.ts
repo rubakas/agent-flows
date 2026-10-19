@@ -5,7 +5,15 @@
 // one-way dependency (runService → artifactStore) so there is no cycle.
 
 import { randomBytes } from "node:crypto";
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import {
+  closeSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
@@ -515,9 +523,24 @@ function unclaimedEventsStems(dir: string): string[] {
   );
   return names
     .filter((name) => name.endsWith(EVENTS_SUFFIX))
+    .filter((name) => isRegularFile(join(dir, name)))
     .map((name) => name.slice(0, -EVENTS_SUFFIX.length))
     .filter((pipelineId) => !claimed.has(pipelineId))
     .sort();
+}
+
+/**
+ * Whether `path` is itself a regular file. A link is not followed and a FIFO is
+ * not opened: the state dir is owned by this user, but a lookup for an id that
+ * came off a URL must not be the thing that reads through a link or blocks on a
+ * pipe someone left there.
+ */
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
