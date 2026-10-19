@@ -25,12 +25,22 @@ import {
   openRunLog,
   subscribeRunLog,
 } from "./stepLog.js";
-import type { ArtifactProvenance, StepProvenance } from "./artifactStore.js";
 import type { JudgeDeps, JudgeResult } from "./gateJudge.js";
 import { runGateSummary } from "./gateSummary.js";
 import type { GateSummaryDeps } from "./gateSummary.js";
 import type { GatePayload } from "./gateMaterial.js";
-import type { StepStatus } from "./runStatus.js";
+import type {
+  ArtifactProvenance,
+  GateDecision,
+  GateMode,
+  GetResult,
+  RunArtifact,
+  RunInvocation,
+  RunSummary,
+  StepProvenance,
+  StepState,
+  CancelledInfo,
+} from "./runState.js";
 import type { ModelRegistry, ProviderProfile } from "../canon/registry.js";
 import type { StepLogEvent, StepLogEventInput } from "../canon/stepLogEvents.js";
 import type { StepTransition } from "../canon/stepTransition.js";
@@ -76,34 +86,18 @@ export interface MastraLike {
 // ── Public types ──────────────────────────────────────────────────────────────
 
 // Re-export for callers that need the provenance types alongside GetResult.
-export type { StepProvenance, ArtifactProvenance } from "./artifactStore.js";
-
-/** Run-level gate mode (FR-001). Default "manual" preserves existing behaviour. */
-export type GateMode = "manual" | "auto";
-
-/**
- * One recorded gate decision (FR-008).
- * Persists for the lifetime of the RunRecord; exposed via GetResult so every
- * approval is auditable regardless of who or what made it.
- */
-export interface GateDecision {
-  /** Dot-joined step path of the gate that was decided. */
-  gateStepId: string;
-  /** Run-level mode in effect at the time of the decision. */
-  mode: GateMode;
-  decidedBy: "human" | "agent";
-  approved: boolean;
-  /** Non-empty reason from the agent or (in future) from a human form. */
-  reason?: string;
-  /** Registry entry id of the judge model; present for agent decisions. */
-  judgeModelId?: string;
-  /** True when the judge had read-only workspace access; false/absent for api transport. */
-  workspaceAccess?: boolean;
-  /** True when this verdict arrived after the run had already left suspended (race, FR-003). */
-  superseded?: boolean;
-  /** ISO-8601 timestamp. */
-  decidedAt: string;
-}
+export type {
+  ArtifactProvenance,
+  CancelledInfo,
+  GateDecision,
+  GateMode,
+  GetResult,
+  RunArtifact,
+  RunInvocation,
+  RunSummary,
+  StepProvenance,
+  StepState,
+} from "./runState.js";
 
 export interface StepEvent {
   // The stream's own vocabulary plus the one transition Mastra never reports.
@@ -185,153 +179,8 @@ export interface ApproveResult {
   error?: string;
 }
 
-/** Per-step state accumulated by the record-level watch (FR-006). */
-export interface StepState {
-  status: StepStatus;
-  /** ISO-8601 timestamp of the step's workflow-step-start event (spec 033 D3). */
-  startedAt?: string;
-  /** ISO-8601 timestamp of the step's result/cancellation event (spec 033 D3). */
-  finishedAt?: string;
-  /** Failure reason when status is "failed" (spec 033 D3). */
-  error?: string;
-  /** First OUTPUT_EXCERPT_LIMIT chars of the step's output, if any. */
-  outputExcerpt?: string;
-  /** True when the output was longer than OUTPUT_EXCERPT_LIMIT. */
-  outputTruncated?: boolean;
-  /** Rendered prompt sent to the model, for llm steps (spec 033 FR-017). */
-  prompt?: string;
-  /** Shell command executed, for check steps (spec 033 FR-017). */
-  command?: string;
-  /** Resolved model id and transport for the step (spec 033 FR-017). */
-  model?: string;
-}
-
-/**
- * How a run was invoked, recorded once in start() and never mutated
- * (spec 033 D6/FR-016). Inputs are kept verbatim so the operator can reproduce
- * the run from the UI, chat or curl.
- */
-export interface RunInvocation {
-  pipeline: string;
-  inputs: Record<string, unknown>;
-  models?: Readonly<Record<string, string>>;
-  /** The provider profile id the run was started under, when the caller named one. */
-  provider?: string;
-  gateMode: GateMode;
-  artifactPath?: string;
-  /** ISO-8601 timestamp of the start() call. */
-  startedAt: string;
-  /** Every run enters through the daemon's HTTP API, including the MCP tools. */
-  source: "http";
-}
-
-/** Recorded when an operator cancels a run (spec 033 FR-002). */
-export interface CancelledInfo {
-  /** ISO-8601 timestamp of the cancel() call. */
-  at: string;
-  /** Optional operator-supplied reason. */
-  reason?: string;
-}
-
 /** Outcome of RunService.cancel(). `status` names the status that blocked the cancel. */
 export type CancelResult = { ok: true } | { ok: false; status: GetResult["status"] };
-
-export interface GetResult {
-  runId: string;
-  pipelineId: string;
-  /** "unreadable" only ever comes from a persisted run whose artifact failed to parse (FR-012). */
-  status:
-    | "running"
-    | "awaiting_approval"
-    | "succeeded"
-    | "rejected"
-    | "failed"
-    | "cancelled"
-    | "unreadable";
-  /** Where this state came from: the live registry, or an artifact on disk (FR-010). */
-  source?: "live" | "disk";
-  /** Run-level gate mode (FR-001). */
-  gateMode: GateMode;
-  /** Per-step states accumulated in flight (FR-006). Always present; empty before any step fires. */
-  steps: Record<string, StepState>;
-  /** How the run was invoked (spec 033 FR-016). */
-  invocation?: RunInvocation;
-  /** All gate decisions recorded so far (FR-008). Empty until a gate is decided. */
-  gateDecisions: GateDecision[];
-  result?: unknown;
-  /**
-   * One line naming what this run was started against (spec 042 D14), derived
-   * from its inputs — the same line the runs list shows, so a run opened from
-   * that list does not lose the only label that told it apart.
-   */
-  subject?: string;
-  /** Present only when status is "awaiting_approval" — the pending gate's human-readable prompt. */
-  gateMessage?: string;
-  /** Present only when status is "awaiting_approval" — the spec the human is being asked to approve. */
-  spec?: unknown;
-  /**
-   * Present only when status is "awaiting_approval", and only once it has been
-   * produced — one paragraph describing what approving would decide (spec 043).
-   *
-   * Absent is a normal state, not an error state: it is absent while the call
-   * is still in flight and absent for good when it failed. The page renders
-   * what it has (FR-003).
-   */
-  gateSummary?: string;
-  /**
-   * Present only when status is "awaiting_approval" — the dotted id of the gate
-   * step that suspended. The page names it when there is nothing else to show
-   * (spec 043 FR-005); "this gate" tells an operator nothing about which one.
-   */
-  gateStepId?: string;
-  /**
-   * Present only when status is "failed", "rejected" or "cancelled" — a brief
-   * description of why the run ended.
-   */
-  error?: string;
-  /** Present only when status is "cancelled" — when the operator cancelled and why (FR-002). */
-  cancelled?: CancelledInfo;
-  /**
-   * Set when the judge produced a malformed verdict after two attempts or encountered a
-   * transport error (FR-005). The run degrades to manual: it remains awaiting_approval so a human
-   * can answer instead. Cleared when a new suspension is recorded.
-   */
-  judgeError?: string;
-  /**
-   * Absolute path of the durable artifact written by the last persistArtifact call
-   * (spec 029 FR-009). Absent until the run first settles or suspends.
-   */
-  artifactPath?: string;
-}
-
-/** One row in the list returned by list() (FR-001). No output, result, spec, or gate data. */
-export interface RunSummary {
-  runId: string;
-  pipelineId: string;
-  status:
-    | "running"
-    | "awaiting_approval"
-    | "succeeded"
-    | "rejected"
-    | "failed"
-    | "cancelled"
-    | "unreadable";
-  /** Where this summary came from: the live registry, or an artifact on disk (FR-010). */
-  source: "live" | "disk";
-  /** ISO-8601 timestamp of when start() was called. */
-  createdAt: string;
-  /**
-   * ISO-8601 timestamp of the terminal transition (spec 034 FR-002). Absent
-   * while the run is running or waiting at a gate — a suspended run has not
-   * settled — so a list consumer can tell "still going" from "took this long".
-   */
-  settledAt?: string;
-  /**
-   * One line naming what this run was started against (spec 042 D14), derived
-   * from its inputs. Absent when those carry nothing worth showing.
-   */
-  subject?: string;
-}
 
 /** The `subject` property when there is one, and nothing at all when there is not. */
 function withSubject(invocation: unknown): { subject?: string } {
@@ -997,13 +846,9 @@ export class RunService {
     if (!this.runsDir) return undefined;
     const persisted = readPersistedRun(this.runsDir, runId);
     if (!persisted) return undefined;
-    // The artifact is a serialised GetResult plus provenance, so it already has
-    // the shape callers expect; the cast documents that it is not re-validated
-    // field by field, and status/steps/gateDecisions were normalised on read.
     // `subject` is derived rather than read, because artifacts written before it
     // existed carry none and a restored run should not be the nameless one.
-    const out = persisted as unknown as GetResult;
-    return { ...out, ...withSubject(out.invocation) };
+    return { ...persisted, ...withSubject(persisted.invocation) };
   }
 
   /**
@@ -1028,9 +873,7 @@ export class RunService {
     if (!this.runsDir) return live;
 
     const liveIds = new Set(live.map((r) => r.runId));
-    const persisted = listPersistedRuns(this.runsDir)
-      .filter((p) => !liveIds.has(p.runId))
-      .map((p) => p as unknown as RunSummary);
+    const persisted = listPersistedRuns(this.runsDir).filter((p) => !liveIds.has(p.runId));
     return [...live, ...persisted];
   }
 
@@ -1608,7 +1451,7 @@ export class RunService {
       settledAt,
     };
 
-    const artifactData: Record<string, unknown> = {
+    const artifactData: RunArtifact = {
       ...snapshot,
       provenance,
       // FR-004: surface the cancellation at the top level of the artifact so a

@@ -33,6 +33,7 @@ import { ensureProjectState, resolveProjectState } from "./projectState.js";
 import { RunService } from "./runService.js";
 import { recordStep } from "./stepIntrospection.js";
 import type { MastraLike } from "./runService.js";
+import type { RunArtifact } from "./runState.js";
 
 // ── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -139,6 +140,25 @@ function loadedOf(steps: StepDef[]): LoadedPipeline {
   return {
     def: { id: "test-pipeline", version: 1, description: "", inputs: [], steps },
     prompts: {},
+  };
+}
+
+/** A complete artifact as the run service writes one, for tests of the writer. */
+function sampleRunArtifact(runId: string): RunArtifact {
+  return {
+    runId,
+    pipelineId: "test-pipeline",
+    status: "succeeded",
+    gateMode: "manual",
+    steps: {},
+    gateDecisions: [],
+    provenance: {
+      pipelineId: "test-pipeline",
+      profileId: "anthropic",
+      transportPerStep: {},
+      startedAt: "2026-10-10T10:00:00.000Z",
+      settledAt: "2026-10-10T10:05:00.000Z",
+    },
   };
 }
 
@@ -1483,9 +1503,12 @@ describe("writeRunArtifact / upsertManifestEntry — owner-only modes", () => {
     const root = mkdtempSync(join(tmpdir(), "af-modes-"));
     try {
       const artifactDir = join(root, "run-modes-01");
-      const artifactPath = await writeRunArtifact(artifactDir, "run-modes-01", "test", {
-        status: "succeeded",
-      });
+      const artifactPath = await writeRunArtifact(
+        artifactDir,
+        "run-modes-01",
+        "test",
+        sampleRunArtifact("run-modes-01")
+      );
       assert.ok(artifactPath !== undefined, "the artifact must be written");
       await upsertManifestEntry(artifactDir, new Date().toISOString(), {
         stageId: "test",
@@ -1609,10 +1632,8 @@ describe("artifact publication is atomic (spec 029 FR-001)", () => {
       const artifactPath = join(dir, "test-pipeline.json");
       const incomplete = await countIncompleteReads(artifactPath, 500, (i) =>
         writeRunArtifact(dir, "atomic-run", "test-pipeline", {
-          runId: "atomic-run",
-          status: "succeeded",
-          iteration: i,
-          provenance: { pipelineId: "test-pipeline", profileId: "anthropic", settledAt: "now" },
+          ...sampleRunArtifact("atomic-run"),
+          result: { iteration: i },
         })
       );
 
@@ -1659,7 +1680,12 @@ describe("artifact publication is atomic (spec 029 FR-001)", () => {
   it("keeps owner-only mode on the renamed artifact and manifest", async () => {
     const dir = mkdtempSync(join(tmpdir(), "af-atomic-mode-"));
     try {
-      const path = await writeRunArtifact(dir, "mode-run", "test-pipeline", { runId: "mode-run" });
+      const path = await writeRunArtifact(
+        dir,
+        "mode-run",
+        "test-pipeline",
+        sampleRunArtifact("mode-run")
+      );
       assert.ok(path !== undefined);
       assert.equal(statSync(path).mode & 0o777, 0o600);
 
@@ -1674,5 +1700,212 @@ describe("artifact publication is atomic (spec 029 FR-001)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Spec 047 FR-10: the artifact is typed and normalised on read ─────────────
+
+describe("spec 047 FR-10: an artifact reads back as the run it recorded", () => {
+  /** A service with an empty registry over the same runs dir — the daemon after a restart. */
+  function restarted(runsDir: string): RunService {
+    return new RunService(
+      makeMastra(makeMockRun("unused", successResult())),
+      undefined,
+      runsDir,
+      stubProfile
+    );
+  }
+
+  function emit(run: MockRun, event: Record<string, unknown>): void {
+    for (const cb of run.watchers) cb(event);
+  }
+
+  /** What the HTTP layer would serve: JSON drops undefined, so compare after the same trip. */
+  function wire(value: unknown): Record<string, unknown> {
+    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  }
+
+  /** The fields that differ by construction between a live run and its restored twin. */
+  function withoutReadSideFields(state: Record<string, unknown>): Record<string, unknown> {
+    const rest = { ...state };
+    for (const key of ["source", "createdAt", "settledAt", "artifactPath"]) delete rest[key];
+    // What a persisted run adds to the live state, checked where it matters.
+    for (const key of ["provenance", "cancelledAt", "reason"]) delete rest[key];
+    return rest;
+  }
+
+  /** A run that touched every part of its state: input, models, provider, steps, a gate. */
+  async function startFullRun(
+    runsDir: string,
+    runId: string,
+    run: MockRun
+  ): Promise<{ service: RunService; runId: string }> {
+    const service = new RunService(
+      makeMastra(run),
+      undefined,
+      runsDir,
+      testProfileFull,
+      testRegistry
+    );
+    await service.start(
+      "investigate",
+      { request: "the auth bug" },
+      {
+        gateMode: "manual",
+        loaded: loadedOf(testSteps),
+        models: { "reason-step": "haiku" },
+        provider: { id: "cheap", roles: { reasoner: "haiku", worker: "haiku", scout: "haiku" } },
+      }
+    );
+    recordStep(runId, "reason-step", { prompt: "PROMPT", command: "CMD", model: "haiku (cli)" });
+    emit(run, { type: "workflow-step-start", payload: { id: "reason-step" } });
+    emit(run, {
+      type: "workflow-step-result",
+      payload: {
+        id: "reason-step",
+        status: "success",
+        output: { request: "the auth bug", "reason-step": { answer: "x".repeat(40) } },
+      },
+    });
+    emit(run, { type: "workflow-step-start", payload: { id: "work-step" } });
+    emit(run, {
+      type: "workflow-step-result",
+      payload: { id: "work-step", status: "failed", error: "boom" },
+    });
+    return { service, runId };
+  }
+
+  async function assertRestoredMatchesLive(
+    runsDir: string,
+    service: RunService,
+    runId: string
+  ): Promise<Record<string, unknown>> {
+    const live = wire(service.get(runId));
+    const disk = wire(restarted(runsDir).get(runId));
+    assert.equal(disk.source, "disk");
+    assert.equal(typeof (disk.provenance as { profileId?: unknown }).profileId, "string");
+    assert.deepEqual(withoutReadSideFields(disk), withoutReadSideFields(live));
+    return live;
+  }
+
+  it("a run held at a gate", async () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const run = makeMockRun("rt-gated", suspendedResult());
+    const { service } = await startFullRun(runsDir, "rt-gated", run);
+    await settled(service, "rt-gated");
+
+    const live = await assertRestoredMatchesLive(runsDir, service, "rt-gated");
+    assert.equal(live.status, "awaiting_approval");
+    for (const key of ["gateMessage", "spec", "gateStepId", "invocation", "steps"]) {
+      assert.ok(key in live, `the gated state must carry ${key}`);
+    }
+  });
+
+  it("an approved run", async () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const run = makeMockRun("rt-approved", suspendedResult());
+    const { service } = await startFullRun(runsDir, "rt-approved", run);
+    await settled(service, "rt-approved");
+    await service.approve("rt-approved", true, "looks right");
+    await settled(service, "rt-approved");
+
+    const live = await assertRestoredMatchesLive(runsDir, service, "rt-approved");
+    assert.equal(live.status, "succeeded");
+    assert.equal((live.gateDecisions as unknown[]).length, 1);
+    const steps = live.steps as Record<string, Record<string, unknown>>;
+    assert.equal(steps["reason-step"].prompt, "PROMPT");
+    assert.equal(steps["reason-step"].command, "CMD");
+    assert.equal(steps["reason-step"].model, "haiku (cli)");
+    assert.equal(steps["work-step"].error, "boom");
+    assert.ok(typeof steps["reason-step"].outputExcerpt === "string");
+    assert.ok(typeof steps["reason-step"].startedAt === "string");
+    assert.ok(typeof steps["reason-step"].finishedAt === "string");
+  });
+
+  it("a cancelled run", async () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const run: MockRun = {
+      ...makeMockRun("rt-cancelled", successResult()),
+      start: () => new Promise<Record<string, unknown>>(() => undefined),
+    };
+    const { service } = await startFullRun(runsDir, "rt-cancelled", run);
+    assert.deepEqual(await service.cancel("rt-cancelled", "operator stopped it"), { ok: true });
+    await settled(service, "rt-cancelled");
+
+    const live = await assertRestoredMatchesLive(runsDir, service, "rt-cancelled");
+    assert.equal(live.status, "cancelled");
+    assert.equal((live.cancelled as { reason?: string }).reason, "operator stopped it");
+    const disk = wire(restarted(runsDir).get("rt-cancelled"));
+    assert.equal(disk.reason, "operator stopped it");
+    assert.equal(typeof disk.cancelledAt, "string");
+  });
+
+  describe("an artifact this build cannot read as written", () => {
+    function writeArtifactFile(
+      runsDir: string,
+      runId: string,
+      body: Record<string, unknown>
+    ): void {
+      const dir = join(runsDir, runId);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "investigate.json"), JSON.stringify({ runId, ...body }), "utf8");
+    }
+
+    it("reports a status this build does not know as unreadable, naming it", () => {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      writeArtifactFile(runsDir, "run-v9", {
+        pipelineId: "investigate",
+        status: "paused-by-v9",
+        gateMode: "manual",
+        steps: {},
+        gateDecisions: [],
+      });
+
+      const full = readPersistedRun(runsDir, "run-v9");
+      assert.equal(full?.status, "unreadable");
+      assert.match(String(full?.error), /paused-by-v9/);
+      const row = listPersistedRuns(runsDir).find((r) => r.runId === "run-v9");
+      assert.equal(row?.status, "unreadable");
+      assert.match(String(row?.error), /paused-by-v9/);
+    });
+
+    it("replaces malformed fields with their empty value instead of passing them on", () => {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      writeArtifactFile(runsDir, "run-garbled", {
+        pipelineId: "investigate",
+        status: "succeeded",
+        gateMode: 7,
+        steps: [],
+        gateDecisions: "x",
+        invocation: "s",
+      });
+
+      const full = readPersistedRun(runsDir, "run-garbled");
+      assert.equal(full?.status, "succeeded");
+      assert.equal(full?.gateMode, "manual");
+      assert.deepEqual(full?.steps, {});
+      assert.deepEqual(full?.gateDecisions, []);
+      assert.equal(full?.invocation, undefined);
+    });
+
+    it("drops a step whose status is unknown and keeps its neighbours", () => {
+      const runsDir = makeStateRunsDir(makeTmpDir());
+      writeArtifactFile(runsDir, "run-steps", {
+        pipelineId: "investigate",
+        status: "succeeded",
+        steps: {
+          good: { status: "succeeded", prompt: "P", outputTruncated: true },
+          odd: { status: "levitating" },
+          junk: "nope",
+          typed: { status: "failed", error: 7, prompt: { not: "a string" } },
+        },
+      });
+
+      const steps = readPersistedRun(runsDir, "run-steps")?.steps;
+      assert.deepEqual(steps, {
+        good: { status: "succeeded", prompt: "P", outputTruncated: true },
+        typed: { status: "failed" },
+      });
+    });
   });
 });

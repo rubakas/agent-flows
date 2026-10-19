@@ -606,10 +606,16 @@ describe("POST /api/runs — non-blocking start + SSE step events", () => {
     // A 200 alone cannot tell a wired provider from one dropped between the
     // validation above and the two places it has to land (spec 039 review).
     const original = runService.start.bind(runService);
-    let seen: { wfInput: Record<string, unknown>; providerId?: string } | undefined;
-    runService.start = (pipelineId, wfInput, opts) => {
-      seen = { wfInput, ...(opts?.provider ? { providerId: opts.provider.id } : {}) };
-      return original(pipelineId, wfInput, opts);
+    const originalRunStart = mockRun.start.bind(mockRun);
+    let seen: { inputs: Record<string, unknown>; providerId?: string } | undefined;
+    let workflowInput: unknown;
+    runService.start = (pipelineId, inputs, opts) => {
+      seen = { inputs, ...(opts?.provider ? { providerId: opts.provider.id } : {}) };
+      return original(pipelineId, inputs, opts);
+    };
+    mockRun.start = async (opts: unknown) => {
+      workflowInput = (opts as { inputData?: unknown }).inputData;
+      return originalRunStart(opts);
     };
 
     let res: Response;
@@ -621,19 +627,21 @@ describe("POST /api/runs — non-blocking start + SSE step events", () => {
       });
     } finally {
       runService.start = original;
+      mockRun.start = originalRunStart;
     }
 
     assert.equal(res.status, 200, "a known profile id must be accepted");
     assert.ok(seen, "the route must have started a run");
-    assert.equal(
-      seen.wfInput.provider,
-      "openai",
-      "the validated provider must reach the workflow context the steps resolve from"
-    );
+    assert.deepEqual(seen.inputs, { request: "test" }, "the provider is an option, not an input");
     assert.equal(
       seen.providerId,
       "openai",
       "the resolved profile must reach opts.provider, which provenance is written from"
+    );
+    assert.deepEqual(
+      workflowInput,
+      { request: "test", provider: "openai" },
+      "the validated provider must reach the workflow context the steps resolve from"
     );
   });
 

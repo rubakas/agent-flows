@@ -9,49 +9,23 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-import { runPhase } from "./runStatus.js";
+import { isRunStatus, isStepStatus, runPhase } from "./runStatus.js";
 import { runSubject } from "./runSubject.js";
+import type {
+  ArtifactProvenance,
+  CancelledInfo,
+  GateDecision,
+  PersistedRun,
+  RunArtifact,
+  RunInvocation,
+  RunSummary,
+  StepState,
+} from "./runState.js";
+import type { ReadStatus } from "./runStatus.js";
+
+export type { ArtifactProvenance, PersistedRun, StepProvenance } from "./runState.js";
 
 // ── Provenance types ──────────────────────────────────────────────────────────
-
-/**
- * Per-step model and transport info recorded in every artifact.
- * Only entries whose model is known are present — an invented value is worse
- * than an absent one (spec 029 Design B).
- */
-export interface StepProvenance {
-  transport: "cli" | "api";
-  /**
-   * Registry entry id — e.g. "opus", "codex", "ollama-qwen".
-   * Never a key, secret, or API token.
-   */
-  modelId: string;
-  /** Human-readable model name from the registry entry, e.g. "claude-opus-5". */
-  model?: string;
-  /** Token counts for API transports (endpoint returns usage); absent for CLI. */
-  inputTokens?: number;
-  outputTokens?: number;
-}
-
-/**
- * Provenance block attached to every artifact.
- * A reader can tell which provider produced the artifact without the daemon running.
- */
-export interface ArtifactProvenance {
-  /** Matches the pipeline id used to start the run. */
-  pipelineId: string;
-  /** Active provider profile id, e.g. "anthropic", "openai", "local". */
-  profileId: string;
-  /**
-   * Per-step model info, keyed by step id.
-   * Empty when the step model cannot be determined without guessing.
-   */
-  transportPerStep: Record<string, StepProvenance>;
-  /** ISO-8601 timestamp when start() was called. */
-  startedAt: string;
-  /** ISO-8601 timestamp when the run first settled or suspended at a gate. */
-  settledAt: string;
-}
 
 // ── Manifest types (spec 029 FR-006) ─────────────────────────────────────────
 
@@ -155,7 +129,7 @@ export async function writeRunArtifact(
   artifactDir: string,
   runId: string,
   pipelineId: string,
-  artifactData: Record<string, unknown>
+  artifactData: RunArtifact
 ): Promise<string | undefined> {
   const artifactPath = join(artifactDir, `${pipelineId}.json`);
 
@@ -377,31 +351,14 @@ export async function readManifest(artifactDir: string): Promise<RunManifest> {
 // the routes and the MCP tools for no behavioural gain.
 
 /** One persisted run as it appears in the run list. */
-export interface PersistedRunSummary {
-  runId: string;
-  pipelineId: string;
-  /** Terminal status from the artifact, or "unreadable" when it could not be parsed. */
-  status: string;
-  /** ISO-8601 start time, from the artifact's provenance or invocation. */
-  createdAt: string;
-  /** ISO-8601 settle time from the artifact's provenance. */
-  settledAt?: string;
+export interface PersistedRunSummary extends RunSummary {
   /** Always "disk" — this run was reconstructed, not served from the registry. */
   source: "disk";
   /** Present when status is "unreadable": why the artifact could not be read. */
   error?: string;
   /** Present when status is "unreadable": the file that could not be read. */
   path?: string;
-  /** One line naming what this run was started against (spec 042 D14). */
-  subject?: string;
 }
-
-/** A run's full state rebuilt from its artifact — the on-disk twin of GetResult. */
-export type PersistedRun = Record<string, unknown> & {
-  runId: string;
-  status: string;
-  source: "disk";
-};
 
 /**
  * Reject anything that could escape runsDir before it reaches join().
@@ -624,8 +581,8 @@ function startedAtOf(artifact: Record<string, unknown>, runDir: string): string 
  * returned with status "unreadable" rather than dropped (FR-012).
  */
 /** The `subject` property when the artifact's invocation yields one. */
-function subjectOf(artifact: unknown): { subject?: string } {
-  const subject = runSubject((artifact as { invocation?: unknown })?.invocation);
+function subjectOf(run: { invocation?: unknown }): { subject?: string } {
+  const subject = runSubject(run.invocation);
   return subject === undefined ? {} : { subject };
 }
 
@@ -635,13 +592,180 @@ function subjectOf(artifact: unknown): { subject?: string } {
  * gate is the suspension, so reading it back as "settled" contradicts the list's
  * own contract.
  */
-function reportedSettledAt(artifact: Record<string, unknown>): { settledAt?: string } {
+function reportedSettledAt(
+  status: ReadStatus,
+  artifact: Record<string, unknown>
+): { settledAt?: string } {
   const settledAt = settledAtOf(artifact);
   if (settledAt === "") return {};
-  const status = typeof artifact.status === "string" ? artifact.status : "unreadable";
   return runPhase({ status, source: "disk" }) === "terminal" ? { settledAt } : {};
 }
 
+// ── Normalising an artifact on read ──────────────────────────────────────────
+//
+// An artifact is a file: another version may have written it, or a person edited
+// it. The reader builds a PersistedRun field by field, so a value that is not the
+// declared type is replaced by its empty value or dropped rather than handed to a
+// caller that trusts the type. Only keys the types declare are kept; anything else
+// in the file is dropped (spec 047 FR-10).
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The listed keys of `raw` that hold a string, and nothing for the rest. */
+function stringFields<K extends string>(
+  raw: Record<string, unknown>,
+  keys: readonly K[]
+): Partial<Record<K, string>> {
+  const out: Partial<Record<K, string>> = {};
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === "string") out[key] = value;
+  }
+  return out;
+}
+
+function booleanFields<K extends string>(
+  raw: Record<string, unknown>,
+  keys: readonly K[]
+): Partial<Record<K, boolean>> {
+  const out: Partial<Record<K, boolean>> = {};
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === "boolean") out[key] = value;
+  }
+  return out;
+}
+
+function stepStateOf(raw: unknown): StepState | undefined {
+  if (!isPlainObject(raw) || !isStepStatus(raw.status)) return undefined;
+  return {
+    status: raw.status,
+    ...stringFields(raw, [
+      "startedAt",
+      "finishedAt",
+      "error",
+      "outputExcerpt",
+      "prompt",
+      "command",
+      "model",
+    ]),
+    ...booleanFields(raw, ["outputTruncated"]),
+  };
+}
+
+function gateDecisionOf(raw: unknown): GateDecision | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const { gateStepId, mode, decidedBy, approved, decidedAt } = raw;
+  if (
+    typeof gateStepId !== "string" ||
+    (mode !== "manual" && mode !== "auto") ||
+    (decidedBy !== "human" && decidedBy !== "agent") ||
+    typeof approved !== "boolean" ||
+    typeof decidedAt !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    gateStepId,
+    mode,
+    decidedBy,
+    approved,
+    decidedAt,
+    ...stringFields(raw, ["reason", "judgeModelId"]),
+    ...booleanFields(raw, ["workspaceAccess", "superseded"]),
+  };
+}
+
+/** The invocation is kept whole once it has the shape the replay UI needs. */
+function invocationOf(raw: unknown): RunInvocation | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  if (typeof raw.pipeline !== "string" || !isPlainObject(raw.inputs)) return undefined;
+  return raw as unknown as RunInvocation;
+}
+
+function cancelledOf(raw: unknown): CancelledInfo | undefined {
+  if (!isPlainObject(raw) || typeof raw.at !== "string") return undefined;
+  return { at: raw.at, ...stringFields(raw, ["reason"]) };
+}
+
+function describeStatus(status: unknown): string {
+  return typeof status === "string"
+    ? `unknown status "${status.slice(0, 100)}"`
+    : "artifact has no status";
+}
+
+/** `raw` is the parsed artifact file at `path`, which sits in `dir` and belongs to `runId`. */
+function normaliseArtifact(
+  raw: Record<string, unknown>,
+  runId: string,
+  path: string,
+  dir: string
+): PersistedRun {
+  const status: ReadStatus = isRunStatus(raw.status) ? raw.status : "unreadable";
+  const provenance = isPlainObject(raw.provenance)
+    ? (raw.provenance as unknown as ArtifactProvenance)
+    : undefined;
+  const pipelineId =
+    typeof raw.pipelineId === "string"
+      ? raw.pipelineId
+      : typeof provenance?.pipelineId === "string"
+        ? provenance.pipelineId
+        : stemOf(path);
+
+  const steps: Record<string, StepState> = {};
+  if (isPlainObject(raw.steps)) {
+    for (const [id, entry] of Object.entries(raw.steps)) {
+      const state = stepStateOf(entry);
+      if (state !== undefined) steps[id] = state;
+    }
+  }
+  const gateDecisions = Array.isArray(raw.gateDecisions)
+    ? raw.gateDecisions.flatMap((entry) => gateDecisionOf(entry) ?? [])
+    : [];
+  const invocation = invocationOf(raw.invocation);
+  const cancelled = cancelledOf(raw.cancelled);
+
+  return {
+    runId,
+    pipelineId,
+    status,
+    source: "disk",
+    gateMode: raw.gateMode === "auto" ? "auto" : "manual",
+    steps,
+    gateDecisions,
+    createdAt: startedAtOf(raw, dir),
+    ...(invocation !== undefined ? { invocation } : {}),
+    ...(raw.result !== undefined ? { result: raw.result } : {}),
+    ...(raw.spec !== undefined ? { spec: raw.spec } : {}),
+    ...stringFields(raw, [
+      "gateMessage",
+      "gateSummary",
+      "gateStepId",
+      "judgeError",
+      "cancelledAt",
+      "reason",
+    ]),
+    // An unknown status is reported as the reason the run cannot be read; the
+    // artifact's own error would describe a run this build cannot place.
+    ...(status === "unreadable"
+      ? { error: describeStatus(raw.status), path }
+      : stringFields(raw, ["error"])),
+    ...(cancelled !== undefined ? { cancelled } : {}),
+    ...(provenance !== undefined ? { provenance } : {}),
+    ...reportedSettledAt(status, raw),
+    artifactPath: path,
+  };
+}
+
+/**
+ * Summarise every run directory under runsDir (FR-010).
+ *
+ * Returns an empty list when runsDir does not exist — a daemon that has never
+ * run anything is not an error. Directories whose artifact cannot be parsed are
+ * returned with status "unreadable" rather than dropped (FR-012).
+ */
 export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
   let dirEntries: string[];
   try {
@@ -678,18 +802,19 @@ export function listPersistedRuns(runsDir: string): PersistedRunSummary[] {
 
     // One row per run: a directory holds its anchor's artifact and the artifact
     // of every stage chained into it, each under its own id.
-    for (const { artifact } of scan.artifacts) {
-      const pipelineId = provenanceOf(artifact).pipelineId ?? artifact.pipelineId;
+    for (const { artifact, path } of scan.artifacts) {
+      const run = normaliseArtifact(artifact, ownerOf(artifact, dirName), path, runDir);
       summaries.push({
-        runId: ownerOf(artifact, dirName),
-        pipelineId: typeof pipelineId === "string" ? pipelineId : "unknown",
-        status: typeof artifact.status === "string" ? artifact.status : "unreadable",
-        createdAt: startedAtOf(artifact, runDir),
-        ...reportedSettledAt(artifact),
+        runId: run.runId,
+        pipelineId: run.pipelineId,
+        status: run.status,
+        createdAt: run.createdAt,
+        ...(run.settledAt !== undefined ? { settledAt: run.settledAt } : {}),
         // A restored run names its subject the same way a live one does: the
         // artifact is a serialised GetResult, so the invocation is right there.
-        ...subjectOf(artifact),
+        ...subjectOf(run),
         source: "disk",
+        ...(run.status === "unreadable" ? { error: run.error, path } : {}),
       });
     }
   }
@@ -712,25 +837,16 @@ export function readPersistedRun(runsDir: string, runId: string): PersistedRun |
   if (match.kind === "unreadable") {
     return {
       runId,
+      pipelineId: "unknown",
       status: "unreadable",
       source: "disk",
+      gateMode: "manual",
+      createdAt: startedAtOf({}, match.dir),
       error: match.error,
       path: match.path,
       steps: {},
       gateDecisions: [],
     };
   }
-
-  const { artifact, path, dir } = match;
-  return {
-    ...artifact,
-    runId,
-    status: typeof artifact.status === "string" ? artifact.status : "unreadable",
-    steps: typeof artifact.steps === "object" && artifact.steps !== null ? artifact.steps : {},
-    gateDecisions: Array.isArray(artifact.gateDecisions) ? artifact.gateDecisions : [],
-    createdAt: startedAtOf(artifact, dir),
-    ...reportedSettledAt(artifact),
-    artifactPath: path,
-    source: "disk",
-  };
+  return normaliseArtifact(match.artifact, runId, match.path, match.dir);
 }

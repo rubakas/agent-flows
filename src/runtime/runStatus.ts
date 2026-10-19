@@ -35,6 +35,33 @@ export type RunSource = "live" | "disk";
  */
 export type RunPhase = "live" | "awaiting" | "terminal" | "restored" | "orphaned" | "unreadable";
 
+const RUN_STATUSES: ReadonlySet<string> = new Set([
+  "running",
+  "awaiting_approval",
+  "succeeded",
+  "rejected",
+  "failed",
+  "cancelled",
+]);
+
+const STEP_STATUSES: ReadonlySet<string> = new Set([
+  "started",
+  "suspended",
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
+
+/** Whether a value read from disk or the wire names a run status this build knows. */
+export function isRunStatus(status: unknown): status is RunStatus {
+  return typeof status === "string" && RUN_STATUSES.has(status);
+}
+
+/** Whether a value read from disk or the wire names a step status this build knows. */
+export function isStepStatus(status: unknown): status is StepStatus {
+  return typeof status === "string" && STEP_STATUSES.has(status);
+}
+
 const RUNNING_OR_AWAITING: ReadonlySet<string> = new Set(["running", "awaiting_approval"]);
 
 const SETTLED: ReadonlySet<string> = new Set(["succeeded", "rejected", "failed", "cancelled"]);
