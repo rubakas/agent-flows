@@ -1909,3 +1909,112 @@ describe("spec 047 FR-10: an artifact reads back as the run it recorded", () => 
     });
   });
 });
+
+// ── Spec 047 FR-11: a chained stage that crashed before it wrote an artifact ─
+
+describe("spec 047 FR-11: locating a chained stage from its events file", () => {
+  const EVENTS_HEAD_BYTES = 64 * 1024;
+
+  /** One events line as stepLog's writeEvent serialises it: payload first, ids after. */
+  function eventLine(runId: string, extra: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      kind: "step.start",
+      model: "m",
+      transport: "cli",
+      ...extra,
+      seq: 1,
+      at: "2026-10-10T10:00:00.000Z",
+      runId,
+      pipelineId: "build",
+      stepId: "s",
+    });
+  }
+
+  function writeDirFile(runsDir: string, dirName: string, file: string, text: string): string {
+    const dir = join(runsDir, dirName);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, file), text, "utf8");
+    return dir;
+  }
+
+  function writeAnchorArtifact(runsDir: string, anchorId: string): string {
+    return writeDirFile(
+      runsDir,
+      anchorId,
+      "investigate.json",
+      JSON.stringify({ runId: anchorId, pipelineId: "investigate", status: "succeeded" })
+    );
+  }
+
+  it("finds a crashed child by the events file in its anchor's directory", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const anchorDir = writeAnchorArtifact(runsDir, "run-anchor");
+    writeFileSync(join(anchorDir, "build.events.jsonl"), `${eventLine("run-child")}\n`);
+
+    assert.deepEqual(locateRun(runsDir, "run-child"), { dir: anchorDir, pipelineId: "build" });
+    assert.deepEqual(locateRun(runsDir, "run-anchor"), {
+      dir: anchorDir,
+      pipelineId: "investigate",
+    });
+  });
+
+  it("does not hand a crashed child's events file to the anchor whose artifact is gone", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const anchorDir = writeDirFile(
+      runsDir,
+      "run-anchor",
+      "build.events.jsonl",
+      `${eventLine("run-child")}\n`
+    );
+
+    assert.equal(locateRun(runsDir, "run-anchor"), undefined);
+    assert.deepEqual(locateRun(runsDir, "run-child"), { dir: anchorDir, pipelineId: "build" });
+  });
+
+  it("takes an events file that names no run, as a run's own crash before its first event", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const dir = writeDirFile(runsDir, "run-empty", "build.events.jsonl", "");
+
+    assert.deepEqual(locateRun(runsDir, "run-empty"), { dir, pipelineId: "build" });
+  });
+
+  it("prefers the events file that names the run over one that names nothing", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const dir = writeDirFile(runsDir, "run-two", "a-empty.events.jsonl", "");
+    writeFileSync(join(dir, "z-named.events.jsonl"), `${eventLine("run-two")}\n`);
+
+    assert.deepEqual(locateRun(runsDir, "run-two"), { dir, pipelineId: "z-named" });
+  });
+
+  it("does not attribute a run to an events line that quotes its id in a nested field", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    // A tool call's input is an object; a model can put `"runId":"run-decoy"` in it.
+    const dir = writeDirFile(
+      runsDir,
+      "run-A",
+      "build.events.jsonl",
+      `${eventLine("run-A", { kind: "tool.call", input: { runId: "run-decoy" } })}\n`
+    );
+
+    assert.equal(locateRun(runsDir, "run-decoy"), undefined);
+    assert.deepEqual(locateRun(runsDir, "run-A"), { dir, pipelineId: "build" });
+  });
+
+  it("reads only the head of an events file", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    const filler = `${eventLine("run-A", { kind: "message", text: "x".repeat(1000) })}\n`;
+    const padding = filler.repeat(Math.ceil(EVENTS_HEAD_BYTES / filler.length) + 1);
+    const anchorDir = writeAnchorArtifact(runsDir, "run-anchor");
+    writeFileSync(
+      join(anchorDir, "build.events.jsonl"),
+      `${eventLine("run-early")}\n${padding}${eventLine("run-late")}\n`
+    );
+
+    assert.equal(locateRun(runsDir, "run-early")?.pipelineId, "build");
+    assert.equal(
+      locateRun(runsDir, "run-late"),
+      undefined,
+      "a run whose first line is past the head is not found: the scan never reads a whole file"
+    );
+  });
+});

@@ -1121,6 +1121,34 @@ describe("daemon down — reads degrade, writes do not", () => {
     assert.equal(child.lastPersistedStatus, "succeeded");
   });
 
+  it("finds a chained child that crashed before it wrote an artifact", async () => {
+    // The anchor finished; its child died after opening its events file. Only
+    // the file in the anchor's directory says the child ever existed.
+    rmSync(runDir, { recursive: true, force: true });
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      join(runDir, "investigate.json"),
+      JSON.stringify({ runId: RUN_ID, pipelineId: "investigate", status: "succeeded" })
+    );
+    writeFileSync(
+      join(runDir, "build.events.jsonl"),
+      JSON.stringify({
+        runId: "run-crashed-child",
+        pipelineId: "build",
+        stepId: "s",
+        at: "2026-10-10T10:00:00.000Z",
+        seq: 1,
+        kind: "step.start",
+      }) + "\n"
+    );
+    daemonGone();
+
+    const child = await getRunState("run-crashed-child");
+    assert.equal(child.pipelineId, "build");
+    assert.equal(child.lastPersistedStatus, "orphaned");
+    assert.equal(child.eventsPath, join(runDir, "build.events.jsonl"));
+  });
+
   it("refuses a run id that is a path rather than a run id", async () => {
     daemonGone();
     // The fallback fires whenever the daemon is retired — routinely — so an

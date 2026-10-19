@@ -5,7 +5,7 @@
 // one-way dependency (runService → artifactStore) so there is no cycle.
 
 import { randomBytes } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
@@ -452,12 +452,83 @@ type RunMatch =
 const EVENTS_SUFFIX = ".events.jsonl";
 
 /**
+ * How much of an events file the scan reads. A file can reach tens of megabytes
+ * (stepLogEvents caps a run's log far above this) and a lookup for an id nobody
+ * has heard of reads every unclaimed one, on the event loop; a run names itself
+ * on its first line, so the head is where its id is.
+ */
+const EVENTS_HEAD_BYTES = 64 * 1024;
+
+/**
+ * The run ids named by the complete lines at the head of an events file: the
+ * top-level `runId` of each line, which is the run that wrote it.
+ *
+ * With `mentioning`, only a line containing that text is parsed. The text is a
+ * pre-filter, not the answer — an id quoted inside a nested field (a tool call's
+ * input is an object) matches it too, so a line it matches is still judged by
+ * its own top-level field. A file that cannot be read names no run.
+ */
+function runIdsAtHeadOfEvents(path: string, mentioning?: string): Set<string> {
+  const ids = new Set<string>();
+  let text: string;
+  let cut: boolean;
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const buffer = Buffer.alloc(EVENTS_HEAD_BYTES);
+    const read = readSync(fd, buffer, 0, EVENTS_HEAD_BYTES, 0);
+    text = buffer.toString("utf8", 0, read);
+    cut = read === EVENTS_HEAD_BYTES;
+  } catch {
+    return ids;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  const lines = text.split("\n");
+  // A head that ended mid-file ends mid-line.
+  if (cut) lines.pop();
+  for (const line of lines) {
+    if (line === "" || (mentioning !== undefined && !line.includes(mentioning))) continue;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (isPlainObject(parsed) && typeof parsed.runId === "string") ids.add(parsed.runId);
+    } catch {
+      // A half-written line names nothing.
+    }
+  }
+  return ids;
+}
+
+/** The pipeline stems of a directory's events files that no artifact in it claims, sorted. */
+function unclaimedEventsStems(dir: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const claimed = new Set(
+    names
+      .filter((name) => name.endsWith(".json") && name !== "manifest.json")
+      .map((name) => name.slice(0, -".json".length))
+  );
+  return names
+    .filter((name) => name.endsWith(EVENTS_SUFFIX))
+    .map((name) => name.slice(0, -EVENTS_SUFFIX.length))
+    .filter((pipelineId) => !claimed.has(pipelineId))
+    .sort();
+}
+
+/**
  * A run in its own directory: the artifact that names it, else the one broken
  * artifact that might, else — for a run that has not written an artifact yet —
  * its events file.
  *
  * An events file whose pipeline already has an artifact belonging to a
- * DIFFERENT run is that run's, not this one's.
+ * DIFFERENT run is that run's, not this one's. An events file that names
+ * another run is never taken; the one that names this run is preferred, then one
+ * that names no run at all (a crash before the first event), which can in rare
+ * cases be another run's.
  */
 function findInOwnDir(runsDir: string, runId: string): RunMatch | undefined {
   const dir = join(runsDir, runId);
@@ -468,26 +539,32 @@ function findInOwnDir(runsDir: string, runId: string): RunMatch | undefined {
   if (own) return { kind: "artifact", dir, ...own };
   if (scan.failure) return { kind: "unreadable", dir, ...scan.failure };
 
-  const claimed = new Set(scan.artifacts.map((c) => stemOf(c.path)));
-  const events = readdirSync(dir)
-    .filter((name) => name.endsWith(EVENTS_SUFFIX))
-    .map((name) => name.slice(0, -EVENTS_SUFFIX.length))
-    .filter((pipelineId) => !claimed.has(pipelineId))
-    .sort()[0];
-  return events === undefined ? undefined : { kind: "events", dir, pipelineId: events };
+  const candidates = unclaimedEventsStems(dir).map((pipelineId) => ({
+    pipelineId,
+    names: runIdsAtHeadOfEvents(join(dir, `${pipelineId}${EVENTS_SUFFIX}`)),
+  }));
+  const found =
+    candidates.find((c) => c.names.has(runId)) ?? candidates.find((c) => c.names.size === 0);
+  return found === undefined ? undefined : { kind: "events", dir, pipelineId: found.pipelineId };
 }
 
 /**
  * A chained run in some other run's directory: the artifact anywhere under
- * runsDir whose own `runId` is this one's.
+ * runsDir whose own `runId` is this one's, else — for a stage that crashed
+ * before it wrote one — an events file there whose lines name it.
  *
  * Cost: one readdir of runsDir plus a read of every artifact in every run
- * directory; only a file whose text contains the run id is parsed. It runs only when the run's own directory does not describe it
- * — a chained child after a restart, or an id nobody has heard of — never on
- * the way to a run that is where its id says it is.
+ * directory; only a file whose text contains the run id is parsed. The second
+ * pass reads at most the head of an events file no artifact claims, which is
+ * none in a healthy directory. It runs only when the run's own directory does
+ * not describe it — a chained child after a restart, or an id nobody has heard
+ * of — never on the way to a run that is where its id says it is.
  *
- * Not resolvable: a stage chained into a directory outside runsDir (a
- * cross-project anchor), which this project's state does not contain.
+ * Limits: openRunLog appends, so an events file can hold several runs and a run
+ * that is not on a head line is not found; a crashed child that re-ran a
+ * pipeline whose stem an artifact in that directory already claims stays
+ * unresolved; a stage chained into a directory outside runsDir (a cross-project
+ * anchor) is found only by the daemon of the project that holds the anchor.
  */
 function findByScan(runsDir: string, runId: string): RunMatch | undefined {
   let dirEntries: string[];
@@ -496,14 +573,22 @@ function findByScan(runsDir: string, runId: string): RunMatch | undefined {
   } catch {
     return undefined;
   }
+  const others = dirEntries.filter((name) => name !== runId && isSafeRunId(name));
   // As the artifact's JSON spells it: an id with a quote in it is escaped there.
   const spelled = JSON.stringify(runId).slice(1, -1);
-  for (const name of dirEntries) {
-    if (name === runId || !isSafeRunId(name)) continue;
+  for (const name of others) {
     const dir = join(runsDir, name);
     const scan = scanRunDir(dir, spelled);
     const found = scan?.artifacts.find((c) => c.artifact.runId === runId);
     if (found) return { kind: "artifact", dir, ...found };
+  }
+  const prefilter = `"runId":${JSON.stringify(runId)}`;
+  for (const name of others) {
+    const dir = join(runsDir, name);
+    for (const pipelineId of unclaimedEventsStems(dir)) {
+      const named = runIdsAtHeadOfEvents(join(dir, `${pipelineId}${EVENTS_SUFFIX}`), prefilter);
+      if (named.has(runId)) return { kind: "events", dir, pipelineId };
+    }
   }
   return undefined;
 }
