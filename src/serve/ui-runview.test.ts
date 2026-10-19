@@ -401,17 +401,19 @@ describe("refresh", () => {
 });
 
 describe("stepDetail", () => {
-  it("shares one in-flight snapshot request between callers", async () => {
+  it("makes its own snapshot request per call, so a step never gets another's response", async () => {
     const r = await opened();
     const before = r.net.calls.length;
-    const p1 = r.session.stepDetail("a");
-    const p2 = r.session.stepDetail("b");
-    assert.equal(r.net.calls.length, before + 1);
-    r.net.calls[before]?.reply({ json: { steps: { a: { prompt: "x" }, b: { command: "y" } } } });
-    assert.deepEqual(await p1, { prompt: "x" });
-    assert.deepEqual(await p2, { command: "y" });
-    void r.session.stepDetail("a");
-    assert.equal(r.net.calls.length, before + 2, "a settled request must not be reused");
+    const forA = r.session.stepDetail("a");
+    const forB = r.session.stepDetail("b");
+    assert.equal(r.net.calls.length, before + 2, "a call joined another step's request");
+    // A's request was made before B's step recorded its prompt; B's carries it.
+    r.net.calls[before]?.reply({ json: { steps: { a: { prompt: "x" } } } });
+    r.net.calls[before + 1]?.reply({
+      json: { steps: { a: { prompt: "x" }, b: { command: "y" } } },
+    });
+    assert.deepEqual(await forA, { prompt: "x" });
+    assert.deepEqual(await forB, { command: "y" });
   });
 
   it("is undefined when the snapshot cannot be read", async () => {

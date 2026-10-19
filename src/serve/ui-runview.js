@@ -74,7 +74,6 @@ export function createRunSession(o) {
   let stream = null;
   let streamState = "none";
   let refreshing = false;
-  let detailGet = null;
 
   async function getSnapshot() {
     const res = await o.fetch(api(""));
@@ -272,13 +271,8 @@ export function createRunSession(o) {
 
     /** One step's current state from a fresh snapshot; undefined when it cannot be read. */
     stepDetail(stepId) {
-      if (detailGet === null) {
-        detailGet = getSnapshot().finally(() => {
-          detailGet = null;
-        });
-      }
       return whileOpen(
-        detailGet.then(
+        getSnapshot().then(
           (fresh) => fresh.steps?.[stepId],
           () => undefined
         )
