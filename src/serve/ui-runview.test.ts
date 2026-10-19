@@ -486,6 +486,19 @@ describe("stepOutput — one fetcher, one cache", () => {
     assert.deepEqual(await second, { kind: "text", output: "now" });
   });
 
+  it("does not cache a 404 that was asked while the step ran, even if it settled before the reply", async () => {
+    const r = await opened({ snapshot: { ...RUNNING, steps: { a: { status: "started" } } } });
+    const first = r.session.stepOutput("a");
+    // The step settles while the request is in flight; the 404 predates its output.
+    r.streams[0]?.emit("step", { stepId: "a", status: "succeeded" });
+    r.net.to(outputUrl("a"))[0]?.reply({ status: 404 });
+    assert.equal(await first, null);
+    const second = r.session.stepOutput("a");
+    assert.equal(r.net.to(outputUrl("a")).length, 2, "a late 404 was cached as final");
+    r.net.to(outputUrl("a"))[1]?.reply({ json: { kind: "text", output: "written" } });
+    assert.deepEqual(await second, { kind: "text", output: "written" });
+  });
+
   it("rejects a server error without caching it", async () => {
     const r = await opened();
     const first = r.session.stepOutput("a");

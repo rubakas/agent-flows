@@ -169,7 +169,11 @@ export function createRunSession(o) {
     };
   }
 
-  /** Whether a 404 for this step's output is final rather than "not yet". */
+  /**
+   * Whether a 404 for this step's output is final rather than "not yet". It is
+   * read when the request goes out: a step that settles while the request is in
+   * flight may have been answered before its output was written.
+   */
   function settled(stepId) {
     return (
       SETTLED_STEP_STATUSES.includes(snapshot?.steps?.[stepId]?.status) ||
@@ -179,9 +183,10 @@ export function createRunSession(o) {
   }
 
   async function loadOutput(stepId, key) {
+    const wasSettled = settled(stepId);
     const res = await o.fetch(api(`/steps/${encodeURIComponent(stepId)}/output`));
     if (res.status === 404) {
-      if (settled(stepId)) outputs.payloads.set(key, null);
+      if (wasSettled) outputs.payloads.set(key, null);
       return null;
     }
     if (!res.ok) throw new Error(`Request failed (${res.status})`);
