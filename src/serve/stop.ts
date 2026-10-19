@@ -126,43 +126,42 @@ export async function stopProjectDaemon(
           `the daemon on port ${checked.record.port} serves ${checked.identity.projectDir}, not the recorded ` +
           `${checked.record.projectDir} — nothing was signalled`,
       };
-    case "verified":
-      break;
+    case "verified": {
+      const { record } = checked;
+      const base = reportBase(stateDir, record);
+      kill(record.pid, "SIGTERM");
+
+      const deadline = Date.now() + waitMs;
+      for (;;) {
+        const still = await probe(record.port);
+        if (still?.pid !== record.pid) break;
+        if (Date.now() >= deadline) {
+          return {
+            ...base,
+            stopped: false,
+            outcome: "unresolved",
+            reason: `pid ${record.pid} was sent SIGTERM but is still answering on port ${record.port}`,
+          };
+        }
+        await sleep(pollMs);
+      }
+
+      // The daemon removes its own record on a graceful exit; this covers the case
+      // where it died before reaching that path. Ownership is re-checked, so a
+      // daemon that has already replaced the record keeps it.
+      removeDaemonRecordIfOwned(stateDir, record.pid);
+      return {
+        ...base,
+        stopped: true,
+        outcome: "stopped",
+        reason: `stopped pid ${record.pid} serving ${record.projectDir} on port ${record.port}`,
+      };
+    }
     default: {
       const unreachable: never = checked;
       return unreachable;
     }
   }
-
-  const { record } = checked;
-  const base = reportBase(stateDir, record);
-  kill(record.pid, "SIGTERM");
-
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    const still = await probe(record.port);
-    if (still?.pid !== record.pid) break;
-    if (Date.now() >= deadline) {
-      return {
-        ...base,
-        stopped: false,
-        outcome: "unresolved",
-        reason: `pid ${record.pid} was sent SIGTERM but is still answering on port ${record.port}`,
-      };
-    }
-    await sleep(pollMs);
-  }
-
-  // The daemon removes its own record on a graceful exit; this covers the case
-  // where it died before reaching that path. Ownership is re-checked, so a
-  // daemon that has already replaced the record keeps it.
-  removeDaemonRecordIfOwned(stateDir, record.pid);
-  return {
-    ...base,
-    stopped: true,
-    outcome: "stopped",
-    reason: `stopped pid ${record.pid} serving ${record.projectDir} on port ${record.port}`,
-  };
 }
 
 /** Every per-project state directory under the state root, in listing order. */
