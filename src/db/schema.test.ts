@@ -26,6 +26,8 @@ interface ForeignKeyRow {
   table: string;
   from: string;
   to: string;
+  on_update: string;
+  on_delete: string;
 }
 
 const drizzleTables = Object.values(schema).filter((v) => is(v, SQLiteTable)) as SQLiteTable[];
@@ -100,16 +102,23 @@ describe("bootstrap DDL matches the Drizzle schema", () => {
         }
         const fromDdl = (
           sqlite.prepare(`PRAGMA foreign_key_list("${config.name}")`).all() as ForeignKeyRow[]
-        ).map(({ table: foreign, from, to }) => ({ table: foreign, from, to }));
+        ).map(({ table: foreign, from, to, on_update, on_delete }) => ({
+          table: foreign,
+          from,
+          to,
+          onUpdate: on_update,
+          onDelete: on_delete,
+        }));
         const fromDrizzle = config.foreignKeys.map((fk) => {
           const ref = fk.reference();
           return {
             table: getTableConfig(ref.foreignTable).name,
             from: ref.columns[0].name,
             to: ref.foreignColumns[0].name,
+            onUpdate: (fk.onUpdate ?? "no action").toUpperCase(),
+            onDelete: (fk.onDelete ?? "no action").toUpperCase(),
           };
         });
-        assert.equal(fromDdl.length, fromDrizzle.length, "foreign key count");
         const byKey = (a: { from: string }, b: { from: string }): number =>
           a.from.localeCompare(b.from);
         assert.deepEqual(fromDdl.sort(byKey), fromDrizzle.sort(byKey));
@@ -126,6 +135,10 @@ describe("bootstrap DDL matches the Drizzle schema", () => {
           [0, 0, 0, 0],
           "schema.ts gained a constraint — extend this test to compare it with the DDL"
         );
+        const { sql } = sqlite
+          .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get(config.name) as { sql: string };
+        assert.doesNotMatch(sql, /\bCHECK\b/iu, "the DDL gained a CHECK — extend this test");
         const indexes = sqlite.prepare(`PRAGMA index_list("${config.name}")`).all();
         assert.deepEqual(indexes, [], "the DDL gained an index — extend this test");
       });
