@@ -6,6 +6,7 @@
 
 import { join } from "node:path";
 import { activeProfileIdOrUnknown, resolveStepModel } from "../canon/registry.js";
+import { isRunControlKey } from "../canon/runContext.js";
 import { UnknownStepStatusError, stepTransitionOf } from "../canon/stepTransition.js";
 import {
   writeRunArtifact,
@@ -117,6 +118,41 @@ export interface StepEvent {
 
 export type StepListener = (event: StepEvent) => void;
 
+/**
+ * What a caller hands `start` beside the pipeline's own inputs. The run control
+ * fields are typed here and merged into the workflow's input inside `start`,
+ * so `inputs` can never be a second door onto them.
+ */
+export interface RunStartOptions {
+  gateMode?: GateMode;
+  /**
+   * The pipeline as loaded and validated by the caller. Its steps drive the
+   * provenance recorded up-front (spec 029 FR-002): transportPerStep is filled
+   * for every llm step when a registry and profile are present. Non-llm steps
+   * have no model and are omitted. After loadPipeline+expandNested, pipeline-kind
+   * steps are already inlined as namespaced children (e.g. "outer.inner");
+   * loop steps have no model, and their body steps are absent from
+   * transportPerStep. Its loop bodies are built and logged like top-level steps,
+   * so the log needs them too.
+   */
+  loaded?: LoadedPipeline;
+  /** Per-step model overrides, validated by the caller (step id → model id). */
+  models?: Readonly<Record<string, string>>;
+  /**
+   * The profile this run was started under, resolved from the caller's
+   * `provider` field. Provenance must name the profile the run actually uses;
+   * the instance-level profile is the daemon's startup default and is wrong for
+   * any run that named its own.
+   */
+  provider?: ProviderProfile;
+  /**
+   * Chaining from a parent run's artifact (spec 029 FR-006): `dir` is where this
+   * stage writes its artifact, `artifactPath` the one the caller handed in,
+   * recorded verbatim on the invocation (spec 033 FR-016).
+   */
+  chain?: { dir: string; artifactPath: string };
+}
+
 export interface StartResult {
   runId: string;
   /** Always "running" — the run advances in the background. */
@@ -178,7 +214,7 @@ export interface StepState {
 export interface RunInvocation {
   pipeline: string;
   inputs: Record<string, unknown>;
-  models?: unknown;
+  models?: Readonly<Record<string, string>>;
   /** The provider profile id the run was started under, when the caller named one. */
   provider?: string;
   gateMode: GateMode;
@@ -344,26 +380,20 @@ const STEP_JOURNAL = {
  * vanishing from the timeline. Loop BODY steps must be in here or their
  * builder's lines would be written twice.
  *
- * Returns undefined when the caller declared no steps: which ids are
+ * Returns undefined when the caller passed no loaded pipeline: which ids are
  * builder-logged cannot then be known, and guessing wrong doubles every llm
  * step's log.
  */
-function builderLoggedStepIds(
-  steps: readonly StepDef[] | undefined,
-  bodies: Record<string, LoadedPipeline> | undefined
-): ReadonlySet<string> | undefined {
-  if (steps === undefined) return undefined;
+function builderLoggedStepIds(loaded: LoadedPipeline | undefined): ReadonlySet<string> | undefined {
+  if (loaded === undefined) return undefined;
   const ids = new Set<string>();
-  const walk = (
-    stepList: readonly StepDef[],
-    bodyMap: Record<string, LoadedPipeline> | undefined
-  ): void => {
-    for (const step of stepList) {
+  const walk = (pipeline: LoadedPipeline): void => {
+    for (const step of pipeline.def.steps) {
       if (STEP_JOURNAL[step.kind] === "builder") ids.add(step.id);
     }
-    for (const body of Object.values(bodyMap ?? {})) walk(body.def.steps, body.bodies);
+    for (const body of Object.values(pipeline.bodies ?? {})) walk(body);
   };
-  walk(steps, bodies);
+  walk(loaded);
   return ids;
 }
 
@@ -564,46 +594,16 @@ export class RunService {
    */
   async start(
     pipelineId: string,
-    wfInput: Record<string, unknown>,
-    opts?: {
-      gateMode?: GateMode;
-      /**
-       * Pipeline step definitions for provenance recording (spec 029 FR-002).
-       * When provided alongside a registry and profile, transportPerStep is
-       * filled for every llm step. Non-llm steps (gate, check, persist-ticket,
-       * export-spec, assemble-spec) have no model and are omitted. After
-       * loadPipeline+expandNested, pipeline-kind steps are already inlined as
-       * namespaced children (e.g. "outer.inner") and resolved naturally. Loop
-       * steps have no model; their body steps do not appear in this list and
-       * are therefore absent from transportPerStep.
-       */
-      pipelineSteps?: readonly StepDef[];
-      /**
-       * Resolved loop bodies, keyed by the loop step's id (`expandNested`).
-       * Their steps are absent from `pipelineSteps` but are built — and logged —
-       * exactly like top-level ones, so the log needs to know about them.
-       */
-      pipelineBodies?: Record<string, LoadedPipeline>;
-      /**
-       * Directory to write artifacts into when chaining from a parent run
-       * (spec 029 FR-006). Stored on the RunRecord and used by persistArtifact.
-       */
-      chainArtifactDir?: string;
-      /**
-       * The artifactPath the caller handed in, recorded verbatim on the
-       * invocation (spec 033 FR-016) so the run can be reproduced as issued.
-       */
-      artifactPath?: string;
-      /**
-       * The profile this run was started under, resolved from the caller's
-       * `provider` field. Provenance must name the profile the run actually
-       * uses; the instance-level profile is the daemon's startup default and is
-       * wrong for any run that named its own.
-       */
-      provider?: ProviderProfile;
-    }
+    inputs: Readonly<Record<string, string>>,
+    opts: RunStartOptions = {}
   ): Promise<StartResult> {
-    const gateMode: GateMode = opts?.gateMode ?? "manual";
+    // Guards callers that do not go through runStart, which refuses these first
+    // with a message that names the top-level field to use instead.
+    const reserved = Object.keys(inputs).find(isRunControlKey);
+    if (reserved !== undefined) {
+      throw new Error(`Input "${reserved}" is reserved — pass it through the run options instead`);
+    }
+    const gateMode: GateMode = opts.gateMode ?? "manual";
     const wf = this.mastra.getWorkflow(pipelineId);
     const run = await wf.createRun();
     const { runId } = run;
@@ -616,26 +616,25 @@ export class RunService {
     // Compute transportPerStep up-front from the pipeline step definitions.
     // The result is an accurate record of what the run will use — not a guess —
     // because it applies the same model-resolution logic as the step runner,
-    // including per-run model overrides from wfInput.models (spec 029 FR-002).
+    // including per-run model overrides (spec 029 FR-002).
     const transportPerStep = this.computeTransportPerStep(
-      opts?.pipelineSteps,
-      wfInput.models,
-      opts?.provider ?? this.judgeDeps?.profile ?? this.standaloneProfile,
+      opts.loaded?.def.steps,
+      opts.models,
+      opts.provider ?? this.judgeDeps?.profile ?? this.standaloneProfile,
       this.judgeDeps?.registry ?? this.standaloneRegistry
     );
 
-    // FR-016: the invocation is the run as the operator issued it. `models` is
-    // merged into wfInput for the workflow, so it is split back out here rather
-    // than left inside the inputs the UI offers for replay.
-    const { models, provider, ...inputsOnly } = wfInput;
+    // FR-016: the invocation is the run as the operator issued it. The run
+    // control fields are options, never inside `inputs`, so the inputs the UI
+    // offers for replay are exactly what the caller passed.
     const createdAt = new Date();
     const invocation: RunInvocation = {
       pipeline: pipelineId,
-      inputs: inputsOnly,
-      ...(models !== undefined ? { models } : {}),
-      ...(typeof provider === "string" ? { provider } : {}),
+      inputs: { ...inputs },
+      ...(opts.models !== undefined ? { models: opts.models } : {}),
+      ...(opts.provider !== undefined ? { provider: opts.provider.id } : {}),
       gateMode,
-      ...(opts?.artifactPath !== undefined ? { artifactPath: opts.artifactPath } : {}),
+      ...(opts.chain !== undefined ? { artifactPath: opts.chain.artifactPath } : {}),
       startedAt: createdAt.toISOString(),
       source: "http",
     };
@@ -653,9 +652,9 @@ export class RunService {
       settledPromise,
       settle,
       transportPerStep,
-      builderLoggedSteps: builderLoggedStepIds(opts?.pipelineSteps, opts?.pipelineBodies),
-      ...(opts?.provider !== undefined ? { profile: opts.provider } : {}),
-      ...(opts?.chainArtifactDir !== undefined ? { chainArtifactDir: opts.chainArtifactDir } : {}),
+      builderLoggedSteps: builderLoggedStepIds(opts.loaded),
+      ...(opts.provider !== undefined ? { profile: opts.provider } : {}),
+      ...(opts.chain !== undefined ? { chainArtifactDir: opts.chain.dir } : {}),
     };
     this.registry.set(runId, record);
 
@@ -754,6 +753,14 @@ export class RunService {
     // The result/rejection updates the registry record and resolves settledPromise.
     // The void operator makes the dangling promise intentional; the catch branch
     // ensures no unhandled rejection can surface.
+    // The workflow reads the run control fields from its input beside the
+    // pipeline's own inputs (bindings/mastra/build.ts controlShape), so they are
+    // merged here and nowhere else.
+    const wfInput = {
+      ...inputs,
+      ...(opts.models !== undefined ? { models: opts.models } : {}),
+      ...(opts.provider !== undefined ? { provider: opts.provider.id } : {}),
+    };
     void run
       .start({ inputData: wfInput })
       .then((r1) => {
@@ -1501,31 +1508,22 @@ export class RunService {
    * steps list and are therefore absent from transportPerStep by design — a missing
    * entry is less harmful than a wrong one.
    *
-   * Models override: wfInput.models (step id → registry model id) takes precedence
+   * Models override: `models` (step id → registry model id) takes precedence
    * over the profile's role mapping. This is the point of the override feature: a
    * step run with haiku instead of the profile's opus must say haiku, not opus.
    */
   private computeTransportPerStep(
     steps: readonly StepDef[] | undefined,
-    modelsRaw: unknown,
+    models: Readonly<Record<string, string>> | undefined,
     profile: ProviderProfile | undefined,
     registry: ModelRegistry | undefined
   ): Record<string, StepProvenance> {
     if (!steps || !profile || !registry) return {};
 
-    // Extract the models override map, or use an empty object when absent/malformed.
-    const modelsOverride: Record<string, string> =
-      modelsRaw !== null &&
-      modelsRaw !== undefined &&
-      typeof modelsRaw === "object" &&
-      !Array.isArray(modelsRaw)
-        ? (modelsRaw as Record<string, string>)
-        : {};
-
     const result: Record<string, StepProvenance> = {};
     for (const step of steps) {
       if (step.kind !== "llm") continue;
-      const overriddenId = modelsOverride[step.id];
+      const overriddenId = models?.[step.id];
       const entry =
         overriddenId !== undefined
           ? registry.resolve(overriddenId)

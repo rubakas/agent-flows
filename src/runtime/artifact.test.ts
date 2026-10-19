@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, after } from "node:test";
 import { ModelRegistry } from "../canon/registry.js";
-import type { StepDef } from "../canon/types.js";
+import type { LoadedPipeline, StepDef } from "../canon/types.js";
 import type { ManifestStage, RunManifest, StepProvenance } from "./artifactStore.js";
 import {
   deriveChainStatus,
@@ -132,6 +132,14 @@ async function settled(service: RunService, runId: string): Promise<void> {
     (await service.waitForSettled(runId)) !== undefined,
     `run ${runId} is not live in this service`
   );
+}
+
+/** A loaded pipeline around the given steps; the rest of the definition is inert. */
+function loadedOf(steps: StepDef[]): LoadedPipeline {
+  return {
+    def: { id: "test-pipeline", version: 1, description: "", inputs: [], steps },
+    prompts: {},
+  };
 }
 
 /** Recursive, sorted list of relative paths under dir — empty when dir is absent. */
@@ -449,7 +457,7 @@ describe("FR-002: transportPerStep filled for model-bearing steps", () => {
       testRegistry
     );
 
-    await service.start(pipelineId, {}, { pipelineSteps: testSteps });
+    await service.start(pipelineId, {}, { loaded: loadedOf(testSteps) });
     await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
@@ -489,7 +497,7 @@ describe("FR-002: non-llm steps are omitted from transportPerStep", () => {
       testRegistry
     );
 
-    await service.start(pipelineId, {}, { pipelineSteps: testSteps });
+    await service.start(pipelineId, {}, { loaded: loadedOf(testSteps) });
     await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);
@@ -521,8 +529,8 @@ describe("FR-002: per-run models override is recorded, not the profile default",
     // Override: run reason-step with "haiku" instead of the profile-default "opus".
     await service.start(
       pipelineId,
-      { models: { "reason-step": "haiku" } },
-      { pipelineSteps: testSteps }
+      {},
+      { loaded: loadedOf(testSteps), models: { "reason-step": "haiku" } }
     );
     await settled(service, runId);
 
@@ -570,9 +578,9 @@ describe("spec 039: provenance records the per-run provider, not the startup def
     // The run names a different profile: every role resolves to haiku.
     await service.start(
       pipelineId,
-      { provider: "cheap" },
+      {},
       {
-        pipelineSteps: testSteps,
+        loaded: loadedOf(testSteps),
         provider: { id: "cheap", roles: { reasoner: "haiku", worker: "haiku", scout: "haiku" } },
       }
     );
@@ -671,7 +679,16 @@ describe("FR-006: second stage in same chain directory adds an ordered entry", (
     const chainArtifactDir = join(runsDir, stage1RunId);
     const service2 = new RunService(makeMastra(mockRun2), undefined, runsDir, stubProfile);
 
-    await service2.start(stage2Pipeline, {}, { chainArtifactDir });
+    await service2.start(
+      stage2Pipeline,
+      {},
+      {
+        chain: {
+          dir: chainArtifactDir,
+          artifactPath: join(chainArtifactDir, `${stage1Pipeline}.json`),
+        },
+      }
+    );
     await settled(service2, stage2RunId);
 
     // Read the manifest from the chain directory (stage 1's directory).
@@ -708,7 +725,11 @@ describe("FR-006: second stage in same chain directory adds an ordered entry", (
     const stage2RunId = "run-manifest-artdir-s2";
     const mockRun2 = makeMockRun(stage2RunId, successResult());
     const service2 = new RunService(makeMastra(mockRun2), undefined, runsDir, stubProfile);
-    await service2.start("spec-creation", {}, { chainArtifactDir: chainDir });
+    await service2.start(
+      "spec-creation",
+      {},
+      { chain: { dir: chainDir, artifactPath: join(chainDir, "investigate.json") } }
+    );
     await settled(service2, stage2RunId);
 
     // The second stage's artifact must be in the chain dir, not in its own runId dir.
@@ -1311,7 +1332,11 @@ describe("spec 047 FR-11: locating a run by its own id after a restart", () => {
       runsDir,
       stubProfile
     );
-    await second.start("spec-creation", {}, { chainArtifactDir: chainDir });
+    await second.start(
+      "spec-creation",
+      {},
+      { chain: { dir: chainDir, artifactPath: join(chainDir, "investigate.json") } }
+    );
     await settled(second, childId);
 
     const fresh = restarted(runsDir);
@@ -1351,7 +1376,11 @@ describe("spec 047 FR-11: locating a run by its own id after a restart", () => {
       stubProfile
     );
     // Same pipeline into the same directory: investigate.json now describes the second run.
-    await second.start("investigate", {}, { chainArtifactDir: dir });
+    await second.start(
+      "investigate",
+      {},
+      { chain: { dir, artifactPath: join(dir, "investigate.json") } }
+    );
     await settled(second, secondId);
 
     assert.equal(
@@ -1506,7 +1535,7 @@ describe("spec 039: provenance names the provider that answered after a failover
       actual: { profileId: "openai", transport: "cli", modelId: "codex", model: "gpt-5-codex" },
     });
 
-    await service.start(pipelineId, {}, { pipelineSteps: testSteps });
+    await service.start(pipelineId, {}, { loaded: loadedOf(testSteps) });
     await settled(service, runId);
 
     const artifactPath = join(runsDir, runId, `${pipelineId}.json`);

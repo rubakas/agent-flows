@@ -144,7 +144,7 @@ export type ArtifactInputsResult =
   | {
       ok: true;
       /** Inputs derived from the artifact. Take priority over the caller's own. */
-      inputs: Record<string, unknown>;
+      inputs: Record<string, string>;
       /**
        * FR-006: the directory holding the source artifact. The next stage writes
        * its own artifact there so every stage in a chain accumulates together.
@@ -177,7 +177,7 @@ export function resolveArtifactInputs(params: {
   explicitInputs: Record<string, unknown>;
 }): ArtifactInputsResult {
   const { projectDir, stateRoot, pipelineDef, explicitInputs } = params;
-  const artifactDerivedInputs: Record<string, unknown> = {};
+  const artifactDerivedInputs: Record<string, string> = {};
 
   const artifactPath = params.artifactPath;
   if (typeof artifactPath !== "string") {

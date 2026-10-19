@@ -34,6 +34,15 @@ function removeRunsDir(dir: string): void {
   rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 }
 
+/** A loaded pipeline around the given steps; the rest of the definition is inert. */
+function loadedOf(steps: StepDef[], bodies?: Record<string, LoadedPipeline>): LoadedPipeline {
+  return {
+    def: { id: "test-pipeline", version: 1, description: "", inputs: [], steps },
+    prompts: {},
+    ...(bodies !== undefined ? { bodies } : {}),
+  };
+}
+
 // ── Mock helpers ──────────────────────────────────────────────────────────────
 
 type WatchCallback = (event: Record<string, unknown>) => void;
@@ -2101,8 +2110,12 @@ describe("RunService — invocation is recorded once and round-trips (FR-016)", 
       const service = new RunService(makeMastra(run), undefined, runsDir);
       const started = await service.start(
         "test-pipeline",
-        { request: "ship it", models: { "test.step": "sonnet" } },
-        { gateMode: "auto", artifactPath: "runs/prev/spec-creation.json" }
+        { request: "ship it" },
+        {
+          gateMode: "auto",
+          models: { "test.step": "sonnet" },
+          chain: { dir: join(runsDir, "prev"), artifactPath: "runs/prev/spec-creation.json" },
+        }
       );
       await service.waitForSettled(started.runId);
 
@@ -2121,7 +2134,7 @@ describe("RunService — invocation is recorded once and round-trips (FR-016)", 
         `startedAt must be an ISO timestamp; got ${JSON.stringify(invocation?.startedAt)}`
       );
 
-      const raw = await waitForFile(join(runsDir, started.runId, "test-pipeline.json"));
+      const raw = await waitForFile(join(runsDir, "prev", "test-pipeline.json"));
       assert.ok(raw !== undefined, "a settled run must persist an artifact");
       const artifact = JSON.parse(raw) as { invocation?: Record<string, unknown> };
       assert.deepEqual(
@@ -2132,6 +2145,59 @@ describe("RunService — invocation is recorded once and round-trips (FR-016)", 
     } finally {
       removeRunsDir(runsDir);
     }
+  });
+});
+
+describe("RunService.start — run control fields are typed options (spec 047 FR-10)", () => {
+  /** A run that records the inputData the workflow was started with. */
+  function capturingRun(runId: string): { run: MockRun; inputs: () => unknown } {
+    const run = makeMockRun(runId, successResult(), successResult());
+    let captured: unknown = "never started";
+    run.start = async (opts: unknown) => {
+      captured = (opts as { inputData?: unknown }).inputData;
+      return successResult();
+    };
+    return { run, inputs: () => captured };
+  }
+
+  const cheap: ProviderProfile = {
+    id: "cheap",
+    roles: { reasoner: "haiku", worker: "haiku", scout: "haiku" },
+  };
+
+  it("hands the workflow its inputs plus the run control fields", async () => {
+    const { run, inputs } = capturingRun("ctl-run-1");
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start(
+      "p",
+      { request: "r" },
+      { models: { s: "haiku" }, provider: cheap }
+    );
+    await service.waitForSettled(runId);
+
+    assert.deepEqual(inputs(), { request: "r", models: { s: "haiku" }, provider: "cheap" });
+    const invocation = service.get(runId)?.invocation;
+    assert.deepEqual(invocation?.inputs, { request: "r" });
+    assert.deepEqual(invocation?.models, { s: "haiku" });
+    assert.equal(invocation?.provider, "cheap");
+  });
+
+  it("starts with exactly the inputs when no run control field is given", async () => {
+    const { run, inputs } = capturingRun("ctl-run-2");
+    const service = new RunService(makeMastra(run));
+    const { runId } = await service.start("p", { request: "r" });
+    await service.waitForSettled(runId);
+
+    // deepEqual sees an own key whose value is undefined, so a stray
+    // `models: undefined` would fail here.
+    assert.deepEqual(inputs(), { request: "r" });
+  });
+
+  it("throws on a run control key in inputs", async () => {
+    const { run } = capturingRun("ctl-run-3");
+    const service = new RunService(makeMastra(run));
+    await assert.rejects(service.start("p", { provider: "x" }), /reserved/);
+    await assert.rejects(service.start("p", { models: "x" }), /reserved/);
   });
 });
 
@@ -2771,7 +2837,7 @@ describe("RunService — structural steps reach the events file", () => {
     try {
       const run = pendingRun("structural-run");
       const service = new RunService(makeMastra(run), undefined, runsDir);
-      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+      const { runId } = await service.start("test-pipeline", {}, { loaded: loadedOf(STEPS) });
 
       run.emit({ type: "workflow-step-start", payload: { id: "approve" } });
       run.emit({ type: "workflow-step-start", payload: { id: "write" } });
@@ -2813,7 +2879,7 @@ describe("RunService — structural steps reach the events file", () => {
     try {
       const run = makeCancellableRun("structural-cancel-run", "approve");
       const service = new RunService(makeMastra(run), undefined, runsDir);
-      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+      const { runId } = await service.start("test-pipeline", {}, { loaded: loadedOf(STEPS) });
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
 
       await service.cancel(runId, "changed their mind");
@@ -2836,7 +2902,7 @@ describe("RunService — structural steps reach the events file", () => {
       const run = makeMockRun("gate-cancel-run", suspendedResult("x"), successResult());
       run.cancel = async () => undefined;
       const service = new RunService(makeMastra(run), undefined, runsDir);
-      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+      const { runId } = await service.start("test-pipeline", {}, { loaded: loadedOf(STEPS) });
       await service.waitForSettled(runId);
       // Mastra suspends the gate; the record-level watch records the state.
       run.emit({ type: "workflow-step-suspended", payload: { id: "approve" } });
@@ -2869,13 +2935,9 @@ describe("RunService — structural steps reach the events file", () => {
         {
           // A loop step at the top level; its body's steps are reachable only
           // through `bodies`, never through def.steps.
-          pipelineSteps: [{ id: "refine", kind: "loop", pipeline: "body" }],
-          pipelineBodies: {
-            refine: {
-              def: { id: "body", steps: [{ id: "draft", kind: "llm" }] },
-              prompts: {},
-            } as unknown as LoadedPipeline,
-          },
+          loaded: loadedOf([{ id: "refine", kind: "loop", pipeline: "body" }], {
+            refine: loadedOf([{ id: "draft", kind: "llm" }]),
+          }),
         }
       );
 
@@ -2900,7 +2962,7 @@ describe("RunService — structural steps reach the events file", () => {
     try {
       const run = pendingRun("structural-agree-run");
       const service = new RunService(makeMastra(run), undefined, runsDir);
-      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+      const { runId } = await service.start("test-pipeline", {}, { loaded: loadedOf(STEPS) });
 
       const seen: StepEvent[] = [];
       service.subscribe(runId, (event) => seen.push(event));
@@ -2938,7 +3000,7 @@ describe("RunService — structural steps reach the events file", () => {
     try {
       const run = pendingRun("structural-status-run");
       const service = new RunService(makeMastra(run), undefined, runsDir);
-      const { runId } = await service.start("test-pipeline", {}, { pipelineSteps: STEPS });
+      const { runId } = await service.start("test-pipeline", {}, { loaded: loadedOf(STEPS) });
 
       const seen: StepEvent[] = [];
       service.subscribe(runId, (event) => seen.push(event));

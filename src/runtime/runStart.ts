@@ -15,7 +15,7 @@ import { builtInProfileIds, getProfile, type ProviderProfile } from "../canon/re
 import { isRunControlKey } from "../canon/runContext.js";
 import { resolveArtifactInputs } from "../serve/artifactInputs.js";
 import { redactPaths } from "../serve/route-helpers.js";
-import type { RunService, StartResult } from "./runService.js";
+import type { RunService, RunStartOptions, StartResult } from "./runService.js";
 import type { Lookup, Pipelines } from "../canon/pipelines.js";
 
 /** The raw JSON body of `POST /api/runs`: every field is untrusted until checked. */
@@ -90,6 +90,7 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
   // record. Keys must name steps of this pipeline and values must be
   // registry-id-shaped, so a typo fails here rather than silently running the
   // profile default, and nothing unvalidated reaches the CLI argv.
+  let modelOverrides: Record<string, string> | undefined;
   if (models !== undefined) {
     if (typeof models !== "object" || models === null || Array.isArray(models)) {
       return invalid('Field "models" must be an object');
@@ -100,6 +101,7 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
       );
     }
     const stepIds = new Set(pipelineDef.steps.map((s) => s.id));
+    const checked: Record<string, string> = {};
     for (const [stepId, model] of Object.entries(models as Record<string, unknown>)) {
       if (!stepIds.has(stepId)) {
         return invalid(
@@ -109,7 +111,9 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
       if (typeof model !== "string" || model.length > 100 || !CLI_MODEL_RE.test(model)) {
         return invalid(`Model override "${stepId.slice(0, 100)}" must be a model id`);
       }
+      checked[stepId] = model;
     }
+    modelOverrides = checked;
   }
 
   // The per-run provider names a profile, not a model. It is resolved here so
@@ -141,9 +145,10 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
 
   // Extract explicit inputs early so the artifact check can skip inputs that
   // the operator already provided — those don't need to come from the artifact.
+  // Every value is a string: checked at the top of this function.
   const explicitInputs =
     typeof inputs === "object" && inputs !== null && !Array.isArray(inputs)
-      ? (inputs as Record<string, unknown>)
+      ? (inputs as Record<string, string>)
       : {};
 
   // `inputs` is spread straight into the workflow context, which is also where
@@ -178,7 +183,7 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
   // When artifactPath is provided, inputs may be omitted; the artifact seeds
   // the run's inputs. If both are provided, artifact-derived values take
   // priority — the operator is being explicit about what to hand off.
-  let artifactDerivedInputs: Record<string, unknown> = {};
+  let artifactDerivedInputs: Record<string, string> = {};
   // FR-006: when chaining from a parent artifact, write the new stage's artifact
   // into the parent run's directory so all stages in a chain accumulate there.
   // The chain dir is the directory that contains the source artifact file.
@@ -213,24 +218,22 @@ export async function startRun(req: RunRequest, deps: RunStartDeps): Promise<Run
 
   // Merge explicit inputs and artifact-derived inputs; artifact takes priority
   // when both are present (FR-003: "artifactPath takes priority").
-  const wfInput: Record<string, unknown> = {
-    ...explicitInputs,
-    ...artifactDerivedInputs,
-    ...(models !== undefined ? { models } : {}),
-    ...(runProfile !== undefined ? { provider: runProfile.id } : {}),
-  };
-
-  const result = await deps.runService.start(pipeline, wfInput, {
+  const startOptions: RunStartOptions = {
     gateMode: gateMode ?? "manual",
-    pipelineSteps: pipelineEntry.loaded.def.steps,
-    // Loop bodies are built like top-level steps but are absent from
-    // def.steps, so without them their llm steps would be logged twice.
-    ...(pipelineEntry.loaded.bodies !== undefined
-      ? { pipelineBodies: pipelineEntry.loaded.bodies }
-      : {}),
-    ...(chainArtifactDir !== undefined ? { chainArtifactDir } : {}),
-    ...(typeof artifactPath === "string" ? { artifactPath } : {}),
+    // The loaded pipeline carries the steps and the loop bodies. Bodies are built
+    // like top-level steps but are absent from def.steps, so without them their
+    // llm steps would be logged twice.
+    loaded: pipelineEntry.loaded,
+    ...(modelOverrides !== undefined ? { models: modelOverrides } : {}),
     ...(runProfile !== undefined ? { provider: runProfile } : {}),
-  });
+    ...(chainArtifactDir !== undefined && typeof artifactPath === "string"
+      ? { chain: { dir: chainArtifactDir, artifactPath } }
+      : {}),
+  };
+  const result = await deps.runService.start(
+    pipeline,
+    { ...explicitInputs, ...artifactDerivedInputs },
+    startOptions
+  );
   return { ok: true, result };
 }

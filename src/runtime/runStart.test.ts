@@ -348,7 +348,7 @@ function writeProfileFile(): void {
 }
 
 describe("startRun — a valid request", () => {
-  it("starts the pipeline with its step defs and a manual gate by default", async () => {
+  it("starts the pipeline with its loaded definition and a manual gate by default", async () => {
     const outcome = await startRun(request(), deps());
     assert.deepEqual(outcome, { ok: true, result: { runId: "fake-run", status: "running" } });
     assert.equal(calls.length, 1);
@@ -357,13 +357,13 @@ describe("startRun — a valid request", () => {
     assert.deepEqual(wfInput, { request: "r" });
     assert.equal(opts?.gateMode, "manual");
     assert.deepEqual(
-      opts?.pipelineSteps?.map((s) => s.id),
+      opts?.loaded?.def.steps.map((s) => s.id),
       ["only", "second"]
     );
-    assert.equal(opts?.pipelineBodies, undefined);
+    assert.equal(opts?.loaded?.bodies, undefined);
+    assert.equal(opts?.models, undefined);
     assert.equal(opts?.provider, undefined);
-    assert.equal(opts?.chainArtifactDir, undefined);
-    assert.equal(opts?.artifactPath, undefined);
+    assert.equal(opts?.chain, undefined);
   });
 
   it("passes an explicit gateMode through", async () => {
@@ -371,16 +371,13 @@ describe("startRun — a valid request", () => {
     assert.equal(calls[0][2]?.gateMode, "auto");
   });
 
-  it("merges models and the validated provider into the workflow input and the run options", async () => {
+  it("hands the validated models and provider to the run as options, not as inputs", async () => {
     // One without the other is a run that validated a provider it then never used,
     // or recorded provenance for a profile the steps did not resolve from.
     await startRun(request({ models: { only: "claude-sonnet-4-5" }, provider: "openai" }), deps());
     const [, wfInput, opts] = calls[0];
-    assert.deepEqual(wfInput, {
-      request: "r",
-      models: { only: "claude-sonnet-4-5" },
-      provider: "openai",
-    });
+    assert.deepEqual(wfInput, { request: "r" });
+    assert.deepEqual(opts?.models, { only: "claude-sonnet-4-5" });
     assert.equal(opts?.provider?.id, "openai");
   });
 
@@ -403,12 +400,12 @@ describe("startRun — a valid request", () => {
       deps({ providerProfiles: snapshot })
     );
     assert.equal(outcome.ok, true, JSON.stringify(outcome));
-    assert.equal(calls[0][1].provider, "from-snapshot");
+    assert.equal(calls[0][2]?.provider?.id, "from-snapshot");
   });
 
   it("hands a loop pipeline's bodies to the run so their steps are not logged twice", async () => {
     await startRun({ pipeline: "loopy", inputs: {} }, deps());
-    assert.deepEqual(Object.keys(calls[0][2]?.pipelineBodies ?? {}), ["again"]);
+    assert.deepEqual(Object.keys(calls[0][2]?.loaded?.bodies ?? {}), ["again"]);
   });
 
   it("lets a throw from the run service through: a throw is a bug, not a refusal", async () => {
@@ -449,8 +446,7 @@ describe("startRun — an artifact seeds the inputs", () => {
     const [, wfInput, opts] = calls[0];
     assert.deepEqual(wfInput, { plan: "My Feature Spec: Implement dark mode" });
     assert.equal(typeof wfInput.plan, "string");
-    assert.equal(opts?.chainArtifactDir, dirname(artifactPath));
-    assert.equal(opts?.artifactPath, artifactPath);
+    assert.deepEqual(opts?.chain, { dir: dirname(artifactPath), artifactPath });
   });
 
   it("the artifact's value wins over an explicit input of the same name", async () => {
