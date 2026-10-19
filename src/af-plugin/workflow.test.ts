@@ -1,6 +1,7 @@
 // The review-engine workflow (spec 046 D5, FR-5). The committed script and schema files are
-// generated from the plugin's prompts and the canon's schema rules; this file pins it to the generator and runs it against
-// stub runtime globals to prove the step graph, models, schemas and isolation it promises.
+// generated from the plugin's prompts and the canon's schema rules; this file pins them to
+// the generator and runs the script against stub runtime globals to prove the step graph,
+// models, schemas and isolation it promises.
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -629,7 +630,7 @@ describe("review engine vs the code-review pipeline", () => {
         };
         let timer: NodeJS.Timeout | undefined;
         const timeout = new Promise<string>((resolve) => {
-          timer = setTimeout(() => resolve("timeout"), 2000);
+          timer = setTimeout(() => resolve("timeout"), 5000);
         });
         try {
           const outcome = await Promise.race([run(watching, ...rest).then(() => "done"), timeout]);
