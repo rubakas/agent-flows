@@ -116,6 +116,27 @@ describe("GET /api/daemons enumeration (spec 042 FR-001, D3)", () => {
     assert.match(entries[0].staleReason ?? "", /nothing answered on port 51111/u);
   });
 
+  it("a daemon reporting a different version is still live (version is not checked)", async () => {
+    const home = makeHome();
+    home.record("alpha");
+    const [entry] = await listDaemons(home.stateHome, {
+      probe: async () =>
+        identity({ pid: 4242, projectDir: home.projectDir("alpha"), version: "9.9.9" }),
+    });
+    assert.equal(entry.live, true);
+    assert.equal(entry.staleReason, undefined);
+  });
+
+  it("when pid AND project both differ, the reason names the pid (pid is checked first)", async () => {
+    const home = makeHome();
+    home.record("alpha", { pid: 4242 });
+    const [entry] = await listDaemons(home.stateHome, {
+      probe: async () => identity({ pid: 9999, projectDir: home.projectDir("beta") }),
+    });
+    assert.equal(entry.live, false);
+    assert.match(entry.staleReason ?? "", /held by pid 9999, not the recorded 4242/u);
+  });
+
   it("lists every project on the machine, not just one (FR-001, D2)", async () => {
     const home = makeHome();
     home.record("alpha", { port: 51111, pid: 111 });

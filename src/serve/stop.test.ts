@@ -5,7 +5,7 @@
 // runner.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -77,8 +77,31 @@ describe("stop — nothing recorded (FR-016)", () => {
       probe: async () => undefined,
     });
     assert.equal(report.stopped, false);
+    assert.equal(report.outcome, "no-daemon");
     assert.match(report.reason, /no daemon\.json/u);
     assert.deepEqual(spy.calls, []);
+  });
+
+  it("a malformed daemon.json is unresolved, never no-daemon, and is left in place", async () => {
+    const fx = makeFixture();
+    writeFileSync(daemonRecordPath(fx.stateDir), "{ not json");
+    const spy = killSpy();
+    let probed = false;
+
+    const report = await stopProjectDaemon(fx.stateDir, {
+      kill: spy.kill,
+      probe: async () => {
+        probed = true;
+        return undefined;
+      },
+    });
+
+    assert.equal(report.stopped, false);
+    assert.equal(report.outcome, "unresolved", "a caller deleting the state dir must not proceed");
+    assert.match(report.reason, /unreadable|malformed/u);
+    assert.deepEqual(spy.calls, []);
+    assert.equal(probed, false, "there is no port to probe without a record");
+    assert.ok(existsSync(daemonRecordPath(fx.stateDir)), "the file is left alone");
   });
 });
 
@@ -94,6 +117,7 @@ describe("stop — the identity handshake gates the kill (FR-016)", () => {
     });
 
     assert.equal(report.stopped, false);
+    assert.equal(report.outcome, "no-daemon");
     assert.match(report.reason, /NOT signalled/u);
     assert.deepEqual(spy.calls, [], "a pid may have been recycled — it must not be killed");
     assert.ok(existsSync(daemonRecordPath(fx.stateDir)));
@@ -110,6 +134,7 @@ describe("stop — the identity handshake gates the kill (FR-016)", () => {
     });
 
     assert.equal(report.stopped, false);
+    assert.equal(report.outcome, "unresolved");
     assert.match(report.reason, /9999/u);
     assert.deepEqual(spy.calls, []);
   });
@@ -125,6 +150,7 @@ describe("stop — the identity handshake gates the kill (FR-016)", () => {
     });
 
     assert.equal(report.stopped, false);
+    assert.equal(report.outcome, "unresolved");
     assert.match(report.reason, /somewhere-else/u);
     assert.deepEqual(spy.calls, []);
   });
@@ -152,6 +178,26 @@ describe("stop — a verified daemon is terminated and forgotten (FR-016)", () =
     assert.equal(readDaemonRecord(fx.stateDir), undefined);
   });
 
+  it("a daemon reporting a different version is still verified and stopped", async () => {
+    const fx = makeFixture();
+    writeDaemonRecord(fx.stateDir, { ...identity(fx), port: 51234 });
+    const spy = killSpy();
+    let alive = true;
+
+    const report = await stopProjectDaemon(fx.stateDir, {
+      kill: (pid, signal) => {
+        spy.kill(pid, signal);
+        alive = false;
+      },
+      probe: async () => (alive ? identity(fx, { version: "9.9.9" }) : undefined),
+      pollMs: 5,
+      waitMs: 500,
+    });
+
+    assert.equal(report.outcome, "stopped", report.reason);
+    assert.deepEqual(spy.calls, [[4242, "SIGTERM"]]);
+  });
+
   it("reports a daemon that ignored SIGTERM instead of claiming success", async () => {
     const fx = makeFixture();
     writeDaemonRecord(fx.stateDir, { ...identity(fx), port: 51234 });
@@ -164,6 +210,7 @@ describe("stop — a verified daemon is terminated and forgotten (FR-016)", () =
     });
 
     assert.equal(report.stopped, false);
+    assert.equal(report.outcome, "unresolved");
     assert.match(report.reason, /still answering/u);
   });
 });

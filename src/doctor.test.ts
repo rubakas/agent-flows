@@ -575,6 +575,20 @@ describe("projectDaemonStatus", () => {
     assert.ok(status.detail.includes(join(stateDir, "daemon.json")), status.detail);
   });
 
+  it("a malformed record → not running, like an absent one", async () => {
+    const stateDir = makeTempDir();
+    writeFileSync(join(stateDir, "daemon.json"), "{ not json");
+    const status = await projectDaemonStatus(deps(stateDir, IDENTITY));
+    assert.equal(status.state, "not-running");
+  });
+
+  it("the port answers with a different pid but this project and version → listening", async () => {
+    const other = { ...IDENTITY, pid: 9999 };
+    const status = await projectDaemonStatus(deps(stateWith(7411), other));
+    assert.equal(status.state, "listening");
+    assert.ok(status.detail.includes("9999"), status.detail);
+  });
+
   it("a record nothing answers → stale-record, naming the pid and the port", async () => {
     const status = await projectDaemonStatus(deps(stateWith(7411)));
     assert.equal(status.state, "stale-record");
