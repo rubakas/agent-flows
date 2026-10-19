@@ -1875,6 +1875,64 @@ steps:
   });
 });
 
+describe("loadPipeline — a nested reference needs a resolver", () => {
+  const parentYaml = `
+id: p
+version: 1
+description: parent
+inputs: []
+steps:
+  - id: sub
+    kind: pipeline
+    pipeline: child
+`;
+  const childYaml = `
+id: child
+version: 1
+description: child
+inputs: []
+steps:
+  - id: only
+    kind: gate
+    message: ok?
+`;
+  const soloYaml = `
+id: solo
+version: 1
+description: no nesting
+inputs: []
+steps:
+  - id: only
+    kind: gate
+    message: ok?
+`;
+
+  it("refuses a nested pipeline without reading a sibling file", () => {
+    const asked: string[] = [];
+    assert.throws(
+      () =>
+        loadPipeline("/fake/pipelines/p.yaml", {
+          readFile: (p) => {
+            asked.push(p);
+            if (p.endsWith("p.yaml")) return parentYaml;
+            if (p.endsWith("child.yaml")) return childYaml;
+            return "prompt content";
+          },
+        }),
+      /nested pipeline "child" cannot be resolved/
+    );
+    assert.ok(
+      !asked.some((p) => p.endsWith("child.yaml")),
+      `the loader went looking for a sibling file: ${asked.join(", ")}`
+    );
+  });
+
+  it("still loads a pipeline that nests nothing without a resolver", () => {
+    const { def } = loadPipeline("/fake/pipelines/solo.yaml", { readFile: () => soloYaml });
+    assert.equal(def.id, "solo");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // V7 / FR-009: permissions.allow is removed
 // ---------------------------------------------------------------------------

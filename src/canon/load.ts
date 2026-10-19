@@ -80,8 +80,8 @@ export interface LoadDeps {
   readFile?: (p: string) => string;
   /**
    * Maps a nested pipeline id to the YAML file that defines it (spec 038 D13,
-   * FR-019). Absent means the legacy rule: a sibling file in the parent's own
-   * directory. The merged view passes a resolver over all three layers, so a
+   * FR-019). Required to load a pipeline that nests another; absent, such a load
+   * throws. The merged view passes a resolver over all three layers, so a
    * forked parent can mount a child from another layer.
    */
   resolvePath?: (pipelineId: string) => string | undefined;
@@ -517,11 +517,10 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
     validateStepCommon(step);
   }
 
-  // Resolve and expand nested pipelines. Without an injected resolver the child
-  // is a sibling YAML in the parent's own directory; with one (the merged view)
-  // it is whichever layer owns that id, and its prompts resolve against that
+  // Resolve and expand nested pipelines. A child is whichever layer owns that
+  // id (the merged view's resolver), and its prompts resolve against that
   // layer's prompts/ directory because the child is loaded from its own path.
-  const pipelineDir = dirname(resolve(yamlPath));
+  // Without a resolver a nested pipeline cannot be loaded at all.
   const loadStack: readonly string[] = [...(deps?.loadStack ?? []), def.id];
   const resolveNested = (pipelineId: string): LoadedPipeline => {
     // A cycle is detected here as well as inside expandNested: by the time the
@@ -532,9 +531,12 @@ export function loadPipeline(yamlPath: string, deps?: LoadDeps): LoadedPipeline 
       const chain = [...loadStack.slice(cycleIdx), pipelineId].join(" -> ");
       throw new GraphError(`cycle detected in nested pipelines: ${chain}`);
     }
-    const childPath = deps?.resolvePath
-      ? deps.resolvePath(pipelineId)
-      : join(pipelineDir, `${pipelineId}.yaml`);
+    if (deps?.resolvePath === undefined) {
+      throw new Error(
+        `Pipeline "${def.id}": nested pipeline "${pipelineId}" cannot be resolved — no resolver was given (load pipelines through src/canon/pipelines.ts)`
+      );
+    }
+    const childPath = deps.resolvePath(pipelineId);
     if (childPath === undefined) {
       throw new Error(
         `Pipeline "${def.id}": nested pipeline "${pipelineId}" is not defined in any workflow layer`
