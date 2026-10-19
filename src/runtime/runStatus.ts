@@ -35,22 +35,29 @@ export type RunSource = "live" | "disk";
  */
 export type RunPhase = "live" | "awaiting" | "terminal" | "restored" | "orphaned" | "unreadable";
 
-const RUN_STATUSES: ReadonlySet<string> = new Set([
-  "running",
-  "awaiting_approval",
-  "succeeded",
-  "rejected",
-  "failed",
-  "cancelled",
-]);
+// A table over every member of each union rather than a list beside it, so adding
+// a status fails to compile here until it is placed (the same pattern as
+// STEP_JOURNAL in runService).
+const RUN_STATUS_TABLE = {
+  running: true,
+  awaiting_approval: true,
+  succeeded: true,
+  rejected: true,
+  failed: true,
+  cancelled: true,
+} as const satisfies Record<RunStatus, true>;
 
-const STEP_STATUSES: ReadonlySet<string> = new Set([
-  "started",
-  "suspended",
-  "succeeded",
-  "failed",
-  "cancelled",
-]);
+const STEP_STATUS_TABLE = {
+  started: true,
+  suspended: true,
+  succeeded: true,
+  failed: true,
+  cancelled: true,
+} as const satisfies Record<StepStatus, true>;
+
+const RUN_STATUSES: ReadonlySet<string> = new Set(Object.keys(RUN_STATUS_TABLE));
+
+const STEP_STATUSES: ReadonlySet<string> = new Set(Object.keys(STEP_STATUS_TABLE));
 
 /** Whether a value read from disk or the wire names a run status this build knows. */
 export function isRunStatus(status: unknown): status is RunStatus {
