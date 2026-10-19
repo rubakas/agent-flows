@@ -523,6 +523,7 @@ The plugin generator moves to TypeScript with generated output unchanged apart f
 **Track C** (page, FR-15 commits 2–3):
 
 - Commit 2 done (one run session per opened run; `close()` replaces the staleness guards and fixes five unguarded cases; one step-output fetcher; the cache key includes the project; a missing output is cached only if the step had settled when asked; run and step ids `.`/`..` are refused). Commit 2b fixes Copy on a re-opened settled run. Commit 3 re-scoped: its premise was false (nothing polled while a run stream was open); it now refreshes the run list and daemons panel beside an open run on a wide screen (more requests, none removed) and deletes the dead stream check. Cut: follow states, detached-run polling, `coversRun`.
+- Browser test `~/.claude/chrome-test/agent-flows/report-a7f3f53a.md` (2026-10-19, run by the dev session through the Chrome tools against two throwaway daemons, no model calls): stream lifecycle, fast switching within and across projects, step outputs, Copy after re-open, the same run id in two projects, live command blocks and a stream error all PASS. The split-view polling scenarios were NOT EXERCISED because the controlled tab was hidden; the owner should glance at a wide `#/runs/<id>` view.
 
 **Track D** (daemon records):
 
@@ -549,6 +550,7 @@ The plugin generator moves to TypeScript with generated output unchanged apart f
 - `doctor` ignores `AGENT_FLOWS_PORT`; `removeDaemonRecordIfOwned` checks the pid only.
 - `layerForPipelinesDir` still labels an injected bundled root "repo".
 - The split view's 4 s poll re-renders the run list, which drops keyboard focus.
+- A run interrupted before its first artifact (events file only) returns 404 over HTTP after a daemon restart, so an open page keeps a stale "running" view with Cancel; only the MCP daemon-down reader finds it.
 
 ### Excluded from Phase 3
 
