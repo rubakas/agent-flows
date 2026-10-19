@@ -2113,11 +2113,21 @@ describe("spec 047 FR-11: locating a chained stage from its events file", () => 
     assert.deepEqual(locateRun(runsDir, "run-child"), { dir: anchorDir, pipelineId: "build" });
   });
 
-  it("takes an events file that names no run, as a run's own crash before its first event", () => {
+  it("takes an empty events file, as a run's own crash before its first event", () => {
     const runsDir = makeStateRunsDir(makeTmpDir());
     const dir = writeDirFile(runsDir, "run-empty", "build.events.jsonl", "");
 
     assert.deepEqual(locateRun(runsDir, "run-empty"), { dir, pipelineId: "build" });
+  });
+
+  it("does not attribute a non-empty events file that names no run", () => {
+    const runsDir = makeStateRunsDir(makeTmpDir());
+    // Content, but no line that parses: it belongs to some run, not necessarily this one.
+    writeDirFile(runsDir, "run-torn", "build.events.jsonl", '{"kind":"step.start","ru');
+    writeDirFile(runsDir, "run-noise", "build.events.jsonl", "not json at all\n");
+
+    assert.equal(locateRun(runsDir, "run-torn"), undefined);
+    assert.equal(locateRun(runsDir, "run-noise"), undefined);
   });
 
   it("prefers the events file that names the run over one that names nothing", () => {

@@ -529,6 +529,14 @@ function unclaimedEventsStems(dir: string): string[] {
     .sort();
 }
 
+function sizeOf(path: string): number | undefined {
+  try {
+    return lstatSync(path).size;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Whether `path` is itself a regular file. A link is not followed and a FIFO is
  * not opened: the state dir is owned by this user, but a lookup for an id that
@@ -550,9 +558,9 @@ function isRegularFile(path: string): boolean {
  *
  * An events file whose pipeline already has an artifact belonging to a
  * DIFFERENT run is that run's, not this one's. An events file that names
- * another run is never taken; the one that names this run is preferred, then one
- * that names no run at all (a crash before the first event), which can in rare
- * cases be another run's.
+ * another run is never taken; the one that names this run is preferred, then an
+ * empty one (a crash before the first event), which can in rare cases be another
+ * run's.
  */
 function findInOwnDir(runsDir: string, runId: string): RunMatch | undefined {
   const dir = join(runsDir, runId);
@@ -563,12 +571,13 @@ function findInOwnDir(runsDir: string, runId: string): RunMatch | undefined {
   if (own) return { kind: "artifact", dir, ...own };
   if (scan.failure) return { kind: "unreadable", dir, ...scan.failure };
 
-  const candidates = unclaimedEventsStems(dir).map((pipelineId) => ({
-    pipelineId,
-    names: runIdsAtHeadOfEvents(join(dir, `${pipelineId}${EVENTS_SUFFIX}`)),
-  }));
-  const found =
-    candidates.find((c) => c.names.has(runId)) ?? candidates.find((c) => c.names.size === 0);
+  const candidates = unclaimedEventsStems(dir).map((pipelineId) => {
+    const file = join(dir, `${pipelineId}${EVENTS_SUFFIX}`);
+    return { pipelineId, names: runIdsAtHeadOfEvents(file), empty: sizeOf(file) === 0 };
+  });
+  // Only a file with nothing in it is a crash before the first event; one with
+  // content that names no run belongs to some run, and may not be this one.
+  const found = candidates.find((c) => c.names.has(runId)) ?? candidates.find((c) => c.empty);
   return found === undefined ? undefined : { kind: "events", dir, pipelineId: found.pipelineId };
 }
 
