@@ -242,7 +242,7 @@ describe("review-engine run", () => {
   const run = compile(committed);
   const args = { runDir: "/repo/.af-review/RUN", plan: "THE_PLAN", hasSpecs: true };
 
-  it("runs eight steps with specs, all as af:reviewer, and returns synthesis and verify", async () => {
+  it("runs eight steps with specs, all as af:reviewer, and returns synthesis, verify and delivery", async () => {
     const s = stubs();
     const result = await run(...s.globals(args));
     assert.equal(s.calls.length, 8);
@@ -254,6 +254,10 @@ describe("review-engine run", () => {
     assert.deepEqual(JSON.parse(JSON.stringify(result)), {
       synthesis: "SYNTHESIS_OUT",
       verify: { codeReviewFindings: [{ claim: "VERIFY_OUT" }] },
+      delivery: {
+        specSourcesProvided: true,
+        codeReviewDelivery: [{ requirement: "DELIVERY_OUT" }],
+      },
     });
     assert.deepEqual(s.phases, ["Brief", "Review", "Verify", "Synthesis"]);
   });
@@ -287,6 +291,23 @@ describe("review-engine run", () => {
         );
       }
     }
+  });
+
+  it("returns the delivery worker's output only when delivery produced one", async () => {
+    const failed = stubs({
+      delivery: () => {
+        throw new Error("schema still invalid after 5 attempts");
+      },
+    });
+    const failedResult = await run(...failed.globals(args));
+    assert.equal(Object.hasOwn(failedResult, "delivery"), false);
+    assert.equal(failedResult.synthesis, "SYNTHESIS_OUT");
+
+    const empty = stubs({ delivery: () => null });
+    assert.equal(Object.hasOwn(await run(...empty.globals(args)), "delivery"), false);
+
+    const noSpecs = await run(...stubs().globals({ ...args, hasSpecs: false }));
+    assert.equal(Object.hasOwn(noSpecs, "delivery"), false);
   });
 
   it("assigns models by tier", async () => {

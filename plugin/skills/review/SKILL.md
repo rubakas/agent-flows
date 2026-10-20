@@ -29,13 +29,14 @@ If you passed any `--spec` or `--spec-file` and `hasSpecs` is false, no spec sou
 
 ## 2. Run the engine
 
-- If a `Workflow` tool is available: start the workflow `af:review-engine` with args `{"runDir": "<runDir>", "plan": "<the change description, omitted when none>", "hasSpecs": <hasSpecs>}` and wait for it. It returns `{synthesis, verify}`. Create `<runDir>/out/`, then write the `verify` object VERBATIM to `<runDir>/out/verify.json` and the `synthesis` text to `<runDir>/out/synthesis.md`. If `synthesis` is missing, say so, still write `verify.json`, and skip to step 3.
+- If a `Workflow` tool is available: start the workflow `af:review-engine` with args `{"runDir": "<runDir>", "plan": "<the change description, omitted when none>", "hasSpecs": <hasSpecs>}` and wait for it. It returns `{synthesis, verify, delivery}`; `delivery` is absent when delivery did not run or failed. Create `<runDir>/out/`, then write the `verify` object VERBATIM to `<runDir>/out/verify.json`, the `delivery` object VERBATIM to `<runDir>/out/delivery.json` when it is present, and the `synthesis` text to `<runDir>/out/synthesis.md`. If `synthesis` is missing, say so, still write `verify.json`, and skip to step 3.
 - Otherwise, if a `spawn_agent` tool is available: follow `<skill dir>/references/codex.md`. It writes `<runDir>/out/verify.json` and `<runDir>/out/synthesis.md` itself.
 - Otherwise stop and tell the user that workflows must be enabled in Claude Code (or that Codex subagents are required); do not review inline.
 
 ## 3. Check
 
 1. `node '<skill dir>/scripts/check.mjs' findings '<runDir>/out/verify.json'` - a non-zero exit means the verify output broke the schema or one of its rules. Report the printed lines prominently; never present an unchecked verify result as clean.
+   When `<runDir>/out/delivery.json` exists, also run `node '<skill dir>/scripts/check.mjs' delivery '<runDir>/out/delivery.json'` - a non-zero exit means the delivery output broke the schema or its rule (for example `specSourcesProvided: false` with entries). Report the printed lines prominently, the same way; never present an unchecked delivery result as clean.
 2. `node '<skill dir>/scripts/capture.mjs' check-tree '<runDir>'` - prints `{"changed":[...]}`: working-tree paths that differ from before the review.
 
 ## 4. Report

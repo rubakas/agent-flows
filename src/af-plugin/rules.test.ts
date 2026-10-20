@@ -389,6 +389,25 @@ describe("check.mjs", () => {
       assert.match(result.stdout, /^\/codeReviewFindings\/0: Rule: verdict CONFIRMED needs/m);
     });
 
+    it("delivery: exits 1 naming the rule for specSourcesProvided false with entries", () => {
+      const bad = delivery([entry()], false);
+      const result = run("delivery", file("delivery-bad.json", JSON.stringify(bad)));
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /Rule: specSourcesProvided false means/);
+    });
+
+    it("delivery: exits 0 for false with no entries and for true with valid entries", () => {
+      for (const ok of [
+        delivery([], false),
+        delivery([entry()]),
+        delivery([entry(), entry(silent)]),
+      ]) {
+        const result = run("delivery", file("delivery-ok.json", JSON.stringify(ok)));
+        assert.equal(result.status, 0, result.stdout);
+        assert.equal(result.stdout, "");
+      }
+    });
+
     it("exits 2, on stderr, only for usage errors", () => {
       for (const result of [
         run(),

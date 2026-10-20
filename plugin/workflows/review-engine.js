@@ -614,4 +614,9 @@ const synthesis = await agent(
 )
 if (synthesis === null || synthesis === undefined) log('synthesis returned no output')
 
-return { synthesis: synthesis, verify: verify }
+// The delivery worker's own output, for the caller to check against its schema. A failed
+// worker leaves a marker string and a review with no spec sources leaves NO_SPECS: neither
+// is delivery output, so neither is returned as such.
+const result = { synthesis: synthesis, verify: verify }
+if (hasSpecs && deliveryOut !== null && typeof deliveryOut === 'object') result.delivery = deliveryOut
+return result
