@@ -36,7 +36,7 @@ If you passed any `--spec` or `--spec-file` and `hasSpecs` is false, no spec sou
 ## 3. Check
 
 1. `node '<skill dir>/scripts/check.mjs' findings '<runDir>/out/verify.json'` - a non-zero exit means the verify output broke the schema or one of its rules. Report the printed lines prominently; never present an unchecked verify result as clean.
-   On the Workflow path, when you wrote `<runDir>/out/delivery.json` in step 2, also run `node '<skill dir>/scripts/check.mjs' delivery '<runDir>/out/delivery.json'` - a non-zero exit means the delivery output broke the schema or its rule (for example `specSourcesProvided: false` with entries). Report the printed lines prominently, the same way; never present an unchecked delivery result as clean. (The Codex path checks delivery itself in `<skill dir>/references/codex.md`.)
+   On the Workflow path, when you wrote `<runDir>/out/delivery.json` in step 2, also run `node '<skill dir>/scripts/check.mjs' delivery '<runDir>/out/delivery.json'` - a non-zero exit means the delivery output broke the schema or its rule (for example `specSourcesProvided: false` with entries). Report the printed lines prominently, the same way; never present an unchecked delivery result as clean. (The Codex path checks delivery itself in `<skill dir>/references/codex.md`.) If `hasSpecs` was true but the engine returned no `delivery`, the delivery step failed: say in the report that delivery was not checked for that reason.
 2. `node '<skill dir>/scripts/capture.mjs' check-tree '<runDir>'` - prints `{"changed":[...]}`: working-tree paths that differ from before the review.
 
 ## 4. Report
