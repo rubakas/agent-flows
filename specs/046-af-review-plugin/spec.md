@@ -52,8 +52,8 @@ Names avoid agent-notes' `code-review` skill and Claude's built-in review comman
 **D2 — Single prompt and schema source.** Prompts are byte copies at
 `plugin/skills/review/references/prompts/{brief,radius,falsifiability,delivery,correctness,security,verify,synthesis}.md`
 (matching `prompts/code-review-*.md`). Schemas are DERIVED at
-`plugin/skills/review/references/schemas/{findings,delivery}.json` (af's schema + rule `allOf`
-entries) and pinned by a test that strips the rules and deep-equals af's object. Claude workflows
+`plugin/skills/review/references/schemas/{findings,delivery}.json` (af's schema + the item rules as `items.allOf`
+entries and the delivery root rule as a top-level `if`/`then`) and pinned by a test that strips the rules and deep-equals af's object. Claude workflows
 cannot read files, so `plugin/workflows/review-engine.js` is GENERATED from these files by
 `src/af-plugin/buildReviewEngine.ts` (`pnpm plugin:generate`). A test fails when the committed script differs from
 generator output.
@@ -115,7 +115,7 @@ radius input). brief, falsifiability, delivery, correctness, security degrade to
 text byte-identical (src/bindings/mastra/buildSteps.ts:414–421), which verify.md:24 knows how to record;
 verify failure aborts. Placeholders replaced at EVERY occurrence (like af's `renderPrompt`, src/canon/render.ts),
 so pointer texts are noun phrases; the material pointer tells the agent to read the whole file with paged Read.
-`{{plan}}` renders as empty string when none given (af parity). Returns `{synthesis, verify}`; step outputs
+`{{plan}}` renders as empty string when none given (af parity). Returns `{synthesis, verify, delivery}` (`delivery` only when the delivery worker returned an object); step outputs
 stay in journal. Upstream outputs inlined as text (JSON stringified).
 
 **D6 — Codex engine.** `plugin/skills/review/references/codex.md` procedure: same steps via
@@ -238,6 +238,10 @@ gaps, not fixed there.
 - A2: a test fails when any schema the engine passes to a worker has a top-level `oneOf`, `anyOf` or `allOf`. Proven once by putting the `allOf` back.
 - A3: tests show that `check.mjs delivery` rejects `specSourcesProvided: false` with a non-empty `codeReviewDelivery`, and accepts the valid cases.
 - A4: `pnpm check` is green.
-- A5: a real `/af:review` run with spec sources returns delivery output, the synthesis has a Delivery section, and its content is checked against the reviewed change.
+- A5: a real `/af:review` run with spec sources returns delivery output that passes `check.mjs delivery`, and the synthesis's "Searched and not found" line for delivery reports it as examined, not "not examined".
 
 **Probe results (2026-10-20).** Probe A, `claude -p --model haiku --json-schema` with the old schema, reproduced the failure: `API Error: 400 ... input_schema does not support oneOf, allOf, or anyOf at the top level`. Probe B, the same call with the new schema (the rule moved to a root `if`/`then`), succeeded and returned `{"specSourcesProvided":false,"codeReviewDelivery":[]}`. Probe C, the new schema with a prompt asking for `specSourcesProvided: false` and one entry, was accepted by the API and the model returned the empty list (two turns), so the probe does not show whether the CLI enforces the rule. Neuter probe: with the `allOf` emission put back and the files regenerated, `workflow.test.ts` failed on "the delivery schema has a top-level allOf; the API rejects it with a 400"; restored, it passes. A5 (a real `/af:review` run with spec sources) is still open.
+
+**Live run (2026-10-20).** `/af:review` on base `daa5b5a` with this section as the spec (run `20261020-003333-d6091ea-410f`, about 10 minutes, $2.82): delivery returned 9 entries with `specSourcesProvided: true`; `check.mjs findings` and `check.mjs delivery` exited 0; check-tree found no changes; the synthesis reported delivery as examined. Verdict: 0 blocking, 5 minor. An independent reviewer confirmed all 9 delivery classifications (two citations a few lines off) and all 5 findings. A5 is met.
+
+Review findings: the stale return value and rule shape in this spec, the plural test name, and the unannounced skipped delivery check are fixed. Two remain as follow-ups: `check.mjs:125` prints an unexpected key name without `display()` (pre-existing; it cannot change the exit code); on the Workflow path the root rule is checked only by `check.mjs delivery` after verify has already read the delivery output (`buildReviewEngine.ts:286`), and verify ignores entries when `specSourcesProvided` is false (`verify.md:22`).
