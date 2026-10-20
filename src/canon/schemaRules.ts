@@ -109,33 +109,33 @@ export const SCHEMA_RULES = {
         },
       },
     ],
-    root: [
-      {
-        description:
-          "Rule: specSourcesProvided false means no requirement exists to classify, so codeReviewDelivery must be empty; report zero entries or set specSourcesProvided true.",
-        if: {
-          required: ["specSourcesProvided"],
-          properties: { specSourcesProvided: { const: false } },
-        },
-        then: {
-          required: ["codeReviewDelivery"],
-          properties: { codeReviewDelivery: { maxItems: 0 } },
-        },
+    root: {
+      description:
+        "Rule: specSourcesProvided false means no requirement exists to classify, so codeReviewDelivery must be empty; report zero entries or set specSourcesProvided true.",
+      if: {
+        required: ["specSourcesProvided"],
+        properties: { specSourcesProvided: { const: false } },
       },
-    ],
+      then: {
+        required: ["codeReviewDelivery"],
+        properties: { codeReviewDelivery: { maxItems: 0 } },
+      },
+    },
   },
-} satisfies Partial<Record<SchemaKey, { items?: Rule[]; root?: Rule[] }>>;
+} satisfies Partial<Record<SchemaKey, { items?: Rule[]; root?: Rule }>>;
 
 type Node = Record<string, unknown>;
 
 /** The canon schema for `key` plus its rules and a title: what the plugin ships. */
 export function workflowSchema(key: keyof typeof SCHEMA_RULES): object {
   const schema = structuredClone(canonSchemas[key]) as Node;
-  const rules: { items?: Rule[]; root?: Rule[] } = SCHEMA_RULES[key];
+  const rules: { items?: Rule[]; root?: Rule } = SCHEMA_RULES[key];
   const items = ((schema.properties as Node)[key] as Node | undefined)?.items as Node | undefined;
   if (items === undefined) throw new Error(`schema ${key} has no properties.${key}.items`);
   if (rules.items !== undefined) items.allOf = structuredClone(rules.items);
   schema.title = key;
-  if (rules.root !== undefined) schema.allOf = structuredClone(rules.root);
+  // The API rejects a top-level oneOf, anyOf or allOf in a structured-output schema, so a
+  // schema holds at most one root rule and it sits on the root as a plain if/then.
+  if (rules.root !== undefined) Object.assign(schema, structuredClone(rules.root));
   return schema;
 }

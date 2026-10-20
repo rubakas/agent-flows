@@ -197,31 +197,27 @@ const SCHEMAS = {
     ],
     "additionalProperties": false,
     "title": "codeReviewDelivery",
-    "allOf": [
-      {
-        "description": "Rule: specSourcesProvided false means no requirement exists to classify, so codeReviewDelivery must be empty; report zero entries or set specSourcesProvided true.",
-        "if": {
-          "required": [
-            "specSourcesProvided"
-          ],
-          "properties": {
-            "specSourcesProvided": {
-              "const": false
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "codeReviewDelivery"
-          ],
-          "properties": {
-            "codeReviewDelivery": {
-              "maxItems": 0
-            }
-          }
+    "description": "Rule: specSourcesProvided false means no requirement exists to classify, so codeReviewDelivery must be empty; report zero entries or set specSourcesProvided true.",
+    "if": {
+      "required": [
+        "specSourcesProvided"
+      ],
+      "properties": {
+        "specSourcesProvided": {
+          "const": false
         }
       }
-    ]
+    },
+    "then": {
+      "required": [
+        "codeReviewDelivery"
+      ],
+      "properties": {
+        "codeReviewDelivery": {
+          "maxItems": 0
+        }
+      }
+    }
   },
   "verify": {
     "type": "object",

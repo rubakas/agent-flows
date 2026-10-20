@@ -11,7 +11,7 @@ describe("schema rules", () => {
   it("every rule names itself, and there are eight", () => {
     const rules = Object.values(SCHEMA_RULES).flatMap((r) => [
       ...(r.items ?? []),
-      ...("root" in r ? r.root : []),
+      ...("root" in r ? [r.root] : []),
     ]);
     assert.equal(rules.length, 8);
     for (const rule of rules) assert.match(rule.description, /^Rule: /);
@@ -20,7 +20,9 @@ describe("schema rules", () => {
   it("puts the item rules on the items and the root rules on the root", () => {
     const delivery = workflowSchema("codeReviewDelivery") as Record<string, any>;
     assert.equal(delivery.properties.codeReviewDelivery.items.allOf.length, 4);
-    assert.equal(delivery.allOf.length, 1);
+    assert.equal(delivery.allOf, undefined);
+    assert.match(delivery.description, /^Rule: /);
+    assert.ok(delivery.if && delivery.then);
     const findings = workflowSchema("codeReviewFindings") as Record<string, any>;
     assert.equal(findings.properties.codeReviewFindings.items.allOf.length, 3);
     assert.equal(findings.allOf, undefined);

@@ -273,6 +273,22 @@ describe("review-engine run", () => {
     );
   });
 
+  it("hands no agent a schema with a top-level oneOf, anyOf or allOf (the API refuses one)", async () => {
+    const s = stubs();
+    await run(...s.globals(args));
+    const schemas = s.calls.filter((c) => c.opts.schema !== undefined);
+    assert.deepEqual(schemas.map((c) => String(c.opts.label)).sort(), ["delivery", "verify"]);
+    for (const call of schemas) {
+      for (const keyword of ["oneOf", "anyOf", "allOf"]) {
+        assert.equal(
+          Object.hasOwn(call.opts.schema, keyword),
+          false,
+          `the ${call.opts.label} schema has a top-level ${keyword}; the API rejects it with a 400`
+        );
+      }
+    }
+  });
+
   it("assigns models by tier", async () => {
     const s = stubs();
     await run(...s.globals(args));
