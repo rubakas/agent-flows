@@ -17,7 +17,7 @@ describe("schema rules", () => {
     for (const rule of rules) assert.match(rule.description, /^Rule: /);
   });
 
-  it("puts the item rules on the items and the root rules on the root", () => {
+  it("puts the item rules on the items and the root rule on the root", () => {
     const delivery = workflowSchema("codeReviewDelivery") as Record<string, any>;
     assert.equal(delivery.properties.codeReviewDelivery.items.allOf.length, 4);
     assert.equal(delivery.allOf, undefined);
