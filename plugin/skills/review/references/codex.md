@@ -87,6 +87,20 @@ Radius is the exception: it is required, as in af, and verify has no input throu
 
 The verify prompt knows how to record such a marker as an UNVERIFIABLE finding. The marker is the same one the Claude engine and af's own pipeline produce.
 
+## Coverage
+
+SKILL.md step 3 computes the merge verdict from `<runDir>/out/coverage.json`, and Codex has no engine to write it: you write it, from what you observed once the worker waves are over (before verify, so verify's inputs are settled). Exactly this shape, every one of the five axes in exactly one list:
+
+```
+{"ran":["falsifiability","correctness","security","radius","delivery"],"failed":[{"step":"security","reason":"<why>"}],"skipped":[{"step":"delivery","reason":"no spec sources"}]}
+```
+
+- `ran`: the step's subagent replied DONE and left its output file (delivery: and its check passed).
+- `failed`: the step got the unavailable marker above, or delivery's check stayed non-zero; `reason` is the reason in the marker. Radius never appears here: if it fails you stop.
+- `skipped`: delivery when `hasSpecs` is false, with the reason `no spec sources`.
+
+Write nothing else into the file and never leave an axis out: a missing axis makes the verdict refuse.
+
 ## Finish
 
-After synthesis is DONE, copy nothing: `<runDir>/out/synthesis.md` and `<runDir>/out/verify.json` are already where SKILL.md step 3 expects them. Continue with SKILL.md step 3.
+After synthesis is DONE, copy nothing: `<runDir>/out/synthesis.md`, `<runDir>/out/verify.json` and `<runDir>/out/coverage.json` are already where SKILL.md step 3 expects them. Continue with SKILL.md step 3.

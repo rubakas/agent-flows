@@ -300,3 +300,34 @@ describe("check.mjs verdict (spec 049)", () => {
     assert.throws(() => readFileSync(join(dir, "out", "verdict.txt"), "utf8"), /ENOENT/);
   });
 });
+
+describe("the procedures run the verdict (spec 049 D6)", () => {
+  const skillDir = join(dirname(checkScript), "..");
+  const skill = readFileSync(join(skillDir, "SKILL.md"), "utf8");
+  const codex = readFileSync(join(skillDir, "references", "codex.md"), "utf8");
+
+  it("SKILL.md runs check.mjs verdict on the run dir", () => {
+    assert.ok(skill.includes("check.mjs' verdict '<runDir>'"));
+  });
+
+  it("SKILL.md writes the engine's coverage to out/coverage.json, verbatim", () => {
+    assert.match(skill, /`coverage` object VERBATIM to `<runDir>\/out\/coverage\.json`/);
+  });
+
+  it("SKILL.md leads the report and the answer with the computed line", () => {
+    const report = skill.slice(skill.indexOf("## 4. Report"), skill.indexOf("## 5. Answer"));
+    assert.ok(report.includes("out/verdict.txt"), "the report step must take the line from there");
+    assert.ok(
+      report.indexOf("verdict.txt") < report.indexOf("The synthesis, exactly as produced"),
+      "the computed line comes before the synthesis"
+    );
+    const answer = skill.slice(skill.indexOf("## 5. Answer"));
+    assert.match(answer, /computed verdict line verbatim first/);
+    assert.match(answer, /authoritative/);
+  });
+
+  it("codex.md has the lead write out/coverage.json before SKILL.md step 3", () => {
+    assert.ok(codex.includes("<runDir>/out/coverage.json"));
+    assert.match(codex, /Write nothing else into the file/);
+  });
+});
