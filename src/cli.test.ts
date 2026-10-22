@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { describe, it } from "node:test";
 
-import { nodeInstallRemedy, nodeSatisfies, requiredNodePin } from "./nodeVersion.js";
+import { nodeInstallRemedy, nodeSatisfies, parseNodePin, requiredNodePin } from "./nodeVersion.js";
 import { packageRoot } from "./packageRoot.js";
 
 // Resolved by walking up to package.json (spec 038 FR-004) rather than by a
@@ -454,7 +454,8 @@ function installFakeNode(
   scenario: Scenario,
   binDir: string,
   name: string,
-  version: string
+  version: string,
+  options: { nativeFails?: boolean } = {}
 ): { path: string; marker: (kind: "probe" | "native" | "run") => string } {
   mkdirSync(binDir, { recursive: true });
   const path = join(binDir, "node");
@@ -466,7 +467,9 @@ function installFakeNode(
       "#!/bin/sh",
       'case "$1" in',
       `  -p) : > '${marker("probe")}'; echo '${version}' ;;`,
-      `  -e) : > '${marker("native")}'; exec '${process.execPath}' "$@" ;;`,
+      options.nativeFails === true
+        ? `  -e) : > '${marker("native")}'; exit 1 ;;`
+        : `  -e) : > '${marker("native")}'; exec '${process.execPath}' "$@" ;;`,
       `  *) : > '${marker("run")}'; exec '${process.execPath}' "$@" ;;`,
       "esac",
       "",
@@ -675,9 +678,14 @@ describe("bin/agent-flows: symlink resolution and project targeting", () => {
   });
 
   it("refuses instead of re-execing again once the loop marker is set (FR-003)", () => {
+    requireHermeticMachine();
     const scenario = makeScenario();
     try {
+      // A perfectly good interpreter is on PATH: only the marker stops the launcher
+      // from using it. Without it the refusal below is just "nothing was found".
+      const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", PIN.floor);
       const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(onPath.path)],
         extraEnv: { AGENT_FLOWS_NODE_REEXEC: "1" },
         timeout: 30_000,
       });
@@ -694,6 +702,8 @@ describe("bin/agent-flows: symlink resolution and project targeting", () => {
         output.includes(BELOW_FLOOR),
         `the message must name the version found (${BELOW_FLOOR}):\n${output}`
       );
+      assert.ok(!existsSync(onPath.marker("probe")), "the launcher searched despite the marker");
+      assert.ok(!existsSync(onPath.marker("run")), "the launcher re-execed despite the marker");
     } finally {
       rmSync(scenario.dir, { recursive: true, force: true });
     }
@@ -761,6 +771,8 @@ describe("bin/agent-flows: interpreter search honours the security floor", () =>
     ["exactly the floor", PIN.floor],
     ["a newer patch", NEWER_PATCH],
     ["a newer minor", NEWER_MINOR],
+    ["a two-digit patch", `${String(PIN.major)}.${String(PIN.minor)}.${String(PIN.patch + 10)}`],
+    ["a three-digit minor", `${String(PIN.major)}.${String(PIN.minor + 77)}.0`],
   ] as const) {
     it(`chooses a PATH node at ${label} (${version})`, () => {
       requireHermeticMachine();
@@ -856,6 +868,327 @@ describe("bin/agent-flows: interpreter search honours the security floor", () =>
         !result.stderr.includes(otherMajor.path),
         `named a wrong-major node:\n${result.stderr}`
       );
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// -- 6c. bin/agent-flows: what the search must not be fooled by ----------------
+
+describe("bin/agent-flows: the search is not fooled", () => {
+  it("the native-module probe decides: a satisfying version that cannot load it is passed over", () => {
+    requireHermeticMachine();
+    ensureBuild();
+    const scenario = makeScenario();
+    try {
+      const bad = installFakeNode(scenario, join(scenario.dir, "bad"), "bad", PIN.floor, {
+        nativeFails: true,
+      });
+      const good = installFakeNode(scenario, join(scenario.dir, "good"), "good", NEWER_PATCH);
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(bad.path), dirname(good.path)],
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(
+        existsSync(bad.marker("native")),
+        "the bad node was never asked to load the module"
+      );
+      assert.ok(!existsSync(bad.marker("run")), "a node that cannot load the module ran the CLI");
+      assert.ok(existsSync(good.marker("run")), "the good node did not run the CLI");
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("with nothing else, refuses and says the module could not be loaded", () => {
+    requireHermeticMachine();
+    const scenario = makeScenario();
+    try {
+      const bad = installFakeNode(scenario, join(scenario.dir, "bad"), "bad", PIN.floor, {
+        nativeFails: true,
+      });
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(bad.path)],
+        timeout: 30_000,
+      });
+      const output = result.stdout + result.stderr;
+      assert.notEqual(result.status, 0, `expected a refusal:\n${output}`);
+      assert.match(output, /none of them could load this package's better-sqlite3/u);
+      assert.ok(output.includes(bad.path), `must name ${bad.path}:\n${output}`);
+      assert.ok(!existsSync(bad.marker("run")));
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("tries nvm releases newest first, numerically", () => {
+    requireHermeticMachine();
+    ensureBuild();
+    const scenario = makeScenario();
+    try {
+      const nodes = ["9.0", `${String(PIN.minor)}.${String(PIN.patch)}`, "100.0"].map((tail) => {
+        const version = `${String(PIN.major)}.${tail}`;
+        const fake = installFakeNode(
+          scenario,
+          join(scenario.nvmDir, "versions", "node", `v${version}`, "bin"),
+          `nvm-${version}`,
+          version
+        );
+        return { version, fake };
+      });
+      const [lowest, atFloor, newest] = nodes;
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"]);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(existsSync(newest.fake.marker("run")), `${newest.version} did not run the CLI`);
+      assert.ok(!existsSync(lowest.fake.marker("probe")), `${lowest.version} was probed first`);
+      assert.ok(!existsSync(atFloor.fake.marker("probe")), `${atFloor.version} was probed first`);
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers PATH over nvm when both qualify", () => {
+    requireHermeticMachine();
+    ensureBuild();
+    const scenario = makeScenario();
+    try {
+      const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", PIN.floor);
+      const underNvm = installFakeNode(
+        scenario,
+        join(scenario.nvmDir, "versions", "node", `v${NEWER_MINOR}`, "bin"),
+        "nvm",
+        NEWER_MINOR
+      );
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(onPath.path)],
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(existsSync(onPath.marker("run")), "the PATH node did not run the CLI");
+      assert.ok(!existsSync(underNvm.marker("probe")), "nvm was searched although PATH had a node");
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, version] of [
+    ["a pre-release of the floor", `${PIN.floor}-rc.1`],
+    ["a nightly build", `${PIN.floor}-nightly20261022abcdef`],
+    ["a version with no patch", `${String(PIN.major)}.${String(PIN.minor + 1)}`],
+    ["a version with a fourth part", `${PIN.floor}.1`],
+  ] as const) {
+    it(`does not accept a candidate reporting ${label} (${version})`, () => {
+      requireHermeticMachine();
+      const scenario = makeScenario();
+      try {
+        const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", version);
+        const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+          pathDirs: [dirname(onPath.path)],
+          timeout: 30_000,
+        });
+        assert.notEqual(result.status, 0, result.stdout + result.stderr);
+        assert.ok(existsSync(onPath.marker("probe")), "the candidate was never considered");
+        assert.ok(!existsSync(onPath.marker("run")), `${version} ran the CLI`);
+      } finally {
+        rmSync(scenario.dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("treats a pre-release of the floor as below it when it is the RUNNING node", () => {
+    requireHermeticMachine();
+    ensureBuild();
+    const scenario = makeScenario();
+    try {
+      const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", PIN.floor);
+      const result = runLauncher(scenario, `${PIN.floor}-rc.1`, ["list"], {
+        pathDirs: [dirname(onPath.path)],
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(existsSync(onPath.marker("run")), "a pre-release was accepted as the running node");
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists a binary reachable by two paths once", () => {
+    requireHermeticMachine();
+    const scenario = makeScenario();
+    try {
+      const oldVersion = `${String(PIN.major)}.0.0`;
+      const real = installFakeNode(
+        scenario,
+        join(scenario.nvmDir, "versions", "node", `v${oldVersion}`, "bin"),
+        "nvm",
+        oldVersion
+      );
+      const linkDir = join(scenario.dir, "link");
+      mkdirSync(linkDir);
+      symlinkSync(real.path, join(linkDir, "node"));
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [linkDir],
+        timeout: 30_000,
+      });
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      const listed = /below the floor: (.*)\.$/mu.exec(result.stderr)?.[1];
+      assert.ok(listed !== undefined, `no below-floor line:\n${result.stderr}`);
+      assert.ok(!listed.includes(", "), `the same binary was listed twice: ${listed}`);
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("bin/agent-flows: terminal escapes never reach a message", () => {
+  const ESC = String.fromCharCode(0x1b);
+  const BEL = String.fromCharCode(0x07);
+
+  it("a probe that prints an escape sequence after a version is not echoed", () => {
+    requireHermeticMachine();
+    const scenario = makeScenario();
+    try {
+      const onPath = installFakeNode(
+        scenario,
+        join(scenario.dir, "path"),
+        "path",
+        `${NEWER_PATCH}${ESC}]0;pwned${BEL}`
+      );
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(onPath.path)],
+        timeout: 30_000,
+      });
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.ok(!result.stderr.includes(ESC) && !result.stderr.includes(BEL), result.stderr);
+      assert.ok(!existsSync(onPath.marker("run")), "a node with a garbled version ran the CLI");
+      // The override message quotes what the binary reported, so it is the sink
+      // that would carry the sequence if the probe kept it.
+      const garbled = installFakeNode(
+        scenario,
+        join(scenario.dir, "garbled"),
+        "garbled",
+        `${BELOW_FLOOR}${ESC}]0;pwned${BEL}`
+      );
+      const viaOverride = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        extraEnv: { AGENT_FLOWS_NODE: garbled.path },
+        timeout: 30_000,
+      });
+      assert.notEqual(viaOverride.status, 0);
+      assert.ok(
+        !viaOverride.stderr.includes(ESC) && !viaOverride.stderr.includes(BEL),
+        viaOverride.stderr
+      );
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a path with an escape sequence in it is printed without it", () => {
+    requireHermeticMachine();
+    const scenario = makeScenario();
+    try {
+      const dirty = installFakeNode(
+        scenario,
+        join(scenario.dir, `path${ESC}[31m`),
+        "dirty",
+        BELOW_FLOOR
+      );
+      const viaPath = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(dirty.path)],
+        timeout: 30_000,
+      });
+      assert.notEqual(viaPath.status, 0);
+      assert.match(viaPath.stderr, /below the floor: .*path\?\[31m/u, viaPath.stderr);
+      assert.ok(!viaPath.stderr.includes(ESC), "an escape reached the PATH refusal");
+      const viaOverride = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        extraEnv: { AGENT_FLOWS_NODE: dirty.path },
+        timeout: 30_000,
+      });
+      assert.notEqual(viaOverride.status, 0);
+      assert.ok(!viaOverride.stderr.includes(ESC), "an escape reached the override refusal");
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// -- 6d. The launcher and src/nodeVersion.ts are two parsers of one value --------
+
+describe("bin/agent-flows: reads engines.node exactly as src/nodeVersion.ts does", () => {
+  /** A package root holding only the launcher and a package.json with `engines.node`. */
+  function launcherWith(range: string): { status: number | null; stderr: string } {
+    const fakeRoot = realpathSync(mkdtempSync(join(tmpdir(), "af-pin-")));
+    try {
+      mkdirSync(join(fakeRoot, "bin"));
+      copyFileSync(join(repoRoot, "bin", "agent-flows"), join(fakeRoot, "bin", "agent-flows"));
+      writeFileSync(
+        join(fakeRoot, "package.json"),
+        JSON.stringify({ name: "stub", type: "module", engines: { node: range } })
+      );
+      const result = spawnSync(process.execPath, [join(fakeRoot, "bin", "agent-flows"), "list"], {
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      return { status: result.status, stderr: result.stderr };
+    } finally {
+      rmSync(fakeRoot, { recursive: true, force: true });
+    }
+  }
+
+  for (const range of [
+    "22.x",
+    "22",
+    "^22",
+    "22.17.1",
+    ">=22",
+    ">=22.23.4 <23",
+    "^22.23.4 || ^24.22.1",
+    "",
+    "^022.23.4",
+    "^22.023.4",
+    "^22.23.04",
+  ]) {
+    it(`rejects "${range}" with the TypeScript parser's own message`, () => {
+      let message = "";
+      try {
+        parseNodePin(range);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      assert.notEqual(message, "", `parseNodePin accepted "${range}"`);
+      const result = launcherWith(range);
+      assert.notEqual(result.status, 0);
+      assert.equal(result.stderr, `agent-flows: ${message}.\n`);
+    });
+  }
+
+  it("accepts the pin's own form and goes on to look for the build", () => {
+    const result = launcherWith(`^${PIN.floor}`);
+    assert.match(result.stderr, /compiled CLI is missing/u);
+  });
+});
+
+// -- 6e. src/cli.ts fails closed too: `node dist/cli.js` skips the launcher ------
+
+describe("cli: the entry point enforces the floor itself", () => {
+  it("exits 1, naming the floor and the remedy, under a node below it", () => {
+    const scenario = makeScenario();
+    try {
+      const preload = join(scenario.dir, "below.cjs");
+      writeFileSync(
+        preload,
+        `Object.defineProperty(process.versions, "node", { value: "${BELOW_FLOOR}", configurable: true });\n`
+      );
+      const result = spawnSync(
+        process.execPath,
+        ["-r", preload, "--import", "tsx/esm", join(repoRoot, "src", "cli.ts"), "list"],
+        { cwd: repoRoot, encoding: "utf8", timeout: 30_000 }
+      );
+      const output = result.stdout + result.stderr;
+      assert.equal(result.status, 1, output);
+      assert.ok(output.includes(PIN.floor), `must name the floor:\n${output}`);
+      assert.ok(output.includes(nodeInstallRemedy(PIN)), `must name the remedy:\n${output}`);
+      assert.ok(output.includes(BELOW_FLOOR), `must name what it is running:\n${output}`);
+      assert.doesNotMatch(output, /AVAILABLE WORKFLOWS/u, "a verb ran despite the refusal");
     } finally {
       rmSync(scenario.dir, { recursive: true, force: true });
     }
