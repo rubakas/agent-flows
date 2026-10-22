@@ -3303,6 +3303,11 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
     // introduced-by-the-change gate, and give the not-ready form both counts.
     for (const rule of [
       "no blocking or major defect introduced by the change",
+      "`kind` defect",
+      "`verdict` CONFIRMED or PARTIAL",
+      "`scope` introduced or undetermined",
+      "Readiness not established",
+      "failed or was reported not examined",
       "Change has B blocking and M major finding(s) \u2014 resolve before merge",
     ]) {
       assert.ok(
@@ -3310,6 +3315,14 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
         `prompts/code-review-synthesis.md's verdict paragraph must carry "${rule}"`
       );
     }
+    const questionsAnchor = 'Then a separate "Questions for owners" section';
+    const questionsAt = synthesis.indexOf(questionsAnchor);
+    assert.notEqual(questionsAt, -1, `the prompt must still carry: ${questionsAnchor}`);
+    const questions = synthesis.slice(questionsAt, synthesis.indexOf("\n\n", questionsAt));
+    assert.ok(
+      questions.includes("excluded from the blocking and major counts"),
+      "Questions for owners must be excluded from the major count too, not blocking alone"
+    );
     assert.ok(
       !verdictParagraph.includes("if there are no blocking findings"),
       "the verdict rule must not go back to counting blocking findings alone"
