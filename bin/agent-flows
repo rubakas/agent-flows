@@ -3,22 +3,24 @@
 //
 // It runs the compiled CLI under the ambient node: no transpiler at runtime and
 // no nvm sourcing, so it works from a global install with no dev dependencies.
-// The Node pin in package.json's engines.node is enforced here instead, because
-// better-sqlite3 is built for one Node ABI (NODE_MODULE_VERSION 127 for Node 22)
-// and any other one fails deep inside a database call with an unreadable dlopen
-// error. It is a pin, not a floor: Node 24 is newer and equally unable to load
-// the addon.
+// The Node requirement in package.json's engines.node is enforced here instead.
+// It is a pin AND a floor. The major is a pin: better-sqlite3 is built for one
+// Node ABI, and any other major fails deep inside a database call with an
+// unreadable dlopen error — Node 24 is newer and equally unable to load the
+// addon. Inside that major the floor is a security one (spec 048): the ABI does
+// not change between releases of a line, so only the fixed releases are accepted.
 //
 // AI CLI harnesses spawn the registered MCP command with their own PATH, which
-// is usually the machine's default node and may be older than 22. Refusing
-// there would make the command unreachable from every harness, so when the
-// running node is too old this script looks for a working interpreter and
-// re-execs itself under it, silently. It only refuses when it finds none.
+// is usually the machine's default node and may be the wrong major or an
+// unpatched release. Refusing there would make the command unreachable from
+// every harness, so when the running node does not satisfy the requirement this
+// script looks for a working interpreter and re-execs itself under it, silently.
+// It only refuses when it finds none.
 //
 // "Working" is proved by loading better-sqlite3, not by a version number: the
-// major is necessary but not sufficient — a Node 22 that did not install these
-// dependencies can still fail to open a database, and `serve`, the daemon every
-// harness talks to, would then fail at its first query.
+// version is necessary but not sufficient — a node of the right release that did
+// not install these dependencies can still fail to open a database, and `serve`,
+// the daemon every harness talks to, would then fail at its first query.
 //
 // The project directory is not captured here: this script never changes
 // directory, so process.cwd() in the CLI is already the invocation directory
@@ -54,38 +56,57 @@ while (!existsSync(join(root, "package.json"))) {
 // The one place the version is written is package.json's engines.node, which
 // this script has just located. It cannot import src/nodeVersion.ts: it runs
 // before a build exists and under a node that may not be able to load this
-// package at all.
-const REQUIRED_NODE = readPinnedMajor();
+// package at all, so the expression and the error text below are a deliberate
+// copy of that module's (a test holds the two together).
+const PIN = readPin();
 
-function readPinnedMajor() {
+function readPin() {
+  let declared;
   try {
-    const declared = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))?.engines?.node;
-    const pinned = Number.parseInt(String(declared).trim(), 10);
-    if (Number.isFinite(pinned)) return pinned;
+    declared = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))?.engines?.node;
   } catch {
     // Fall through: an unreadable package.json is reported by the missing-CLI
     // check below far more usefully than by a version error here.
   }
-  process.stderr.write("agent-flows: package.json declares no usable engines.node pin.\n");
-  process.exit(1);
+  if (declared === undefined) {
+    process.stderr.write("agent-flows: package.json declares no usable engines.node pin.\n");
+    process.exit(1);
+  }
+  const match = /^\^(\d+)\.(\d+)\.(\d+)$/u.exec(String(declared));
+  if (match === null) {
+    process.stderr.write(
+      `agent-flows: engines.node must be "^MAJOR.MINOR.PATCH" \u2014 one major with a security floor inside it (e.g. "^22.23.4") \u2014 got "${String(declared)}".\n`
+    );
+    process.exit(1);
+  }
+  const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const floor = `${String(major)}.${String(minor)}.${String(patch)}`;
+  return { major, minor, patch, floor, requirement: `Node ${String(major)} at or above ${floor}` };
+}
+
+/** Whether a version is the pinned major and at or above the floor. */
+function satisfies(version) {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/u.exec(String(version ?? "").trim());
+  if (match === null) return false;
+  const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  if (major !== PIN.major) return false;
+  return minor > PIN.minor || (minor === PIN.minor && patch >= PIN.patch);
 }
 
 const running = process.versions.node;
-const major = Number.parseInt(running.split(".")[0], 10);
-if (!Number.isFinite(major) || major !== REQUIRED_NODE) {
+if (!satisfies(running)) {
   reExecOrRefuse();
 }
 
-/** The major version a node binary reports, or undefined if it is not usable. */
-function probeMajor(binary) {
+/** The full version a node binary reports, or undefined if it is not usable. */
+function probeVersion(binary) {
   try {
     const reported = execFileSync(binary, ["-p", "process.versions.node"], {
       encoding: "utf8",
       timeout: 5_000,
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    const probed = Number.parseInt(reported.split(".")[0], 10);
-    return Number.isFinite(probed) ? probed : undefined;
+    return /^\d+\.\d+\.\d+/u.test(reported) ? reported : undefined;
   } catch {
     // A missing file, a non-executable, a hung binary or anything that is not
     // node at all: all of them simply mean "not a candidate".
@@ -94,22 +115,21 @@ function probeMajor(binary) {
 }
 
 /**
- * Whether a candidate interpreter can actually run this package, and the major
- * version it reported — the refusal message needs both, and probing is a
- * subprocess, so it happens once.
+ * Whether a candidate interpreter can actually run this package, and the version
+ * it reported — the refusal message needs both, and probing is a subprocess, so
+ * it happens once.
  *
- * The verdict is "ok", "version" (too old or not a node at all) or "native"
- * (new enough, but it cannot load the compiled database module). A version
- * number is not evidence: better-sqlite3 is compiled for whichever node
- * installed it, so a Node 24 install passes the floor and still fails to dlopen
- * a binary built for Node 22. Loading the module is the only evidence there is.
+ * The verdict is "ok", "version" (the wrong major, below the floor, or not a
+ * node at all) or "native" (a satisfying version, but it cannot load the
+ * compiled database module). A version number is not evidence: better-sqlite3
+ * is compiled for whichever node installed it, so a Node 24 install passes a
+ * naive floor and still fails to dlopen a binary built for Node 22. Loading the
+ * module is the only evidence there is.
  */
 function qualify(binary) {
-  const probed = probeMajor(binary);
-  if (probed === undefined || probed !== REQUIRED_NODE) {
-    return { verdict: "version", major: probed };
-  }
-  return { verdict: loadsNativeModule(binary) ? "ok" : "native", major: probed };
+  const version = probeVersion(binary);
+  if (version === undefined || !satisfies(version)) return { verdict: "version", version };
+  return { verdict: loadsNativeModule(binary) ? "ok" : "native", version };
 }
 
 /** True when `binary` can open a database with the package's better-sqlite3. */
@@ -154,20 +174,33 @@ function fromPath(rejected) {
   return undefined;
 }
 
-/** Qualify a candidate, recording it when only the native module load failed. */
+/**
+ * Qualify a candidate, recording why it was passed over when the refusal can use
+ * it: `native` when only the module load failed, `belowFloor` when it is the
+ * pinned major but a release older than the security floor.
+ */
 function accept(candidate, rejected) {
-  const { verdict } = qualify(candidate);
-  if (verdict === "native") rejected.push(candidate);
+  const { verdict, version } = qualify(candidate);
+  if (verdict === "native") rejected.native.push(candidate);
+  if (
+    verdict === "version" &&
+    version !== undefined &&
+    version.startsWith(`${String(PIN.major)}.`)
+  ) {
+    rejected.belowFloor.push(candidate);
+  }
   return verdict === "ok";
 }
 
 /**
- * The first nvm-installed node of the pinned major that qualifies.
+ * The first nvm-installed node that satisfies the pin and qualifies.
  *
- * Only that major is considered — anything else cannot load the addon whatever
- * its version number says. Newest patch first, since that is the most likely to
- * be the one that installed the dependencies; with the native-module probe
- * deciding, the order is an optimisation, not a correctness argument.
+ * Only the pinned major is considered — anything else cannot load the addon
+ * whatever its version number says; releases below the floor are probed so the
+ * refusal can name them, and passed over. Newest first, since that is the most
+ * likely to be the one that installed the dependencies and the safest release;
+ * with the native-module probe deciding, the order is an optimisation, not a
+ * correctness argument.
  */
 function fromNvm(rejected) {
   const versionsDir = join(process.env.NVM_DIR ?? join(homedir(), ".nvm"), "versions", "node");
@@ -176,7 +209,7 @@ function fromNvm(rejected) {
   const entries = readdirSync(versionsDir)
     .filter((name) => /^v\d+\.\d+\.\d+$/u.test(name))
     .map(parse)
-    .filter(([entryMajor]) => entryMajor === REQUIRED_NODE)
+    .filter(([entryMajor]) => entryMajor === PIN.major)
     .sort((a, b) => b[1] - a[1] || b[2] - a[2]);
   for (const version of entries) {
     const candidate = join(versionsDir, `v${version.join(".")}`, "bin", "node");
@@ -192,15 +225,15 @@ function fromNvm(rejected) {
  * search would hide a broken configuration behind a working run.
  */
 function overrideInterpreter(override) {
-  const { verdict, major: probed } = qualify(override);
+  const { verdict, version } = qualify(override);
   if (verdict === "ok") return override;
   const reason =
     verdict === "native"
-      ? `it is Node ${String(probed)}, but it cannot load this package's better-sqlite3 (built for a different Node ABI)`
-      : `it is not Node ${String(REQUIRED_NODE)}${probed === undefined ? "" : ` (it reports Node ${String(probed)})`}`;
+      ? `it is Node ${String(version)}, but it cannot load this package's better-sqlite3 (built for a different Node ABI)`
+      : `it is not ${PIN.requirement}${version === undefined ? "" : ` (it reports Node ${version})`}`;
   process.stderr.write(
     `agent-flows: AGENT_FLOWS_NODE points at ${override}, but ${reason}.\n` +
-      `Point AGENT_FLOWS_NODE at a Node ${String(REQUIRED_NODE)} binary that can load the module, or unset it.\n`
+      `Point AGENT_FLOWS_NODE at a Node ${String(PIN.major)} binary at or above ${PIN.floor} that can load the module, or unset it.\n`
   );
   process.exit(1);
 }
@@ -208,8 +241,9 @@ function overrideInterpreter(override) {
 /**
  * The first interpreter on this machine that can run the package, or undefined.
  *
- * Candidates that are new enough but cannot load the database module are pushed
- * onto `rejected`, so the refusal can say that rather than "none found".
+ * Candidates that were passed over for a reason the refusal can state — below the
+ * floor, or unable to load the database module — are recorded on `rejected`, so
+ * it can say that rather than "none found".
  */
 function findInterpreter(rejected) {
   return (
@@ -225,12 +259,16 @@ function findInterpreter(rejected) {
 function refuse(rejected) {
   const nvmDir = process.env.NVM_DIR ?? join(homedir(), ".nvm");
   process.stderr.write(
-    `agent-flows: Node ${String(REQUIRED_NODE)} is required, but this is Node ${running}.\n` +
-      (rejected.length === 0
-        ? `Switch to Node ${String(REQUIRED_NODE)} (for example: nvm use ${String(REQUIRED_NODE)}) and run the command again.\n`
+    `agent-flows: ${PIN.requirement} is required (${PIN.floor} is the security floor), but this is ${running}.\n` +
+      (rejected.belowFloor.length === 0
+        ? ""
+        : `Found Node ${String(PIN.major)} interpreters below the floor: ${rejected.belowFloor.join(", ")}.\n`) +
+      (rejected.native.length === 0
+        ? ""
         : `Found other Node interpreters, but none of them could load this package's better-sqlite3, ` +
-          `which is built for one Node ABI: ${rejected.join(", ")}.\n` +
+          `which is built for one Node ABI: ${rejected.native.join(", ")}.\n` +
           `Run the command under the Node that installed the dependencies, or rebuild them for one of these.\n`) +
+      `Install a safe one: nvm install ${String(PIN.major)} \u2014 then run the command again.\n` +
       `Looked for one in AGENT_FLOWS_NODE, on PATH, under ${join(nvmDir, "versions", "node")}, /opt/homebrew/bin/node and /usr/local/bin/node.\n`
   );
   process.exit(1);
@@ -241,7 +279,7 @@ function reExecOrRefuse() {
   // Already re-execed once and still too old: the interpreter we picked was not
   // what it claimed to be. Refuse rather than fork forever.
   const alreadyReExeced = process.env[REEXEC_MARKER] !== undefined;
-  const rejected = [];
+  const rejected = { native: [], belowFloor: [] };
   if (!alreadyReExeced) {
     const override = process.env.AGENT_FLOWS_NODE;
     if (override !== undefined && override !== "") reExec(overrideInterpreter(override));

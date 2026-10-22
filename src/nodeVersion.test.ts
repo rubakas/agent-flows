@@ -131,7 +131,10 @@ describe("every copy of the version agrees", () => {
     for (const name of ["bin/agent-flows", "bootstrap.sh", "scripts/use-pinned-node.sh"]) {
       const code = readFileSync(join(ROOT, name), "utf8")
         .split("\n")
-        .filter((line) => !/^\s*(#|\/\/|\*|\/\*)/u.test(line))
+        // Comments, and the parse error's own example, which is fixed text by design.
+        .filter(
+          (line) => !/^\s*(#|\/\/|\*|\/\*)/u.test(line) && !line.includes("MAJOR.MINOR.PATCH")
+        )
         .join("\n");
       assert.ok(!hardcoded.test(code), `${name} hardcodes the version; it must derive it`);
     }

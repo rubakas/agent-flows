@@ -10,21 +10,23 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   accessSync,
+  chmodSync,
   constants,
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
   copyFileSync,
+  writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { describe, it } from "node:test";
 
+import { nodeInstallRemedy, nodeSatisfies, requiredNodePin } from "./nodeVersion.js";
 import { packageRoot } from "./packageRoot.js";
 
 // Resolved by walking up to package.json (spec 038 FR-004) rather than by a
@@ -396,33 +398,121 @@ function ensureBuild(): void {
   });
 }
 
-/** An installed node older than 22, if this machine has one. */
-function olderNodeBinary(): string | undefined {
-  const versionsDir = join(homedir(), ".nvm", "versions", "node");
-  if (!existsSync(versionsDir)) return undefined;
-  for (const entry of readdirSync(versionsDir).sort().reverse()) {
-    const major = Number.parseInt(entry.replace(/^v/u, ""), 10);
-    // Below 20 the launcher never reaches its own check: node refuses to load an
-    // extensionless entry point inside a "type": "module" package at all.
-    if (!Number.isFinite(major) || major >= 22 || major < 20) continue;
-    const candidate = join(versionsDir, entry, "bin", "node");
-    if (existsSync(candidate)) return candidate;
-  }
-  return undefined;
+// The launcher only searches when the RUNNING node does not satisfy the pin, so
+// these tests need a starting interpreter that does not. No such Node is installed
+// (and none should have to be): a preload, passed on the child's argv only, makes
+// a real Node report a chosen version. It is not in NODE_OPTIONS, so it cannot
+// leak into the interpreter the launcher re-execs.
+
+const PIN = requiredNodePin(repoRoot);
+const BELOW_FLOOR = `${String(PIN.major)}.${String(PIN.minor)}.${String(PIN.patch - 1)}`;
+const NEWER_PATCH = `${String(PIN.major)}.${String(PIN.minor)}.${String(PIN.patch + 1)}`;
+const NEWER_MINOR = `${String(PIN.major)}.${String(PIN.minor + 1)}.0`;
+const SYSTEM_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+// Locations the launcher searches that a test cannot redirect.
+const FIXED_NODES = ["/opt/homebrew/bin/node", "/usr/local/bin/node"];
+
+/** One launcher scenario: a scratch directory holding fake interpreters and markers. */
+interface Scenario {
+  dir: string;
+  nvmDir: string;
+  markerDir: string;
+}
+
+function makeScenario(): Scenario {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "af-launch-")));
+  const markerDir = join(dir, "markers");
+  mkdirSync(markerDir);
+  return { dir, nvmDir: join(dir, "nvm"), markerDir };
+}
+
+/** Fails, never skips, when this machine cannot host the scenario hermetically. */
+function requireHermeticMachine(): void {
+  assert.ok(
+    nodeSatisfies(process.versions.node, PIN),
+    `the test runner (Node ${process.versions.node}) must itself satisfy the pin: the fake interpreters exec it`
+  );
+  assert.ok(PIN.patch > 0, "the pin's patch must be above 0 to derive a below-floor version");
+  const stray = [...FIXED_NODES, ...SYSTEM_DIRS.map((dir) => join(dir, "node"))].filter((path) =>
+    existsSync(path)
+  );
+  assert.deepEqual(
+    stray,
+    [],
+    `${stray.join(", ")} exists, and the launcher searches it where this test cannot redirect it, ` +
+      "so the scenario cannot be hermetic. Remove it for the run, or give the launcher a way to skip it."
+  );
 }
 
 /**
- * The environment a harness gives the launcher: an old node first on PATH and
- * no other node anywhere on it, so the launcher's own search has to do the
- * work. Inheriting the test runner's PATH would hide that -- it carries the
- * Node 22 the suite runs under, which would rescue any selection bug.
+ * A fake `node` at <binDir>/node. It answers `-p` with `version`, and otherwise runs the
+ * real Node. Every call leaves a marker of its own kind, so a test can tell
+ * which interpreter was probed, which was asked to load the native module, and
+ * which actually ran the CLI -- the run itself is identical whichever it was.
  */
-function harnessEnv(oldNode: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, AGENT_FLOWS_PROJECT_DIR: repoRoot };
-  delete env.AGENT_FLOWS_NODE;
-  delete env.AGENT_FLOWS_NODE_REEXEC;
-  env.PATH = [dirname(oldNode), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(delimiter);
-  return env;
+function installFakeNode(
+  scenario: Scenario,
+  binDir: string,
+  name: string,
+  version: string
+): { path: string; marker: (kind: "probe" | "native" | "run") => string } {
+  mkdirSync(binDir, { recursive: true });
+  const path = join(binDir, "node");
+  const marker = (kind: "probe" | "native" | "run"): string =>
+    join(scenario.markerDir, `${name}.${kind}`);
+  writeFileSync(
+    path,
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      `  -p) : > '${marker("probe")}'; echo '${version}' ;;`,
+      `  -e) : > '${marker("native")}'; exec '${process.execPath}' "$@" ;;`,
+      `  *) : > '${marker("run")}'; exec '${process.execPath}' "$@" ;;`,
+      "esac",
+      "",
+    ].join("\n")
+  );
+  chmodSync(path, 0o755);
+  return { path, marker };
+}
+
+/** The real Node, linked where nvm would keep it -- the interpreter that really can run the CLI. */
+function installRealNvmNode(scenario: Scenario): void {
+  const binDir = join(scenario.nvmDir, "versions", "node", `v${process.versions.node}`, "bin");
+  mkdirSync(binDir, { recursive: true });
+  symlinkSync(process.execPath, join(binDir, "node"));
+}
+
+/**
+ * Run the launcher under a real Node that reports `startingVersion`, with a PATH
+ * of `pathDirs` plus the system directories and nothing else. The ambient
+ * environment is not inherited where it matters: the test runner's PATH carries
+ * the Node the suite runs under, which would rescue any selection bug.
+ */
+function runLauncher(
+  scenario: Scenario,
+  startingVersion: string,
+  args: string[],
+  options: { pathDirs?: string[]; extraEnv?: NodeJS.ProcessEnv; timeout?: number } = {}
+): { status: number | null; stdout: string; stderr: string } {
+  const preload = join(scenario.dir, `report-${startingVersion}.cjs`);
+  writeFileSync(
+    preload,
+    `Object.defineProperty(process.versions, "node", { value: "${startingVersion}", configurable: true });\n`
+  );
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, AGENT_FLOWS_PROJECT_DIR: repoRoot };
+  delete childEnv.AGENT_FLOWS_NODE;
+  delete childEnv.AGENT_FLOWS_NODE_REEXEC;
+  delete childEnv.NODE_OPTIONS;
+  childEnv.PATH = [...(options.pathDirs ?? []), ...SYSTEM_DIRS].join(delimiter);
+  childEnv.NVM_DIR = scenario.nvmDir;
+  Object.assign(childEnv, options.extraEnv);
+  const result = spawnSync(
+    process.execPath,
+    ["-r", preload, join(repoRoot, "bin", "agent-flows"), ...args],
+    { env: childEnv, encoding: "utf8", timeout: options.timeout ?? 60_000 }
+  );
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
 describe("bin/agent-flows: symlink resolution and project targeting", () => {
@@ -468,98 +558,145 @@ describe("bin/agent-flows: symlink resolution and project targeting", () => {
     assert.doesNotMatch(source, /nvm\.sh/u, "the launcher must not source nvm");
   });
 
-  it("re-execs under a compatible node when the ambient node is too old (FR-003)", (t) => {
-    const oldNode = olderNodeBinary();
-    if (oldNode === undefined) {
-      t.skip("no node older than 22 (and at least 20) is installed on this machine");
-      return;
+  it("the starting interpreter really reports the version the preload gives it", () => {
+    const scenario = makeScenario();
+    try {
+      const preload = join(scenario.dir, "probe.cjs");
+      writeFileSync(
+        preload,
+        `Object.defineProperty(process.versions, "node", { value: "${BELOW_FLOOR}", configurable: true });\n`
+      );
+      const reported = execFileSync(
+        process.execPath,
+        ["-r", preload, "-p", "process.versions.node"],
+        { encoding: "utf8" }
+      ).trim();
+      assert.equal(reported, BELOW_FLOOR);
+      assert.ok(!nodeSatisfies(reported, PIN), "the starting interpreter must not satisfy the pin");
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
     }
+  });
+
+  it("re-execs under a compatible node when the ambient node is below the floor (FR-003)", () => {
+    requireHermeticMachine();
     ensureBuild();
-    // Exactly the harness case: the launcher is started by a node older than 22
-    // whose directory is also the first PATH entry, so nothing on PATH rescues
-    // it -- the launcher's own search must find the interpreter.
-    const childEnv = harnessEnv(oldNode);
-    const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "list"], {
-      env: childEnv,
-      encoding: "utf8",
-      timeout: 60_000,
-    });
-    const output = (result.stdout ?? "") + (result.stderr ?? "");
-    assert.equal(result.status, 0, `expected the re-exec to succeed:\n${output}`);
-    assert.match(result.stdout ?? "", /AVAILABLE WORKFLOWS/u);
-    // A silent, correct run is the point: no version complaint on the way.
-    assert.doesNotMatch(
-      result.stderr ?? "",
-      /Node 22 is required/u,
-      `the success path must print no version message:\n${result.stderr ?? ""}`
-    );
+    const scenario = makeScenario();
+    try {
+      // Exactly the harness case: the launcher is started by a node that does not
+      // satisfy the pin and nothing on PATH rescues it -- the launcher's own
+      // search must find the interpreter.
+      installRealNvmNode(scenario);
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"]);
+      const output = result.stdout + result.stderr;
+      assert.equal(result.status, 0, `expected the re-exec to succeed:\n${output}`);
+      assert.match(result.stdout, /AVAILABLE WORKFLOWS/u);
+      // A silent, correct run is the point: no version complaint on the way.
+      assert.doesNotMatch(
+        result.stderr,
+        /is required/u,
+        `the success path must print no version message:\n${result.stderr}`
+      );
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
   });
 
-  it("re-execs onto an interpreter that can load the native module, not merely a newer one (FR-003)", (t) => {
-    const oldNode = olderNodeBinary();
-    if (oldNode === undefined) {
-      t.skip("no node older than 22 (and at least 20) is installed on this machine");
-      return;
-    }
+  it("re-execs onto an interpreter that can load the native module, not merely a newer one (FR-003)", () => {
+    requireHermeticMachine();
     ensureBuild();
-    // "doctor" is the cheapest verb that opens a database, so it is the only
-    // available proof that the chosen interpreter can dlopen better-sqlite3 --
-    // a newer major passes the version floor and still fails here.
-    const childEnv = harnessEnv(oldNode);
-    const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "doctor"], {
-      env: childEnv,
-      encoding: "utf8",
-      timeout: 120_000,
-    });
-    const output = (result.stdout ?? "") + (result.stderr ?? "");
-    assert.match(output, /better-sqlite3 \(native ABI\)/u, `doctor did not run at all:\n${output}`);
-    assert.doesNotMatch(
-      output,
-      /ABI mismatch|ERR_DLOPEN_FAILED/u,
-      `the re-exec chose an interpreter that cannot load the database module:\n${output}`
-    );
+    const scenario = makeScenario();
+    try {
+      installRealNvmNode(scenario);
+      // "doctor" is the cheapest verb that opens a database, so it is the only
+      // available proof that the chosen interpreter can dlopen better-sqlite3 --
+      // a newer major passes the version floor and still fails here.
+      const result = runLauncher(scenario, BELOW_FLOOR, ["doctor"], { timeout: 120_000 });
+      const output = result.stdout + result.stderr;
+      assert.match(
+        output,
+        /better-sqlite3 \(native ABI\)/u,
+        `doctor did not run at all:\n${output}`
+      );
+      assert.doesNotMatch(
+        output,
+        /ABI mismatch|ERR_DLOPEN_FAILED/u,
+        `the re-exec chose an interpreter that cannot load the database module:\n${output}`
+      );
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
   });
 
-  it("fails loudly when AGENT_FLOWS_NODE points at an unusable binary (FR-003)", (t) => {
-    const oldNode = olderNodeBinary();
-    if (oldNode === undefined) {
-      t.skip("no node older than 22 (and at least 20) is installed on this machine");
-      return;
+  it("fails loudly when AGENT_FLOWS_NODE points at an unusable binary (FR-003)", () => {
+    const scenario = makeScenario();
+    try {
+      // A file that exists but is not an interpreter: the override must not fall
+      // through to the search, because a wrong explicit setting has to be visible.
+      const bogus = join(repoRoot, "package.json");
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        extraEnv: { AGENT_FLOWS_NODE: bogus },
+        timeout: 30_000,
+      });
+      const output = result.stdout + result.stderr;
+      assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
+      assert.ok(output.includes(bogus), `the message must name ${bogus}:\n${output}`);
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
     }
-    // A file that exists but is not an interpreter: the override must not fall
-    // through to the search, because a wrong explicit setting has to be visible.
-    const bogus = join(repoRoot, "package.json");
-    const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "list"], {
-      env: { ...process.env, AGENT_FLOWS_NODE: bogus },
-      encoding: "utf8",
-      timeout: 30_000,
-    });
-    const output = (result.stdout ?? "") + (result.stderr ?? "");
-    assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
-    assert.ok(output.includes(bogus), `the message must name ${bogus}:\n${output}`);
   });
 
-  it("refuses instead of re-execing again once the loop marker is set (FR-003)", (t) => {
-    const oldNode = olderNodeBinary();
-    if (oldNode === undefined) {
-      t.skip("no node older than 22 (and at least 20) is installed on this machine");
-      return;
+  it("refuses an AGENT_FLOWS_NODE that is the right major but below the floor", () => {
+    requireHermeticMachine();
+    const scenario = makeScenario();
+    try {
+      const fake = installFakeNode(
+        scenario,
+        join(scenario.dir, "override"),
+        "override",
+        BELOW_FLOOR
+      );
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        extraEnv: { AGENT_FLOWS_NODE: fake.path },
+        timeout: 30_000,
+      });
+      const output = result.stdout + result.stderr;
+      assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
+      assert.ok(output.includes(fake.path), `the message must name ${fake.path}:\n${output}`);
+      assert.ok(
+        output.includes(PIN.floor),
+        `the message must name the floor ${PIN.floor}:\n${output}`
+      );
+      assert.ok(output.includes(BELOW_FLOOR), `the message must name what it reports:\n${output}`);
+      assert.ok(!existsSync(fake.marker("run")), "a below-floor override must not run the CLI");
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
     }
-    const result = spawnSync(oldNode, [join(repoRoot, "bin", "agent-flows"), "list"], {
-      env: { ...process.env, AGENT_FLOWS_NODE_REEXEC: "1" },
-      encoding: "utf8",
-      timeout: 30_000,
-    });
-    const output = (result.stdout ?? "") + (result.stderr ?? "");
-    assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
-    assert.match(output, /Node 22 is required/u);
-    const running = execFileSync(oldNode, ["-p", "process.versions.node"], {
-      encoding: "utf8",
-    }).trim();
-    assert.ok(
-      output.includes(running),
-      `the message must name the version found (${running}):\n${output}`
-    );
+  });
+
+  it("refuses instead of re-execing again once the loop marker is set (FR-003)", () => {
+    const scenario = makeScenario();
+    try {
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        extraEnv: { AGENT_FLOWS_NODE_REEXEC: "1" },
+        timeout: 30_000,
+      });
+      const output = result.stdout + result.stderr;
+      assert.notEqual(result.status, 0, `expected a non-zero exit:\n${output}`);
+      assert.match(
+        output,
+        new RegExp(
+          `Node ${String(PIN.major)} at or above ${PIN.floor.replace(/\./gu, "\\.")} is required`,
+          "u"
+        )
+      );
+      assert.ok(
+        output.includes(BELOW_FLOOR),
+        `the message must name the version found (${BELOW_FLOOR}):\n${output}`
+      );
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
   });
 
   it("refuses to run without a build, naming the command that fixes it", () => {
@@ -580,6 +717,147 @@ describe("bin/agent-flows: symlink resolution and project targeting", () => {
       assert.match(output, /pnpm build/u);
     } finally {
       rmSync(fakeRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// -- 6b. bin/agent-flows: the security floor (spec 048 FR-3) --------------------
+//
+// Every assertion is on markers the fake interpreters leave, not on exit codes:
+// the real CLI that eventually runs is the same whichever interpreter was
+// chosen, so a green exit proves nothing about the selection.
+
+describe("bin/agent-flows: interpreter search honours the security floor", () => {
+  it("passes over a below-floor node on PATH for a satisfying one under nvm", () => {
+    requireHermeticMachine();
+    ensureBuild();
+    const scenario = makeScenario();
+    try {
+      const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", BELOW_FLOOR);
+      const nvmBin = join(scenario.nvmDir, "versions", "node", `v${PIN.floor}`, "bin");
+      const underNvm = installFakeNode(scenario, nvmBin, "nvm", PIN.floor);
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(onPath.path)],
+      });
+      const output = result.stdout + result.stderr;
+      assert.equal(result.status, 0, `expected success:\n${output}`);
+      assert.ok(existsSync(onPath.marker("probe")), "the PATH node was never even considered");
+      assert.ok(
+        !existsSync(onPath.marker("native")),
+        "a below-floor node reached the native probe"
+      );
+      assert.ok(!existsSync(onPath.marker("run")), "the below-floor PATH node ran the CLI");
+      assert.ok(
+        existsSync(underNvm.marker("native")),
+        "the nvm node was not probed for the module"
+      );
+      assert.ok(existsSync(underNvm.marker("run")), "the nvm node did not run the CLI");
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, version] of [
+    ["exactly the floor", PIN.floor],
+    ["a newer patch", NEWER_PATCH],
+    ["a newer minor", NEWER_MINOR],
+  ] as const) {
+    it(`chooses a PATH node at ${label} (${version})`, () => {
+      requireHermeticMachine();
+      ensureBuild();
+      const scenario = makeScenario();
+      try {
+        const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", version);
+        const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+          pathDirs: [dirname(onPath.path)],
+        });
+        const output = result.stdout + result.stderr;
+        assert.equal(result.status, 0, `expected success:\n${output}`);
+        assert.ok(existsSync(onPath.marker("run")), `the ${version} PATH node did not run the CLI`);
+      } finally {
+        rmSync(scenario.dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("does not search at all when the running node already satisfies the pin", () => {
+    requireHermeticMachine();
+    ensureBuild();
+    const scenario = makeScenario();
+    try {
+      const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", PIN.floor);
+      const result = runLauncher(scenario, PIN.floor, ["list"], {
+        pathDirs: [dirname(onPath.path)],
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(!existsSync(onPath.marker("probe")), "a satisfying running node still searched");
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when every candidate is below the floor, naming the floor, the remedy and the paths", () => {
+    // Fails, not skips, where a fixed-location node exists: it would be found,
+    // and this refusal could not be reached (see requireHermeticMachine).
+    requireHermeticMachine();
+    const scenario = makeScenario();
+    try {
+      const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", BELOW_FLOOR);
+      const oldVersion = `${String(PIN.major)}.0.0`;
+      const underNvm = installFakeNode(
+        scenario,
+        join(scenario.nvmDir, "versions", "node", `v${oldVersion}`, "bin"),
+        "nvm",
+        oldVersion
+      );
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(onPath.path)],
+        timeout: 30_000,
+      });
+      const output = result.stdout + result.stderr;
+      assert.notEqual(result.status, 0, `expected a refusal:\n${output}`);
+      assert.ok(
+        output.includes(PIN.floor),
+        `the refusal must name the floor ${PIN.floor}:\n${output}`
+      );
+      assert.ok(
+        output.includes(nodeInstallRemedy(PIN)),
+        `the refusal must say "${nodeInstallRemedy(PIN)}":\n${output}`
+      );
+      assert.ok(
+        output.includes(BELOW_FLOOR),
+        `the refusal must name what it is running:\n${output}`
+      );
+      for (const rejected of [onPath.path, underNvm.path]) {
+        assert.ok(output.includes(rejected), `the refusal must name ${rejected}:\n${output}`);
+      }
+      assert.ok(!existsSync(onPath.marker("run")) && !existsSync(underNvm.marker("run")));
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not count another major as 'below the floor' in the refusal", () => {
+    requireHermeticMachine();
+    const scenario = makeScenario();
+    try {
+      const otherMajor = installFakeNode(
+        scenario,
+        join(scenario.dir, "path"),
+        "path",
+        `${String(PIN.major + 2)}.0.0`
+      );
+      const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+        pathDirs: [dirname(otherMajor.path)],
+        timeout: 30_000,
+      });
+      assert.notEqual(result.status, 0);
+      assert.ok(
+        !result.stderr.includes(otherMajor.path),
+        `named a wrong-major node:\n${result.stderr}`
+      );
+    } finally {
+      rmSync(scenario.dir, { recursive: true, force: true });
     }
   });
 });
