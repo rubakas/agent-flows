@@ -534,28 +534,81 @@ describe("the procedures run the verdict (spec 049 D6)", () => {
   const skill = readFileSync(join(skillDir, "SKILL.md"), "utf8");
   const codex = readFileSync(join(skillDir, "references", "codex.md"), "utf8");
 
-  it("SKILL.md runs check.mjs verdict on the run dir", () => {
-    assert.ok(skill.includes("check.mjs' verdict '<runDir>'"));
+  /** The text between two anchors; both must exist, or the slice would be silently empty. */
+  function between(text: string, from: string, to?: string): string {
+    const start = text.indexOf(from);
+    assert.notEqual(start, -1, `anchor not found: ${from}`);
+    if (to === undefined) return text.slice(start);
+    const end = text.indexOf(to, start);
+    assert.notEqual(end, -1, `anchor not found: ${to}`);
+    return text.slice(start, end);
+  }
+  /** Each needle must occur, in the given order. */
+  function inOrder(text: string, needles: string[]): void {
+    let at = -1;
+    for (const needle of needles) {
+      const found = text.indexOf(needle, at + 1);
+      assert.notEqual(found, -1, `missing, or out of order: ${needle}`);
+      at = found;
+    }
+  }
+
+  it("SKILL.md step 3 checks the findings, then computes the verdict, then checks the tree", () => {
+    const check = between(skill, "## 3. Check", "## 4. Report");
+    inOrder(check, [
+      "check.mjs' findings '<runDir>/out/verify.json'",
+      "check.mjs' verdict '<runDir>'",
+      "capture.mjs' check-tree",
+    ]);
   });
 
   it("SKILL.md writes the engine's coverage to out/coverage.json, verbatim", () => {
     assert.match(skill, /`coverage` object VERBATIM to `<runDir>\/out\/coverage\.json`/);
   });
 
-  it("SKILL.md leads the report and the answer with the computed line", () => {
-    const report = skill.slice(skill.indexOf("## 4. Report"), skill.indexOf("## 5. Answer"));
-    assert.ok(report.includes("out/verdict.txt"), "the report step must take the line from there");
-    assert.ok(
-      report.indexOf("verdict.txt") < report.indexOf("The synthesis, exactly as produced"),
-      "the computed line comes before the synthesis"
-    );
-    const answer = skill.slice(skill.indexOf("## 5. Answer"));
+  it("SKILL.md says what happens when the engine result has no coverage", () => {
+    const engine = between(skill, "## 2. Run the engine", "## 3. Check");
+    assert.match(engine, /has no `coverage`.*verdict.*will refuse/s);
+  });
+
+  it("SKILL.md orders the report: refusal, warnings, verdict, synthesis, pointer", () => {
+    const report = between(skill, "## 4. Report", "## 5. Answer");
+    inOrder(report, [
+      "Verdict not established",
+      "`changed` is non-empty",
+      "check.mjs reported errors",
+      "out/verdict.txt",
+      "The synthesis, exactly as produced",
+      "verify.json",
+    ]);
+    assert.match(report, /very first line of the report/);
+    assert.match(report, /unverified and is not a readiness claim/);
+  });
+
+  it("SKILL.md answers with the computed line first, or the refusal, and calls it authoritative", () => {
+    const answer = between(skill, "## 5. Answer");
     assert.match(answer, /computed verdict line verbatim first/);
+    assert.match(answer, /Verdict not established: <why>/);
+    assert.match(answer, /unverified and not a readiness claim/);
     assert.match(answer, /authoritative/);
   });
 
-  it("codex.md has the lead write out/coverage.json before SKILL.md step 3", () => {
-    assert.ok(codex.includes("<runDir>/out/coverage.json"));
-    assert.match(codex, /Write nothing else into the file/);
+  it("codex.md has a Coverage section that names the five axes, the exact-once rule and both examples", () => {
+    const coverage = between(codex, "## Coverage", "## Finish");
+    for (const axis of ["falsifiability", "correctness", "security", "radius", "delivery"]) {
+      assert.ok(coverage.includes(axis), `${axis} missing from the Coverage section`);
+    }
+    assert.ok(coverage.includes("<runDir>/out/coverage.json"));
+    assert.match(coverage, /exactly one of the three lists/);
+    assert.match(coverage, /Write nothing else into the file/);
+    assert.ok(coverage.includes('{"step":"security","reason":'), "a failed example");
+    assert.ok(coverage.includes('{"step":"delivery","reason":"no spec sources"}'), "a skipped one");
+    assert.ok(
+      coverage.includes(
+        '"ran":["falsifiability","correctness","security","radius","delivery"],"failed":[],"skipped":[]'
+      ),
+      "an all-ran example"
+    );
+    inOrder(codex, ["## Coverage", "## Finish"]);
   });
 });

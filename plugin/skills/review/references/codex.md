@@ -89,17 +89,29 @@ The verify prompt knows how to record such a marker as an UNVERIFIABLE finding. 
 
 ## Coverage
 
-SKILL.md step 3 computes the merge verdict from `<runDir>/out/coverage.json`, and Codex has no engine to write it: you write it, from what you observed once the worker waves are over (before verify, so verify's inputs are settled). Exactly this shape, every one of the five axes in exactly one list:
+SKILL.md step 3 computes the merge verdict from `<runDir>/out/coverage.json`, and Codex has no engine to write it: you write it, from what you observed once the worker waves are over (before verify, so verify's inputs are settled). A JSON object with exactly the keys `ran`, `failed` and `skipped`, and every one of the five axes (falsifiability, correctness, security, radius, delivery) in exactly one of the three lists. A run where everything answered:
 
 ```
-{"ran":["falsifiability","correctness","security","radius","delivery"],"failed":[{"step":"security","reason":"<why>"}],"skipped":[{"step":"delivery","reason":"no spec sources"}]}
+{"ran":["falsifiability","correctness","security","radius","delivery"],"failed":[],"skipped":[]}
+```
+
+An axis that failed moves out of `ran` into `failed`, as an object with its reason:
+
+```
+{"step":"security","reason":"the subagent did not reply DONE"}
+```
+
+An axis that was skipped moves into `skipped` the same way:
+
+```
+{"step":"delivery","reason":"no spec sources"}
 ```
 
 - `ran`: the step's subagent replied DONE and left its output file (delivery: and its check passed).
 - `failed`: the step got the unavailable marker above, or delivery's check stayed non-zero; `reason` is the reason in the marker. Radius never appears here: if it fails you stop.
 - `skipped`: delivery when `hasSpecs` is false, with the reason `no spec sources`.
 
-Write nothing else into the file and never leave an axis out: a missing axis makes the verdict refuse.
+Write nothing else into the file and never leave an axis out or list it twice: either makes the verdict refuse. The verdict re-checks `out/delivery.json` itself whenever delivery is in `ran`.
 
 ## Finish
 

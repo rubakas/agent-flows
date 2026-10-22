@@ -29,7 +29,7 @@ If you passed any `--spec` or `--spec-file` and `hasSpecs` is false, no spec sou
 
 ## 2. Run the engine
 
-- If a `Workflow` tool is available: start the workflow `af:review-engine` with args `{"runDir": "<runDir>", "plan": "<the change description, omitted when none>", "hasSpecs": <hasSpecs>}` and wait for it. It returns `{synthesis, verify, delivery, coverage}`; `delivery` is absent when delivery did not run or failed, and `coverage` says which review dimensions ran, failed or were skipped. Create `<runDir>/out/`, then write the `verify` object VERBATIM to `<runDir>/out/verify.json`, the `coverage` object VERBATIM to `<runDir>/out/coverage.json`, the `delivery` object VERBATIM to `<runDir>/out/delivery.json` when it is present, and the `synthesis` text to `<runDir>/out/synthesis.md`. If `synthesis` is missing, say so, still write `verify.json` and `coverage.json`, and skip to step 3.
+- If a `Workflow` tool is available: start the workflow `af:review-engine` with args `{"runDir": "<runDir>", "plan": "<the change description, omitted when none>", "hasSpecs": <hasSpecs>}` and wait for it. It returns `{synthesis, verify, delivery, coverage}`; `delivery` is absent when delivery did not run or failed, and `coverage` says which review dimensions ran, failed or were skipped. Create `<runDir>/out/`, then write the `verify` object VERBATIM to `<runDir>/out/verify.json`, the `coverage` object VERBATIM to `<runDir>/out/coverage.json`, the `delivery` object VERBATIM to `<runDir>/out/delivery.json` when it is present, and the `synthesis` text to `<runDir>/out/synthesis.md`. If `synthesis` is missing, say so, still write `verify.json` and `coverage.json`, and skip to step 3. If the result has no `coverage`, say so in the report: there is nothing to write to `coverage.json`, so the verdict in step 3 will refuse.
 - Otherwise, if a `spawn_agent` tool is available: follow `<skill dir>/references/codex.md`. It writes `<runDir>/out/verify.json`, `<runDir>/out/coverage.json` and `<runDir>/out/synthesis.md` itself.
 - Otherwise stop and tell the user that workflows must be enabled in Claude Code (or that Codex subagents are required); do not review inline.
 
@@ -37,19 +37,20 @@ If you passed any `--spec` or `--spec-file` and `hasSpecs` is false, no spec sou
 
 1. `node '<skill dir>/scripts/check.mjs' findings '<runDir>/out/verify.json'` - a non-zero exit means the verify output broke the schema or one of its rules. Report the printed lines prominently; never present an unchecked verify result as clean.
    On the Workflow path, when you wrote `<runDir>/out/delivery.json` in step 2, also run `node '<skill dir>/scripts/check.mjs' delivery '<runDir>/out/delivery.json'` - a non-zero exit means the delivery output broke the schema or its rule (for example `specSourcesProvided: false` with entries). Report the printed lines prominently, the same way; never present an unchecked delivery result as clean. (The Codex path checks delivery itself in `<skill dir>/references/codex.md`.) If `hasSpecs` was true but the engine returned no `delivery`, the delivery step failed: say in the report that delivery was not checked for that reason.
-2. `node '<skill dir>/scripts/check.mjs' verdict '<runDir>'` - computes the merge verdict from the verified findings in `out/verify.json` and the coverage in `out/coverage.json`, prints it as one line and writes it to `<runDir>/out/verdict.txt`. Exit 0 means a verdict was established (ready or not ready). A non-zero exit prints `Verdict not established: <why>` and writes no `verdict.txt`: report that line prominently, and do not offer any verdict of your own.
+2. `node '<skill dir>/scripts/check.mjs' verdict '<runDir>'` - computes the merge verdict from the verified findings in `out/verify.json` and the coverage in `out/coverage.json`, prints it as one line and writes it to `<runDir>/out/verdict.txt`. It also re-checks `out/delivery.json` when the coverage says delivery ran, and counts delivery as not examined when that file is missing or invalid. Exit 0 means a verdict was established (ready or not ready). A non-zero exit prints `Verdict not established: <why>` and writes no `verdict.txt`: step 4 and step 5 lead with that line, and you do not offer any verdict of your own.
 3. `node '<skill dir>/scripts/capture.mjs' check-tree '<runDir>'` - prints `{"changed":[...]}`: working-tree paths that differ from before the review.
 
 ## 4. Report
 
 Write `<runDir>/report.md`:
 
-1. If `changed` is non-empty, a prominent warning first: these paths changed during the review - by a reviewer or by you - followed by the paths.
-2. If check.mjs reported errors, a prominent warning with them.
-3. The computed verdict line from `<runDir>/out/verdict.txt`, verbatim, labelled as computed from the verified findings. When the verdict was not established, the `Verdict not established` line instead.
-4. The synthesis, exactly as produced.
-5. A final line pointing at `<runDir>/out/verify.json` for the verified findings JSON (do not copy the JSON into the report).
+1. If the verdict was not established, the printed `Verdict not established: <why>` line, as the very first line of the report, before everything below.
+2. If `changed` is non-empty, a prominent warning: these paths changed during the review - by a reviewer or by you - followed by the paths.
+3. If check.mjs reported errors, a prominent warning with them.
+4. The computed verdict line from `<runDir>/out/verdict.txt`, verbatim, labelled as computed from the verified findings (omitted when the verdict was not established).
+5. The synthesis, exactly as produced. When the verdict was not established, put one line directly above it: the synthesis's own closing verdict line is unverified and is not a readiness claim.
+6. A final line pointing at `<runDir>/out/verify.json` for the verified findings JSON (do not copy the JSON into the report).
 
 ## 5. Answer
 
-Show the user the computed verdict line verbatim first, then the synthesis and the absolute path of `report.md`. The computed line is authoritative: if the synthesis ends in a verdict line that disagrees with it, say so. Do not fix anything the review found.
+Show the user the computed verdict line verbatim first - or, when the verdict was not established, the `Verdict not established: <why>` line, saying the synthesis's closing verdict line is unverified and not a readiness claim - then the synthesis and the absolute path of `report.md`. The computed line is authoritative: if the synthesis ends in a verdict line that disagrees with it, say so. Do not fix anything the review found.
