@@ -4,7 +4,7 @@
 | ------------ | ------------------------------------------------- |
 | Feature Name | Node requirement: major pin plus a security floor |
 | Branch       | `fix/048-node-floor`                              |
-| Status       | In progress 2026-10-22                            |
+| Status       | Implemented 2026-10-22 (branch unpushed)          |
 | Created      | 2026-10-22                                        |
 
 ## Problem
