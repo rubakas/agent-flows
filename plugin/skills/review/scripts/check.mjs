@@ -54,8 +54,15 @@ function deepEqual(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-/** Control characters (ESC, NUL, DEL ...) become spaces, so nothing echoed can drive a terminal. */
-const clean = (text) => String(text).replace(/[\u0000-\u001f\u007f]/g, " ");
+/**
+ * Control characters (ESC, NUL, DEL, the C1 range ...) become spaces, so nothing echoed can drive
+ * a terminal. Filtered by code point: a regex literal over control characters trips no-control-regex.
+ */
+const clean = (text) =>
+  Array.from(String(text), (ch) => {
+    const code = ch.codePointAt(0);
+    return code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : ch;
+  }).join("");
 
 const display = (value) => clean(JSON.stringify(value) ?? String(value));
 
@@ -196,7 +203,8 @@ function readCoverage(file) {
     coverage = JSON.parse(readFileSync(file, "utf8"));
   } catch (err) {
     throw new Error(
-      `${file} is not readable bare JSON - ${err instanceof Error ? err.message : String(err)}`
+      `${file} is not readable bare JSON - ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
     );
   }
   if (typeOf(coverage) !== "object") throw new Error(`${file} must be a JSON object`);
