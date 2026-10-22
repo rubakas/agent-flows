@@ -3297,6 +3297,23 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
           "it never names is indistinguishable from an axis that came back clean"
       );
     }
+
+    // Spec 049: the rule counted blocking only, so a verified, introduced MAJOR defect left
+    // the verdict at "ready to merge" in 11 of 40 replayed runs. It must name major, name the
+    // introduced-by-the-change gate, and give the not-ready form both counts.
+    for (const rule of [
+      "no blocking or major defect introduced by the change",
+      "Change has B blocking and M major finding(s) \u2014 resolve before merge",
+    ]) {
+      assert.ok(
+        verdictParagraph.includes(rule),
+        `prompts/code-review-synthesis.md's verdict paragraph must carry "${rule}"`
+      );
+    }
+    assert.ok(
+      !verdictParagraph.includes("if there are no blocking findings"),
+      "the verdict rule must not go back to counting blocking findings alone"
+    );
   });
 
   // Spec 044 V2. D8 calls this the weakest decision in the spec: synthesis emits
