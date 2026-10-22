@@ -41,11 +41,11 @@ interface Sandbox {
   calls: string;
 }
 
-function makeSandbox(): Sandbox {
+function makeSandbox(nvmrc: string = PIN.floor): Sandbox {
   assert.ok(PIN.patch > 0, "the pin's patch must be above 0 to derive a below-floor version");
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "af-shell-")));
   mkdirSync(join(dir, "nvm"));
-  writeFileSync(join(dir, ".nvmrc"), `${PIN.floor}\n`);
+  writeFileSync(join(dir, ".nvmrc"), `${nvmrc}\n`);
   return {
     dir,
     initialBin: join(dir, "initial"),
@@ -111,8 +111,8 @@ function nvmCalls(sandbox: Sandbox): string[] {
   return existsSync(sandbox.calls) ? readFileSync(sandbox.calls, "utf8").trim().split("\n") : [];
 }
 
-function inSandbox(body: (sandbox: Sandbox) => void): void {
-  const sandbox = makeSandbox();
+function inSandbox(body: (sandbox: Sandbox) => void, nvmrc?: string): void {
+  const sandbox = makeSandbox(nvmrc);
   try {
     body(sandbox);
   } finally {
@@ -134,6 +134,23 @@ describe("scripts/use-pinned-node.sh", () => {
         assert.equal(result.status, 0, result.stderr);
         assert.equal(result.stdout.trim(), "OK");
         assert.deepEqual(nvmCalls(sandbox), [], "nvm was called although the node was fine");
+      });
+    });
+  }
+
+  for (const [label, version] of [
+    ["a pre-release of the floor", `${PIN.floor}-rc.1`],
+    ["a nightly build", `${PIN.floor}-nightly20261022abcdef`],
+    ["a version with no patch", `${String(PIN.major)}.${String(PIN.minor + 1)}`],
+    ["a version with a fourth part", `${PIN.floor}.1`],
+  ] as const) {
+    it(`refuses ${label} (${version})`, () => {
+      inSandbox((sandbox) => {
+        fakeNode(sandbox.initialBin, version);
+        fakeNvm(sandbox, false);
+        const result = source(sandbox);
+        assert.equal(result.status, 1, `expected exit 1:\n${result.stderr}`);
+        assert.ok(!result.stdout.includes("OK"));
       });
     });
   }
@@ -205,6 +222,51 @@ describe("scripts/use-pinned-node.sh", () => {
       fakeNvm(sandbox, false);
       const result = source(sandbox);
       assert.equal(result.status, 0, result.stderr);
+    });
+  });
+});
+
+describe("scripts/use-pinned-node.sh: the .nvmrc it reads", () => {
+  // A legacy bare major ("22") used to read as a floor of 22.22.22 and pass.
+  for (const nvmrc of ["22", "22.23", "lts/*", "garbage", "22.23.4.1", "22.x.4", "22..4"]) {
+    it(`refuses ${JSON.stringify(nvmrc)} and names .nvmrc`, () => {
+      inSandbox((sandbox) => {
+        fakeNode(sandbox.initialBin, PIN.floor);
+        fakeNvm(sandbox, false);
+        const result = source(sandbox);
+        assert.equal(result.status, 1, `expected exit 1:\n${result.stdout}${result.stderr}`);
+        assert.ok(!result.stdout.includes("OK"));
+        assert.ok(result.stderr.includes(".nvmrc"), result.stderr);
+        assert.deepEqual(nvmCalls(sandbox), [], "it went on to nvm with an invalid floor");
+      }, nvmrc);
+    });
+  }
+
+  it("accepts a leading v", () => {
+    inSandbox((sandbox) => {
+      fakeNode(sandbox.initialBin, PIN.floor);
+      const result = source(sandbox);
+      assert.equal(result.status, 0, result.stderr);
+    }, `v${PIN.floor}`);
+  });
+
+  it("leaves none of its working variables or helpers in the sourcing shell", () => {
+    inSandbox((sandbox) => {
+      fakeNode(sandbox.initialBin, PIN.floor);
+      const result = spawnSync(
+        "/bin/bash",
+        ["-c", `. '${SCRIPT}' && { set | grep -E '^_[A-Za-z_]+=|^_node_' ; echo DONE; }`],
+        {
+          cwd: sandbox.dir,
+          env: {
+            PATH: `${sandbox.initialBin}:/usr/bin:/bin`,
+            NVM_DIR: sandbox.nvmDir,
+            HOME: sandbox.dir,
+          },
+          encoding: "utf8",
+        }
+      );
+      assert.equal(result.stdout.trim(), "DONE", `left behind:\n${result.stdout}`);
     });
   });
 });

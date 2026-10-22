@@ -18,29 +18,46 @@
 # so there is one shell implementation of the check, not two.
 
 _floor="$(tr -d '[:space:]' < .nvmrc)"
+_floor="${_floor#v}"
+
+# .nvmrc must hold the floor as MAJOR.MINOR.PATCH. A legacy bare major ("22")
+# would otherwise be read as a floor of 22.22.22 and pass, so it is refused.
+_floor_ok=0
+case "$_floor" in
+  *[!0-9.]* | '' | .* | *. | *..*) ;;
+  *.*.*.*) ;;
+  *.*.*) _floor_ok=1 ;;
+esac
+if [ "$_floor_ok" != 1 ]; then
+  echo "$(basename "$0"): .nvmrc must hold the Node security floor as MAJOR.MINOR.PATCH (e.g. 22.23.4), got \"$_floor\"." >&2
+  unset _floor _floor_ok
+  exit 1
+fi
+unset _floor_ok
 _major="${_floor%%.*}"
 
 # _node_satisfies VERSION FLOOR: same major, and (minor, patch) at or above the
-# floor. Plain POSIX tests on integers, so "22.100.0" is above "22.23.4".
-_node_satisfies() {
-  _ns_v="${1#v}"
-  case "$_ns_v" in *.*.*) ;; *) return 1 ;; esac
-  _ns_vMajor="${_ns_v%%.*}"
-  _ns_rest="${_ns_v#*.}"
-  _ns_vMinor="${_ns_rest%%.*}"
-  _ns_vPatch="${_ns_rest#*.}"
-  _ns_vPatch="${_ns_vPatch%%[!0-9]*}"
-  _ns_fMajor="${2%%.*}"
-  _ns_rest="${2#*.}"
-  _ns_fMinor="${_ns_rest%%.*}"
-  _ns_fPatch="${_ns_rest#*.}"
-  case "$_ns_vMajor$_ns_vMinor$_ns_vPatch$_ns_fMajor$_ns_fMinor$_ns_fPatch" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  [ "$_ns_vMajor" -eq "$_ns_fMajor" ] || return 1
-  [ "$_ns_vMinor" -gt "$_ns_fMinor" ] && return 0
-  [ "$_ns_vMinor" -eq "$_ns_fMinor" ] && [ "$_ns_vPatch" -ge "$_ns_fPatch" ]
-}
+# floor. Plain POSIX tests on integers, so "22.100.0" is above "22.23.4". Only a
+# bare N.N.N satisfies: "22.23.4-rc.1" and "22.23" do not. A subshell function, so
+# its working variables cannot leak into the sourcing script.
+_node_satisfies() (
+  v="${1#v}"
+  case "$v" in *.*.*) ;; *) exit 1 ;; esac
+  vMajor="${v%%.*}"
+  rest="${v#*.}"
+  vMinor="${rest%%.*}"
+  vPatch="${rest#*.}"
+  fMajor="${2%%.*}"
+  rest="${2#*.}"
+  fMinor="${rest%%.*}"
+  fPatch="${rest#*.}"
+  for n in "$vMajor" "$vMinor" "$vPatch" "$fMajor" "$fMinor" "$fPatch"; do
+    case "$n" in '' | *[!0-9]*) exit 1 ;; esac
+  done
+  [ "$vMajor" -eq "$fMajor" ] || exit 1
+  [ "$vMinor" -gt "$fMinor" ] && exit 0
+  [ "$vMinor" -eq "$fMinor" ] && [ "$vPatch" -ge "$fPatch" ]
+)
 
 _node_version() { node -p 'process.versions.node' 2>/dev/null || echo 0; }
 
@@ -55,7 +72,11 @@ if ! _node_satisfies "$(_node_version)" "$_floor"; then
   echo "$(basename "$0"): needs Node $_major at or above $_floor, the security floor (this is $(node -v 2>/dev/null || echo 'no node'))." >&2
   echo "better-sqlite3 is built for one Node ABI; any other major fails inside the first query." >&2
   echo "Run: nvm install $_major && nvm use $_major" >&2
+  unset _floor _major
+  unset -f _node_satisfies _node_version
   exit 1
 fi
 
+# Nothing but PATH (and NVM_DIR, if it was needed) is left behind for the caller.
 unset _floor _major
+unset -f _node_satisfies _node_version
