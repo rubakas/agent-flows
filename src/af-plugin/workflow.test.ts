@@ -29,6 +29,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // specifier and described here, so no declaration file has to ship inside the plugin.
 interface Checker {
   loadSchema: (name: string) => unknown;
+  AXES: string[];
 }
 const checker = (await import(
   pathToFileURL(join(root, "plugin", "skills", "review", "scripts", "check.mjs")).href
@@ -111,7 +112,8 @@ function stubs(overrides: Record<string, (call: Call) => unknown> = {}) {
   };
 }
 
-const AXES = ["falsifiability", "correctness", "security", "radius", "delivery"];
+// The axes check.mjs verdict accounts for: the engine's coverage must be exactly these.
+const AXES = checker.AXES;
 
 const byLabel = (calls: Call[], label: string) => calls.find((c) => c.opts.label === label)!;
 
@@ -510,6 +512,33 @@ describe("review-engine run", () => {
       const result = await run(...stubs(overrides).globals({ ...args, hasSpecs }));
       return JSON.parse(JSON.stringify(result.coverage)) as unknown;
     };
+
+    it("covers exactly the axes check.mjs verdict knows, however the run went", async () => {
+      assert.deepEqual([...AXES].sort(), [
+        "correctness",
+        "delivery",
+        "falsifiability",
+        "radius",
+        "security",
+      ]);
+      for (const [overrides, hasSpecs] of [
+        [{}, true],
+        [{ security: () => null }, true],
+        [{}, false],
+      ] as const) {
+        const coverage = (await coverageOf(overrides, hasSpecs)) as {
+          ran: string[];
+          failed: { step: string }[];
+          skipped: { step: string }[];
+        };
+        const named = [
+          ...coverage.ran,
+          ...coverage.failed.map((e) => e.step),
+          ...coverage.skipped.map((e) => e.step),
+        ];
+        assert.deepEqual(named.sort(), [...AXES].sort());
+      }
+    });
 
     it("lists all five axes as ran when every worker answered", async () => {
       assert.deepEqual(await coverageOf({}), { ran: AXES, failed: [], skipped: [] });

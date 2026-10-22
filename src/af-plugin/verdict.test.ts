@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -57,6 +57,8 @@ function unverifiable(overrides: Obj = {}): Obj {
 }
 
 const fullCoverage = { ran: AXES, failed: [], skipped: [] };
+const validDelivery = { specSourcesProvided: true, codeReviewDelivery: [] };
+const ESC = String.fromCharCode(27);
 
 describe("check.mjs verdict (spec 049)", () => {
   const root = mkdtempSync(join(tmpdir(), "af-verdict-"));
@@ -64,12 +66,17 @@ describe("check.mjs verdict (spec 049)", () => {
   let counter = 0;
 
   /** A fresh run dir; a null part is left unwritten. */
-  function runDir(verify: unknown, coverage: unknown = fullCoverage): string {
+  function runDir(
+    verify: unknown,
+    coverage: unknown = fullCoverage,
+    delivery: unknown = validDelivery
+  ): string {
     const dir = join(root, `run${String(counter++)}`);
     mkdirSync(join(dir, "out"), { recursive: true });
     const text = (value: unknown) => (typeof value === "string" ? value : JSON.stringify(value));
     if (verify !== null) writeFileSync(join(dir, "out", "verify.json"), text(verify));
     if (coverage !== null) writeFileSync(join(dir, "out", "coverage.json"), text(coverage));
+    if (delivery !== null) writeFileSync(join(dir, "out", "delivery.json"), text(delivery));
     return dir;
   }
   const verdict = (dir: string) =>
@@ -285,6 +292,227 @@ describe("check.mjs verdict (spec 049)", () => {
         assert.match(result.stderr, /usage.*verdict/);
         assert.equal(result.stdout, "");
       }
+    });
+  });
+
+  describe("delivery output is checked, not trusted (spec 049 review)", () => {
+    const ranWithoutDelivery = AXES.slice(0, 4);
+    const deliveryFailed = "delivery output failed its check";
+
+    it("a valid delivery.json with entries leaves delivery examined", () => {
+      const delivery = {
+        specSourcesProvided: true,
+        codeReviewDelivery: [
+          {
+            requirement: "Bids close at the lot deadline",
+            source: "issue #12",
+            classification: "implemented",
+            evidence: "app/models/lot.rb:42 closes the bid window",
+          },
+        ],
+      };
+      const line = established(runDir(withFindings(), fullCoverage, delivery));
+      assert.match(line, /^Ready to merge:.*examined [^;]*delivery/);
+    });
+
+    it("a delivery.json that breaks its schema while delivery ran is not established", () => {
+      const bad = { specSourcesProvided: false, codeReviewDelivery: [{ requirement: "x" }] };
+      assert.equal(
+        established(runDir(withFindings(), fullCoverage, bad)),
+        `Readiness not established: delivery did not run (${deliveryFailed}).`
+      );
+    });
+
+    it("a missing delivery.json while delivery ran is not established", () => {
+      assert.equal(
+        established(runDir(withFindings(), fullCoverage, null)),
+        `Readiness not established: delivery did not run (${deliveryFailed}).`
+      );
+    });
+
+    it("an unparseable delivery.json while delivery ran is not established", () => {
+      const line = established(runDir(withFindings(), fullCoverage, "```json\n{}\n```"));
+      assert.match(line, /^Readiness not established: delivery did not run/);
+    });
+
+    it("a failed delivery check plus a major is Not ready with the Not examined clause", () => {
+      const line = established(runDir(withFindings(finding()), fullCoverage, null));
+      assert.match(line, /^Not ready to merge: 0 blocking and 1 major/);
+      assert.ok(line.endsWith(` Not examined: delivery (${deliveryFailed}).`), line);
+    });
+
+    it("a delivery.json is not read when delivery was skipped", () => {
+      const coverage = {
+        ran: ranWithoutDelivery,
+        failed: [],
+        skipped: [{ step: "delivery", reason: "no spec sources" }],
+      };
+      const line = established(runDir(withFindings(), coverage, "garbage"));
+      assert.match(line, /^Ready to merge:.*delivery not checked: no spec sources/);
+    });
+  });
+
+  describe("output is one printable line", () => {
+    it("an ESC byte in a coverage reason never reaches stdout or verdict.txt", () => {
+      const coverage = {
+        ran: AXES.slice(1),
+        failed: [{ step: "falsifiability", reason: `died ${ESC}[31mred\u007f${ESC}[0m` }],
+        skipped: [],
+      };
+      const dir = runDir(withFindings(), coverage);
+      const line = established(dir);
+      const control = [...line].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
+      assert.equal(control, false, JSON.stringify(line));
+      assert.match(line, /died \[31mred/);
+      assert.equal(readFileSync(join(dir, "out", "verdict.txt"), "utf8").includes(ESC), false);
+    });
+
+    it("an ESC byte in an unexpected key of a finding never reaches the refusal", () => {
+      const bad = withFindings({ ...finding(), [`${ESC}[31mevil`]: 1 });
+      const out = notEstablished(runDir(bad));
+      assert.equal(out.includes(ESC), false, JSON.stringify(out));
+      assert.match(out, /unexpected field/);
+    });
+
+    it("an ESC byte at the start of a non-JSON verify.json never reaches the refusal", () => {
+      const out = notEstablished(runDir(`${ESC}[31mnot json`));
+      assert.equal(out.includes(ESC), false, JSON.stringify(out));
+    });
+
+    it("check.mjs findings no longer echoes an ESC byte in an unexpected field", () => {
+      const dir = runDir({ codeReviewFindings: [{ ...finding(), [`${ESC}[2Jx`]: 1 }] });
+      const result = spawnSync(
+        process.execPath,
+        [checkScript, "findings", join(dir, "out", "verify.json")],
+        { encoding: "utf8" }
+      );
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout.includes(ESC), false, JSON.stringify(result.stdout));
+      assert.match(result.stdout, /unexpected field/);
+    });
+
+    it("caps a very long reason with an ellipsis", () => {
+      const coverage = {
+        ran: AXES.slice(1),
+        failed: [{ step: "falsifiability", reason: "x".repeat(5000) }],
+        skipped: [],
+      };
+      const line = established(runDir(withFindings(), coverage));
+      assert.ok(line.includes("\u2026"), "an ellipsis marks the cut");
+      assert.ok(line.length < 400, `the line is ${String(line.length)} chars`);
+    });
+  });
+
+  describe("counts only what it should", () => {
+    it("a DECLINED pre-existing major is not named as pre-existing", () => {
+      const line = established(
+        runDir(withFindings(finding({ scope: "pre-existing", verdict: "DECLINED" })))
+      );
+      assert.match(line, /^Ready to merge:/);
+      assert.doesNotMatch(line, /pre-existing/);
+    });
+
+    it("a DECLINED business-decision is not a question for owners", () => {
+      const line = established(
+        runDir(withFindings(finding({ kind: "business-decision", verdict: "DECLINED" })))
+      );
+      assert.match(line, /^Ready to merge:/);
+      assert.doesNotMatch(line, /question/);
+    });
+
+    it("an UNVERIFIABLE blocking business-decision does not unsettle readiness", () => {
+      const line = established(
+        runDir(withFindings(unverifiable({ kind: "business-decision", severity: "blocking" })))
+      );
+      assert.match(line, /^Ready to merge:/);
+      assert.doesNotMatch(line, /could not be verified|question/);
+    });
+
+    it("an UNVERIFIABLE blocking external-confirmation does not unsettle readiness", () => {
+      const line = established(
+        runDir(withFindings(unverifiable({ kind: "external-confirmation", severity: "blocking" })))
+      );
+      assert.match(line, /^Ready to merge:/);
+    });
+
+    it("a failed axis outranks pre-existing-only findings", () => {
+      const coverage = {
+        ran: AXES.slice(1),
+        failed: [{ step: "falsifiability", reason: "timed out" }],
+        skipped: [],
+      };
+      const line = established(runDir(withFindings(finding({ scope: "pre-existing" })), coverage));
+      assert.equal(line, "Readiness not established: falsifiability did not run (timed out).");
+    });
+
+    it("a skipped axis with pre-existing-only findings is ready, naming both", () => {
+      const coverage = {
+        ran: AXES.slice(0, 4),
+        failed: [],
+        skipped: [{ step: "delivery", reason: "no spec sources" }],
+      };
+      const line = established(runDir(withFindings(finding({ scope: "pre-existing" })), coverage));
+      assert.match(line, /^Ready to merge:.*delivery not checked: no spec sources\./);
+      assert.match(line, /1 pre-existing blocking\/major finding\(s\)/);
+    });
+  });
+
+  describe("refuses a coverage.json that is not exactly the shape", () => {
+    it("an axis in both ran and skipped", () => {
+      const coverage = {
+        ran: AXES,
+        failed: [],
+        skipped: [{ step: "delivery", reason: "no spec sources" }],
+      };
+      assert.match(notEstablished(runDir(withFindings(), coverage)), /delivery.*exactly once/);
+    });
+
+    it("a non-array ran", () => {
+      const coverage = { ran: "falsifiability", failed: [], skipped: [] };
+      assert.match(notEstablished(runDir(withFindings(), coverage)), /"ran" must be an array/);
+    });
+
+    it("a non-array failed or skipped", () => {
+      for (const key of ["failed", "skipped"]) {
+        const coverage = { ran: AXES, failed: [], skipped: [], [key]: {} };
+        assert.match(notEstablished(runDir(withFindings(), coverage)), /must be an array/);
+      }
+    });
+
+    it("an unknown top-level key", () => {
+      const coverage = { ...fullCoverage, extra: [] };
+      assert.match(notEstablished(runDir(withFindings(), coverage)), /unexpected key.*extra/);
+    });
+
+    it("an unknown key in a failed entry", () => {
+      const coverage = {
+        ran: AXES.slice(1),
+        failed: [{ step: "falsifiability", reason: "x", note: "y" }],
+        skipped: [],
+      };
+      assert.match(notEstablished(runDir(withFindings(), coverage)), /unexpected key.*note/);
+    });
+
+    it("an array where the object belongs", () => {
+      notEstablished(runDir(withFindings(), []));
+    });
+  });
+
+  describe("verdict.txt housekeeping", () => {
+    it("a stale verdict.txt does not survive a refusal", () => {
+      const dir = runDir(withFindings(), null);
+      writeFileSync(join(dir, "out", "verdict.txt"), "Ready to merge: stale\n");
+      notEstablished(dir);
+      assert.equal(existsSync(join(dir, "out", "verdict.txt")), false);
+    });
+
+    it("a verdict.txt that is a directory refuses without a stack trace", () => {
+      const dir = runDir(withFindings());
+      mkdirSync(join(dir, "out", "verdict.txt"));
+      const result = verdict(dir);
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /^Verdict not established: /);
+      assert.equal(result.stderr, "");
     });
   });
 

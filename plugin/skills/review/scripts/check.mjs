@@ -54,7 +54,10 @@ function deepEqual(a, b) {
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-const display = (value) => JSON.stringify(value) ?? String(value);
+/** Control characters (ESC, NUL, DEL ...) become spaces, so nothing echoed can drive a terminal. */
+const clean = (text) => String(text).replace(/[\u0000-\u001f\u007f]/g, " ");
+
+const display = (value) => clean(JSON.stringify(value) ?? String(value));
 
 /** Throws on any keyword this checker does not implement. */
 function assertSupported(schema, path) {
@@ -128,7 +131,8 @@ function collect(schema, value, path, errors) {
     }
     if (schema.additionalProperties === false) {
       for (const name of Object.keys(value)) {
-        if (!Object.hasOwn(properties, name)) errors.push(`${at}: unexpected field "${name}"`);
+        if (!Object.hasOwn(properties, name))
+          errors.push(`${at}: unexpected field "${clean(name)}"`);
       }
     }
   }
@@ -175,9 +179,17 @@ export function loadSchema(name) {
 }
 
 /** The review's worker axes, as the engine and the Codex procedure name them. */
-const AXES = ["falsifiability", "correctness", "security", "radius", "delivery"];
+export const AXES = ["falsifiability", "correctness", "security", "radius", "delivery"];
 
-const oneLine = (text) => String(text).replace(/\s+/g, " ").trim();
+const oneLine = (text) => clean(text).replace(/\s+/g, " ").trim();
+
+const REASON_MAX = 200;
+const capped = (text) => {
+  const line = oneLine(text);
+  return line.length > REASON_MAX ? `${line.slice(0, REASON_MAX - 1)}\u2026` : line;
+};
+
+const DELIVERY_FAILED = "delivery output failed its check";
 
 /** Returns the coverage as `{ran, failed, skipped}` or throws an Error saying what is wrong. */
 function readCoverage(file) {
@@ -190,6 +202,15 @@ function readCoverage(file) {
     );
   }
   if (typeOf(coverage) !== "object") throw new Error(`${file} must be a JSON object`);
+  const unexpected = (where, object, allowed) => {
+    const extra = Object.keys(object).find((key) => !allowed.includes(key));
+    if (extra !== undefined) {
+      throw new Error(
+        `${file}: ${where} has unexpected key "${extra}" (allowed: ${allowed.join(", ")})`
+      );
+    }
+  };
+  unexpected("coverage", coverage, ["ran", "failed", "skipped"]);
   const seen = [];
   const stepOf = (where, step) => {
     if (!AXES.includes(step)) {
@@ -206,7 +227,8 @@ function readCoverage(file) {
       if (typeOf(entry) !== "object" || typeof entry.reason !== "string") {
         throw new Error(`${file}: every "${key}" entry needs a step and a string reason`);
       }
-      return { step: stepOf(key, entry.step), reason: oneLine(entry.reason) };
+      unexpected(`a "${key}" entry`, entry, ["step", "reason"]);
+      return { step: stepOf(key, entry.step), reason: capped(entry.reason) };
     });
   };
   const failed = withReasons("failed");
@@ -265,15 +287,36 @@ function computeVerdict(findings, coverage) {
   return line;
 }
 
+/** Delivery only counts as examined when its output passes the delivery schema. */
+function checkedCoverage(out, coverage) {
+  if (!coverage.ran.includes("delivery")) return coverage;
+  try {
+    const value = JSON.parse(readFileSync(join(out, "delivery.json"), "utf8"));
+    if (validate(loadSchema("delivery"), value).length === 0) return coverage;
+  } catch {
+    // unreadable or not JSON: the same outcome as a schema violation
+  }
+  return {
+    ran: coverage.ran.filter((step) => step !== "delivery"),
+    failed: [...coverage.failed, { step: "delivery", reason: DELIVERY_FAILED }],
+    skipped: coverage.skipped,
+  };
+}
+
 function verdictMain(runDir) {
   const out = join(runDir, "out");
   const verdictFile = join(out, "verdict.txt");
-  // A verdict file left by an earlier run must never outlive a refusal.
-  rmSync(verdictFile, { force: true });
   const refuse = (why) => {
     process.stdout.write(`Verdict not established: ${oneLine(why)}\n`);
     return 1;
   };
+  const reason = (err) => (err instanceof Error ? err.message : String(err));
+  // A verdict file left by an earlier run must never outlive a refusal.
+  try {
+    rmSync(verdictFile, { force: true });
+  } catch (err) {
+    return refuse(`${verdictFile} cannot be cleared - ${reason(err)}`);
+  }
   let findings;
   const verifyFile = join(out, "verify.json");
   try {
@@ -286,18 +329,20 @@ function verdictMain(runDir) {
     }
     findings = value.codeReviewFindings;
   } catch (err) {
-    return refuse(
-      `${verifyFile} is not a readable bare JSON object - ${err instanceof Error ? err.message : String(err)}`
-    );
+    return refuse(`${verifyFile} is not a readable bare JSON object - ${reason(err)}`);
   }
   let coverage;
   try {
-    coverage = readCoverage(join(out, "coverage.json"));
+    coverage = checkedCoverage(out, readCoverage(join(out, "coverage.json")));
   } catch (err) {
-    return refuse(err instanceof Error ? err.message : String(err));
+    return refuse(reason(err));
   }
   const line = computeVerdict(findings, coverage);
-  writeFileSync(verdictFile, line + "\n");
+  try {
+    writeFileSync(verdictFile, line + "\n");
+  } catch (err) {
+    return refuse(`${verdictFile} cannot be written - ${reason(err)}`);
+  }
   process.stdout.write(line + "\n");
   return 0;
 }
@@ -319,7 +364,7 @@ function main(argv) {
   try {
     value = JSON.parse(readFileSync(file, "utf8"));
   } catch (err) {
-    const why = err instanceof Error ? err.message : String(err);
+    const why = clean(err instanceof Error ? err.message : String(err));
     process.stdout.write(
       `(root): ${file} is not a readable bare JSON object (no code fences, no prose) - ${why}\n`
     );
