@@ -43,6 +43,9 @@ describe("parseNodePin — one major with a security floor", () => {
       ">=22.23.4 <23",
       "^22.23.4 || ^24.22.1",
       "",
+      "^022.23.4",
+      "^22.023.4",
+      "^22.23.04",
     ]) {
       assert.throws(
         () => parseNodePin(range),
@@ -62,6 +65,12 @@ describe("nodeSatisfies — same major, at or above the floor", () => {
     ["22.23.5", true],
     ["22.24.0", true],
     ["v22.23.4", true],
+    ["22.23.10", true],
+    ["22.100.0", true],
+    ["22.23.4-rc.1", false],
+    ["22.23.4-nightly20261022abcdef", false],
+    ["22.23.4.1", false],
+    ["22.23", false],
     ["22.23.3", false],
     ["22.14.0", false],
     ["24.22.1", false],

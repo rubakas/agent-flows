@@ -187,7 +187,7 @@ function checkNode(probes: DoctorProbes): CheckResult[] {
     {
       name,
       status: "fail",
-      detail: `v${raw} (need ${nodeRequirement(pin)}; ${pin.floor} is the security floor)`,
+      detail: `v${raw} (need ${nodeRequirement(pin)})`,
       hint: `${nodeInstallRemedy(pin)} && nvm use  (reads .nvmrc)`,
     },
   ];

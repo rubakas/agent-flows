@@ -29,6 +29,8 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { nodeRefusal, nodeSatisfies, requiredNodePin } from "./nodeVersion.js";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -101,6 +103,14 @@ function runModule(modulePath: string, args: string[] = []): void {
       process.exit(code ?? 0);
     }
   });
+}
+
+// Fail closed. bin/agent-flows enforces the pin, but `node dist/cli.js` does not
+// pass through it, and a Node below the security floor must not run any verb.
+const pin = requiredNodePin();
+if (!nodeSatisfies(process.versions.node, pin)) {
+  console.error(`agent-flows: ${nodeRefusal(process.versions.node, pin)}`);
+  process.exit(1);
 }
 
 const [, , verb, ...rest] = process.argv;
