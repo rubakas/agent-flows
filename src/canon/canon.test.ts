@@ -3307,7 +3307,9 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
       "`verdict` CONFIRMED or PARTIAL",
       "`scope` introduced or undetermined",
       "Readiness not established",
-      "failed or was reported not examined",
+      "a dimension's step failed",
+      "`specSourcesProvided: false`) did not fail: it withholds nothing",
+      "not checked for that reason",
       "Change has B blocking and M major finding(s) \u2014 resolve before merge",
     ]) {
       assert.ok(
@@ -3315,6 +3317,20 @@ describe("code-review prompts — placeholders and wiring (spec 040)", () => {
         `prompts/code-review-synthesis.md's verdict paragraph must carry "${rule}"`
       );
     }
+    // check.mjs treats a delivery with no spec sources as skipped, not failed; a rule that
+    // withheld readiness for every "not examined" dimension would contradict it on the daemon,
+    // where the delivery step still runs and reports specSourcesProvided false.
+    const withheldAt = verdictParagraph.indexOf("Readiness is not established");
+    assert.notEqual(withheldAt, -1, "the verdict paragraph must say when readiness is withheld");
+    const withheld = verdictParagraph.slice(
+      withheldAt,
+      verdictParagraph.indexOf("The verdict line is followed by", withheldAt)
+    );
+    assert.ok(
+      withheld.includes("specSourcesProvided: false") && !withheld.includes("not examined"),
+      "the readiness rule must withhold readiness for a FAILED step only, not for every " +
+        "dimension the report calls not examined, and must exempt a delivery with no spec sources"
+    );
     const questionsAnchor = 'Then a separate "Questions for owners" section';
     const questionsAt = synthesis.indexOf(questionsAnchor);
     assert.notEqual(questionsAt, -1, `the prompt must still carry: ${questionsAnchor}`);
