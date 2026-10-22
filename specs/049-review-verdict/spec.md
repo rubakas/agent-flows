@@ -107,6 +107,36 @@ it gets the prompt rule only.
 - The generated engine and schema files are regenerated, never hand-edited; the freshness and copies
   tests pass.
 
+## Amended after review
+
+Policy decisions D1-D7 are unchanged. The review tightened how they are carried out:
+
+- **Delivery is verified by the verdict, not trusted.** When the coverage lists delivery in `ran`,
+  `verdict` validates `out/delivery.json` with the delivery schema. Missing, unreadable or invalid
+  counts delivery as failed ("delivery output failed its check"), on both paths.
+- **Coverage must be exact.** Each of the five axes appears exactly once across `ran`, `failed` and
+  `skipped`; unknown keys, at the top level or in an entry, are refused.
+- **Echoes are sanitised.** Control characters become spaces in every refusal, in a coverage reason
+  and in the schema checker's unexpected-field message; a reason is capped at 200 characters.
+- **A refusal leads.** When the verdict is not established, `SKILL.md` puts that line first in
+  `report.md` and in the answer and labels the synthesis's own closing verdict line unverified.
+- **The daemon prompt withholds readiness too.** The shared synthesis prompt says readiness is not
+  established for an unverifiable blocking or major introduced defect and for any dimension that
+  failed or was not examined.
+
+## Verified
+
+Each probe neutered one branch of `check.mjs`, ran `src/af-plugin/verdict.test.ts`, then restored it.
+
+- Major count forced to 0: the introduced-major, undetermined-scope and failed-axis-plus-major tests failed.
+- Pre-existing no longer excluded from the gate set: the pre-existing-major test failed.
+- Gate no longer limited to `kind` defect: the business-decision and external-confirmation tests failed.
+- Delivery output not checked: four delivery tests failed (invalid, missing, unparseable, Not examined clause).
+- Sanitiser made the identity: the ESC tests failed (coverage reason, unexpected key, non-JSON `verify.json`, `check.mjs findings`).
+- Reason cap removed, stale `verdict.txt` kept, unwrapped `verdict.txt` removal, unknown keys allowed, exactly-once check weakened, `ran` type check removed, failed-axis branch removed: each failed its own test.
+- DECLINED ignored when naming pre-existing or questions, and the defect-only filter dropped from the unverifiable rule: each failed its own test.
+- `SKILL.md`, `codex.md` and the synthesis prompt reverted to the earlier commit: their pins failed.
+
 ## Out of scope / Follow-ups
 
 - **The daemon pipeline has no computed verdict.** It shares the canon prompt and gets the prompt rule
