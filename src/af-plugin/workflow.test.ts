@@ -111,6 +111,8 @@ function stubs(overrides: Record<string, (call: Call) => unknown> = {}) {
   };
 }
 
+const AXES = ["falsifiability", "correctness", "security", "radius", "delivery"];
+
 const byLabel = (calls: Call[], label: string) => calls.find((c) => c.opts.label === label)!;
 
 describe("review-engine freshness (FR-5)", () => {
@@ -258,6 +260,7 @@ describe("review-engine run", () => {
         specSourcesProvided: true,
         codeReviewDelivery: [{ requirement: "DELIVERY_OUT" }],
       },
+      coverage: { ran: AXES, failed: [], skipped: [] },
     });
     assert.deepEqual(s.phases, ["Brief", "Review", "Verify", "Synthesis"]);
   });
@@ -497,6 +500,61 @@ describe("review-engine run", () => {
     const marker = unavailableStepMarker("delivery", "schema still invalid after 5 attempts");
     assert.ok(byLabel(s.calls, "verify").prompt.includes(marker));
     assert.equal(result.synthesis, "SYNTHESIS_OUT");
+  });
+
+  describe("coverage (spec 049 D4)", () => {
+    const coverageOf = async (
+      overrides: Record<string, (call: Call) => unknown>,
+      hasSpecs = true
+    ): Promise<unknown> => {
+      const result = await run(...stubs(overrides).globals({ ...args, hasSpecs }));
+      return JSON.parse(JSON.stringify(result.coverage)) as unknown;
+    };
+
+    it("lists all five axes as ran when every worker answered", async () => {
+      assert.deepEqual(await coverageOf({}), { ran: AXES, failed: [], skipped: [] });
+    });
+
+    it("names a worker that threw, with the error message as the reason", async () => {
+      const coverage = await coverageOf({
+        security: () => {
+          throw new Error("schema still invalid after 5 attempts");
+        },
+      });
+      assert.deepEqual(coverage, {
+        ran: ["falsifiability", "correctness", "radius", "delivery"],
+        failed: [{ step: "security", reason: "schema still invalid after 5 attempts" }],
+        skipped: [],
+      });
+    });
+
+    it("names a worker that returned nothing, with af's no-output reason", async () => {
+      const coverage = await coverageOf({ falsifiability: () => null, delivery: () => null });
+      assert.deepEqual(coverage, {
+        ran: ["correctness", "security", "radius"],
+        failed: [
+          { step: "falsifiability", reason: "the step returned no output" },
+          { step: "delivery", reason: "the step returned no output" },
+        ],
+        skipped: [],
+      });
+    });
+
+    it("skips delivery for no spec sources, which is not a failure", async () => {
+      assert.deepEqual(await coverageOf({}, false), {
+        ran: ["falsifiability", "correctness", "security", "radius"],
+        failed: [],
+        skipped: [{ step: "delivery", reason: "no spec sources" }],
+      });
+    });
+
+    it("does not count a failed brief as a failed dimension", async () => {
+      assert.deepEqual(await coverageOf({ brief: () => null }), {
+        ran: AXES,
+        failed: [],
+        skipped: [],
+      });
+    });
   });
 
   it("feeds a failed brief to the dimensions as the marker", async () => {

@@ -538,6 +538,9 @@ function options(name, phaseTitle, model, extra) {
   return Object.assign({ agentType: 'af:reviewer', label: name, phase: phaseTitle, model: model }, extra)
 }
 
+// Why each step that degraded to a marker failed, kept for the coverage the caller gets back.
+const FAILED = {}
+
 // The brief and every worker may fail without ending the review: a null result or a thrown
 // agent() (a schema still failing after its retries) becomes the marker. The prompt is
 // rendered outside the try so a wiring error is never mistaken for a step failure.
@@ -552,6 +555,7 @@ async function optional(name, phaseTitle, model, vars, extra) {
     reason = err && err.message ? String(err.message) : String(err)
   }
   log(name + ' failed (' + reason + ') - continuing without it')
+  FAILED[name] = reason
   return unavailableStepMarker(name, reason)
 }
 
@@ -614,9 +618,21 @@ const synthesis = await agent(
 )
 if (synthesis === null || synthesis === undefined) log('synthesis returned no output')
 
+const result = { synthesis: synthesis, verify: verify }
+
+// Which review dimensions ran, failed or were skipped - known here and nowhere else, so the
+// merge verdict (check.mjs verdict) never has to guess it from prose. radius is required: had it
+// failed, the run would have ended above. The brief is not a dimension.
+const coverage = { ran: [], failed: [], skipped: [] }
+for (const axis of ['falsifiability', 'correctness', 'security', 'radius', 'delivery']) {
+  if (axis === 'delivery' && !hasSpecs) coverage.skipped.push({ step: axis, reason: 'no spec sources' })
+  else if (Object.prototype.hasOwnProperty.call(FAILED, axis)) coverage.failed.push({ step: axis, reason: FAILED[axis] })
+  else coverage.ran.push(axis)
+}
+result.coverage = coverage
+
 // The delivery worker's own output, for the caller to check against its schema. A failed
 // worker leaves a marker string and a review with no spec sources leaves NO_SPECS: neither
 // is delivery output, so neither is returned as such.
-const result = { synthesis: synthesis, verify: verify }
 if (hasSpecs && deliveryOut !== null && typeof deliveryOut === 'object') result.delivery = deliveryOut
 return result
