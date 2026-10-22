@@ -189,8 +189,6 @@ const capped = (text) => {
   return line.length > REASON_MAX ? `${line.slice(0, REASON_MAX - 1)}\u2026` : line;
 };
 
-const DELIVERY_FAILED = "delivery output failed its check";
-
 /** Returns the coverage as `{ran, failed, skipped}` or throws an Error saying what is wrong. */
 function readCoverage(file) {
   let coverage;
@@ -263,7 +261,11 @@ function computeVerdict(findings, coverage) {
     );
   }
   if (failed.length > 0) {
-    const did = coverage.failed.map(({ step, reason }) => `${step} did not run (${reason})`);
+    const did = coverage.failed.map(({ step, reason, output }) =>
+      output
+        ? `${step} output did not pass its check (${reason})`
+        : `${step} did not run (${reason})`
+    );
     return `Readiness not established: ${did.join(", ")}.`;
   }
   const unverifiable = defects.filter(
@@ -287,18 +289,28 @@ function computeVerdict(findings, coverage) {
   return line;
 }
 
-/** Delivery only counts as examined when its output passes the delivery schema. */
+/**
+ * Delivery only counts as examined when its output passes the delivery schema and does not
+ * contradict the coverage. A problem with the output is a failure of its own kind (`output`),
+ * so the verdict line says the output did not pass, not that the step did not run.
+ */
 function checkedCoverage(out, coverage) {
   if (!coverage.ran.includes("delivery")) return coverage;
+  let problem;
   try {
     const value = JSON.parse(readFileSync(join(out, "delivery.json"), "utf8"));
-    if (validate(loadSchema("delivery"), value).length === 0) return coverage;
+    if (validate(loadSchema("delivery"), value).length > 0) {
+      problem = "out/delivery.json is missing or breaks the delivery schema";
+    } else if (value.specSourcesProvided === false) {
+      problem = "coverage says delivery ran but out/delivery.json reports no spec sources";
+    }
   } catch {
-    // unreadable or not JSON: the same outcome as a schema violation
+    problem = "out/delivery.json is missing or breaks the delivery schema";
   }
+  if (problem === undefined) return coverage;
   return {
     ran: coverage.ran.filter((step) => step !== "delivery"),
-    failed: [...coverage.failed, { step: "delivery", reason: DELIVERY_FAILED }],
+    failed: [...coverage.failed, { step: "delivery", reason: problem, output: true }],
     skipped: coverage.skipped,
   };
 }

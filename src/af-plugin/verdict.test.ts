@@ -297,7 +297,8 @@ describe("check.mjs verdict (spec 049)", () => {
 
   describe("delivery output is checked, not trusted (spec 049 review)", () => {
     const ranWithoutDelivery = AXES.slice(0, 4);
-    const deliveryFailed = "delivery output failed its check";
+    const deliveryFailed = "out/delivery.json is missing or breaks the delivery schema";
+    const disagrees = "coverage says delivery ran but out/delivery.json reports no spec sources";
 
     it("a valid delivery.json with entries leaves delivery examined", () => {
       const delivery = {
@@ -319,20 +320,44 @@ describe("check.mjs verdict (spec 049)", () => {
       const bad = { specSourcesProvided: false, codeReviewDelivery: [{ requirement: "x" }] };
       assert.equal(
         established(runDir(withFindings(), fullCoverage, bad)),
-        `Readiness not established: delivery did not run (${deliveryFailed}).`
+        `Readiness not established: delivery output did not pass its check (${deliveryFailed}).`
       );
     });
 
     it("a missing delivery.json while delivery ran is not established", () => {
       assert.equal(
         established(runDir(withFindings(), fullCoverage, null)),
-        `Readiness not established: delivery did not run (${deliveryFailed}).`
+        `Readiness not established: delivery output did not pass its check (${deliveryFailed}).`
       );
     });
 
     it("an unparseable delivery.json while delivery ran is not established", () => {
       const line = established(runDir(withFindings(), fullCoverage, "```json\n{}\n```"));
-      assert.match(line, /^Readiness not established: delivery did not run/);
+      assert.match(line, /^Readiness not established: delivery output did not pass its check/);
+    });
+
+    it("coverage saying delivery ran while delivery.json says no spec sources fails closed", () => {
+      const contradiction = { specSourcesProvided: false, codeReviewDelivery: [] };
+      assert.equal(
+        established(runDir(withFindings(), fullCoverage, contradiction)),
+        `Readiness not established: delivery output did not pass its check (${disagrees}).`
+      );
+      const heavy = established(runDir(withFindings(finding()), fullCoverage, contradiction));
+      assert.ok(heavy.endsWith(` Not examined: delivery (${disagrees}).`), heavy);
+    });
+
+    it("the failed-delivery line never claims the step did not run", () => {
+      const line = established(runDir(withFindings(), fullCoverage, null));
+      assert.doesNotMatch(line, /did not run/);
+    });
+
+    it("a step that really did not run still says so", () => {
+      const coverage = {
+        ran: AXES.slice(1),
+        failed: [{ step: "falsifiability", reason: "timed out" }],
+        skipped: [],
+      };
+      assert.match(established(runDir(withFindings(), coverage)), /falsifiability did not run/);
     });
 
     it("a failed delivery check plus a major is Not ready with the Not examined clause", () => {

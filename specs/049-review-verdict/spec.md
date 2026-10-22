@@ -113,7 +113,9 @@ Policy decisions D1-D7 are unchanged. The review tightened how they are carried 
 
 - **Delivery is verified by the verdict, not trusted.** When the coverage lists delivery in `ran`,
   `verdict` validates `out/delivery.json` with the delivery schema. Missing, unreadable or invalid
-  counts delivery as failed ("delivery output failed its check"), on both paths.
+  counts delivery as failed on both paths, and the line says its output "did not pass its check" rather
+  than that the step did not run. `ran` in the coverage with `specSourcesProvided: false` in the file is a
+  contradiction and fails closed.
 - **Coverage must be exact.** Each of the five axes appears exactly once across `ran`, `failed` and
   `skipped`; unknown keys, at the top level or in an entry, are refused.
 - **Echoes are sanitised.** Control characters become spaces in every refusal, in a coverage reason
@@ -121,8 +123,9 @@ Policy decisions D1-D7 are unchanged. The review tightened how they are carried 
 - **A refusal leads.** When the verdict is not established, `SKILL.md` puts that line first in
   `report.md` and in the answer and labels the synthesis's own closing verdict line unverified.
 - **The daemon prompt withholds readiness too.** The shared synthesis prompt says readiness is not
-  established for an unverifiable blocking or major introduced defect and for any dimension that
-  failed or was not examined.
+  established for an unverifiable blocking or major introduced defect and for any dimension whose step
+  failed. A delivery with no spec sources did not fail: the daemon's delivery step still runs and reports
+  `specSourcesProvided: false`, which withholds nothing and is named as not checked, as `check.mjs` does.
 
 ## Verified
 
