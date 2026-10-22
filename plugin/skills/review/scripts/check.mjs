@@ -8,11 +8,17 @@
 // is the gate its procedure (references/codex.md) runs on verify and delivery output.
 //
 //   node check.mjs <findings|delivery> <file.json>
+//   node check.mjs verdict <runDir>
 //   exit 0 valid; exit 1 invalid - an unreadable file, text that is not JSON (a fenced code
 //   block, say) or a schema/rule violation - with one readable line per problem on stdout;
 //   exit 2 only for a usage error (bad argv, unknown schema name), on stderr
+//
+// `verdict` computes the merge verdict line from <runDir>/out/verify.json (checked against the
+// findings schema) and <runDir>/out/coverage.json: exit 0 and the line on stdout, also written
+// to <runDir>/out/verdict.txt, when a verdict is established, ready or not; exit 1 and
+// "Verdict not established: <why>" when an input is missing or invalid.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -168,10 +174,145 @@ export function loadSchema(name) {
   );
 }
 
+/** The review's worker axes, as the engine and the Codex procedure name them. */
+const AXES = ["falsifiability", "correctness", "security", "radius", "delivery"];
+
+const oneLine = (text) => String(text).replace(/\s+/g, " ").trim();
+
+/** Returns the coverage as `{ran, failed, skipped}` or throws an Error saying what is wrong. */
+function readCoverage(file) {
+  let coverage;
+  try {
+    coverage = JSON.parse(readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new Error(
+      `${file} is not readable bare JSON - ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  if (typeOf(coverage) !== "object") throw new Error(`${file} must be a JSON object`);
+  const seen = [];
+  const stepOf = (where, step) => {
+    if (!AXES.includes(step)) {
+      throw new Error(`${file}: ${where} names ${display(step)}, not one of ${AXES.join(", ")}`);
+    }
+    seen.push(step);
+    return step;
+  };
+  if (!Array.isArray(coverage.ran)) throw new Error(`${file}: "ran" must be an array of step ids`);
+  const ran = coverage.ran.map((step) => stepOf("ran", step));
+  const withReasons = (key) => {
+    if (!Array.isArray(coverage[key])) throw new Error(`${file}: "${key}" must be an array`);
+    return coverage[key].map((entry) => {
+      if (typeOf(entry) !== "object" || typeof entry.reason !== "string") {
+        throw new Error(`${file}: every "${key}" entry needs a step and a string reason`);
+      }
+      return { step: stepOf(key, entry.step), reason: oneLine(entry.reason) };
+    });
+  };
+  const failed = withReasons("failed");
+  const skipped = withReasons("skipped");
+  // A dropped axis reads as a clean one, so every axis must be accounted for exactly once.
+  for (const axis of AXES) {
+    const count = seen.filter((step) => step === axis).length;
+    if (count !== 1) {
+      throw new Error(
+        `${file}: ${axis} must appear exactly once across ran, failed and skipped - found ${String(count)}`
+      );
+    }
+  }
+  return { ran, failed, skipped };
+}
+
+/** The merge verdict line (spec 049 D1-D3): code over the verified findings and the coverage. */
+function computeVerdict(findings, coverage) {
+  const defects = findings.filter((f) => f.kind === "defect");
+  const real = (f) => f.verdict === "CONFIRMED" || f.verdict === "PARTIAL";
+  const heavy = (f) => f.severity === "blocking" || f.severity === "major";
+  const gate = defects.filter((f) => real(f) && f.scope !== "pre-existing");
+  const blocking = gate.filter((f) => f.severity === "blocking").length;
+  const major = gate.filter((f) => f.severity === "major").length;
+  const failed = coverage.failed.map(({ step, reason }) => `${step} (${reason})`);
+
+  if (blocking + major > 0) {
+    const notExamined = failed.length > 0 ? ` Not examined: ${failed.join(", ")}.` : "";
+    return (
+      `Not ready to merge: ${String(blocking)} blocking and ${String(major)} major ` +
+      `finding(s) introduced by this change.${notExamined}`
+    );
+  }
+  if (failed.length > 0) {
+    const did = coverage.failed.map(({ step, reason }) => `${step} did not run (${reason})`);
+    return `Readiness not established: ${did.join(", ")}.`;
+  }
+  const unverifiable = defects.filter(
+    (f) => f.verdict === "UNVERIFIABLE" && heavy(f) && f.scope !== "pre-existing"
+  ).length;
+  if (unverifiable > 0) {
+    return `Readiness not established: ${String(unverifiable)} blocking or major claim(s) could not be verified.`;
+  }
+
+  const minor = gate.filter((f) => f.severity === "minor").length;
+  const preExisting = defects.filter((f) => real(f) && heavy(f) && f.scope === "pre-existing");
+  const questions = findings.filter((f) => f.kind !== "defect" && real(f)).length;
+  let line = `Ready to merge: no blocking or major defect introduced; examined ${coverage.ran.join(", ")}`;
+  for (const { step, reason } of coverage.skipped) line += `; ${step} not checked: ${reason}`;
+  line += ".";
+  if (minor > 0) line += ` ${String(minor)} minor finding(s).`;
+  if (preExisting.length > 0) {
+    line += ` ${String(preExisting.length)} pre-existing blocking/major finding(s) not introduced by this change.`;
+  }
+  if (questions > 0) line += ` ${String(questions)} question(s) for owners.`;
+  return line;
+}
+
+function verdictMain(runDir) {
+  const out = join(runDir, "out");
+  const verdictFile = join(out, "verdict.txt");
+  // A verdict file left by an earlier run must never outlive a refusal.
+  rmSync(verdictFile, { force: true });
+  const refuse = (why) => {
+    process.stdout.write(`Verdict not established: ${oneLine(why)}\n`);
+    return 1;
+  };
+  let findings;
+  const verifyFile = join(out, "verify.json");
+  try {
+    const value = JSON.parse(readFileSync(verifyFile, "utf8"));
+    const errors = validate(loadSchema("findings"), value);
+    if (errors.length > 0) {
+      return refuse(
+        `${verifyFile} breaks the findings schema (${errors[0]}); run check.mjs findings on it`
+      );
+    }
+    findings = value.codeReviewFindings;
+  } catch (err) {
+    return refuse(
+      `${verifyFile} is not a readable bare JSON object - ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  let coverage;
+  try {
+    coverage = readCoverage(join(out, "coverage.json"));
+  } catch (err) {
+    return refuse(err instanceof Error ? err.message : String(err));
+  }
+  const line = computeVerdict(findings, coverage);
+  writeFileSync(verdictFile, line + "\n");
+  process.stdout.write(line + "\n");
+  return 0;
+}
+
 function main(argv) {
+  if (argv[0] === "verdict") {
+    if (argv.length === 2) return verdictMain(argv[1]);
+    process.stderr.write("usage: node check.mjs verdict <runDir>\n");
+    return 2;
+  }
   const [name, file] = argv;
   if (argv.length !== 2 || !SCHEMAS.includes(name)) {
-    process.stderr.write("usage: node check.mjs <findings|delivery> <file.json>\n");
+    process.stderr.write(
+      "usage: node check.mjs <findings|delivery> <file.json> | node check.mjs verdict <runDir>\n"
+    );
     return 2;
   }
   let value;
