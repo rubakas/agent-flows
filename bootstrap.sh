@@ -23,40 +23,12 @@ run() {
   fi
 }
 
-_node_major() { node --version 2>/dev/null | tr -d 'v' | cut -d. -f1; }
-
-# ── 1. Node ≥ 22 ──────────────────────────────────────────────────────────────
-step "Check Node.js ≥ 22"
-_need_node=0
-if ! command -v node &>/dev/null; then
-  _need_node=1
-elif [[ $(_node_major) -lt 22 ]]; then
-  _need_node=1
-fi
-if [[ $_need_node == 1 ]]; then
-  if [[ -f "$HOME/.nvm/nvm.sh" ]]; then
-    if [[ $DRY_RUN == 1 ]]; then
-      echo "  + source $HOME/.nvm/nvm.sh"
-      echo "  + nvm use"
-    else
-      # shellcheck source=/dev/null
-      source "$HOME/.nvm/nvm.sh"
-      nvm use
-    fi
-  fi
-  if [[ $DRY_RUN == 0 ]]; then
-    _still_bad=0
-    _pinned_node="$(tr -d '[:space:]' < "$(dirname "$0")/.nvmrc")"
-    if ! command -v node &>/dev/null; then _still_bad=1
-    # A pin, not a floor: better-sqlite3 is built for one ABI, so a newer Node
-    # fails exactly as an older one does.
-    elif [[ $(_node_major) != "$_pinned_node" ]]; then _still_bad=1; fi
-    if [[ $_still_bad == 1 ]]; then
-      echo "ERROR: Node $_pinned_node required. Run: nvm install $_pinned_node && nvm use  (reads .nvmrc)" >&2
-      exit 1
-    fi
-  fi
-fi
+# ── 1. Node: the pinned major, at or above the security floor ────────────────
+# The check lives in one place (scripts/use-pinned-node.sh, which reads .nvmrc);
+# sourcing it either leaves the right Node on PATH or exits with the reason.
+step "Check Node.js (pinned in .nvmrc)"
+# shellcheck source=scripts/use-pinned-node.sh
+. scripts/use-pinned-node.sh
 
 # ── 2. pnpm ───────────────────────────────────────────────────────────────────
 step "Check pnpm"
