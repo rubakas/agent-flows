@@ -12,6 +12,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { requiredNodePin } from "../nodeVersion.js";
 import { loadProviders } from "./loadProviders.js";
 import { defaultRegistry, getActiveProfile, getProfile } from "./registry.js";
 
@@ -90,7 +91,7 @@ describe("providers-wiring — doctor root honours providers", () => {
 
     // Minimal probes with providers wired in.
     const probes = {
-      nodeVersion: () => "22.17.1",
+      nodeVersion: () => requiredNodePin().floor,
       which: (bin: string) => `/usr/bin/${bin}`,
       whichAll: (bin: string) => [`/usr/bin/${bin}`],
       exec: async (_cmd: string, _args: string[]) =>

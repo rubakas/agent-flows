@@ -1,7 +1,7 @@
-// Spec: one Node version, declared once.
+// Spec 048: one Node requirement, declared once — a major pin with a security floor.
 //
-// The mirrors matter more than the parser. "22" is written in package.json, in
-// .nvmrc, in bin/agent-flows, in bootstrap.sh and in doctor's output, and five
+// The mirrors matter more than the parser. The version is written in package.json,
+// in .nvmrc, in bin/agent-flows, in bootstrap.sh and in doctor's output, and
 // hand-kept copies of one number is how a project ends up running on a Node it
 // says it does not support.
 
@@ -10,39 +10,108 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { parseNodeMajor, requiredNodeMajor } from "./nodeVersion.js";
+import {
+  nodeInstallRemedy,
+  nodeRequirement,
+  nodeSatisfies,
+  parseNodePin,
+  requiredNodePin,
+} from "./nodeVersion.js";
 import { packageRoot } from "./packageRoot.js";
 
 const ROOT = packageRoot();
 
-describe("parseNodeMajor — a pin, never a range", () => {
-  it("reads the pinned forms this project uses", () => {
-    assert.equal(parseNodeMajor("22.x"), 22);
-    assert.equal(parseNodeMajor("22"), 22);
-    assert.equal(parseNodeMajor("22.17.1"), 22);
+describe("parseNodePin — one major with a security floor", () => {
+  it("reads the single accepted form", () => {
+    assert.deepEqual(parseNodePin("^22.23.4"), {
+      major: 22,
+      minor: 23,
+      patch: 4,
+      floor: "22.23.4",
+    });
   });
 
-  it("refuses a range, which cannot answer which Node", () => {
-    // ">=22" is the value this module was written to delete: it admitted Node
-    // 24, which is installed here and cannot load the compiled addon.
-    for (const range of [">=22", "^22.0.0", "22 || 24", ">=22 <23", ""]) {
-      assert.throws(() => parseNodeMajor(range), /pin one major version/u, `accepted: ${range}`);
+  it("refuses every other form, with the one error text", () => {
+    // "22.x" is the value this change deletes: it admitted a vulnerable 22.x.
+    // ">=22" is older: it admitted Node 24, which cannot load the compiled addon.
+    for (const range of [
+      "22.x",
+      "22",
+      "^22",
+      "22.17.1",
+      ">=22",
+      ">=22.23.4 <23",
+      "^22.23.4 || ^24.22.1",
+      "",
+    ]) {
+      assert.throws(
+        () => parseNodePin(range),
+        (error: Error) =>
+          error.message ===
+          `engines.node must be "^MAJOR.MINOR.PATCH" — one major with a security floor inside it (e.g. "^22.23.4") — got "${range}"`,
+        `accepted or mis-worded: "${range}"`
+      );
     }
   });
 });
 
-describe("every copy of the version agrees", () => {
-  it("package.json engines.node is the source and it is a pin", () => {
-    assert.equal(requiredNodeMajor(ROOT), 22);
+describe("nodeSatisfies — same major, at or above the floor", () => {
+  const pin = parseNodePin("^22.23.4");
+  const table: [string, boolean][] = [
+    ["22.23.4", true],
+    ["22.23.5", true],
+    ["22.24.0", true],
+    ["v22.23.4", true],
+    ["22.23.3", false],
+    ["22.14.0", false],
+    ["24.22.1", false],
+    ["21.9.0", false],
+  ];
+  for (const [version, expected] of table) {
+    it(`${version} -> ${String(expected)}`, () => {
+      assert.equal(nodeSatisfies(version, pin), expected);
+    });
+  }
+
+  it("compares numerically, not as text", () => {
+    assert.equal(nodeSatisfies("22.100.0", pin), true);
+    assert.equal(nodeSatisfies("22.23.10", pin), true);
+    assert.equal(nodeSatisfies("22.9.99", pin), false);
   });
 
-  it(".nvmrc names the same major", () => {
-    const nvmrc = readFileSync(join(ROOT, ".nvmrc"), "utf8").trim();
-    assert.equal(
-      parseNodeMajor(nvmrc),
-      requiredNodeMajor(ROOT),
-      ".nvmrc and package.json engines.node must name one version"
+  it("refuses garbage rather than guessing", () => {
+    for (const version of ["", "22", "twenty-two", "22.x.1"]) {
+      assert.equal(nodeSatisfies(version, pin), false, `accepted: "${version}"`);
+    }
+  });
+});
+
+describe("messages derive from the pin", () => {
+  const pin = parseNodePin("^22.23.4");
+  it("name the major and the floor", () => {
+    assert.equal(nodeRequirement(pin), "Node 22 at or above 22.23.4");
+    assert.equal(nodeInstallRemedy(pin), "nvm install 22");
+  });
+  it("follow a different pin, so no literal is baked in", () => {
+    const other = parseNodePin("^30.1.2");
+    assert.equal(nodeRequirement(other), "Node 30 at or above 30.1.2");
+    assert.equal(nodeInstallRemedy(other), "nvm install 30");
+  });
+});
+
+describe("every copy of the version agrees", () => {
+  it("package.json engines.node is the source: a pin with a floor of at least 22.23.4", () => {
+    const pin = requiredNodePin(ROOT);
+    assert.equal(pin.major, 22);
+    assert.ok(
+      nodeSatisfies(pin.floor, parseNodePin("^22.23.4")),
+      `floor ${pin.floor} is below the 2026-10-21 security release`
     );
+  });
+
+  it(".nvmrc is the floor exactly, so `nvm use` cannot land on a vulnerable 22.x", () => {
+    const nvmrc = readFileSync(join(ROOT, ".nvmrc"), "utf8").trim();
+    assert.equal(nvmrc, requiredNodePin(ROOT).floor);
   });
 
   it("bin/agent-flows reads the version rather than carrying its own copy", () => {
@@ -50,20 +119,21 @@ describe("every copy of the version agrees", () => {
     // able to load this package, so it cannot import nodeVersion.ts — but it can
     // read the same package.json it already locates.
     const launcher = readFileSync(join(ROOT, "bin", "agent-flows"), "utf8");
-    assert.ok(
-      !/REQUIRED_NODE_MAJOR\s*=\s*\d+/u.test(launcher),
-      "bin/agent-flows must derive the major from package.json, not hardcode it"
-    );
     assert.match(launcher, /engines/u, "it must read engines.node");
   });
 
-  it("no shell script hardcodes the major either", () => {
-    for (const name of ["bootstrap.sh", "scripts/use-pinned-node.sh"]) {
-      const text = readFileSync(join(ROOT, name), "utf8");
-      assert.ok(
-        !/\bnvm (install|use) 22\b/u.test(text),
-        `${name} hardcodes the version; it must read .nvmrc`
-      );
+  it("no code message hardcodes the major or the floor", () => {
+    const pin = requiredNodePin(ROOT);
+    const hardcoded = new RegExp(
+      `\\bnvm (install|use) ${String(pin.major)}\\b|Node ${String(pin.major)}\\b|${pin.floor.replace(/\./gu, "\\.")}`,
+      "u"
+    );
+    for (const name of ["bin/agent-flows", "bootstrap.sh", "scripts/use-pinned-node.sh"]) {
+      const code = readFileSync(join(ROOT, name), "utf8")
+        .split("\n")
+        .filter((line) => !/^\s*(#|\/\/|\*|\/\*)/u.test(line))
+        .join("\n");
+      assert.ok(!hardcoded.test(code), `${name} hardcodes the version; it must derive it`);
     }
   });
 });

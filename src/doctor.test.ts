@@ -13,6 +13,7 @@ import {
   type CheckResult,
   type DoctorProbes,
 } from "./doctor.js";
+import { requiredNodePin } from "./nodeVersion.js";
 import { writeDaemonRecord } from "./runtime/daemonRecord.js";
 import type { HarnessReach } from "./harness/harnesses.js";
 import type { DaemonIdentity } from "./runtime/daemonRecord.js";
@@ -36,9 +37,14 @@ after(() => {
 
 const OLLAMA_MODELS = [{ name: "qwen2.5:1.5b" }];
 
+// Derived from the pin, so raising the floor does not break the "all ok" fixture.
+const NODE_PIN = requiredNodePin();
+const NODE_AT_FLOOR = NODE_PIN.floor;
+const NODE_BELOW_FLOOR = `${String(NODE_PIN.major)}.${String(NODE_PIN.minor)}.${String(NODE_PIN.patch - 1)}`;
+
 function makeOkProbes(overrides: Partial<DoctorProbes> = {}): DoctorProbes {
   return {
-    nodeVersion: () => "22.17.1",
+    nodeVersion: () => NODE_AT_FLOOR,
     which: (bin) => `/usr/bin/${bin}`,
     whichAll: (bin) => [`/usr/bin/${bin}`],
     exec: async (cmd, args) => {
@@ -118,6 +124,29 @@ describe("runDoctor", () => {
     assert.equal(check.status, "fail");
     assert.ok(check.hint?.includes("nvm"), `hint must mention nvm: ${check.hint}`);
     assert.ok(check.hint?.includes(".nvmrc"), `hint must mention .nvmrc: ${check.hint}`);
+  });
+
+  it("one patch below the security floor → fail naming the floor and the remedy", async () => {
+    assert.ok(NODE_PIN.patch > 0, "the pin's patch must be above 0 for this fixture");
+    const results = await runDoctor(makeOkProbes({ nodeVersion: () => NODE_BELOW_FLOOR }));
+    const check = results.find((r) => r.name.includes("Node"));
+    assert.ok(check, "Node check missing");
+    assert.equal(check.status, "fail");
+    assert.ok(
+      check.detail.includes(NODE_BELOW_FLOOR),
+      `detail must name the running version: ${check.detail}`
+    );
+    assert.ok(check.detail.includes(NODE_AT_FLOOR), `detail must name the floor: ${check.detail}`);
+    assert.ok(
+      check.hint?.includes(`nvm install ${String(NODE_PIN.major)}`),
+      `hint must say nvm install <major>: ${check.hint}`
+    );
+  });
+
+  it("a newer release inside the major passes", async () => {
+    const newer = `${String(NODE_PIN.major)}.${String(NODE_PIN.minor)}.${String(NODE_PIN.patch + 1)}`;
+    const results = await runDoctor(makeOkProbes({ nodeVersion: () => newer }));
+    assert.equal(results.find((r) => r.name.includes("Node"))?.status, "ok");
   });
 
   it("pnpm missing → fail", async () => {

@@ -18,12 +18,17 @@ import {
   whichOnPath,
   type HarnessReach,
 } from "./harness/harnesses.js";
+import {
+  nodeInstallRemedy,
+  nodeRequirement,
+  nodeSatisfies,
+  requiredNodePin,
+} from "./nodeVersion.js";
 import { packageVersion } from "./packageRoot.js";
 import { checkRecordedDaemon, classifyIdentity, probeDaemon } from "./runtime/daemonRecord.js";
 import { resolveProjectState } from "./runtime/projectState.js";
 import type { ProviderConfig } from "./canon/registry.js";
 import type { DaemonIdentity } from "./runtime/daemonRecord.js";
-import { requiredNodeMajor } from "./nodeVersion.js";
 
 const execFileAsync = promisify(execFile);
 const _require = createRequire(import.meta.url);
@@ -168,26 +173,24 @@ export function reachResult(reach: HarnessReach): CheckResult {
 
 // 1. The pinned Node (required)
 //
-// A pin, not a floor: better-sqlite3 is built for one ABI, so a NEWER Node fails
-// exactly as a older one does. Reporting "≥ 22" here told an operator on Node 24
-// that the thing about to break was fine.
+// A pin AND a floor. The major is a pin: better-sqlite3 is built for one ABI, so
+// a NEWER major fails exactly as an older one does — reporting "≥ 22" here told
+// an operator on Node 24 that the thing about to break was fine. Inside that
+// major there is a security floor (spec 048): "any 22.x" admitted releases with
+// known High CVEs.
 function checkNode(probes: DoctorProbes): CheckResult[] {
-  const results: CheckResult[] = [];
   const raw = probes.nodeVersion().replace(/^v/, "");
-  const major = parseInt(raw.split(".")[0], 10);
-  const pinned = requiredNodeMajor();
-  const name = `Node.js ${pinned}`;
-  if (major === pinned) {
-    results.push({ name, status: "ok", detail: `v${raw}` });
-  } else {
-    results.push({
+  const pin = requiredNodePin();
+  const name = `Node.js ${String(pin.major)}`;
+  if (nodeSatisfies(raw, pin)) return [{ name, status: "ok", detail: `v${raw}` }];
+  return [
+    {
       name,
       status: "fail",
-      detail: `v${raw} (need ${pinned})`,
-      hint: `nvm install ${pinned} && nvm use  (reads .nvmrc)`,
-    });
-  }
-  return results;
+      detail: `v${raw} (need ${nodeRequirement(pin)}; ${pin.floor} is the security floor)`,
+      hint: `${nodeInstallRemedy(pin)} && nvm use  (reads .nvmrc)`,
+    },
+  ];
 }
 
 // 2. pnpm on PATH (required)
