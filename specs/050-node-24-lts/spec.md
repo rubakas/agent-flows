@@ -68,8 +68,8 @@ Environment: Node 24.22.1 (ABI 137), pnpm 10.15.0, a worktree with its own `node
   consumer. No other package moved.
 - `node -e "new (require('better-sqlite3'))(':memory:')"` succeeds (`v24.22.1`, ABI 137).
 - `pnpm typecheck`, `pnpm build`, eslint (0 errors) and prettier on the changed files are green.
-- Targeted tests, all green, none skipped: `nodeVersion.test.ts` 25, `doctor.test.ts` 49,
-  `cli.test.ts` 72, `pinnedNodeScript.test.ts` 25, `canon/providers-wiring.test.ts` 10.
+- Targeted tests, all green, none skipped: `nodeVersion.test.ts` 26, `doctor.test.ts` 49,
+  `cli.test.ts` 72, `pinnedNodeScript.test.ts` 28, `canon/providers-wiring.test.ts` 10.
 
 Falsifiability (each mutation applied, the test file run, the file restored with `git checkout`):
 
@@ -77,6 +77,19 @@ Falsifiability (each mutation applied, the test file run, the file restored with
 | -------------------------------------------------------- | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `nodeSatisfies` ignores the major (`src/nodeVersion.ts`) | 1   | "22.23.4 -> false"                                                                                                                                                                                                      |
 | launcher `satisfies()` ignores the major                 | 4   | "passes over an older major (22.99.0) on PATH for a satisfying one under nvm", "...a newer major (26.99.0)...", "does not let the running node stand when it is an older major (22.99.0)", "...a newer major (26.99.0)" |
+
+Two further mutations, added after review:
+
+- Shell: deleting `[ "$vMajor" -eq "$fMajor" ] || exit 1` from `scripts/use-pinned-node.sh` stayed
+  green at first, because the old fixture (26.0.0) was refused by the minor comparison alone. The
+  wrong-major fixtures now clear the floor's minor (a newer 26.99.0 and an older 22.99.0). With the
+  line deleted, `pinnedNodeScript.test.ts` goes 6 red: "a newer major (26.99.0) is refused even
+  though its minor is above the floor's", "a newer major (26.99.0) is switched away from when nvm
+  offers a satisfying node", the same two for "an older major (22.99.0)", and bootstrap's "refuses a
+  newer major (26.99.0) before doing anything" and "refuses an older major (22.99.0) before doing
+  anything".
+- TypeScript: a `nodeSatisfies` that only rejects an older major (`major < pin.major`) passed because no newer-major row cleared the floor. The row `26.99.0 -> false` was
+  added and now fails under that mutation (1 red).
 
 The launcher mutation was first run against the existing `cli.test.ts` and went unnoticed (68 of
 68 green): no launcher test used a wrong major whose minor and patch clear the floor. Those four

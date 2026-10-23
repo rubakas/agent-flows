@@ -4,7 +4,7 @@
 // not a floor: any other major, older or newer, fails to load the addon this
 // package installs, and fails deep inside the first database call with an
 // unreadable dlopen error. Stating it as a bare ">=" was the bug — it admits
-// every newer major, which is installed on this machine and broken.
+// every newer major, which cannot load the addon either.
 //
 // Inside that one major there is also a floor, a security one (spec 048): a
 // release line keeps shipping fixes, and the ABI does not change between them,

@@ -75,6 +75,7 @@ describe("nodeSatisfies — same major, at or above the floor", () => {
     ["24.14.0", false],
     ["22.23.4", false],
     ["26.12.1", false],
+    ["26.99.0", false],
     ["23.9.0", false],
   ];
   for (const [version, expected] of table) {

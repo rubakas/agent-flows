@@ -31,7 +31,11 @@ const SCRIPT = join(ROOT, "scripts", "use-pinned-node.sh");
 const BELOW_FLOOR = `${String(PIN.major)}.${String(PIN.minor)}.${String(PIN.patch - 1)}`;
 const NEWER_PATCH = `${String(PIN.major)}.${String(PIN.minor)}.${String(PIN.patch + 1)}`;
 const NEWER_MINOR = `${String(PIN.major)}.${String(PIN.minor + 1)}.0`;
-const OTHER_MAJOR = `${String(PIN.major + 2)}.0.0`;
+// Another major whose minor and patch clear the floor's: only the major comparison refuses it.
+const OTHER_MAJORS = [
+  ["a newer major", `${String(PIN.major + 2)}.${String(PIN.minor + 77)}.0`],
+  ["an older major", `${String(PIN.major - 2)}.${String(PIN.minor + 77)}.0`],
+] as const;
 
 interface Sandbox {
   dir: string;
@@ -193,27 +197,29 @@ describe("scripts/use-pinned-node.sh", () => {
     });
   });
 
-  it("another major is refused even though it is newer", () => {
-    inSandbox((sandbox) => {
-      fakeNode(sandbox.initialBin, OTHER_MAJOR);
-      fakeNvm(sandbox, false);
-      const result = source(sandbox);
-      assert.equal(result.status, 1, `expected exit 1:\n${result.stderr}`);
-      assert.ok(result.stderr.includes(OTHER_MAJOR), result.stderr);
-      assert.ok(result.stderr.includes(`nvm install ${String(PIN.major)}`), result.stderr);
+  for (const [label, other] of OTHER_MAJORS) {
+    it(`${label} (${other}) is refused even though its minor is above the floor's`, () => {
+      inSandbox((sandbox) => {
+        fakeNode(sandbox.initialBin, other);
+        fakeNvm(sandbox, false);
+        const result = source(sandbox);
+        assert.equal(result.status, 1, `expected exit 1:\n${result.stderr}`);
+        assert.ok(result.stderr.includes(other), result.stderr);
+        assert.ok(result.stderr.includes(`nvm install ${String(PIN.major)}`), result.stderr);
+      });
     });
-  });
 
-  it("another major is switched away from when nvm offers a satisfying node", () => {
-    inSandbox((sandbox) => {
-      fakeNode(sandbox.initialBin, OTHER_MAJOR);
-      fakeNode(sandbox.nvmBin, PIN.floor);
-      fakeNvm(sandbox, true);
-      const result = source(sandbox);
-      assert.equal(result.status, 0, result.stderr);
-      assert.deepEqual(nvmCalls(sandbox), [`use ${String(PIN.major)}`]);
+    it(`${label} (${other}) is switched away from when nvm offers a satisfying node`, () => {
+      inSandbox((sandbox) => {
+        fakeNode(sandbox.initialBin, other);
+        fakeNode(sandbox.nvmBin, PIN.floor);
+        fakeNvm(sandbox, true);
+        const result = source(sandbox);
+        assert.equal(result.status, 0, result.stderr);
+        assert.deepEqual(nvmCalls(sandbox), [`use ${String(PIN.major)}`]);
+      });
     });
-  });
+  }
 
   it("compares numerically: a minor of two digits is not below a minor of one", () => {
     inSandbox((sandbox) => {
@@ -227,8 +233,17 @@ describe("scripts/use-pinned-node.sh", () => {
 });
 
 describe("scripts/use-pinned-node.sh: the .nvmrc it reads", () => {
-  // A legacy bare major ("22") used to read as a floor of 22.22.22 and pass.
-  for (const nvmrc of ["22", "22.23", "lts/*", "garbage", "22.23.4.1", "22.x.4", "22..4"]) {
+  // A legacy bare major used to read as a floor of MAJOR.MAJOR.MAJOR and pass.
+  const major = String(PIN.major);
+  for (const nvmrc of [
+    major,
+    `${major}.${String(PIN.minor)}`,
+    "lts/*",
+    "garbage",
+    `${PIN.floor}.1`,
+    `${major}.x.${String(PIN.patch)}`,
+    `${major}..${String(PIN.patch)}`,
+  ]) {
     it(`refuses ${JSON.stringify(nvmrc)} and names .nvmrc`, () => {
       inSandbox((sandbox) => {
         fakeNode(sandbox.initialBin, PIN.floor);
@@ -281,10 +296,7 @@ describe("bootstrap.sh shares the one shell implementation", () => {
     assert.ok(!/-lt\s+\d+/u.test(text), "bootstrap.sh still gates on a hardcoded major");
   });
 
-  for (const [label, version] of [
-    ["below the floor", BELOW_FLOOR],
-    ["another major", OTHER_MAJOR],
-  ] as const) {
+  for (const [label, version] of [["below the floor", BELOW_FLOOR], ...OTHER_MAJORS] as const) {
     it(`refuses ${label} (${version}) before doing anything`, () => {
       inSandbox((sandbox) => {
         fakeNode(sandbox.initialBin, version);
