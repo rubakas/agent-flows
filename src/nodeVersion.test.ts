@@ -23,17 +23,17 @@ const ROOT = packageRoot();
 
 describe("parseNodePin — one major with a security floor", () => {
   it("reads the single accepted form", () => {
-    assert.deepEqual(parseNodePin("^22.23.4"), {
-      major: 22,
-      minor: 23,
-      patch: 4,
-      floor: "22.23.4",
+    assert.deepEqual(parseNodePin("^24.22.1"), {
+      major: 24,
+      minor: 22,
+      patch: 1,
+      floor: "24.22.1",
     });
   });
 
   it("refuses every other form, with the one error text", () => {
     // "22.x" is the value this change deletes: it admitted a vulnerable 22.x.
-    // ">=22" is older: it admitted Node 24, which cannot load the compiled addon.
+    // ">=22" is older: it admitted every newer major, which cannot load the compiled addon.
     for (const range of [
       "22.x",
       "22",
@@ -51,7 +51,7 @@ describe("parseNodePin — one major with a security floor", () => {
         () => parseNodePin(range),
         (error: Error) =>
           error.message ===
-          `engines.node must be "^MAJOR.MINOR.PATCH" — one major with a security floor inside it (e.g. "^22.23.4") — got "${range}"`,
+          `engines.node must be "^MAJOR.MINOR.PATCH" — one major with a security floor inside it (e.g. "^24.22.1") — got "${range}"`,
         `accepted or mis-worded: "${range}"`
       );
     }
@@ -59,22 +59,23 @@ describe("parseNodePin — one major with a security floor", () => {
 });
 
 describe("nodeSatisfies — same major, at or above the floor", () => {
-  const pin = parseNodePin("^22.23.4");
+  const pin = parseNodePin("^24.22.1");
   const table: [string, boolean][] = [
-    ["22.23.4", true],
-    ["22.23.5", true],
-    ["22.24.0", true],
-    ["v22.23.4", true],
-    ["22.23.10", true],
-    ["22.100.0", true],
-    ["22.23.4-rc.1", false],
-    ["22.23.4-nightly20261022abcdef", false],
-    ["22.23.4.1", false],
-    ["22.23", false],
-    ["22.23.3", false],
-    ["22.14.0", false],
-    ["24.22.1", false],
-    ["21.9.0", false],
+    ["24.22.1", true],
+    ["24.22.2", true],
+    ["24.23.0", true],
+    ["v24.22.1", true],
+    ["24.22.10", true],
+    ["24.100.0", true],
+    ["24.22.1-rc.1", false],
+    ["24.22.1-nightly20261022abcdef", false],
+    ["24.22.1.1", false],
+    ["24.22", false],
+    ["24.22.0", false],
+    ["24.14.0", false],
+    ["22.23.4", false],
+    ["26.12.1", false],
+    ["23.9.0", false],
   ];
   for (const [version, expected] of table) {
     it(`${version} -> ${String(expected)}`, () => {
@@ -83,23 +84,23 @@ describe("nodeSatisfies — same major, at or above the floor", () => {
   }
 
   it("compares numerically, not as text", () => {
-    assert.equal(nodeSatisfies("22.100.0", pin), true);
-    assert.equal(nodeSatisfies("22.23.10", pin), true);
-    assert.equal(nodeSatisfies("22.9.99", pin), false);
+    assert.equal(nodeSatisfies("24.100.0", pin), true);
+    assert.equal(nodeSatisfies("24.22.10", pin), true);
+    assert.equal(nodeSatisfies("24.9.99", pin), false);
   });
 
   it("refuses garbage rather than guessing", () => {
-    for (const version of ["", "22", "twenty-two", "22.x.1"]) {
+    for (const version of ["", "24", "twenty-four", "24.x.1"]) {
       assert.equal(nodeSatisfies(version, pin), false, `accepted: "${version}"`);
     }
   });
 });
 
 describe("messages derive from the pin", () => {
-  const pin = parseNodePin("^22.23.4");
+  const pin = parseNodePin("^24.22.1");
   it("name the major and the floor", () => {
-    assert.equal(nodeRequirement(pin), "Node 22 at or above 22.23.4");
-    assert.equal(nodeInstallRemedy(pin), "nvm install 22");
+    assert.equal(nodeRequirement(pin), "Node 24 at or above 24.22.1");
+    assert.equal(nodeInstallRemedy(pin), "nvm install 24");
   });
   it("follow a different pin, so no literal is baked in", () => {
     const other = parseNodePin("^30.1.2");
@@ -109,16 +110,16 @@ describe("messages derive from the pin", () => {
 });
 
 describe("every copy of the version agrees", () => {
-  it("package.json engines.node is the source: a pin with a floor of at least 22.23.4", () => {
+  it("package.json engines.node is the source: a pin with a floor of at least 24.22.1", () => {
     const pin = requiredNodePin(ROOT);
-    assert.equal(pin.major, 22);
+    assert.equal(pin.major, 24);
     assert.ok(
-      nodeSatisfies(pin.floor, parseNodePin("^22.23.4")),
-      `floor ${pin.floor} is below the 2026-10-21 security release`
+      nodeSatisfies(pin.floor, parseNodePin("^24.22.1")),
+      `floor ${pin.floor} is below the 24.22.1 floor of spec 050`
     );
   });
 
-  it(".nvmrc is the floor exactly, so `nvm use` cannot land on a vulnerable 22.x", () => {
+  it(".nvmrc is the floor exactly, so `nvm use` cannot land on a vulnerable release of the major", () => {
     const nvmrc = readFileSync(join(ROOT, ".nvmrc"), "utf8").trim();
     assert.equal(nvmrc, requiredNodePin(ROOT).floor);
   });

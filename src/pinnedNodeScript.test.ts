@@ -217,7 +217,7 @@ describe("scripts/use-pinned-node.sh", () => {
 
   it("compares numerically: a minor of two digits is not below a minor of one", () => {
     inSandbox((sandbox) => {
-      // 22.100.0 is above 22.23.4; as text it would sort below it.
+      // A minor of two digits is above one of a single digit; as text it would sort below it.
       fakeNode(sandbox.initialBin, `${String(PIN.major)}.${String(PIN.minor + 77)}.0`);
       fakeNvm(sandbox, false);
       const result = source(sandbox);
