@@ -792,6 +792,52 @@ describe("bin/agent-flows: interpreter search honours the security floor", () =>
     });
   }
 
+  // The major is a pin (one ABI), not a floor: a minor and patch above the floor's mean nothing
+  // in another major, older or newer.
+  for (const [label, version] of [
+    ["an older major", `${String(PIN.major - 2)}.${String(PIN.minor + 77)}.0`],
+    ["a newer major", `${String(PIN.major + 2)}.${String(PIN.minor + 77)}.0`],
+  ] as const) {
+    it(`passes over ${label} (${version}) on PATH for a satisfying one under nvm`, () => {
+      requireHermeticMachine();
+      ensureBuild();
+      const scenario = makeScenario();
+      try {
+        const onPath = installFakeNode(scenario, join(scenario.dir, "path"), "path", version);
+        const nvmBin = join(scenario.nvmDir, "versions", "node", `v${PIN.floor}`, "bin");
+        const underNvm = installFakeNode(scenario, nvmBin, "nvm", PIN.floor);
+        const result = runLauncher(scenario, BELOW_FLOOR, ["list"], {
+          pathDirs: [dirname(onPath.path)],
+        });
+        const output = result.stdout + result.stderr;
+        assert.equal(result.status, 0, `expected success:\n${output}`);
+        assert.ok(!existsSync(onPath.marker("run")), `the ${version} PATH node ran the CLI`);
+        assert.ok(existsSync(underNvm.marker("run")), "the nvm node did not run the CLI");
+      } finally {
+        rmSync(scenario.dir, { recursive: true, force: true });
+      }
+    });
+
+    it(`does not let the running node stand when it is ${label} (${version})`, () => {
+      requireHermeticMachine();
+      ensureBuild();
+      const scenario = makeScenario();
+      try {
+        const nvmBin = join(scenario.nvmDir, "versions", "node", `v${PIN.floor}`, "bin");
+        const underNvm = installFakeNode(scenario, nvmBin, "nvm", PIN.floor);
+        const result = runLauncher(scenario, version, ["list"]);
+        const output = result.stdout + result.stderr;
+        assert.equal(result.status, 0, `expected success:\n${output}`);
+        assert.ok(
+          existsSync(underNvm.marker("run")),
+          `the launcher accepted the running ${version} instead of searching`
+        );
+      } finally {
+        rmSync(scenario.dir, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("does not search at all when the running node already satisfies the pin", () => {
     requireHermeticMachine();
     ensureBuild();
