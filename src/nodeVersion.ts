@@ -1,14 +1,14 @@
 // The one place that says which Node this project runs on.
 //
 // `better-sqlite3` is compiled for a single Node ABI, so the major is a pin and
-// not a floor: Node 20 and Node 24 both fail to load the addon this package
-// installs, and they fail deep inside the first database call with an
-// unreadable dlopen error. Stating it as ">=22" was the bug — it admits Node 24,
-// which is installed on this machine and broken.
+// not a floor: any other major, older or newer, fails to load the addon this
+// package installs, and fails deep inside the first database call with an
+// unreadable dlopen error. Stating it as a bare ">=" was the bug — it admits
+// every newer major, which is installed on this machine and broken.
 //
 // Inside that one major there is also a floor, a security one (spec 048): a
 // release line keeps shipping fixes, and the ABI does not change between them,
-// so "any 22.x" admitted releases with known High CVEs. The requirement is one
+// so "any release of the major" admitted releases with known High CVEs. The requirement is one
 // major AND a minimum (minor, patch) inside it, written `^MAJOR.MINOR.PATCH`.
 //
 // `package.json` `engines.node` is the source, because it is the only file that
@@ -43,7 +43,7 @@ export function parseNodePin(range: string): NodePin {
   const match = /^\^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.exec(String(range ?? ""));
   if (match === null) {
     throw new Error(
-      `engines.node must be "^MAJOR.MINOR.PATCH" — one major with a security floor inside it (e.g. "^22.23.4") — got "${range}"`
+      `engines.node must be "^MAJOR.MINOR.PATCH" — one major with a security floor inside it (e.g. "^24.22.1") — got "${range}"`
     );
   }
   const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])];
@@ -65,7 +65,7 @@ export function requiredNodePin(root: string = packageRoot()): NodePin {
  * nightly tag — does not, because a pre-release of the floor release is not the
  * release that carries the fix.
  *
- * @param version A version such as "22.23.4" or "v22.23.4".
+ * @param version A version such as "24.22.1" or "v24.22.1".
  */
 export function nodeSatisfies(version: string, pin: NodePin): boolean {
   const match = /^v?(\d+)\.(\d+)\.(\d+)$/u.exec(String(version ?? ""));
@@ -75,7 +75,7 @@ export function nodeSatisfies(version: string, pin: NodePin): boolean {
   return minor > pin.minor || (minor === pin.minor && patch >= pin.patch);
 }
 
-/** "Node 22 at or above 22.23.4" — what a failing check says is required. */
+/** "Node 24 at or above 24.22.1" — what a failing check says is required. */
 export function nodeRequirement(pin: NodePin): string {
   return `Node ${String(pin.major)} at or above ${pin.floor}`;
 }

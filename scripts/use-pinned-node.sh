@@ -5,9 +5,9 @@
 # Callers must already be in the package root.
 #
 # The requirement is a major AND a floor (spec 048). better-sqlite3 is compiled
-# for one Node ABI, so the major is a pin — Node 24 is newer than the pin and
-# equally unable to load the addon. Inside that major the floor is a security
-# one: the ABI does not change between releases, so an unpatched 22.x loads the
+# for one Node ABI, so the major is a pin — a newer major is as unable to load
+# the addon as an older one. Inside that major the floor is a security
+# one: the ABI does not change between releases, so an unpatched release loads the
 # addon fine and is still refused. Both come from .nvmrc, which holds the floor
 # (MAJOR.MINOR.PATCH), so this file carries no copy of either.
 #
@@ -20,8 +20,8 @@
 _floor="$(tr -d '[:space:]' < .nvmrc)"
 _floor="${_floor#v}"
 
-# .nvmrc must hold the floor as MAJOR.MINOR.PATCH. A legacy bare major ("22")
-# would otherwise be read as a floor of 22.22.22 and pass, so it is refused.
+# .nvmrc must hold the floor as MAJOR.MINOR.PATCH. A legacy bare major ("24")
+# would otherwise be read as a floor of 24.24.24 and pass, so it is refused.
 _floor_ok=0
 case "$_floor" in
   *[!0-9.]* | '' | .* | *. | *..*) ;;
@@ -29,7 +29,7 @@ case "$_floor" in
   *.*.*) _floor_ok=1 ;;
 esac
 if [ "$_floor_ok" != 1 ]; then
-  echo "$(basename "$0"): .nvmrc must hold the Node security floor as MAJOR.MINOR.PATCH (e.g. 22.23.4), got \"$_floor\"." >&2
+  echo "$(basename "$0"): .nvmrc must hold the Node security floor as MAJOR.MINOR.PATCH (e.g. 24.22.1), got \"$_floor\"." >&2
   unset _floor _floor_ok
   exit 1
 fi
@@ -37,8 +37,8 @@ unset _floor_ok
 _major="${_floor%%.*}"
 
 # _node_satisfies VERSION FLOOR: same major, and (minor, patch) at or above the
-# floor. Plain POSIX tests on integers, so "22.100.0" is above "22.23.4". Only a
-# bare N.N.N satisfies: "22.23.4-rc.1" and "22.23" do not. A subshell function, so
+# floor. Plain POSIX tests on integers, so "24.100.0" is above "24.22.1". Only a
+# bare N.N.N satisfies: "24.22.1-rc.1" and "24.22" do not. A subshell function, so
 # its working variables cannot leak into the sourcing script.
 _node_satisfies() (
   v="${1#v}"

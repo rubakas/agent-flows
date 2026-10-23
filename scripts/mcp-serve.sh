@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Launch the agent-flows MCP (Binding B) server under the project's pinned Node. better-sqlite3 is built for Node 22 (NODE_MODULE_VERSION 127); the host's
-# default node is 20, which fails on an ABI mismatch. Force 22 here.
+# Launch the agent-flows MCP (Binding B) server under the project's pinned Node. better-sqlite3 is built for the pinned Node major (see engines.node); the host's
+# default node may be another major, which fails on an ABI mismatch. Force the pin here.
 set -euo pipefail
 # Capture the launch directory before cd changes it; the server uses this as the
 # working directory for pipeline steps so they run against the operator's project.

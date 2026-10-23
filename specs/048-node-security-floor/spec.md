@@ -95,7 +95,7 @@ unchanged.
 
 ## Out of scope / Follow-ups
 
-- Node 24 support (a different ABI: needs a better-sqlite3 rebuild and a pin decision).
+- Node 24 support (a different ABI: needs a better-sqlite3 rebuild and a pin decision). Done in spec 050.
 - Historical documents under `docs/research` and `docs/decisions`.
 - Publishing: the package is private; no release is cut here.
 - `/opt/homebrew/bin/node` and `/usr/local/bin/node` cannot be isolated from the launcher

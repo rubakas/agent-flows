@@ -13,10 +13,10 @@ agent-flows installs once per machine as a global npm package, registers itself 
 ```sh
 pnpm install && pnpm build
 npm pack
-nvm install 22 && nvm use 22 && npm i -g --prefix ~/.local ./rubakas-agent-flows-0.1.0.tgz
+nvm install 24 && nvm use 24 && npm i -g --prefix ~/.local ./rubakas-agent-flows-0.1.0.tgz
 ```
 
-Node 22 at or above 22.23.4 (the security floor) is required for the install itself: the native `better-sqlite3` module is compiled against whichever Node ran the install. After that, the command works fine under a default Node that is older or below the floor — `bin/agent-flows` re-execs itself under a Node that can actually load the database module, proving that by loading it rather than by comparing version numbers, since a newer Node also fails to load a module built for a different one.
+Node 24 at or above 24.22.1 (the security floor) is required for the install itself: the native `better-sqlite3` module is compiled against whichever Node ran the install. After that, the command works fine under a default Node that is older or below the floor — `bin/agent-flows` re-execs itself under a Node that can actually load the database module, proving that by loading it rather than by comparing version numbers, since a newer Node also fails to load a module built for a different one.
 
 **The trap:** npm's global prefix follows whichever Node is currently active, so installing without pinning `--prefix` can put the `agent-flows` command somewhere that isn't on your PATH. Pick a prefix once (`~/.local` above) and keep using it.
 
@@ -385,7 +385,7 @@ See [`specs/`](specs/) for the full set: stage1-hardening, module-system, tracke
 
 ## Development
 
-**Prerequisites:** Node 22 at or above 22.23.4 (the security floor; `nvm install 22 && nvm use 22`), pnpm, Docker (Compose v2), `claude` CLI, `gh` (authenticated).
+**Prerequisites:** Node 24 at or above 24.22.1 (the security floor; `nvm install 24 && nvm use 24`), pnpm, Docker (Compose v2), `claude` CLI, `gh` (authenticated).
 
 > Exact dependency versions pin on first `pnpm install` via `.npmrc save-exact`. The resulting `pnpm-lock.yaml` is committed and must be kept in sync.
 

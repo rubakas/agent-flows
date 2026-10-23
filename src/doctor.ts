@@ -174,10 +174,10 @@ export function reachResult(reach: HarnessReach): CheckResult {
 // 1. The pinned Node (required)
 //
 // A pin AND a floor. The major is a pin: better-sqlite3 is built for one ABI, so
-// a NEWER major fails exactly as an older one does — reporting "≥ 22" here told
-// an operator on Node 24 that the thing about to break was fine. Inside that
-// major there is a security floor (spec 048): "any 22.x" admitted releases with
-// known High CVEs.
+// a NEWER major fails exactly as an older one does — reporting "≥ <major>" here told
+// an operator on a newer Node that the thing about to break was fine. Inside that
+// major there is a security floor (spec 048): "any release of the major" admitted
+// releases with known High CVEs.
 function checkNode(probes: DoctorProbes): CheckResult[] {
   const raw = probes.nodeVersion().replace(/^v/, "");
   const pin = requiredNodePin();
