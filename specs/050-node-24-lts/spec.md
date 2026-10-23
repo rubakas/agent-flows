@@ -1,11 +1,11 @@
 # 050. Node 24 LTS as the one runtime
 
-| Field        | Value                                                |
-| ------------ | ---------------------------------------------------- |
+| Field        | Value                                                   |
+| ------------ | ------------------------------------------------------- |
 | Feature Name | Retarget the Node pin and floor from 22.23.4 to 24.22.1 |
-| Branch       | `fix/node-floor-review-verdict`                      |
-| Status       | Implemented 2026-10-23 (branch unpushed)             |
-| Created      | 2026-10-23                                           |
+| Branch       | `fix/node-floor-review-verdict`                         |
+| Status       | Implemented 2026-10-23 (branch unpushed)                |
+| Created      | 2026-10-23                                              |
 
 ## Why
 
@@ -61,4 +61,26 @@ The mechanism of spec 048 is kept exactly; only its values move.
 
 ## Verified
 
-(Filled in at the end of the work.)
+Environment: Node 24.22.1 (ABI 137), pnpm 10.15.0, a worktree with its own `node_modules`.
+
+- `pnpm-lock.yaml` moved only `@types/node` 22.20.1 to 24.19.2 for the importer, plus the new
+  `undici-types` 7.24.6 it depends on. `@types/node` 22.20.1 stays in the lockfile for a transitive
+  consumer. No other package moved.
+- `node -e "new (require('better-sqlite3'))(':memory:')"` succeeds (`v24.22.1`, ABI 137).
+- `pnpm typecheck`, `pnpm build`, eslint (0 errors) and prettier on the changed files are green.
+- Targeted tests, all green, none skipped: `nodeVersion.test.ts` 25, `doctor.test.ts` 49,
+  `cli.test.ts` 72, `pinnedNodeScript.test.ts` 25, `canon/providers-wiring.test.ts` 10.
+
+Falsifiability (each mutation applied, the test file run, the file restored with `git checkout`):
+
+| Mutation                                                 | Red | Tests that went red                                                                                                                                                                                                     |
+| -------------------------------------------------------- | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nodeSatisfies` ignores the major (`src/nodeVersion.ts`) | 1   | "22.23.4 -> false"                                                                                                                                                                                                      |
+| launcher `satisfies()` ignores the major                 | 4   | "passes over an older major (22.99.0) on PATH for a satisfying one under nvm", "...a newer major (26.99.0)...", "does not let the running node stand when it is an older major (22.99.0)", "...a newer major (26.99.0)" |
+
+The launcher mutation was first run against the existing `cli.test.ts` and went unnoticed (68 of
+68 green): no launcher test used a wrong major whose minor and patch clear the floor. Those four
+tests were added for that reason; they pass unmutated (72 of 72).
+
+`doctor.test.ts` lines 426 and 432 (`Node.js >= 22`, `nvm install 22`) are a render fixture for
+`formatReport`, not tied to the pin, and were left alone.
