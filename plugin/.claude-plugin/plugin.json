@@ -1,5 +1,5 @@
 {
   "name": "af",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "agent-flows code review with independent verification, run natively in Claude Code or Codex"
 }
