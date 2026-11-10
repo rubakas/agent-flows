@@ -4,7 +4,7 @@
 | ------------ | ------------------------------------------------------------------- |
 | Feature Name | Move the `dual-review` skill into the af plugin as `af:dual-review` |
 | Branch       | `main`                                                              |
-| Status       | Draft                                                               |
+| Status       | Implemented 2026-11-11                                              |
 | Created      | 2026-11-11                                                          |
 
 ## Why
